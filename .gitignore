@@ -49,3 +49,6 @@ docs/test-screenshots/
 .idea/
 .vscode/
 *.swp
+
+# Personal skills (not for repo)
+.opencode/skills/git-skill/
