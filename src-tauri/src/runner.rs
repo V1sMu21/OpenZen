@@ -1,0 +1,798 @@
+//! Agent loop runner — spawns the OpenZen agent loop in a Tauri session.
+//!
+//! One runner per session. Wires up SSE streaming, stop signals, ask_user
+//! slots, and persists the final assistant message with duration + token
+//! counts back to the session store.
+
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+
+use oz_config::mykey::{MyKeyConfig, SessionType};
+use oz_core::handler::LoopConfig;
+use oz_core_types::{ContentBlock, Message, StreamEvent};
+use oz_memory::MemorySystem;
+use oz_server::webui::sessions::{SessionStatus};
+use oz_server::webui::sse_bus::SseEvent;
+use oz_tools::handler::ToolRegistryHandler;
+use oz_tools::registry::ToolRegistry;
+use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
+
+use crate::{
+    AppState, debug_log, data_dir, home_dir, tauri_ctx, load_system_prompt, lock_poison_guard,
+};
+
+/// Build the agent-loop's `additional_messages` from persisted session
+/// messages. Translates the persistent JSON shape back into Claude
+/// Content-Block protocol:
+///   - assistant message + `tool_use_blocks` field → assistant_with_blocks(Text + ToolUse)
+///   - legacy `role:"tool"` messages OR new `tool_results` field → user_with_blocks(ToolResult)
+///   - legacy assistant without tool_use_blocks followed by role:"tool"
+///     messages: synthesise ToolUse blocks from the tool messages' ids
+///     + names so the protocol pairing is restored.
+fn build_history_messages(messages: &[serde_json::Value]) -> Vec<Message> {
+    if messages.is_empty() {
+        eprintln!("[runner::build_history] EMPTY messages array");
+        return Vec::new();
+    }
+    let slice = &messages[..messages.len().saturating_sub(1)];
+    eprintln!(
+        "[runner::build_history] total={} slice_len={}",
+        messages.len(), slice.len()
+    );
+    let mut out: Vec<Message> = Vec::new();
+    let mut pending_tool_results: Vec<ContentBlock> = Vec::new();
+    let mut skip_next = false;
+
+    let flush_tool_results = |out: &mut Vec<Message>, pending: &mut Vec<ContentBlock>| {
+        if !pending.is_empty() {
+            out.push(Message::user_with_blocks(std::mem::take(pending)));
+        }
+    };
+
+    for (i, m) in slice.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let role = match m.get("role").and_then(|v| v.as_str()) {
+            Some(r) => r,
+            None => continue,
+        };
+        match role {
+            "user" | "assistant" => {
+                flush_tool_results(&mut out, &mut pending_tool_results);
+                let content = m
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if role == "assistant" {
+                    let tool_use_blocks = m.get("tool_use_blocks").and_then(|v| v.as_array());
+                    let has_tool_uses = tool_use_blocks
+                        .map(|arr| arr.iter().any(|b| b.get("id").and_then(|v| v.as_str()).is_some()))
+                        .unwrap_or(false);
+
+                    // Legacy sessions keep assistant messages WITHOUT tool_use_blocks.
+                    // Reconstruct from subsequent legacy role:"tool" ids + names so
+                    // the tool_use ↔ tool_result pairing is restored.
+                    let legacy_tool_use_blocks: Vec<serde_json::Value> = if !has_tool_uses {
+                        let mut acc = Vec::new();
+                        for j in (i + 1)..slice.len() {
+                            let nm = &slice[j];
+                            if nm.get("role").and_then(|v| v.as_str()) != Some("tool") {
+                                break;
+                            }
+                            let tu_id = nm.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let tu_name = nm.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                            if !tu_id.is_empty() {
+                                acc.push(serde_json::json!({
+                                    "id": tu_id,
+                                    "name": tu_name,
+                                    "input": {},
+                                }));
+                            }
+                        }
+                        acc
+                    } else {
+                        Vec::new()
+                    };
+
+                    let blocks_to_emit = tool_use_blocks
+                        .map(|arr| arr.iter().cloned().collect::<Vec<_>>())
+                        .unwrap_or(legacy_tool_use_blocks);
+
+                    if blocks_to_emit.is_empty() {
+                        out.push(Message::assistant(&content));
+                    } else {
+                        let mut blocks: Vec<ContentBlock> = Vec::new();
+                        let mut seen_tool_ids: Vec<String> = Vec::new();
+                        if !content.is_empty() {
+                            blocks.push(ContentBlock::text(&content));
+                        }
+                        for tb in &blocks_to_emit {
+                            let id = tb.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let name = tb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let input = tb.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                            if !id.is_empty() && !seen_tool_ids.contains(&id) {
+                                seen_tool_ids.push(id.clone());
+                                blocks.push(ContentBlock::tool_use(id, name, input));
+                            }
+                        }
+                        if blocks.is_empty() {
+                            blocks.push(ContentBlock::text(""));
+                        }
+                        out.push(Message::assistant_with_blocks(blocks));
+                    }
+                } else {
+                    if let Some(tool_results) = m.get("tool_results").and_then(|v| v.as_array()) {
+                        for tr in tool_results {
+                            let tu_id = tr.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let tr_content = tr.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            if !tu_id.is_empty() {
+                                pending_tool_results.push(ContentBlock::tool_result(tu_id, tr_content));
+                            }
+                        }
+                        // Merge tool_results + content into a SINGLE user message
+                        // (splitting into two breaks the LLM protocol pairing)
+                        if !content.is_empty() {
+                            pending_tool_results.push(ContentBlock::text(&content));
+                        } else {
+                            // Empty content but has tool_results: peek at the NEXT message.
+                            // If it's a plain user text (no tool_results), merge its text
+                            // into this same user message so the LLM sees a single
+                            // user(tool_result + text) turn instead of two separate messages.
+                            if i + 1 < slice.len() {
+                                let next = &slice[i + 1];
+                                if next.get("role").and_then(|v| v.as_str()) == Some("user")
+                                    && next.get("tool_results").is_none()
+                                {
+                                    if let Some(next_content) = next.get("content").and_then(|v| v.as_str()) {
+                                        if !next_content.is_empty() {
+                                            pending_tool_results.push(ContentBlock::text(next_content));
+                                            skip_next = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        flush_tool_results(&mut out, &mut pending_tool_results);
+                    } else {
+                        out.push(Message::user(&content));
+                    }
+                }
+            }
+            "tool" => {
+                let tu_id = m
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tr_content = m
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !tu_id.is_empty() {
+                    pending_tool_results.push(ContentBlock::tool_result(tu_id, tr_content));
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_tool_results(&mut out, &mut pending_tool_results);
+    out
+}
+
+pub async fn run_agent_for_session(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    session_id: &str,
+    model_name: Option<&str>,
+    resume: bool,
+) -> anyhow::Result<()> {
+    if let Some(slot) = oz_core_types::CURRENT_REMINDER_SESSION.get() {
+        *slot.lock().unwrap() = Some(session_id.to_string());
+    }
+
+    // Resolve config
+    let config_path = if std::path::Path::new(&state.config_path).exists() {
+        state.config_path.clone()
+    } else {
+        [
+            data_dir().join("mykey.toml"),
+            home_dir().join("mykey.toml"),
+            PathBuf::from("config/mykey.toml"),
+            PathBuf::from("mykey.toml"),
+        ]
+        .into_iter()
+        .find(|c| c.exists())
+        .map(|c| c.to_string_lossy().to_string())
+        .unwrap_or_else(|| state.config_path.clone())
+    };
+    debug_log(&format!("config_path={config_path}"));
+
+    let cfg = MyKeyConfig::from_file(std::path::Path::new(&config_path))
+        .map_err(|e| anyhow::anyhow!("Config error: {e} (path: {config_path})"))?;
+    let session_name = model_name
+        .or_else(|| cfg.default_session.as_deref())
+        .unwrap_or("claude_sonnet");
+    let sess_config = cfg
+        .get(session_name)
+        .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found"))?
+        .clone();
+    let sess_type = cfg.session_type(session_name);
+
+    let mut ctx = tauri_ctx();
+    ctx.lang = lock_poison_guard(&state.locale).clone();
+
+    // Broadcast model info
+    let provider = match sess_type {
+        SessionType::Claude => "claude",
+        SessionType::Oai => "openai",
+        SessionType::NativeClaude => "claude",
+        SessionType::NativeOai => "openai",
+        SessionType::Mixin => "mixin",
+    };
+    let sse_model_info =
+        SseEvent::model_info(session_id, &sess_config.model, provider, sess_config.context_win, crate::is_local_deploy(&sess_config.apibase));
+    let _ = state.sse_bus.send(sse_model_info.clone());
+    let _ = app.emit("sse_event", serde_json::to_value(&sse_model_info).unwrap_or_default());
+
+    let backend: Box<dyn oz_llm::Session> = match sess_type {
+        SessionType::Claude => Box::new(oz_llm::ClaudeSession::new(sess_config.clone())),
+        SessionType::Oai => Box::new(oz_llm::OaiSession::new(sess_config.clone())),
+        SessionType::NativeClaude => Box::new(oz_llm::NativeClaudeSession::new(sess_config.clone())),
+        SessionType::NativeOai => Box::new(oz_llm::NativeOAISession::new(sess_config.clone())),
+        SessionType::Mixin => anyhow::bail!("Mixin session not supported in Tauri"),
+    };
+    let mut client = oz_llm::NativeToolClient::new(backend);
+
+    // Resolve working directory from session → project → fallback.
+    // Priority: session.working_dir > project.root_path > home_dir.
+    let (project_root, project_ga_dir) = {
+        let store = lock_poison_guard(&state.sessions);
+        let sess_working_dir = store
+            .get(session_id)
+            .and_then(|e| e.working_dir.clone());
+        let pid = store
+            .get(session_id)
+            .and_then(|e| e.project_id.clone());
+        drop(store);
+        // Use session's stored working_dir if available (eagerly resolved at creation)
+        if let Some(ref wd) = sess_working_dir {
+            let root = std::path::PathBuf::from(wd);
+            let ga = root.join("openzen");
+            debug_log(&format!(
+                "run_agent: session={} using stored working_dir={}",
+                session_id, root.display()
+            ));
+            (root, ga)
+        } else if let Some(ref pid) = pid {
+            let projects = lock_poison_guard(&state.projects);
+            let found = projects.iter().find(|p| p.id == *pid).cloned();
+            let project_count = projects.len();
+            drop(projects);
+            if let Some(ref p) = found {
+                let root = std::path::PathBuf::from(&p.root_path);
+                let ga = root.join("openzen");
+                debug_log(&format!(
+                    "run_agent: resolved project_root={}, project={}",
+                    root.display(), p.name
+                ));
+                (root, ga)
+            } else {
+                debug_log(&format!(
+                    "run_agent: session={} has project_id={} but project not found among {} projects, using home_dir",
+                    session_id, pid, project_count
+                ));
+                let root = home_dir();
+                (root.clone(), root.join("openzen"))
+            }
+        } else {
+            let root = home_dir();
+            debug_log(&format!(
+                "run_agent: session={} has no project_id or working_dir, using home_dir={}",
+                session_id, root.display()
+            ));
+            (root.clone(), root.join("openzen"))
+        }
+    };
+    ctx.working_dir = project_root.to_string_lossy().to_string();
+    let _ = std::fs::create_dir_all(&project_ga_dir);
+
+    let memory = MemorySystem::new(&project_root, &ctx.lang);
+    let memory_context = memory.get_global_memory().await.unwrap_or_default();
+
+    let registry = ToolRegistry::build_default();
+
+    // MCP servers.toml is not started here: bridge tools are unregistered
+    // stubs, and starting them + mem::forget leaked MCP child processes per run.
+
+    let definitions = registry.to_schema(&ctx.lang);
+    let mut handler = ToolRegistryHandler::new(registry);
+
+    let mut system_prompt = load_system_prompt(&ctx);
+    if !memory_context.is_empty() {
+        system_prompt.push_str("\n\n## Persistent Memory Context\n\n");
+        system_prompt.push_str(&memory_context);
+    }
+
+    // Claude/OpenAI protocol requires paired
+    // assistant-tool_use ↔ user-tool_result blocks; projecting to
+    // standalone Message::assistant(text) + Message::tool(id,text)
+    // breaks pairing, so the LLM loses prior tool turns between runs.
+    let (user_message, history): (String, Vec<Message>) = if resume {
+        // /resume path: the checkpoint already contains the full message
+        // history (system prompt + all turns). The initial user_message and
+        // history are replaced by the checkpoint in agent_loop anyway, so we
+        // use a placeholder to satisfy the non-empty check below.
+        ("[resume]".to_string(), Vec::new())
+    } else {
+        let store = lock_poison_guard(&state.sessions);
+        let session = store.get(session_id);
+        let user_msg = session
+            .and_then(|s| s.messages.last())
+            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+            .unwrap_or_default()
+            .to_string();
+        let hist = session
+            .map(|s| build_history_messages(&s.messages))
+            .unwrap_or_default();
+        (user_msg, hist)
+    };
+    if user_message.is_empty() {
+        anyhow::bail!("No user message to process");
+    }
+
+    let mut loop_config = LoopConfig::default();
+    loop_config.session_id = session_id.to_string();
+    loop_config.lang = ctx.lang.clone();
+    loop_config.verbose = true;  // Enable SOP/skill loading logs for debugging
+    loop_config.context_win = sess_config.context_win;
+    // Local quantized models (MLX/omlx on 127.0.0.1) prefill slowly and
+    // generate tokens at a fraction of cloud speed, so the 300s cloud
+    // default reliably triggers llm_timeout mid-response. Give local
+    // deployments a 30-minute ceiling; keep the tight default for cloud.
+    loop_config.stream_timeout_secs = if crate::is_local_deploy(&sess_config.apibase) {
+        1800
+    } else {
+        300
+    };
+    // Engine-pool contention (other sessions swapping models mid-stream)
+    // aborts in-flight requests; give local engines double the retry
+    // budget so a wedge doesn't kill the whole long task.
+    loop_config.llm_error_retries = if crate::is_local_deploy(&sess_config.apibase) {
+        6
+    } else {
+        3
+    };
+    loop_config.skill_mcp_dir = state.skill_mcp_dir.clone();
+    loop_config.enable_crystallization = state.crystallization_enabled.load(std::sync::atomic::Ordering::Relaxed);
+    loop_config.working_dir = project_root.to_string_lossy().to_string();
+    loop_config.checkpoint_dir = Some(oz_core::checkpoint::checkpoint_dir(&project_root).to_string_lossy().to_string());
+    loop_config.checkpoint_interval = 3;  // save every 3 turns
+    if resume {
+        loop_config.resume_from = loop_config.checkpoint_dir.clone();
+    }
+    loop_config.trust_path = Some(project_ga_dir.join("trust.json").to_string_lossy().to_string());
+
+    // Wire compression logs to the log file so the monitor can see them.
+    // Without this, tracing::warn! only goes to stderr.
+    loop_config.log_fn = Some(std::sync::Arc::new(|msg: &str| {
+        crate::debug_log(msg);
+    }));
+
+    // Wire up the intervention channel so the user can inject messages while agent runs
+    let intervention_queue: Arc<Mutex<std::collections::VecDeque<oz_core::checkpoint::InterventionEvent>>> =
+        Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    loop_config.intervention_rx = Some(intervention_queue.clone());
+    lock_poison_guard(&state.intervention_queues).insert(session_id.to_string(), intervention_queue);
+
+    // Pick summary model: explicit config > auto-detect first local model
+    if let Some(ref name) = cfg.summary_model {
+        // Search by section name first, then by model field value
+        let found = cfg.get(name).or_else(|| {
+            cfg.sessions.iter().find(|(_, s)| s.model == *name).map(|(n, s)| {
+                debug_log(&format!("compression summary: found '{}' via model field match", n));
+                s
+            })
+        });
+        if let Some(sc) = found {
+            // Use the actual model name (sc.model), not the config key,
+            // because the API expects the real model identifier.
+            loop_config.summary_model_name = Some(sc.model.clone());
+            loop_config.summary_apibase = Some(sc.apibase.clone());
+            loop_config.summary_apikey = Some(sc.apikey.clone());
+            debug_log(&format!("compression summary model (explicit): {} ({}) @ {}", name, sc.model, sc.apibase));
+        } else {
+            debug_log(&format!("WARNING: summary_model '{}' not found (neither section nor model field), falling back to auto-detect", name));
+        }
+    }
+    if loop_config.summary_model_name.is_none() {
+        if let Some((name, sc)) = cfg.sessions.iter().find(|(_, s)| crate::is_local_deploy(&s.apibase)) {
+            loop_config.summary_model_name = Some(sc.model.clone());
+            loop_config.summary_apibase = Some(sc.apibase.clone());
+            loop_config.summary_apikey = Some(sc.apikey.clone());
+            debug_log(&format!("compression summary model (auto): {} ({}) @ {}", name, sc.model, sc.apibase));
+        }
+    }
+
+    let trust_store = oz_safety::TrustStore::new(Some(project_ga_dir.join("trust.json")));
+    loop_config.safety_guard = Some(Arc::new(oz_safety::SafetyGuard::new(trust_store)));
+    loop_config.approval_handler = lock_poison_guard(&state.approval_handler).clone();
+
+    // Wire ask_user reply slot
+    {
+        let mut ask_rxs = lock_poison_guard(&state.ask_user_rxs);
+        let slot = ask_rxs
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(None)));
+        *slot.lock().unwrap() = None;
+        loop_config.ask_user_rx = Some(slot.clone());
+    }
+
+    // Event channel: capture streaming events from the agent loop
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<oz_core_types::StreamEvent>();
+    let collected_events: Arc<Mutex<Vec<oz_core_types::StreamEvent>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let event_arrival_ms: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let start_ms: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+
+    let collector_handle: tokio::task::JoinHandle<()> = {
+        let sid = session_id.to_string();
+        let app_for_collector = app.clone();
+        let events_for_collector = collected_events.clone();
+        let arrivals_for_collector = event_arrival_ms.clone();
+        let start_for_collector = start_ms.clone();
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                {
+                    let mut s = start_for_collector.lock().unwrap();
+                    if s.is_none() {
+                        *s = Some(now_ms);
+                    }
+                }
+                let base = start_for_collector.lock().unwrap().unwrap_or(now_ms);
+                let arr = now_ms.saturating_sub(base);
+                arrivals_for_collector.lock().unwrap().push(arr);
+                events_for_collector.lock().unwrap().push(event.clone());
+
+                if !matches!(event, oz_core_types::StreamEvent::ToolCallReady { .. }) {
+                    if let Ok(value) = serde_json::to_value(&event) {
+                        let sse_ev = SseEvent::protocol_v1_json(&sid, &value);
+                        let _ = app_for_collector
+                            .emit("sse_event", serde_json::to_value(&sse_ev).unwrap_or_default());
+                    }
+                }
+            }
+        })
+    };
+
+    let event_tx_for_after = event_tx.clone();
+    loop_config.event_tx = Some(event_tx);
+
+    // Stop signal
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    {
+        let mut map = lock_poison_guard(&state.stop_signals);
+        map.insert(session_id.to_string(), stop_signal.clone());
+    }
+
+    // Subscribe to the sse_bus for external event forwarding
+    let sse_rx = state.sse_bus.subscribe();
+    let app_for_forwarder = app.clone();
+    let session_id_for_forwarder = session_id.to_string();
+    let forwarder = tokio::spawn(async move {
+        let mut rx = sse_rx;
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    if ev.session_id == session_id_for_forwarder {
+                        let _ = app_for_forwarder
+                            .emit("sse_event", serde_json::to_value(&ev).unwrap_or_default());
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let run_start = std::time::Instant::now();
+
+    let outcome = oz_core::agent_loop::run_agent_loop(
+        &mut client,
+        system_prompt,
+        user_message,
+        history,
+        &mut handler,
+        &definitions,
+        &ctx,
+        &loop_config,
+        &stop_signal,
+    )
+    .await;
+
+    forwarder.abort();
+
+    {
+        let err_msg = outcome.data.as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str());
+        let full_len = outcome.data.as_ref()
+            .and_then(|d| d.get("full_response"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.len())
+            .unwrap_or(0);
+        debug_log(&format!(
+            "agent outcome: exit_reason={} turn={} error={} full_len={}",
+            outcome.exit_reason,
+            outcome.turn,
+            err_msg.unwrap_or("(none)"),
+            full_len,
+        ));
+    }
+
+    // Send terminal event through the event channel
+    if let Some(ref err_msg) = outcome.data.as_ref()
+        .and_then(|d| d.get("error"))
+        .and_then(|v| v.as_str())
+    {
+        let _ = event_tx_for_after.send(oz_core_types::StreamEvent::Error {
+            message: err_msg.to_string(),
+        });
+    } else {
+        let _ = event_tx_for_after.send(oz_core_types::StreamEvent::FinishMessage {
+            stop_reason: outcome.exit_reason.clone(),
+        });
+    }
+    drop(event_tx_for_after);
+    loop_config.event_tx.take();
+    let _ = collector_handle.await;
+
+    {
+        let mut map = lock_poison_guard(&state.stop_signals);
+        map.remove(session_id);
+    }
+
+    // Mark idle and persist assistant message
+    let full_response = outcome.data.as_ref()
+        .and_then(|d| d.get("full_response"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    {
+        let mut store = lock_poison_guard(&state.sessions);
+        if let Some(s) = store.get_mut(session_id) {
+            s.status = SessionStatus::Idle;
+            {
+                let has_events = collected_events.lock().unwrap().len() > 0;
+                let full = full_response.as_deref().unwrap_or("");
+                // When the agent is stopped mid-stream, full_response
+                // may be empty even though the UI already rendered text
+                // deltas (the stream parser emits events in real time but
+                // full_response is only populated after stream completes).
+                // Reconstruct content from TextDelta events so the saved
+                // message shows what the user already saw.
+                let display_content: String = if full.is_empty() && has_events {
+                    let events = collected_events.lock().unwrap();
+                    events.iter()
+                        .filter_map(|e| match e {
+                            oz_core_types::StreamEvent::TextDelta { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<&str>>()
+                        .join("")
+                } else {
+                    full.to_string()
+                };
+                if has_events || !display_content.is_empty() {
+                    let now = chrono::Utc::now();
+                    let mut msg = serde_json::json!({
+                        "role": "assistant",
+                        "content": display_content,
+                        "timestamp": now.to_rfc3339(),
+                    });
+
+                    let stream_events_json: Vec<serde_json::Value> = {
+                        let events = collected_events.lock().unwrap();
+                        let arrivals = event_arrival_ms.lock().unwrap();
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        events
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, e)| {
+                                let mut v = serde_json::to_value(e).ok()?;
+                                let arr_i = arrivals.get(i).copied().unwrap_or(0);
+                                let next_arr = arrivals.get(i + 1).copied().unwrap_or(now_ms);
+                                let dur = next_arr.saturating_sub(arr_i);
+                                if let Some(obj) = v.as_object_mut() {
+                                    obj.insert(
+                                        "duration_ms".to_string(),
+                                        serde_json::Value::Number(dur.into()),
+                                    );
+                                }
+                                Some(v)
+                            })
+                            .collect()
+                    };
+                    if !stream_events_json.is_empty() {
+                        msg["streamEvents"] = serde_json::Value::Array(stream_events_json);
+                    }
+
+                    let dur = run_start.elapsed().as_millis() as u64;
+                    if dur > 0 {
+                        msg["duration"] = serde_json::json!(dur);
+                    }
+
+                    msg["modelInfo"] = serde_json::json!({
+                        "model": sess_config.model,
+                        "provider": provider,
+                        "contextWindow": sess_config.context_win,
+                        "isLocal": crate::is_local_deploy(&sess_config.apibase),
+                    });
+
+                    msg["exitReason"] = serde_json::json!(outcome.exit_reason);
+
+                    if let Some(ref data) = outcome.data {
+                        if let Some(thinking) = data.get("full_thinking").and_then(|v| v.as_str()) {
+                            if !thinking.is_empty() {
+                                msg["thinking"] = serde_json::Value::String(thinking.to_string());
+                            }
+                        }
+                        if let Some(tools) = data.get("tool_calls").and_then(|v| v.as_array()) {
+                            if !tools.is_empty() {
+                                msg["toolCalls"] = serde_json::Value::Array(tools.clone());
+                            }
+                        }
+                        if let Some(ti) = data.get("input_tokens_est").and_then(|v| v.as_u64()) {
+                            msg["tokensIn"] = serde_json::Value::Number(ti.into());
+                        }
+                        if let Some(to) = data.get("output_tokens_est").and_then(|v| v.as_u64()) {
+                            msg["tokensOut"] = serde_json::Value::Number(to.into());
+                        }
+                        if let Some(ct) = data.get("context_tokens_est").and_then(|v| v.as_u64()) {
+                            msg["contextTokens"] = serde_json::Value::Number(ct.into());
+                        }
+                    }
+
+                    // Embed ToolUse blocks (id + name + input) directly on the
+                    // assistant message so the next agent run can reconstruct
+                    // the tool_use ↔ tool_result pairing mandated by the chat-
+                    // completion protocol. Without this, the prior assistant
+                    // turn is just `assistant(text)` and any ToolResult blocks
+                    // would be rejected by the API.
+                    //
+                    // IMPORTANT: Deduplicate by tool_call_id — the agent loop
+                    // can emit multiple ToolInputAvailable for the same tool
+                    // (speculative execution + regular execution), which would
+                    // create unmatched tool_use ↔ tool_result pairs and cause
+                    // the LLM to repeat the previous task on the next run.
+                    {
+                        let events = collected_events.lock().unwrap();
+                        let mut seen_ids = std::collections::HashSet::new();
+                        let tool_use_blocks: Vec<serde_json::Value> = events.iter()
+                            .filter_map(|e| match e {
+                                StreamEvent::ToolInputAvailable { tool_call_id, name, args } => {
+                                    let id_str = tool_call_id.as_str();
+                                    if id_str.is_empty() { return None; }
+                                    // Deduplicate: keep only the first occurrence per tool_call_id
+                                    if !seen_ids.insert(id_str.to_string()) {
+                                        return None;
+                                    }
+                                    let input: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+                                    Some(serde_json::json!({
+                                        "id": id_str,
+                                        "name": name,
+                                        "input": input,
+                                    }))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        if !tool_use_blocks.is_empty() {
+                            msg["tool_use_blocks"] = serde_json::Value::Array(tool_use_blocks);
+                        }
+                    }
+
+                    s.messages.push(msg);
+
+                    // Persist all ToolOutputAvailable blocks as ONE user-role
+                    // message with `tool_results` (not as stand-alone
+                    // role:"tool" messages, which break the Claude/OpenAI
+                    // protocol pairing). Deduplicate by tool_call_id to
+                    // prevent unmatched tool_use ↔ tool_result pairs.
+                    {
+                        let events = collected_events.lock().unwrap();
+                        let mut seen_trids = std::collections::HashSet::new();
+                        let tool_results: Vec<serde_json::Value> = events.iter()
+                            .filter_map(|e| match e {
+                                StreamEvent::ToolOutputAvailable { tool_call_id, output, .. } => {
+                                    if tool_call_id.is_empty() { return None; }
+                                    if !seen_trids.insert(tool_call_id.to_string()) {
+                                        return None;
+                                    }
+                                    Some(serde_json::json!({
+                                        "tool_use_id": tool_call_id,
+                                        "content": output,
+                                    }))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        if !tool_results.is_empty() {
+                            let user_msg = serde_json::json!({
+                                "role": "user",
+                                "content": "",
+                                "tool_results": tool_results,
+                                "timestamp": now.to_rfc3339(),
+                            });
+                            s.messages.push(user_msg);
+                        }
+                    }
+                }
+            }
+        }
+        store.save();
+    }
+
+    // Send done event with token counts and full response
+    let tokens_in: usize = outcome.data.as_ref()
+        .and_then(|d| d.get("input_tokens_est"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let tokens_out: usize = outcome.data.as_ref()
+        .and_then(|d| d.get("output_tokens_est"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let context_tokens: usize = outcome.data.as_ref()
+        .and_then(|d| d.get("context_tokens_est"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let done_evt = SseEvent::done(
+        session_id,
+        full_response.as_deref(),
+        tokens_in,
+        tokens_out,
+        context_tokens,
+        Some(&outcome.exit_reason),
+    );
+    let _ = state.sse_bus.send(done_evt.clone());
+    let _ = app.emit("sse_event", serde_json::to_value(&done_evt).unwrap_or_default());
+
+    // Send desktop notification
+    let summary = outcome.data.as_ref()
+        .and_then(|d| d.get("full_response"))
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            if s.len() > 100 {
+                let mut end = 100;
+                while !s.is_char_boundary(end) { end -= 1; }
+                format!("{}...", &s[..end])
+            } else {
+                s.to_string()
+            }
+        })
+        .unwrap_or_else(|| "Task completed".to_string());
+    let _ = app.notification()
+        .builder()
+        .title("OpenZen")
+        .body(&summary)
+        .show();
+
+    if let Some(slot) = oz_core_types::CURRENT_REMINDER_SESSION.get() {
+        *slot.lock().unwrap() = None;
+    }
+
+    Ok(())
+}

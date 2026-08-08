@@ -1,0 +1,21 @@
+[package]
+name = "oz-llm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oz-core-types = { path = "../oz-core-types" }
+oz-config = { path = "../oz-config" }
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true

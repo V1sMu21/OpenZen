@@ -1,0 +1,395 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]: OpenZen
+    - button "New Chat" [ref=e6] [cursor=pointer]:
+      - img [ref=e7]
+      - text: New Chat
+    - generic [ref=e10]:
+      - button "Session 07:37 0 msgs 2026-06-12 15:37 Delete session" [ref=e463] [cursor=pointer]:
+        - generic [ref=e464]:
+          - generic [ref=e465]: Session 07:37
+          - generic [ref=e466]:
+            - generic [ref=e467]: 0 msgs
+            - generic [ref=e468]: 2026-06-12 15:37
+        - button "Delete session" [ref=e469]:
+          - img [ref=e470]
+      - 'button "直接输出（不要思考超过1秒）： ## 流式 | x | 2 msgs 2026-06-12 15:23 Delete session" [ref=e11] [cursor=pointer]':
+        - generic [ref=e12]:
+          - generic [ref=e13]: "直接输出（不要思考超过1秒）： ## 流式 | x |"
+          - generic [ref=e14]:
+            - generic [ref=e15]: 2 msgs
+            - generic [ref=e16]: 2026-06-12 15:23
+        - button "Delete session" [ref=e17]:
+          - img [ref=e18]
+      - 'button "直接输出（不要思考超过1秒）： ## 流式 | x | 2 msgs 2026-06-12 15:19 Delete session" [active] [ref=e20] [cursor=pointer]':
+        - generic [ref=e21]:
+          - generic [ref=e22]: "直接输出（不要思考超过1秒）： ## 流式 | x |"
+          - generic [ref=e23]:
+            - generic [ref=e24]: 2 msgs
+            - generic [ref=e25]: 2026-06-12 15:19
+        - button "Delete session" [ref=e26]:
+          - img [ref=e27]
+      - 'button "直接输出markdown： ## 流式标题 | a | 2 msgs 2026-06-12 15:18 Delete session" [ref=e29] [cursor=pointer]':
+        - generic [ref=e30]:
+          - generic [ref=e31]: "直接输出markdown： ## 流式标题 | a |"
+          - generic [ref=e32]:
+            - generic [ref=e33]: 2 msgs
+            - generic [ref=e34]: 2026-06-12 15:18
+        - button "Delete session" [ref=e35]:
+          - img [ref=e36]
+      - button "Session 07:17 0 msgs 2026-06-12 15:17 Delete session" [ref=e38] [cursor=pointer]:
+        - generic [ref=e39]:
+          - generic [ref=e40]: Session 07:17
+          - generic [ref=e41]:
+            - generic [ref=e42]: 0 msgs
+            - generic [ref=e43]: 2026-06-12 15:17
+        - button "Delete session" [ref=e44]:
+          - img [ref=e45]
+      - button "**直接复制粘贴以下内容**，不要改写，不要描述，纯输出... 4 msgs 2026-06-12 15:15 Delete session" [ref=e47] [cursor=pointer]:
+        - generic [ref=e48]:
+          - generic [ref=e49]: "**直接复制粘贴以下内容**，不要改写，不要描述，纯输出..."
+          - generic [ref=e50]:
+            - generic [ref=e51]: 4 msgs
+            - generic [ref=e52]: 2026-06-12 15:15
+        - button "Delete session" [ref=e53]:
+          - img [ref=e54]
+      - 'button "快速输出（不思考）： ## 标题 | a | b | |... 2 msgs 2026-06-12 15:13 Delete session" [ref=e56] [cursor=pointer]':
+        - generic [ref=e57]:
+          - generic [ref=e58]: "快速输出（不思考）： ## 标题 | a | b | |..."
+          - generic [ref=e59]:
+            - generic [ref=e60]: 2 msgs
+            - generic [ref=e61]: 2026-06-12 15:13
+        - button "Delete session" [ref=e62]:
+          - img [ref=e63]
+      - button "写一个超长详细的技术markdown文档（不要压缩，每段... 2 msgs 2026-06-12 15:11 Delete session" [ref=e65] [cursor=pointer]:
+        - generic [ref=e66]:
+          - generic [ref=e67]: 写一个超长详细的技术markdown文档（不要压缩，每段...
+          - generic [ref=e68]:
+            - generic [ref=e69]: 2 msgs
+            - generic [ref=e70]: 2026-06-12 15:11
+        - button "Delete session" [ref=e71]:
+          - img [ref=e72]
+      - 'button "详细输出以下markdown（不要压缩，不用工具）： #... 2 msgs 2026-06-12 15:10 Delete session" [ref=e74] [cursor=pointer]':
+        - generic [ref=e75]:
+          - generic [ref=e76]: "详细输出以下markdown（不要压缩，不用工具）： #..."
+          - generic [ref=e77]:
+            - generic [ref=e78]: 2 msgs
+            - generic [ref=e79]: 2026-06-12 15:10
+        - button "Delete session" [ref=e80]:
+          - img [ref=e81]
+      - 'button "输出以下markdown（不用工具）： ## 测试 **... 2 msgs 2026-06-12 15:04 Delete session" [ref=e83] [cursor=pointer]':
+        - generic [ref=e84]:
+          - generic [ref=e85]: "输出以下markdown（不用工具）： ## 测试 **..."
+          - generic [ref=e86]:
+            - generic [ref=e87]: 2 msgs
+            - generic [ref=e88]: 2026-06-12 15:04
+        - button "Delete session" [ref=e89]:
+          - img [ref=e90]
+      - button "Session 07:04 0 msgs 2026-06-12 15:04 Delete session" [ref=e92] [cursor=pointer]:
+        - generic [ref=e93]:
+          - generic [ref=e94]: Session 07:04
+          - generic [ref=e95]:
+            - generic [ref=e96]: 0 msgs
+            - generic [ref=e97]: 2026-06-12 15:04
+        - button "Delete session" [ref=e98]:
+          - img [ref=e99]
+      - button "Session 07:02 2 msgs 2026-06-12 15:02 Delete session" [ref=e101] [cursor=pointer]:
+        - generic [ref=e102]:
+          - generic [ref=e103]: Session 07:02
+          - generic [ref=e104]:
+            - generic [ref=e105]: 2 msgs
+            - generic [ref=e106]: 2026-06-12 15:02
+        - button "Delete session" [ref=e107]:
+          - img [ref=e108]
+      - button "详细输出以下markdown，每条展开3-5行，严格格式... 4 msgs 2026-06-12 15:00 Delete session" [ref=e110] [cursor=pointer]:
+        - generic [ref=e111]:
+          - generic [ref=e112]: 详细输出以下markdown，每条展开3-5行，严格格式...
+          - generic [ref=e113]:
+            - generic [ref=e114]: 4 msgs
+            - generic [ref=e115]: 2026-06-12 15:00
+        - button "Delete session" [ref=e116]:
+          - img [ref=e117]
+      - button "用read工具读一下hello.py文件内容，然后用wr... 2 msgs 2026-06-12 14:57 Delete session" [ref=e119] [cursor=pointer]:
+        - generic [ref=e120]:
+          - generic [ref=e121]: 用read工具读一下hello.py文件内容，然后用wr...
+          - generic [ref=e122]:
+            - generic [ref=e123]: 2 msgs
+            - generic [ref=e124]: 2026-06-12 14:57
+        - button "Delete session" [ref=e125]:
+          - img [ref=e126]
+      - 'button "请直接输出以下内容，详细展开每条，不用工具： ## 架构... 1 msgs 2026-06-12 14:56 Delete session" [ref=e128] [cursor=pointer]':
+        - generic [ref=e129]:
+          - generic [ref=e130]: "请直接输出以下内容，详细展开每条，不用工具： ## 架构..."
+          - generic [ref=e131]:
+            - generic [ref=e132]: 1 msgs
+            - generic [ref=e133]: 2026-06-12 14:56
+        - button "Delete session" [ref=e134]:
+          - img [ref=e135]
+      - button "Session 06:55 0 msgs 2026-06-12 14:55 Delete session" [ref=e137] [cursor=pointer]:
+        - generic [ref=e138]:
+          - generic [ref=e139]: Session 06:55
+          - generic [ref=e140]:
+            - generic [ref=e141]: 0 msgs
+            - generic [ref=e142]: 2026-06-12 14:55
+        - button "Delete session" [ref=e143]:
+          - img [ref=e144]
+      - button "只输出以下markdown，不要工具调用，严格按格式输出... 3 msgs 2026-06-12 14:53 Delete session" [ref=e146] [cursor=pointer]:
+        - generic [ref=e147]:
+          - generic [ref=e148]: 只输出以下markdown，不要工具调用，严格按格式输出...
+          - generic [ref=e149]:
+            - generic [ref=e150]: 3 msgs
+            - generic [ref=e151]: 2026-06-12 14:53
+        - button "Delete session" [ref=e152]:
+          - img [ref=e153]
+      - 'button "直接输出以下markdown，不用任何工具： ## 流式... 2 msgs 2026-06-12 14:50 Delete session" [ref=e155] [cursor=pointer]':
+        - generic [ref=e156]:
+          - generic [ref=e157]: "直接输出以下markdown，不用任何工具： ## 流式..."
+          - generic [ref=e158]:
+            - generic [ref=e159]: 2 msgs
+            - generic [ref=e160]: 2026-06-12 14:50
+        - button "Delete session" [ref=e161]:
+          - img [ref=e162]
+      - 'button "只输出以下内容，不要用工具： ## 流式测试 **粗体*... 6 msgs 2026-06-12 14:29 Delete session" [ref=e164] [cursor=pointer]':
+        - generic [ref=e165]:
+          - generic [ref=e166]: "只输出以下内容，不要用工具： ## 流式测试 **粗体*..."
+          - generic [ref=e167]:
+            - generic [ref=e168]: 6 msgs
+            - generic [ref=e169]: 2026-06-12 14:29
+        - button "Delete session" [ref=e170]:
+          - img [ref=e171]
+      - 'button "只输出以下内容，不要使用工具： ## 标题测试 这是**... 4 msgs 2026-06-12 13:35 Delete session" [ref=e173] [cursor=pointer]':
+        - generic [ref=e174]:
+          - generic [ref=e175]: "只输出以下内容，不要使用工具： ## 标题测试 这是**..."
+          - generic [ref=e176]:
+            - generic [ref=e177]: 4 msgs
+            - generic [ref=e178]: 2026-06-12 13:35
+        - button "Delete session" [ref=e179]:
+          - img [ref=e180]
+      - button "你好，请写一段文字，不要写入文件中，但这段文字应该包含所... 10 msgs 2026-06-12 12:34 Delete session" [ref=e182] [cursor=pointer]:
+        - generic [ref=e183]:
+          - generic [ref=e184]: 你好，请写一段文字，不要写入文件中，但这段文字应该包含所...
+          - generic [ref=e185]:
+            - generic [ref=e186]: 10 msgs
+            - generic [ref=e187]: 2026-06-12 12:34
+        - button "Delete session" [ref=e188]:
+          - img [ref=e189]
+      - button "请写一段文字，包含所有Markdown标签以及公式等，我... 4 msgs 2026-06-11 16:14 Delete session" [ref=e191] [cursor=pointer]:
+        - generic [ref=e192]:
+          - generic [ref=e193]: 请写一段文字，包含所有Markdown标签以及公式等，我...
+          - generic [ref=e194]:
+            - generic [ref=e195]: 4 msgs
+            - generic [ref=e196]: 2026-06-11 16:14
+        - button "Delete session" [ref=e197]:
+          - img [ref=e198]
+      - button "你好 12 msgs 2026-06-09 16:02 Delete session" [ref=e200] [cursor=pointer]:
+        - generic [ref=e201]:
+          - generic [ref=e202]: 你好
+          - generic [ref=e203]:
+            - generic [ref=e204]: 12 msgs
+            - generic [ref=e205]: 2026-06-09 16:02
+        - button "Delete session" [ref=e206]:
+          - img [ref=e207]
+      - button "stop-test 7 msgs 2026-06-09 14:49 Delete session" [ref=e209] [cursor=pointer]:
+        - generic [ref=e210]:
+          - generic [ref=e211]: stop-test
+          - generic [ref=e212]:
+            - generic [ref=e213]: 7 msgs
+            - generic [ref=e214]: 2026-06-09 14:49
+        - button "Delete session" [ref=e215]:
+          - img [ref=e216]
+      - button "你好 10 msgs 2026-06-09 14:36 Delete session" [ref=e218] [cursor=pointer]:
+        - generic [ref=e219]:
+          - generic [ref=e220]: 你好
+          - generic [ref=e221]:
+            - generic [ref=e222]: 10 msgs
+            - generic [ref=e223]: 2026-06-09 14:36
+        - button "Delete session" [ref=e224]:
+          - img [ref=e225]
+      - button "test 0 msgs 2026-06-09 14:14 Delete session" [ref=e227] [cursor=pointer]:
+        - generic [ref=e228]:
+          - generic [ref=e229]: test
+          - generic [ref=e230]:
+            - generic [ref=e231]: 0 msgs
+            - generic [ref=e232]: 2026-06-09 14:14
+        - button "Delete session" [ref=e233]:
+          - img [ref=e234]
+      - button "Markdown-Link-Test 0 msgs 2026-06-09 14:14 Delete session" [ref=e236] [cursor=pointer]:
+        - generic [ref=e237]:
+          - generic [ref=e238]: Markdown-Link-Test
+          - generic [ref=e239]:
+            - generic [ref=e240]: 0 msgs
+            - generic [ref=e241]: 2026-06-09 14:14
+        - button "Delete session" [ref=e242]:
+          - img [ref=e243]
+      - button "Stop-Mechanism-Test 1 msgs 2026-06-03 12:45 Delete session" [ref=e245] [cursor=pointer]:
+        - generic [ref=e246]:
+          - generic [ref=e247]: Stop-Mechanism-Test
+          - generic [ref=e248]:
+            - generic [ref=e249]: 1 msgs
+            - generic [ref=e250]: 2026-06-03 12:45
+        - button "Delete session" [ref=e251]:
+          - img [ref=e252]
+      - button "TUI-Comprehensive-Atomic-Ops-Test 4 msgs 2026-06-03 12:43 Delete session" [ref=e254] [cursor=pointer]:
+        - generic [ref=e255]:
+          - generic [ref=e256]: TUI-Comprehensive-Atomic-Ops-Test
+          - generic [ref=e257]:
+            - generic [ref=e258]: 4 msgs
+            - generic [ref=e259]: 2026-06-03 12:43
+        - button "Delete session" [ref=e260]:
+          - img [ref=e261]
+      - button "TUI Comprehensive Atomic Operations Test 2 msgs 2026-06-03 12:04 Delete session" [ref=e263] [cursor=pointer]:
+        - generic [ref=e264]:
+          - generic [ref=e265]: TUI Comprehensive Atomic Operations Test
+          - generic [ref=e266]:
+            - generic [ref=e267]: 2 msgs
+            - generic [ref=e268]: 2026-06-03 12:04
+        - button "Delete session" [ref=e269]:
+          - img [ref=e270]
+      - button "为本电脑安装的opencode接入agnes模型，你要找... 8 msgs 2026-06-02 16:03 Delete session" [ref=e272] [cursor=pointer]:
+        - generic [ref=e273]:
+          - generic [ref=e274]: 为本电脑安装的opencode接入agnes模型，你要找...
+          - generic [ref=e275]:
+            - generic [ref=e276]: 8 msgs
+            - generic [ref=e277]: 2026-06-02 16:03
+        - button "Delete session" [ref=e278]:
+          - img [ref=e279]
+      - 'button "Please do this: 1) Write /tm... 4 msgs 2026-06-02 15:23 Delete session" [ref=e281] [cursor=pointer]':
+        - generic [ref=e282]:
+          - generic [ref=e283]: "Please do this: 1) Write /tm..."
+          - generic [ref=e284]:
+            - generic [ref=e285]: 4 msgs
+            - generic [ref=e286]: 2026-06-02 15:23
+        - button "Delete session" [ref=e287]:
+          - img [ref=e288]
+      - 'button "Please do this: 1) Use the w... 2 msgs 2026-06-02 15:08 Delete session" [ref=e290] [cursor=pointer]':
+        - generic [ref=e291]:
+          - generic [ref=e292]: "Please do this: 1) Use the w..."
+          - generic [ref=e293]:
+            - generic [ref=e294]: 2 msgs
+            - generic [ref=e295]: 2026-06-02 15:08
+        - button "Delete session" [ref=e296]:
+          - img [ref=e297]
+      - button "Use the edit tool to change 2 msgs 2026-06-02 15:02 Delete session" [ref=e299] [cursor=pointer]:
+        - generic [ref=e300]:
+          - generic [ref=e301]: Use the edit tool to change
+          - generic [ref=e302]:
+            - generic [ref=e303]: 2 msgs
+            - generic [ref=e304]: 2026-06-02 15:02
+        - button "Delete session" [ref=e305]:
+          - img [ref=e306]
+      - button "Please do this complex task:... 2 msgs 2026-06-02 13:45 Delete session" [ref=e308] [cursor=pointer]:
+        - generic [ref=e309]:
+          - generic [ref=e310]: Please do this complex task:...
+          - generic [ref=e311]:
+            - generic [ref=e312]: 2 msgs
+            - generic [ref=e313]: 2026-06-02 13:45
+        - button "Delete session" [ref=e314]:
+          - img [ref=e315]
+      - 'button "Please do these tasks: 1) Re... 2 msgs 2026-06-02 13:09 Delete session" [ref=e317] [cursor=pointer]':
+        - generic [ref=e318]:
+          - generic [ref=e319]: "Please do these tasks: 1) Re..."
+          - generic [ref=e320]:
+            - generic [ref=e321]: 2 msgs
+            - generic [ref=e322]: 2026-06-02 13:09
+        - button "Delete session" [ref=e323]:
+          - img [ref=e324]
+      - button "List all files in /tmp. Then... 4 msgs 2026-06-02 13:05 Delete session" [ref=e326] [cursor=pointer]:
+        - generic [ref=e327]:
+          - generic [ref=e328]: List all files in /tmp. Then...
+          - generic [ref=e329]:
+            - generic [ref=e330]: 4 msgs
+            - generic [ref=e331]: 2026-06-02 13:05
+        - button "Delete session" [ref=e332]:
+          - img [ref=e333]
+      - 'button "Please do: 1) Read first 20 2 msgs 2026-06-02 12:58 Delete session" [ref=e335] [cursor=pointer]':
+        - generic [ref=e336]:
+          - generic [ref=e337]: "Please do: 1) Read first 20"
+          - generic [ref=e338]:
+            - generic [ref=e339]: 2 msgs
+            - generic [ref=e340]: 2026-06-02 12:58
+        - button "Delete session" [ref=e341]:
+          - img [ref=e342]
+      - button "你还记得之前让你做一个代码编写能力的演示么？就是用htm... 36 msgs 2026-05-31 17:05 Delete session" [ref=e344] [cursor=pointer]:
+        - generic [ref=e345]:
+          - generic [ref=e346]: 你还记得之前让你做一个代码编写能力的演示么？就是用htm...
+          - generic [ref=e347]:
+            - generic [ref=e348]: 36 msgs
+            - generic [ref=e349]: 2026-05-31 17:05
+        - button "Delete session" [ref=e350]:
+          - img [ref=e351]
+  - main [ref=e353]:
+    - generic [ref=e472]:
+      - generic [ref=e474]:
+        - generic [ref=e475]:
+          - generic [ref=e476]: You
+          - button "Copy message" [ref=e477] [cursor=pointer]:
+            - img [ref=e478]
+        - generic [ref=e482]:
+          - paragraph [ref=e483]: 直接输出（不要思考超过1秒）：
+          - heading "流式" [level=2] [ref=e484]
+          - paragraph
+          - table [ref=e485]:
+            - rowgroup [ref=e486]:
+              - row "x y" [ref=e487]:
+                - columnheader "x" [ref=e488]
+                - columnheader "y" [ref=e489]
+            - rowgroup [ref=e490]:
+              - row "1 2" [ref=e491]:
+                - cell "1" [ref=e492]
+                - cell "2" [ref=e493]
+          - code [ref=e495]: code
+          - paragraph
+          - blockquote [ref=e496]: 引用
+          - list [ref=e497]:
+            - listitem [ref=e498]: A
+            - listitem [ref=e499]: B
+          - link "link" [ref=e500] [cursor=pointer]:
+            - /url: https://x.com
+        - generic "System time" [ref=e502]:
+          - img [ref=e503]
+          - generic [ref=e506]: 15:19
+      - generic [ref=e508]:
+        - generic [ref=e509]:
+          - generic [ref=e510]: Agent
+          - button "Copy message" [ref=e511] [cursor=pointer]:
+            - img [ref=e512]
+          - button "Regenerate response" [ref=e515] [cursor=pointer]:
+            - img [ref=e516]
+        - generic [ref=e522]:
+          - heading "流式" [level=2] [ref=e523]
+          - paragraph
+          - table [ref=e524]:
+            - rowgroup [ref=e525]:
+              - row "x y" [ref=e526]:
+                - columnheader "x" [ref=e527]
+                - columnheader "y" [ref=e528]
+            - rowgroup [ref=e529]:
+              - row "1 2" [ref=e530]:
+                - cell "1" [ref=e531]
+                - cell "2" [ref=e532]
+          - code [ref=e534]: code
+          - paragraph
+          - blockquote [ref=e535]: 引用
+          - list [ref=e536]:
+            - listitem [ref=e537]: A
+            - listitem [ref=e538]: B
+          - link "link" [ref=e539] [cursor=pointer]:
+            - /url: https://x.com
+        - generic [ref=e540]:
+          - generic "Task complete" [ref=e541]:
+            - img [ref=e542]
+            - generic [ref=e544]: Done
+          - generic "System time when this turn started" [ref=e546]:
+            - img [ref=e547]
+            - generic [ref=e550]: 15:19
+          - generic "Total time the agent spent on this turn (thinking + tools + response)" [ref=e552]:
+            - img [ref=e553]
+            - generic [ref=e555]: Total 5.9s
+          - generic "Output tokens the model produced for this turn" [ref=e557]:
+            - img [ref=e558]
+            - generic [ref=e560]: "212"
+            - generic [ref=e561]: out
+    - generic [ref=e368]:
+      - textbox "Type a message... (/ for commands)" [ref=e369]
+      - button "Send message" [disabled] [ref=e370]:
+        - img [ref=e371]

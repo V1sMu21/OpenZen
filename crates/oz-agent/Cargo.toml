@@ -1,0 +1,15 @@
+[package]
+name = "oz-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oz-core-types = { path = "../oz-core-types" }
+oz-config = { path = "../oz-config" }
+oz-llm = { path = "../oz-llm" }
+oz-tools = { path = "../oz-tools" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+serde_yaml = "0.9"
+anyhow.workspace = true
+tracing.workspace = true

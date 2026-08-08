@@ -1,0 +1,107 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oz-core-types",
+    "crates/oz-config",
+    "crates/oz-core",
+    "crates/oz-llm",
+    "crates/oz-tools",
+    "crates/oz-browser",
+    "crates/oz-memory",
+    "crates/oz-mcp",
+    "crates/oz-skill-mcp",
+    "crates/oz-safety",
+    "crates/oz-scheduler",
+    "crates/oz-server",
+    "crates/oz-reflect",
+    "crates/oz-plugin",
+    "crates/oz-tui",
+    "crates/oz-tests",
+    "crates/oz-agent",
+    "crates/oz-platform",
+    "crates/oz-platform-telegram",
+    "crates/oz-platform-feishu",
+    "crates/oz-platform-wechat",
+    "src-tauri",
+]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.40", features = ["full"] }
+reqwest = { version = "0.12", features = ["stream", "json", "multipart"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+regex = "1"
+glob = "0.3"
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+tempfile = "3"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+ratatui = "0.29"
+crossterm = "0.28"
+memmap2 = "0.9"
+linkme = "0.3"
+toml = "0.8"
+
+[package]
+name = "openzen"
+version = "0.1.0"
+edition = "2021"
+description = "OpenZen - Minimalist self-evolving autonomous agent framework (Rust)"
+
+[dependencies]
+oz-core-types = { path = "crates/oz-core-types" }
+oz-config = { path = "crates/oz-config" }
+oz-core = { path = "crates/oz-core" }
+oz-llm = { path = "crates/oz-llm" }
+oz-tools = { path = "crates/oz-tools" }
+oz-memory = { path = "crates/oz-memory" }
+oz-safety = { path = "crates/oz-safety" }
+oz-scheduler = { path = "crates/oz-scheduler" }
+oz-server = { path = "crates/oz-server" }
+oz-reflect = { path = "crates/oz-reflect" }
+oz-plugin = { path = "crates/oz-plugin" }
+oz-agent = { path = "crates/oz-agent" }
+oz-tui = { path = "crates/oz-tui" }
+oz-skill-mcp = { path = "crates/oz-skill-mcp" }
+oz-platform = { path = "crates/oz-platform" }
+oz-platform-feishu = { path = "crates/oz-platform-feishu" }
+oz-platform-telegram = { path = "crates/oz-platform-telegram" }
+oz-platform-wechat = { path = "crates/oz-platform-wechat" }
+
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+toml.workspace = true
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "symbols"
+debug = false
+panic = "unwind"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[[bin]]
+name = "openzen"
+path = "src/main.rs"

@@ -1,0 +1,12 @@
+id = "redesign-existing-projects"
+created_at = "2026-06-21T00:19:40.783480+00:00"
+updated_at = "2026-06-21T00:19:40.783480+00:00"
+version = 1
+description = "Upgrades existing websites and apps to premium quality. Audits current design, identifies generic AI patterns, and applies high-end design standards without breaking functionality. Works with any CSS framework or vanilla CSS."
+success_count = 0
+failure_count = 0
+avg_completion_turns = 0.0
+quality_score = 0.5
+user_approved = false
+stale_flag = false
+tags = []

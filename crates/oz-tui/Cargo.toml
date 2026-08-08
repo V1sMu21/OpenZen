@@ -1,0 +1,27 @@
+[package]
+name = "oz-tui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oz-core-types = { path = "../oz-core-types" }
+oz-core = { path = "../oz-core" }
+oz-config = { path = "../oz-config" }
+oz-llm = { path = "../oz-llm" }
+oz-tools = { path = "../oz-tools" }
+oz-memory = { path = "../oz-memory" }
+oz-server = { path = "../oz-server" }
+oz-agent = { path = "../oz-agent" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+portable-pty = "0.8"

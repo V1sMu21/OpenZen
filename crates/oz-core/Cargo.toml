@@ -1,0 +1,26 @@
+[package]
+name = "oz-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oz-core-types = { path = "../oz-core-types" }
+oz-skill-mcp = { path = "../oz-skill-mcp" }
+oz-safety = { path = "../oz-safety" }
+oz-llm = { path = "../oz-llm" }
+oz-config = { path = "../oz-config" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+memmap2.workspace = true
+regex.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,33 @@
+[package]
+name = "oz-tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oz-core-types = { path = "../oz-core-types" }
+oz-core = { path = "../oz-core" }
+oz-config = { path = "../oz-config" }
+oz-browser = { path = "../oz-browser" }
+oz-memory = { path = "../oz-memory" }
+oz-skill-mcp = { path = "../oz-skill-mcp" }
+oz-mcp = { path = "../oz-mcp" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+regex.workspace = true
+glob.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+linkme.workspace = true
+pdf-extract = "0.7"
+calamine = "0.26"
+zip = "0.6"
+quick-xml = "0.37"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile.workspace = true

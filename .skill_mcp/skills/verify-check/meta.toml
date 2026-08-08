@@ -1,0 +1,12 @@
+id = "verify-check"
+created_at = "2026-07-26T00:00:00+00:00"
+updated_at = "2026-07-26T00:00:00+00:00"
+version = 1
+description = "End-to-end verification pipeline: compile → test → lint → E2E → logs."
+success_count = 0
+failure_count = 0
+avg_completion_turns = 0.0
+quality_score = 0.5
+user_approved = false
+stale_flag = false
+tags = ["verify", "check", "build", "test", "lint", "e2e", "cargo", "tauri"]

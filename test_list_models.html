@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test list_models</title>
+</head>
+<body>
+    <h1>Tauri IPC Test: list_models</h1>
+    <button onclick="testListModels()">Call list_models</button>
+    <pre id="output"></pre>
+
+    <script>
+        async function testListModels() {
+            try {
+                const result = await window.__TAURI__.core.invoke('list_models');
+                document.getElementById('output').textContent = JSON.stringify(result, null, 2);
+                
+                // Check if agents-a1-8bit is in the list
+                const hasAgentsA1 = result.some(m => m.name === 'agents-a1-8bit');
+                if (hasAgentsA1) {
+                    alert('✅ agents-a1-8bit is available!');
+                } else {
+                    alert('❌ agents-a1-8bit NOT found. Available models:\n' + 
+                          result.map(m => m.name).join(', '));
+                }
+            } catch (error) {
+                document.getElementById('output').textContent = 'Error: ' + error;
+            }
+        }
+
+        // Auto-call on load (for Tauri)
+        if (window.__TAURI__) {
+            testListModels();
+        }
+    </script>
+</body>
+</html>

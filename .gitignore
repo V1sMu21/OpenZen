@@ -1,0 +1,44 @@
+# Build artifacts
+target/
+frontends/dist/
+frontends/node_modules/
+frontends/.vite/
+scripts/node_modules/
+node_modules/
+
+# Runtime data (sessions, checkpoints, memory, logs)
+.openzen/
+.openzen/mykey.toml
+.runlogs/
+.playwright-mcp/
+checkpoints/
+backups/
+memory/
+temp/
+openzen/
+~/
+facts/
+
+# Config with secrets
+config/mykey.toml
+mykey.toml
+
+# Logs and test artifacts
+*.log
+console-errors.log
+tests/longtask/
+tests/newtest/
+session-*.md
+*.bak
+*.bg-bak
+
+# Test screenshots (large, regenerable)
+docs/test-screenshots/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

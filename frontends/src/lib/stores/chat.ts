@@ -1,0 +1,1178 @@
+import { writable, get } from "svelte/store";
+import type { Message, SSEEvent, ModelInfo } from "./types";
+import type { ModelEntry } from "../api/chat";
+import { estimateTokens, formatTokenCount } from "./types";
+import type { UIMessagePart, ProtocolV1Event, ToolInvocationPart, DataPart } from "./parts";
+import { sidepanel } from "./sidepanel.svelte";
+import { convertStreamEventsToParts, generatePartId } from "./parts";
+import { applyProtocolEvent, clearReasoningTimers } from "./protocol-processor";
+import { sessions } from "./sessions";
+import { isTauri, tauriInvoke } from "../api/tauri";
+import { sendMessage as httpSendMessage } from "../api/chat";
+import { stopSession } from "../api/sessions";
+
+export interface PendingAskUser {
+  question: string;
+  candidates: string[];
+  askId?: string;
+}
+
+export interface Attachment {
+  id: string;
+  path: string;
+  name: string;
+  type: "file" | "image";
+}
+
+// ── Streaming event coalescing ──
+// text_delta / reasoning_delta arrive at token frequency from SSE; each
+// one used to trigger a full store update (streamingParts copy + all
+// $derived re-evaluations across every ChatMessage). We accumulate the
+// render-only protocol events and apply them in ONE update() on the next
+// animation frame instead. Side-effect events (ask_user, todo, context
+// usage, artifact) are handled immediately, never coalesced.
+const RENDER_ONLY_EVENTS = new Set([
+  "reasoning_start", "reasoning_delta", "reasoning_end",
+  "text_start", "text_delta", "text_end",
+  "tool_input_start", "tool_input_delta", "tool_input_available",
+  "tool_output_available",
+]);
+
+export interface ChatState {
+  messages: Message[];
+  isProcessing: boolean;
+  error: string | null;
+  modelInfo: ModelInfo | null;
+  /** Currently selected model session name (e.g. "local", "local-qwen27b") */
+  selectedModel: string | null;
+  /** Available models from the backend */
+  modelList: ModelEntry[];
+  /** Whether the model switcher dialog is visible */
+  showModelSwitcher: boolean;
+  /** The parts of the currently streaming assistant message.
+   *  During streaming, the last mutable part may have state='streaming'. */
+  streamingParts: UIMessagePart[];
+  /**
+   * When the agent calls `ask_user`, the loop exits with should_exit and
+   * the result payload carries the question + candidate answers. We capture
+   * it here so the UI can pop a dialog and let the user respond.
+   */
+   pendingAskUser: PendingAskUser | null;
+    /** File and image attachments for the next message. */
+    attachments: Attachment[];
+    /** Todo items from the agent's todowrite/todoupdate tools. */
+   todos: Array<{id:string;content:string;status:string;priority:string;order:number}>;
+   compressionNotice: string | null;
+   cumulativeInputTokens: number;
+   cumulativeOutputTokens: number;
+}
+
+// 30 minutes: long enough for a multi-step task with many slow
+// tool calls, and the watchdog is *reset* on every incoming token,
+// so this only fires if the server truly stops talking to us.
+const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000;
+
+function createChatStore() {
+  const { subscribe, set, update } = writable<ChatState>({
+    messages: [],
+    isProcessing: false,
+    error: null,
+    modelInfo: null,
+    selectedModel: null,
+    modelList: [],
+     showModelSwitcher: false,
+     streamingParts: [],
+     pendingAskUser: null,
+      attachments: [],
+      todos: [],
+     compressionNotice: null,
+     cumulativeInputTokens: 0,
+     cumulativeOutputTokens: 0,
+   });
+
+  // Per-session state cache — preserves in-progress agent output when
+  // the user switches to another session and back. Without this cache,
+  // loadSession() wipes streamingParts + the unpersisted assistant
+  // message, so the bubble disappears. The cache is evicted when the
+  // agent finishes (done event) or the user sends a new message.
+   const sessionCache = new Map<string, {
+    messages: Message[];
+    streamingParts: UIMessagePart[];
+    isProcessing: boolean;
+    pendingAskUser: PendingAskUser | null;
+    attachments: Attachment[];
+    todos: ChatState['todos'];
+    compressionNotice: string | null;
+    modelInfo: ModelInfo | null;
+  }>();
+
+  /**
+   * Wall-clock arrival time of every part, indexed by a stable
+   * identity (partId for text/reasoning parts, toolCallId for
+   * tool-invocation parts). We use a map so the index is
+   * independent of `streamingParts.length` — data_* events push
+   * extra parts into streamingParts but never record an arrival,
+   * which would otherwise misalign the indices used to compute
+   * per-part durations.
+   */
+  const partArrivalTimes = new Map<string, number>();
+  /** For text/reasoning parts, which lack their own id field on
+   *  `state` change events, we still want a deterministic arrival
+   *  order. The fallback key is the part's *identity* (id for
+   *  text/reasoning, toolCallId for tool-invocations). */
+  const partArrivalOrder: string[] = [];
+  const arrivalKey = (p: { type: string } & Record<string, unknown>): string => {
+    if (p.type === "tool-invocation") {
+      return `tool:${(p as { toolCallId?: string }).toolCallId ?? ""}`;
+    }
+    if (p.type === "data") {
+      return `data:${(p as { id?: string }).id ?? ""}`;
+    }
+    return `text:${(p as { id?: string }).id ?? ""}`;
+  };
+
+  // ── Streaming event coalescing (see RENDER_ONLY_EVENTS at module
+  // top): deltas are batched into ONE store update per animation
+  // frame instead of one update per token. Live here (inside the
+  // store factory) because flush needs access to partArrivalTimes,
+  // update, contentFromParts and the processing watchdog.
+  let pendingStreamEvents: ProtocolV1Event[] = [];
+  let streamFlushRaf: number | null = null;
+
+  /** Record per-part arrival timestamps for duration computation. */
+  function recordArrivalForEvent(protoEvent: ProtocolV1Event) {
+    let arrivalKeyForEvent: string | null = null;
+    if (protoEvent.type === 'reasoning_start' || protoEvent.type === 'text_start') {
+      if (protoEvent.id) arrivalKeyForEvent = `text:${protoEvent.id}`;
+    } else if (protoEvent.type === 'tool_input_start') {
+      if (protoEvent.tool_call_id) arrivalKeyForEvent = `tool:${protoEvent.tool_call_id}`;
+    } else if (protoEvent.type === 'tool_output_available') {
+      if (protoEvent.tool_call_id) arrivalKeyForEvent = `tool_output:${protoEvent.tool_call_id}`;
+    }
+    if (arrivalKeyForEvent !== null) {
+      const now = Date.now();
+      if (!partArrivalTimes.has(arrivalKeyForEvent)) {
+        partArrivalTimes.set(arrivalKeyForEvent, now);
+        partArrivalOrder.push(arrivalKeyForEvent);
+      }
+    }
+  }
+
+  /** Apply all pending render events in a single store update. */
+  function flushStreamingEvents() {
+    streamFlushRaf = null;
+    if (pendingStreamEvents.length === 0) return;
+    const batch = pendingStreamEvents;
+    pendingStreamEvents = [];
+    resetProcessingWatchdog();
+    for (const ev of batch) recordArrivalForEvent(ev);
+    update((s) => {
+      const parts = [...s.streamingParts];
+      for (const ev of batch) applyProtocolEvent(parts, ev);
+      const content = contentFromParts(parts);
+      const idx = s.messages.length - 1;
+      const msgs = s.messages.map((m, i) =>
+        i === idx && m.role === "assistant" ? { ...m, content } : m
+      );
+      return { ...s, streamingParts: parts, messages: msgs };
+    });
+  }
+
+  /** Queue a render-only event; coalesce into the next animation frame. */
+  function queueStreamEvent(protoEvent: ProtocolV1Event) {
+    pendingStreamEvents.push(protoEvent);
+    // Reset the watchdog on every event, not only on flush: when the
+    // window is minimized/occluded, rAF stops firing so flushes pause
+    // while events keep arriving — the watchdog must not fire then.
+    resetProcessingWatchdog();
+    if (streamFlushRaf === null) {
+      streamFlushRaf = requestAnimationFrame(flushStreamingEvents);
+    }
+  }
+
+  /** Drop queued events + pending rAF (session/reset paths only). */
+  function cancelPendingStreamEvents() {
+    if (streamFlushRaf !== null) {
+      cancelAnimationFrame(streamFlushRaf);
+      streamFlushRaf = null;
+    }
+    pendingStreamEvents = [];
+  }
+
+  let processingTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function startProcessingWatchdog() {
+    clearProcessingWatchdog();
+    processingTimer = setTimeout(() => {
+      console.warn("Processing watchdog fired");
+      update((s) => ({
+        ...s,
+        isProcessing: false,
+        error: "Processing timed out",
+        streamingParts: [],
+        messages: s.messages.map((m) => m.streaming ? { ...m, streaming: false, content: m.content || "—interrupted—" } : m),
+      }));
+    }, PROCESSING_TIMEOUT_MS);
+  }
+
+  function clearProcessingWatchdog() {
+    if (processingTimer !== null) {
+      clearTimeout(processingTimer);
+      processingTimer = null;
+    }
+  }
+
+  function resetProcessingWatchdog() {
+    if (processingTimer !== null) {
+      clearProcessingWatchdog();
+      startProcessingWatchdog();
+    }
+  }
+
+  function addMessage(msg: Message) {
+    update((s) => ({ ...s, messages: [...s.messages, msg], error: null }));
+  }
+
+  function generateId(): string {
+    return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  /** Derive the assistant message content from streamingParts (text parts joined). */
+  function contentFromParts(parts: UIMessagePart[]): string {
+    return parts.filter((p): p is Extract<UIMessagePart, { type: 'text' }> => p.type === 'text')
+      .map((p) => p.text)
+      .join('');
+  }
+
+  return {
+    subscribe,
+
+    setModelInfo(info: ModelInfo) {
+      update((s) => ({ ...s, modelInfo: info }));
+    },
+
+    setSelectedModel(name: string) {
+      update((s) => ({ ...s, selectedModel: name }));
+    },
+
+    setModelList(list: ModelEntry[]) {
+      update((s) => ({ ...s, modelList: list }));
+    },
+
+    openModelSwitcher() {
+      update((s) => ({ ...s, showModelSwitcher: true }));
+    },
+
+    closeModelSwitcher() {
+      update((s) => ({ ...s, showModelSwitcher: false }));
+    },
+
+    addUserMessage(text: string) {
+      addMessage({
+        id: generateId(),
+        role: "user",
+        content: text,
+        timestamp: new Date().toISOString(),
+        tokensIn: estimateTokens(text),
+        children: [],
+      });
+    },
+
+    startAssistantMessage() {
+      const currentSid = get(sessions).currentId;
+      if (currentSid) sessionCache.delete(currentSid);
+      startProcessingWatchdog();
+      cancelPendingStreamEvents();
+      partArrivalTimes.clear();
+      partArrivalOrder.length = 0;
+      const msgId = generateId();
+      update((s) => ({
+        ...s,
+        isProcessing: true,
+        streamingParts: [],
+        pendingAskUser: null,
+        messages: [
+          ...s.messages,
+          {
+            id: msgId,
+            role: "assistant",
+            content: "",
+            timestamp: new Date().toISOString(),
+            streaming: true,
+            modelInfo: s.modelInfo ?? undefined,
+            children: [],
+          },
+        ],
+      }));
+    },
+
+    /**
+     * Append text locally (for local-only commands like /help, /sessions, /export).
+     * Pushes a new text part rather than merging with the last streaming one.
+     */
+    appendLocalText(text: string) {
+      update((s) => {
+        const parts = [...s.streamingParts];
+        const id = generatePartId();
+        parts.push({ type: 'text', id, text, state: 'streaming' });
+        const key = `text:${id}`;
+        if (!partArrivalTimes.has(key)) {
+          partArrivalTimes.set(key, Date.now());
+          partArrivalOrder.push(key);
+        }
+        const idx = s.messages.length - 1;
+        const msgs = s.messages.map((m, i) =>
+          i === idx && m.role === "assistant" ? { ...m, content: contentFromParts(parts) } : m
+        );
+        return { ...s, streamingParts: parts, messages: msgs };
+      });
+    },
+
+    finalizeAssistantMessage(tokensIn?: number, tokensOut?: number, exitReason?: string, preferredContent?: string, contextTokens?: number) {
+      clearProcessingWatchdog();
+      const currentSid = get(sessions).currentId;
+      if (currentSid) sessionCache.delete(currentSid);
+      const finalizeStart = Date.now();
+      update((s) => {
+        const idx = s.messages.length - 1;
+        const last = s.messages[idx];
+        if (!last || last.role !== "assistant" || !last.streaming) {
+          return { ...s, isProcessing: false };
+        }
+
+        // Set all streaming parts to 'done' and freeze durations.
+        // We use the part-id-keyed `partArrivalTimes` map so the
+        // index stays stable even when data_* events push extra
+        // parts into `streamingParts` between _start events.
+        const finalParts: UIMessagePart[] = s.streamingParts.map((p) => {
+          const key = arrivalKey(p);
+          const startMs = partArrivalTimes.get(key);
+
+          // For tool-invocation parts, use the tool_output arrival as
+          // the end time so the frozen duration reflects tool execution
+          // time only (excluding post-tool model thinking).
+          let endMs: number | undefined;
+          if (p.type === 'tool-invocation') {
+            const toolOutputKey = `tool_output:${p.toolCallId ?? ''}`;
+            endMs = partArrivalTimes.get(toolOutputKey);
+          }
+
+          let nextArr = endMs;
+          if (nextArr === undefined && startMs !== undefined) {
+            const curIdx = partArrivalOrder.indexOf(key);
+            if (curIdx >= 0) {
+              for (let j = curIdx + 1; j < partArrivalOrder.length; j++) {
+                const nk = partArrivalOrder[j];
+                if (nk === key) continue;
+                const na = partArrivalTimes.get(nk);
+                if (na !== undefined) {
+                  nextArr = na;
+                  break;
+                }
+              }
+            }
+          }
+          const dur = Math.max(0, (nextArr ?? finalizeStart) - (startMs ?? finalizeStart));
+          if (p.type === 'text') return { ...p, state: 'done' as const, durationMs: dur };
+          if (p.type === 'reasoning') return { ...p, state: 'done' as const, durationMs: dur };
+          if (p.type === 'tool-invocation') return { ...p, state: 'done' as const, durationMs: p.durationMs ?? dur };
+          return { ...p, state: 'done' as const, durationMs: dur };
+        }) as UIMessagePart[];
+
+        // Use preferredContent (authoritative full_response from backend) when available;
+        // fall back to content assembled from streaming parts.
+        const content = preferredContent ?? contentFromParts(finalParts);
+
+        // The final answer text only ever arrives inside `done.full_response`
+        // (respond rounds never stream it as text_start/text_delta events).
+        // Inject it as a completed text part when no text part already
+        // carries it — otherwise a mixed round's partial streamed text
+        // masks the `message.content` fallback in ChatMessage.svelte and
+        // the final answer never renders live (it only appears after a
+        // refresh, when the persisted stream events re-convert the respond
+        // call into a text part).
+        if (
+          preferredContent
+          && !finalParts.some((p) => p.type === 'text' && p.text && p.text.trim() === preferredContent.trim())
+        ) {
+          finalParts.push({ type: 'text', id: generatePartId(), text: preferredContent, state: 'done' as const });
+        }
+
+        // Auto-title
+        const shouldRename = !get(sessions).sessions.some(
+          (ss) => ss.id === get(sessions).currentId && ss.name && !ss.name.startsWith("Session ") && ss.name !== "New Chat"
+        );
+        if (shouldRename) {
+          const firstUser = s.messages.find((m) => m.role === "user");
+          if (firstUser && !firstUser.content.startsWith("/")) {
+            const title = firstUser.content.replace(/[\n\r]+/g, " ").slice(0, 28).trim();
+            if (title) {
+              const sid = get(sessions).currentId;
+              if (sid) sessions.rename(sid, title + (title.length >= 28 ? "..." : "")).catch(() => {});
+            }
+          }
+        }
+
+        return {
+          ...s,
+          messages: s.messages.map((m, i) =>
+            i === idx
+              ? {
+                  ...m,
+                  streaming: false,
+                  content,
+                  parts: finalParts,
+                  duration: last.timestamp ? Date.now() - new Date(last.timestamp).getTime() : 0,
+                  tokensIn: tokensIn ?? m.tokensIn,
+                  tokensOut: tokensOut ?? (content ? estimateTokens(content) : m.tokensOut),
+                  contextTokens: contextTokens ?? m.contextTokens,
+                  exitReason: exitReason ?? m.exitReason,
+                }
+              : m
+          ),
+          isProcessing: false,
+          streamingParts: [],
+        };
+      });
+      cancelPendingStreamEvents();
+      partArrivalTimes.clear();
+      partArrivalOrder.length = 0;
+    },
+
+    setError(err: string) {
+      clearProcessingWatchdog();
+      cancelPendingStreamEvents();
+      const currentSid = get(sessions).currentId;
+      if (currentSid) sessionCache.delete(currentSid);
+      update((s) => {
+        const msgs = [...s.messages];
+        // If the last message is an empty assistant bubble (from
+        // startAssistantMessage before a failed invoke), remove it.
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === "assistant" && (!last.content || last.content.trim() === "")) {
+          msgs.pop();
+        }
+        return { ...s, messages: msgs, error: err, isProcessing: false };
+      });
+    },
+
+    async cancelCurrent() {
+      clearProcessingWatchdog();
+      const sid = get(sessions).currentId;
+      const snap = get(this);
+      let tokensIn: number | undefined;
+      let tokensOut: number | undefined;
+      if (snap.cumulativeInputTokens > 0) {
+        tokensIn = snap.cumulativeInputTokens;
+        tokensOut = snap.cumulativeOutputTokens;
+      } else {
+        // Fallback: estimate from all messages in the conversation,
+        // preferring stored token counts over content-based estimation.
+        try {
+          let inSum = 0;
+          let outSum = 0;
+          for (const m of snap.messages) {
+            if (m.role === "user") {
+              inSum += m.tokensIn ?? estimateTokens(m.content ?? "");
+            } else if (m.role === "assistant") {
+              outSum += m.tokensOut ?? estimateTokens(m.content ?? "");
+            }
+          }
+          // If no stored tokens at all, estimate from accumulated message content
+          if (inSum === 0 && snap.messages.length > 0) {
+            const allText = snap.messages
+              .filter(m => m.role === "user")
+              .map(m => m.content ?? "")
+              .join("\n");
+            inSum = estimateTokens(allText);
+          }
+          const partial = contentFromParts(snap.streamingParts);
+          const lastAssistant = snap.messages
+            .filter(m => m.role === "assistant")
+            .pop();
+          const lastContent = lastAssistant?.content ?? "";
+          outSum += partial ? estimateTokens(partial) : estimateTokens(lastContent);
+          tokensIn = inSum > 0 ? inSum : undefined;
+          tokensOut = outSum > 0 ? outSum : undefined;
+        } catch (e) {
+          console.warn("cancelCurrent token estimation failed:", e);
+        }
+      }
+      this.finalizeAssistantMessage(tokensIn, tokensOut, "stopped_by_user");
+      if (sid) {
+        try {
+          await Promise.race([
+            stopSession(sid),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("stop timeout")), 3000)
+            ),
+          ]);
+        } catch (e) {
+          console.warn("stop session failed or timed out:", e);
+        }
+      }
+    },
+
+    async regenerate() {
+      const sid = get(sessions).currentId;
+      if (!sid || get(chat).isProcessing) return;
+      clearProcessingWatchdog();
+
+      if (isTauri()) {
+        update((s) => {
+          const msgs = [...s.messages];
+          while (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
+            msgs.pop();
+          }
+          return { ...s, messages: msgs };
+        });
+        this.startAssistantMessage();
+        try {
+          await tauriInvoke("regenerate", { sessionId: sid });
+        } catch (err) {
+          this.setError(err instanceof Error ? err.message : String(err));
+          this.finalizeAssistantMessage(undefined, undefined, "error");
+        }
+        return;
+      }
+
+      // Web mode: HTTP fetch
+      this.startAssistantMessage();
+      try {
+        const { getAuthToken } = await import("../api/chat");
+        const token = getAuthToken();
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const res = await fetch(`/api/sessions/${sid}/regenerate`, {
+          method: "POST",
+          headers,
+        });
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          throw new Error(`Regenerate failed: ${res.status} ${txt}`);
+        }
+      } catch (err) {
+        this.setError(err instanceof Error ? err.message : String(err));
+        // Finalize the orphaned streaming message so it doesn't hang
+        this.finalizeAssistantMessage(undefined, undefined, "error");
+      }
+    },
+
+    async resume() {
+      const sid = get(sessions).currentId;
+      if (!sid || get(chat).isProcessing) return;
+      clearProcessingWatchdog();
+
+      if (isTauri()) {
+        update((s) => {
+          const msgs = [...s.messages];
+          return { ...s, messages: msgs, isProcessing: false };
+        });
+        this.startAssistantMessage();
+        let modelName: string | undefined;
+        update((s) => { modelName = s.selectedModel ?? undefined; return s; });
+        try {
+          await tauriInvoke("resume_session", { sessionId: sid, modelName });
+        } catch (err) {
+          this.setError(err instanceof Error ? err.message : String(err));
+          this.finalizeAssistantMessage(undefined, undefined, "error");
+        }
+        return;
+      }
+
+      // Web mode
+      this.startAssistantMessage();
+      try {
+        const { getAuthToken } = await import("../api/chat");
+        const token = getAuthToken();
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const res = await fetch(`/api/sessions/${sid}/resume`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ message: null }),
+        });
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          throw new Error(`Resume failed: ${res.status} ${txt}`);
+        }
+      } catch (err) {
+        this.setError(err instanceof Error ? err.message : String(err));
+        this.finalizeAssistantMessage(undefined, undefined, "error");
+      }
+    },
+
+    /** Nuclear option: reset all processing state WITHOUT calling the stop API. */
+    forceReset() {
+      clearProcessingWatchdog();
+      cancelPendingStreamEvents();
+      const currentSid = get(sessions).currentId;
+      if (currentSid) sessionCache.delete(currentSid);
+      update((s) => ({
+        ...s,
+        messages: s.messages.map((m) =>
+          m.streaming ? { ...m, streaming: false, content: m.content || "—interrupted—" } : m
+        ),
+        isProcessing: false,
+        error: null,
+        streamingParts: [],
+        pendingAskUser: null,
+      }));
+      partArrivalTimes.clear();
+      partArrivalOrder.length = 0;
+      clearReasoningTimers();
+      console.warn("forceReset: frontend state reset (backend agent may still be running)");
+    },
+
+    handleSSEEvent(event: SSEEvent) {
+      // Reset the 30min watchdog on every event — the agent is still alive.
+      resetProcessingWatchdog();
+      switch (event.type) {
+        case "protocol_v1": {
+          const protoEvent = event.data as ProtocolV1Event;
+          // ask_user pause signal rides the protocol_v1 envelope;
+          // surface it so the dialog opens without a new run.
+          if (protoEvent.type === 'ask_user_pending') {
+            // The server-side StreamEvent::AskUserPending serialises as
+            // `{ type: "ask_user_pending", data: "<json string>" }`,
+            // where the JSON string is `{ tool_use_id, tool_name, payload }`
+            // and `payload` is the ask_user tool's own output
+            // (`{ status, intent, data: { question, candidates } }`).
+            const raw = protoEvent as unknown as { data?: string };
+            let question = "";
+            let candidates: string[] = [];
+            if (typeof raw.data === "string" && raw.data) {
+              try {
+                const outer = JSON.parse(raw.data) as {
+                  payload?: { data?: { question?: string; candidates?: string[] } };
+                };
+                const inner = outer.payload?.data;
+                if (inner && typeof inner.question === "string") question = inner.question;
+                if (Array.isArray(inner?.candidates)) candidates = inner!.candidates as string[];
+              } catch { /* malformed JSON — fall through with empty values */ }
+            }
+            this.setPendingAskUser({ question, candidates });
+          }
+          if (protoEvent.type === 'data_todo_update') {
+            const ev = protoEvent as unknown as { items: Array<{id:string;content:string;status:string;priority:string;order:number}>; current: number; total: number };
+            if (Array.isArray(ev.items)) {
+              this.setTodos(ev.items);
+            }
+          }
+          if (protoEvent.type === 'data_context_usage') {
+            const ev = protoEvent as unknown as { current_tokens: number; output_tokens: number; context_window: number; turn: number; message_count: number; total_input_tokens?: number; total_output_tokens?: number };
+            update((s) => {
+              const msgs = [...s.messages];
+              const idx = msgs.length - 1;
+              if (idx >= 0 && msgs[idx].role === "assistant") {
+                msgs[idx] = {
+                  ...msgs[idx],
+                  contextTokens: ev.current_tokens,
+                  tokensIn: ev.current_tokens,
+                  tokensOut: ev.output_tokens > 0 ? ev.output_tokens : msgs[idx].tokensOut,
+                };
+              }
+              return {
+                ...s,
+                messages: msgs,
+                cumulativeInputTokens: ev.total_input_tokens ?? s.cumulativeInputTokens,
+                cumulativeOutputTokens: ev.total_output_tokens ?? s.cumulativeOutputTokens,
+              };
+            });
+          }
+          if (protoEvent.type === 'data_compressing_context') {
+            const ev = protoEvent as unknown as { before_tokens: number; after_tokens: number };
+            import("../i18n/index").then(({ localT }) => {
+              const notice = localT("status.compressing", "Compressing context: {before} → {after} tokens")
+                .replace("{before}", formatTokenCount(ev.before_tokens))
+                .replace("{after}", formatTokenCount(ev.after_tokens));
+              update((s) => ({ ...s, compressionNotice: notice }));
+              setTimeout(() => {
+                update((s) => ({ ...s, compressionNotice: null }));
+              }, 4000);
+            });
+          }
+          if (protoEvent.type === 'open_artifact') {
+            const ev = protoEvent as unknown as {
+              artifact_type: string;
+              artifact_path: string;
+              artifact_label: string;
+            };
+            if (ev.artifact_type && ev.artifact_path) {
+              sidepanel.open({
+                type: ev.artifact_type,
+                path: ev.artifact_path,
+                label: ev.artifact_label,
+              }).catch(() => {});
+            }
+          }
+          if (RENDER_ONLY_EVENTS.has(protoEvent.type)) {
+            // Coalesce render-only events (deltas) into one frame.
+            queueStreamEvent(protoEvent);
+            break;
+          }
+          // Record arrival time keyed by the part's identity so we
+          // can compute per-part durations at finalize time. We
+          // use a Map (not an array) because the data_* events push
+          // additional parts into streamingParts that don't have
+          // their own arrival, which would misalign array indices.
+          // Skip non-start events — they update existing parts.
+          recordArrivalForEvent(protoEvent);
+          resetProcessingWatchdog();
+          update((s) => {
+            const parts = [...s.streamingParts];
+            applyProtocolEvent(parts, protoEvent);
+            const content = contentFromParts(parts);
+            const idx = s.messages.length - 1;
+            const msgs = s.messages.map((m, i) =>
+              i === idx && m.role === "assistant" ? { ...m, content } : m
+            );
+            return { ...s, streamingParts: parts, messages: msgs };
+          });
+          break;
+        }
+        case "done": {
+          // Drain any coalesced deltas BEFORE finalizing — otherwise
+          // the final message would miss the last frame of tokens.
+          if (streamFlushRaf !== null) {
+            cancelAnimationFrame(streamFlushRaf);
+            flushStreamingEvents();
+          }
+          const doneEvent = event.data as Record<string, unknown>;
+          const doneData = doneEvent?.data as Record<string, unknown> | undefined;
+          const exitReason = doneEvent?.exit_reason as string | undefined;
+          let responseText: string | undefined;
+          let tokensIn: number | undefined;
+          let tokensOut: number | undefined;
+          let contextTokens: number | undefined;
+          if (typeof doneData === "object" && doneData !== null) {
+            const dd = doneData as Record<string, unknown>;
+            responseText = dd.full_response as string | undefined;
+            tokensIn = dd.input_tokens_est as number | undefined;
+            tokensOut = dd.output_tokens_est as number | undefined;
+            contextTokens = dd.context_tokens_est as number | undefined;
+          }
+          this.finalizeAssistantMessage(
+            tokensIn,
+            tokensOut,
+            exitReason,
+            responseText,
+            contextTokens,
+          );
+
+          if (tokensIn != null || tokensOut != null) {
+            update((s) => {
+              const idx = s.messages.length - 1;
+              const last = s.messages[idx];
+              if (!last || last.role !== "assistant") return s;
+              return {
+                ...s,
+                messages: s.messages.map((m, i) =>
+                  i === idx ? {
+                    ...m,
+                    tokensIn: tokensIn ?? m.tokensIn,
+                    tokensOut: tokensOut ?? m.tokensOut,
+                    contextTokens: contextTokens ?? m.contextTokens,
+                    exitReason: exitReason ?? m.exitReason,
+                    content: responseText ?? m.content,
+                  } : m
+                ),
+              };
+            });
+          }
+
+          // If the agent exited with ASK_USER, the most recent
+          // ask_user tool output carries the question and candidate
+          // answers. We need to show the AskUserDialog so the user
+          // can answer. Without this, the agent just appears to
+          // "stop" with no user interaction prompt (the user
+          // reported: "ask_user 工具没有弹出窗口让用户选择, 然后就
+          // 直接停止任务了").
+          if (exitReason === "ASK_USER") {
+            const pending = this.findPendingAskUser();
+            if (pending) this.setPendingAskUser(pending);
+          }
+          break;
+        }
+        case "error":
+          this.setError(event.data);
+          break;
+        case "system":
+          if (typeof event.data === "string" && event.data === "reminder fired") {
+            const sid = get(sessions).currentId;
+            if (sid) this.loadSession(sid);
+          }
+          break;
+        case "model_info":
+          this.setModelInfo({
+            model: event.data.model,
+            provider: event.data.provider,
+            contextWindow: event.data.context_window,
+            isLocal: event.data.is_local,
+          });
+          break;
+        case "ask_user_pending": {
+          // The agent loop is blocked waiting for the user — pop the
+          // dialog so they can answer. The existing streaming message
+          // stays in `isProcessing=true`; we DON'T start a new run.
+          const q = event.data?.payload?.data?.question ?? "";
+          const cands = Array.isArray(event.data?.payload?.data?.candidates)
+            ? (event.data!.payload!.data!.candidates as string[])
+            : [];
+          this.setPendingAskUser({ question: q, candidates: cands });
+          break;
+        }
+      }
+    },
+
+    saveSessionState(sessionId: string) {
+      const snap = get({ subscribe } as ReturnType<typeof writable<ChatState>>);
+      // Actually need to read current state directly
+      let state: ChatState = {
+        messages: [], isProcessing: false, error: null, modelInfo: null,
+        selectedModel: null, modelList: [], showModelSwitcher: false,
+        streamingParts: [], pendingAskUser: null, attachments: [], todos: [], compressionNotice: null,
+        cumulativeInputTokens: 0, cumulativeOutputTokens: 0,
+      };
+      const unsub = subscribe((s) => { state = s; });
+      unsub();
+      if (state.isProcessing && state.messages.length > 0) {
+        sessionCache.set(sessionId, {
+          messages: state.messages,
+          streamingParts: state.streamingParts,
+          isProcessing: state.isProcessing,
+          pendingAskUser: state.pendingAskUser,
+          attachments: state.attachments,
+          todos: state.todos,
+          compressionNotice: state.compressionNotice,
+          modelInfo: state.modelInfo,
+        });
+      }
+    },
+
+    async loadSession(sessionId: string) {
+      cancelPendingStreamEvents();
+      // Restore in-progress state from cache if available — prevents
+      // the streaming bubble from disappearing when switching sessions.
+      const cached = sessionCache.get(sessionId);
+      if (cached && cached.isProcessing) {
+        set({
+          messages: cached.messages,
+          isProcessing: cached.isProcessing,
+          error: null,
+          modelInfo: cached.modelInfo,
+          selectedModel: null,
+          modelList: [],
+          showModelSwitcher: false,
+          streamingParts: cached.streamingParts,
+          pendingAskUser: cached.pendingAskUser,
+          attachments: cached.attachments,
+          todos: cached.todos,
+          compressionNotice: cached.compressionNotice,
+          cumulativeInputTokens: 0,
+          cumulativeOutputTokens: 0,
+        });
+        startProcessingWatchdog();
+        return;
+      }
+      sessionCache.delete(sessionId);
+      clearProcessingWatchdog();
+      try {
+        const { getSession } = await import("../api/sessions");
+        const data = await getSession(sessionId);
+        const serverTodos = (data.todos ?? []) as Array<{id:string;content:string;status:string;priority:string;order:number}>;
+        const serverMessages = (data.messages ?? []) as Array<{
+          role?: string;
+          content?: string;
+          thinking?: string;
+          timestamp?: string;
+          toolCalls?: Array<{ name: string; arguments: string; result?: string }>;
+          tool_results?: unknown[];
+          streamEvents?: unknown[];
+          parts?: UIMessagePart[];
+          duration?: number;
+          tokensIn?: number;
+          tokensOut?: number;
+          contextTokens?: number;
+          modelInfo?: { model: string; provider: string; contextWindow: number; isLocal: boolean };
+          exitReason?: string;
+          exit_reason?: string;
+          children?: string[];
+        }>;
+        const messages: Message[] = serverMessages
+          .filter((m) => {
+            const hasText = (m.content?.trim()?.length ?? 0) > 0;
+            const hasToolResults = (m.tool_results?.length ?? 0) > 0;
+            const hasStreamEvents = (m.streamEvents?.length ?? 0) > 0;
+            // User messages with only tool_results (no text) are internal
+            // protocol carriers; skip them in the chat UI.
+            if (m.role === "user" && !hasText && hasToolResults) return false;
+            return hasText || hasToolResults || hasStreamEvents;
+          })
+          .map((m, idx) => {
+          let parts: UIMessagePart[] | undefined;
+          if (m.role === "assistant") {
+            if (m.parts && m.parts.length > 0) {
+              parts = m.parts;
+            } else if (m.streamEvents && m.streamEvents.length > 0) {
+              parts = convertStreamEventsToParts(m.streamEvents as import("./types").StreamEventItem[]);
+            }
+          }
+          return {
+            id: `${sessionId}-msg-${idx}`,
+            role: (m.role as Message["role"]) || "user",
+            content: m.content || "",
+            thinking: m.thinking,
+            timestamp: m.timestamp || new Date().toISOString(),
+            toolCalls: m.toolCalls as Message["toolCalls"],
+            streamEvents: m.streamEvents as Message["streamEvents"],
+            parts,
+            streaming: false,
+            duration: m.duration,
+            tokensIn: m.tokensIn,
+            tokensOut: m.tokensOut,
+            contextTokens: m.contextTokens,
+            modelInfo: m.modelInfo,
+            exitReason: m.exitReason ?? m.exit_reason,
+            children: m.children ?? [],
+          };
+        });
+
+        // Post-process: convert intervention user messages into cards inside
+        // the preceding assistant message for restart-consistency.
+        for (let i = messages.length - 1; i >= 1; i--) {
+          const msg = messages[i];
+          if (msg.role === "user" && msg.content?.startsWith("[USER INTERVENTION")) {
+            for (let j = i - 1; j >= 0; j--) {
+              if (messages[j].role === "assistant") {
+                const parts = messages[j].parts ?? [];
+                const cleanContent = msg.content!.replace(/^\[USER INTERVENTION.*?\n/, "");
+                parts.push({
+                  type: "data",
+                  id: `intervention_${i}`,
+                  dataType: "user_intervention",
+                  content: cleanContent,
+                  transient: false,
+                } as UIMessagePart);
+                messages[j] = { ...messages[j], parts };
+                break;
+              }
+            }
+            messages.splice(i, 1);
+          }
+        }
+        let pendingAskUser: PendingAskUser | null = null;
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg?.role === "assistant" && lastMsg.exitReason === "ASK_USER") {
+          set({ messages, isProcessing: false, error: null, modelInfo: null,
+                selectedModel: null, modelList: [], showModelSwitcher: false,
+                streamingParts: [], pendingAskUser: null, attachments: [], todos: serverTodos, compressionNotice: null,
+                cumulativeInputTokens: 0, cumulativeOutputTokens: 0 });
+          pendingAskUser = this.findPendingAskUser();
+        }
+
+        set({
+          messages,
+        isProcessing: false,
+        error: null,
+          modelInfo: null,
+          selectedModel: null,
+          modelList: [],
+          showModelSwitcher: false,
+          streamingParts: [],
+          pendingAskUser,
+          attachments: [],
+          todos: serverTodos,
+          compressionNotice: null,
+          cumulativeInputTokens: 0,
+          cumulativeOutputTokens: 0,
+        });
+      } catch (err) {
+        console.error("Failed to load session:", err);
+        set({
+          messages: [],
+          isProcessing: false,
+          error: `Failed to load session: ${err instanceof Error ? err.message : String(err)}`,
+          modelInfo: null,
+          selectedModel: null,
+          modelList: [],
+          showModelSwitcher: false,
+          streamingParts: [],
+          pendingAskUser: null,
+          attachments: [],
+          todos: [],
+          compressionNotice: null,
+          cumulativeInputTokens: 0,
+          cumulativeOutputTokens: 0,
+        });
+      }
+    },
+
+    clearMessages() {
+      clearProcessingWatchdog();
+      clearReasoningTimers();
+      cancelPendingStreamEvents();
+      update((s) => ({
+        messages: [],
+        isProcessing: false,
+        error: null,
+        modelInfo: null,
+        streamingParts: [],
+        pendingAskUser: null,
+        attachments: [],
+        selectedModel: s.selectedModel,
+        modelList: s.modelList,
+        showModelSwitcher: false,
+        todos: [],
+        compressionNotice: null,
+        cumulativeInputTokens: 0,
+        cumulativeOutputTokens: 0,
+      }));
+    },
+
+    async submitAskUserResponse(response: string) {
+      const text = response.trim();
+      if (!text) return;
+      const sid = get(sessions).currentId;
+      // Reply is delivered to the running agent loop via a dedicated
+      // endpoint, NOT as a brand-new user message — the original task
+      // resumes in the same run.
+      update((s) => ({ ...s, pendingAskUser: null }));
+      if (!sid) return;
+      try {
+        if (isTauri()) {
+          await tauriInvoke("ask_user_response", { sessionId: sid, response: text });
+        } else {
+          const { fetchJson } = await import("../api/chat");
+          const res = await fetchJson(`/api/sessions/${sid}/ask_user_response`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ response: text }),
+          });
+          if (!res.ok) {
+            const detail = await res.text().catch(() => "");
+            this.setError(`ask_user response failed: ${res.status} ${detail.slice(0, 200)}`);
+          }
+        }
+      } catch (err) {
+        this.setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+
+    dismissAskUser() {
+      // Best-effort: the agent loop is still blocked on ask_user_rx;
+      // we just hide the dialog. The loop will unblock once the user
+      // submits a real reply, or the run can be cancelled via Stop.
+      update((s) => ({ ...s, pendingAskUser: null }));
+    },
+
+    /**
+     * Walk the most-recent assistant message and find the ask_user
+     * tool's payload. The backend stores the ask_user output as a
+     * `tool_output_available` event with `name === "ask_user"` and a
+     * JSON payload of shape:
+     *   {
+     *     "status": "INTERRUPT",
+     *     "intent": "HUMAN_INTERVENTION",
+     *     "data": { "question": "...", "candidates": [...] }
+     *   }
+     */
+    findPendingAskUser(): { question: string; candidates: string[] } | null {
+      const snapshot = get(this).messages;
+      // Walk the most recent assistant turn.
+      for (let i = snapshot.length - 1; i >= 0; i--) {
+        const m = snapshot[i];
+        if (m.role !== "assistant") continue;
+        const parts = m.parts ?? [];
+        for (let j = parts.length - 1; j >= 0; j--) {
+          const p = parts[j];
+          if (p.type !== "tool-invocation") continue;
+          if (p.name !== "ask_user") continue;
+          const raw = p.result ?? "";
+          if (!raw) continue;
+          try {
+            const parsed = JSON.parse(raw);
+            const data = parsed?.data;
+            if (parsed?.intent !== "HUMAN_INTERVENTION" && parsed?.status !== "INTERRUPT") {
+              continue;
+            }
+            if (data && typeof data.question === "string") {
+              return {
+                question: data.question,
+                candidates: Array.isArray(data.candidates) ? data.candidates : [],
+              };
+            }
+          } catch {
+            // not JSON, ignore
+          }
+        }
+        // Only consider the latest assistant turn.
+        break;
+      }
+      return null;
+    },
+
+    setPendingAskUser(pending: { question: string; candidates: string[] }) {
+      update((s) => ({ ...s, pendingAskUser: pending }));
+    },
+
+    setTodos(items: Array<{id:string;content:string;status:string;priority:string;order:number}>) {
+      update((s) => ({ ...s, todos: items }));
+    },
+
+    attachFile(file: Attachment) {
+      update((s) => ({ ...s, attachments: [...s.attachments, file] }));
+    },
+
+    removeAttachment(id: string) {
+      update((s) => ({
+        ...s,
+        attachments: s.attachments.filter((a) => a.id !== id),
+      }));
+    },
+
+    clearAttachments() {
+      update((s) => ({ ...s, attachments: [] }));
+    },
+
+    async sendMessage(text: string) {
+      // Local commands — handled entirely on the frontend side.
+      if (text.trim() === "/resume") {
+        this.resume();
+        return;
+      }
+
+      const sid = get(sessions).currentId;
+      if (!sid) return;
+      let modelName: string | undefined;
+      let attachments: Attachment[] = [];
+      update((s) => {
+        modelName = s.selectedModel ?? undefined;
+        attachments = [...s.attachments];
+        s.attachments = [];
+        return s;
+      });
+
+      // Build message text with attachment markers
+      let fullMessage = "";
+      for (const a of attachments) {
+        if (a.type === "image") {
+          fullMessage += `[IMAGE:${a.path}]\n`;
+        } else {
+          fullMessage += `[FILE:${a.path}]\n`;
+        }
+      }
+      fullMessage += text;
+
+      this.addUserMessage(fullMessage);
+      this.startAssistantMessage();
+      try {
+        await httpSendMessage(fullMessage, sid, undefined, modelName);
+      } catch (err) {
+        this.setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+  };
+}
+
+export const chat = createChatStore();

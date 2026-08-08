@@ -1,0 +1,582 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── 器物语法 / Artifact Grammar — 宋韵天青釉面 ──
+   * 三色克制: 釉白(底) / 天青(唯一功能色) / 墨(文字)
+   * 例外: 朱砂 = 印章与错误(器物上的印泥)
+   * 设计规范: docs/ui-design-language.md (Phase 7)
+   */
+
+  /* Surface hierarchy — 墨夜 */
+  --color-canvas: #14120e;
+  --color-surface: #1a1712;
+  --color-surface-elevated: #221e17;
+  --color-surface-soft: #1d1a14;
+  --color-surface-overlay: #28231b;
+
+  /* Brand — 天青 (Ru ware sky azure) */
+  --color-primary: #93c3d6;
+  --color-primary-hover: #b6dbe8;
+  --color-primary-muted: rgba(147, 195, 214, 0.12);
+  --color-accent: #93c3d6;
+  --color-accent-soft: rgba(147, 195, 214, 0.07);
+
+  /* Text — 宣纸/月白 */
+  --color-ink: #e4ddca;
+  --color-body: #b8b0a3;
+  --color-muted: #7a7366;
+  --color-dim: #4d483e;
+
+  /* Borders — 青调发丝线 */
+  --color-hairline: rgba(147, 195, 214, 0.12);
+  --color-hairline-strong: rgba(147, 195, 214, 0.22);
+
+  /* Semantic — 单色语义: 天青=活动, 朱砂=错误, 墨=常态 */
+  --color-success: #7ab3a8;
+  --color-warning: #c4a877;
+  --color-error: #c05a3e;       /* 朱砂 */
+  --color-info: #93c3d6;
+
+  /* Code */
+  --color-code-bg: #0f0d0a;
+  --color-code-text: #e0d9cc;
+
+  /* Fonts — 器物字形: 宋体铭文 / 楷体手迹 / 等宽 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC",
+    system-ui, sans-serif;
+  --font-serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", serif;
+  --font-kai: "Kaiti SC", "STKaiti", "KaiTi", serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, "Fira Code", monospace;
+
+  /* Animations — 入釉曲线 ease-out-quint */
+  --ease-soak: cubic-bezier(0.22, 1, 0.36, 1);
+  --animate-bounce-dot: bounce-dot 1.4s infinite ease-in-out;
+}
+
+@keyframes bounce-dot {
+  0%,
+  80%,
+  100% {
+    transform: scale(0);
+  }
+  40% {
+    transform: scale(1);
+  }
+}
+
+/* ── Legacy component variable aliases (used by ChatMessage.svelte etc.) ── */
+html {
+  --bg-secondary: var(--color-surface-elevated);
+  --bg-tertiary: var(--color-surface-overlay);
+  --bg-user-bubble: #221e17;
+  --text-secondary: var(--color-body);
+  --text-tertiary: var(--color-dim);
+  --text-bright: #d6cfc0;
+
+  /* Side panel / artifact viewer aliases — 器物语法 */
+  --bg-surface: var(--color-surface-elevated);
+  --bg-main: var(--color-surface-soft);
+  --bg-hover: var(--color-surface-overlay);
+  --border-color: var(--color-hairline);
+  --text-primary: var(--color-ink);
+  --text-muted: var(--color-muted);
+  --accent: var(--color-primary);
+  --danger: var(--color-error);
+  --danger-bg: rgba(192, 90, 62, 0.12);
+
+  /* 釉光阴影: 内青线 + 深墨晕 */
+  --glaze-shadow: inset 0 1px 0 rgba(147, 195, 214, 0.10),
+    0 12px 40px rgba(0, 0, 0, 0.38);
+  /* 开片纹唤醒倍率 (body:hover) */
+  --crackle-hover-scale: 1.9;
+}
+
+/* Base reset */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+body {
+  background: var(--color-canvas);
+}
+
+html.theme-light {
+  /* 釉下彩 — 釉白底 + 青花 */
+  --color-canvas: #eee9db;
+  --color-surface: #f5f1e5;
+  --color-surface-elevated: #e8e4dc;
+  --color-surface-soft: #f0ede6;
+  --color-surface-overlay: #ded9cf;
+  --color-primary: #4f8ea8;
+  --color-primary-hover: #36748f;
+  --color-primary-muted: rgba(79, 142, 168, 0.08);
+  --color-accent: #4f8ea8;
+  --color-accent-soft: rgba(79, 142, 168, 0.05);
+  --color-ink: #2c2820;
+  --color-body: #5c564a;
+  --color-muted: #8a8275;
+  --color-dim: #b0a99e;
+  --color-hairline: rgba(79, 142, 168, 0.16);
+  --color-hairline-strong: rgba(79, 142, 168, 0.28);
+  --color-code-bg: #e8e3d8;
+  --color-code-text: #2a2724;
+  --bg-secondary: #e8e4dc;
+  --bg-tertiary: #ded9cf;
+  --bg-user-bubble: #e0d8c9;
+  --text-secondary: #5c564a;
+  --text-tertiary: #8a8275;
+  --text-bright: #2a2724;
+  --glaze-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    0 12px 40px rgba(60, 50, 30, 0.10);
+}
+
+/* 釉下彩亮色: 釉面保留但显著减弱 (浅色器物) */
+html.theme-light .glaze-atmosphere {
+  opacity: 0.32;
+}
+html.theme-light .glaze-noise {
+  opacity: 0.012;
+}
+html.theme-light .glaze-crackle {
+  opacity: 0.05;
+}
+html.theme-light .glaze-shimmer {
+  opacity: 0.3;
+}
+/* 亮色印章: 青花底 + 釉白字 (对比度保证) */
+html.theme-light .seal,
+html.theme-light .seal-btn {
+  color: #f5f1e5;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-hairline-strong);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-dim);
+}
+
+/* Markdown content styling */
+.markdown-content p {
+  margin: 0 0 8px 0;
+  line-height: 1.55;
+}
+.markdown-content p:last-child {
+  margin-bottom: 0;
+}
+.markdown-content ul,
+.markdown-content ol {
+  margin: 4px 0 8px 0;
+  padding-left: 20px;
+}
+.markdown-content li {
+  margin-bottom: 2px;
+}
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3 {
+  margin: 12px 0 6px 0;
+  font-weight: 600;
+}
+.markdown-content h1 {
+  font-size: 16px;
+}
+.markdown-content h2 {
+  font-size: 15px;
+}
+.markdown-content h3 {
+  font-size: 14px;
+}
+.markdown-content pre {
+  background: var(--color-code-bg);
+  padding: 12px;
+  border-radius: 8px;
+  margin: 8px 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px solid var(--color-hairline);
+}
+.markdown-content code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: var(--color-code-bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.markdown-content pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+.markdown-content strong {
+  font-weight: 600;
+}
+.markdown-content blockquote {
+  border-left: 2px solid var(--color-primary);
+  padding-left: 12px;
+  margin: 8px 0;
+  color: var(--color-body);
+}
+
+/* Semantic keyword highlighting (agent replies) */
+.markdown-content .kw-green {
+  color: var(--color-success);
+  font-weight: 600;
+}
+.markdown-content .kw-orange {
+  color: var(--color-warning);
+  font-weight: 600;
+}
+.markdown-content .kw-red {
+  color: var(--color-error);
+  font-weight: 600;
+}
+
+/* ── Celadon Glaze System ─────────────────────────────────────────
+ *  Material texture system inspired by Song-dynasty celadon glaze.
+ *  Four atmospheric layers that simulate the physical qualities of
+ *  ceramic glaze: depth (light penetration), pooling (thick-at-edges),
+ *  sub-micron noise (material texture), and crackle (开片纹 / 蟹爪纹).
+ *
+ *  "雨过天青云破处，者般颜色作将来"
+ *    — 宋徽宗 describing Ru-ware sky-azure glaze
+ * ──────────────────────────────────────────────────────────────── */
+
+/* Layer 1: Ambient glaze atmosphere — multi-point light penetration
+   simulating translucent glaze over dark ceramic body */
+.glaze-atmosphere {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    /* Top-left skylight — thin glaze, high translucency */
+    radial-gradient(ellipse 120% 70% at 12% 18%, rgba(129, 181, 199, 0.055) 0%, transparent 55%),
+    /* Mid-right secondary glow */
+    radial-gradient(ellipse 70% 90% at 82% 35%, rgba(129, 181, 199, 0.028) 0%, transparent 50%),
+    /* Bottom pool (thicker glaze at the foot, like a celadon vase) */
+    radial-gradient(ellipse 70% 25% at 50% 100%, rgba(129, 181, 199, 0.038) 0%, transparent 60%),
+    /* Deep ambient warmth — the dark body glowing through */
+    radial-gradient(ellipse 50% 50% at 50% 50%, rgba(160, 130, 95, 0.012) 0%, transparent 70%);
+}
+
+/* Layer 2: Ceramic noise — sub-micron surface texture
+   Generated by SVG feTurbulence, tiled as repeating background */
+.glaze-noise {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.018;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' viewBox='0 0 400 400'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='400' height='400' filter='url(%23n)' opacity='0.5' fill='%2381b5c7'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 200px 200px;
+  mix-blend-mode: soft-light;
+}
+
+/* Layer 3: 开片纹 — crackle pattern (crab-claw / 蟹爪纹)
+   Song celadon's defining material feature: fine branching fissures
+   from thermal shrinkage. SVG thresholded fractal noise. */
+.glaze-crackle {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.022;
+  mix-blend-mode: soft-light;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='600' height='600' viewBox='0 0 600 600'%3E%3Cdefs%3E%3Cfilter id='c' x='-20%25' y='-20%25' width='140%25' height='140%25'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.015' numOctaves='5' seed='7' result='n'/%3E%3CfeColorMatrix type='matrix' values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 6 6 6 0 -3' in='n' result='c'/%3E%3CfeComponentTransfer in='c'%3E%3CfeFuncA type='table' tableValues='0 0 0 0.018 0.05 0.1 0.18'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3C/defs%3E%3Crect width='600' height='600' fill='%2381b5c7' filter='url(%23c)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 600px 600px;
+}
+
+/* Layer 4: Jade sheen — slow-shifting specular highlight
+   Simulates light gliding across a curved glazed surface */
+@keyframes jade-shimmer {
+  0%   { background-position: -120% 0; }
+  100% { background-position: 220% 0; }
+}
+
+.glaze-shimmer {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(
+    108deg,
+    transparent 28%,
+    rgba(129, 181, 199, 0.012) 43%,
+    rgba(129, 181, 199, 0.022) 50%,
+    rgba(129, 181, 199, 0.012) 57%,
+    transparent 72%
+  );
+  background-size: 200% 100%;
+  animation: jade-shimmer 18s ease-in-out infinite;
+  mix-blend-mode: overlay;
+}
+
+/* ── Surface utilities ───────────────────────────────────────── */
+
+/* Glaze depth on any panel — layered gradient + edge pooling */
+.glaze-surface {
+  position: relative;
+}
+.glaze-surface::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  border-radius: inherit;
+  background:
+    radial-gradient(ellipse 100% 70% at 15% 20%, rgba(129, 181, 199, 0.035) 0%, transparent 55%),
+    radial-gradient(ellipse 70% 80% at 80% 40%, rgba(129, 181, 199, 0.018) 0%, transparent 50%);
+  box-shadow:
+    inset 0 0 0.5px rgba(129, 181, 199, 0.08),
+    inset 1px 1px 0.5px rgba(129, 181, 199, 0.015),
+    inset -1px -1px 1px rgba(129, 181, 199, 0.035);
+}
+
+/* Subtle celadon-tinted borders for cards */
+.glaze-border {
+  border-color: rgba(129, 181, 199, 0.06) !important;
+  transition: border-color 0.6s ease;
+}
+.glaze-border:hover {
+  border-color: rgba(129, 181, 199, 0.12) !important;
+}
+
+/* Glaze edge pooling for elevated surfaces (sidebars, cards) */
+.glaze-pool {
+  box-shadow:
+    inset 0 0 0.5px rgba(129, 181, 199, 0.06),
+    inset -1px -1px 0.5px rgba(129, 181, 199, 0.035),
+    inset 1px 1px 0.5px rgba(129, 181, 199, 0.015);
+}
+
+/* ── 开片纹触摸唤醒: hover 页面时釉面"活"了 ── */
+body:hover .glaze-crackle {
+  opacity: calc(0.022 * var(--crackle-hover-scale, 1.9));
+  transition: opacity 1.2s var(--ease-soak, ease);
+}
+html.theme-light body:hover .glaze-crackle {
+  opacity: calc(0.05 * 1.5);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   器物语法公共组件 (Phase 7) — docs/ui-design-language.md §7
+   印章 / 铭文 / 竖排天头 / 落款 / 钤印 / 釉色条 / 静思行
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── 印章 (Seal) ── */
+.seal {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: #181715;
+  flex: none;
+  user-select: none;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 0 14px rgba(147, 195, 214, 0.25);
+}
+.seal-icon {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+/* ── 铭文 (宋体小标) ── */
+.inscription {
+  font-family: var(--font-serif);
+  letter-spacing: 0.2em;
+  color: var(--color-muted);
+  user-select: none;
+}
+.inscription.era {
+  font-size: 10.5px;
+  color: var(--color-dim);
+  border-left: 1px solid var(--color-hairline);
+  padding-left: 12px;
+}
+
+/* ── 竖排款识 (卷轴天头) ── */
+.vertical-rl {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  letter-spacing: 0.3em;
+  font-family: var(--font-serif);
+  color: var(--color-dim);
+  user-select: none;
+  flex: none;
+}
+.vertical-rl.qing {
+  color: var(--color-primary);
+  opacity: 0.75;
+}
+
+/* ── 钤印按钮 (发送) ── */
+.seal-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 3px;
+  background: var(--color-primary);
+  color: #12100c;
+  font-family: var(--font-serif);
+  font-size: 15px;
+  font-weight: 700;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 0 18px rgba(147, 195, 214, 0.22);
+  transition: transform 0.2s var(--ease-soak), box-shadow 0.3s var(--ease-soak);
+  position: relative;
+  overflow: hidden;
+}
+.seal-btn:hover {
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 0 26px rgba(147, 195, 214, 0.4);
+}
+.seal-btn:active {
+  transform: scale(0.92); /* 钤印盖下 */
+}
+.seal-btn::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-120%);
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+  transition: transform 0.7s var(--ease-soak);
+}
+.seal-btn:hover::after {
+  transform: translateX(120%); /* 釉光扫过 */
+}
+.seal-btn[data-busy] {
+  background: var(--color-surface-elevated);
+  color: var(--color-error);
+  box-shadow: 0 0 0 1px var(--color-error);
+}
+.seal-btn[data-busy]:hover::after {
+  transform: none;
+}
+
+/* ── 釉光扫过 (通用 hover 效果) ── */
+.glaze-sweep {
+  position: relative;
+  overflow: hidden;
+}
+.glaze-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-110%);
+  background: linear-gradient(100deg, transparent, rgba(147, 195, 214, 0.18), transparent);
+  transition: transform 0.7s var(--ease-soak);
+  pointer-events: none;
+}
+.glaze-sweep:hover::after {
+  transform: translateX(110%);
+}
+
+/* ── 入釉动画 (浸润出现 / token 渐显) ── */
+@keyframes soak-in {
+  from { opacity: 0; transform: translateY(10px); filter: blur(3px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+.soak-in {
+  animation: soak-in 0.6s var(--ease-soak) both;
+}
+@keyframes token-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+.token-in {
+  animation: token-in 0.09s var(--ease-soak) both;
+}
+@keyframes breath-qing {
+  50% { opacity: 0.25; }
+}
+.breath-qing {
+  animation: breath-qing 1.4s ease-in-out infinite;
+}
+
+/* ── 呼吸运行点 (天青) ── */
+.run-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  box-shadow: 0 0 8px var(--color-primary);
+  animation: breath-qing 1.4s ease-in-out infinite;
+  flex: none;
+}
+
+/* ── 釉色条 (用户消息整行) ── */
+.guise-strip {
+  background: var(--color-primary-muted);
+  border-left: 2px solid var(--color-primary);
+  border-radius: 2px;
+}
+
+/* ── 釉下暗纹 (工具调用展开体) ── */
+.under-glaze {
+  background: var(--color-primary-muted);
+  border: 1px solid var(--color-hairline);
+  border-radius: 3px;
+  box-shadow: var(--glaze-shadow);
+}
+
+/* ── 时间线折叠头 (长程任务 O(1)) ── */
+.timeline-fold {
+  border: 1px dashed var(--color-primary);
+  background: var(--color-primary-muted);
+  color: var(--color-primary);
+  font-family: var(--font-serif);
+  letter-spacing: 0.08em;
+  border-radius: 3px;
+  transition: background 0.35s var(--ease-soak), border-color 0.35s var(--ease-soak);
+}
+.timeline-fold:hover {
+  background: var(--color-accent-soft);
+}
+
+/* ── 楷体手迹 (思考块) ── */
+.hand-writing {
+  font-family: var(--font-kai);
+  letter-spacing: 0.04em;
+}
+
+/* ── 减少动态偏好: 全部动效关闭 ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/v2/tooling/cli/schema.json",
+  "productName": "OpenZen",
+  "version": "0.1.0",
+  "identifier": "com.openzen.app",
+  "build": {
+    "frontendDist": "../frontends/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "cd ../frontends && npx vite --port 5173",
+    "beforeBuildCommand": "cd ../frontends && npm run build && cd ../scripts && npm install"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "OpenZen",
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "devtools": true
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPCONFIG/**", "$APPLOCALDATA/**", "$APPDATA/**"]
+      },
+      "csp": "default-src 'self' https://tauri.localhost asset: ozfile:; script-src 'self' http://asset.localhost asset: ozfile:; style-src 'self' 'unsafe-inline' http://asset.localhost asset: ozfile:; connect-src 'self' ws://localhost:5173 http://127.0.0.1:18567 http://127.0.0.1:8080 http://asset.localhost asset: ozfile:; img-src 'self' data: blob: http://asset.localhost asset: ozfile:; font-src 'self' data: http://asset.localhost asset: ozfile:; frame-src 'self' https://tauri.localhost http://asset.localhost asset: ozfile:; media-src 'self' blob: http://asset.localhost asset: ozfile:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../assets/sys_prompt*": "assets/"
+    }
+  }
+}

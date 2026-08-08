@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  check:
+    name: Check compilation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: cargo check
+        run: cargo check --workspace
+      - name: cargo fmt
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: cargo test
+        run: cargo test --workspace --test-threads=1
+
+  build:
+    name: Release build
+    needs: [check, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: cargo build --release
+        run: cargo build --release
+      - name: Check binary size
+        run: |
+          SIZE=$(stat --format=%s target/release/ga 2>/dev/null || stat -f%z target/release/ga)
+          MAX=$((15 * 1024 * 1024))
+          if [ "$SIZE" -gt "$MAX" ]; then
+            echo "Binary size $SIZE exceeds 15MB limit"
+            exit 1
+          fi
+          echo "Binary size: $(numfmt --to=iec $SIZE)"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ga-release
+          path: target/release/ga
+
+  # macOS build (separate runner)
+  build-macos:
+    name: macOS release build
+    runs-on: macos-latest
+    needs: [check, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: cargo build --release
+        run: cargo build --release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ga-release-macos
+          path: target/release/ga

@@ -1,0 +1,26 @@
+[package]
+name = "oz-platform"
+version = "0.1.0"
+edition = "2021"
+description = "OpenZen platform adapter framework — trait-based plugin system for messaging platforms"
+
+[dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+
+oz-core-types = { path = "../oz-core-types" }
+oz-core = { path = "../oz-core" }
+oz-server = { path = "../oz-server" }
+oz-config = { path = "../oz-config" }
+oz-llm = { path = "../oz-llm" }
+oz-tools = { path = "../oz-tools" }
+oz-memory = { path = "../oz-memory" }
+oz-safety = { path = "../oz-safety" }
+oz-skill-mcp = { path = "../oz-skill-mcp" }

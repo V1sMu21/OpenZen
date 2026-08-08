@@ -1,0 +1,26 @@
+[package]
+name = "oz-platform-wechat"
+version = "0.1.0"
+edition = "2021"
+description = "OpenZen WeChat platform adapter (iLink Bot API)"
+
+[dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+uuid.workspace = true
+
+aes = "0.8"
+base64 = "0.22"
+md5 = "0.7"
+regex.workspace = true
+
+oz-platform = { path = "../oz-platform" }
+oz-core-types = { path = "../oz-core-types" }

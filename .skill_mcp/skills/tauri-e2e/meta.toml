@@ -1,0 +1,12 @@
+id = "tauri-e2e"
+created_at = "2026-07-05T09:44:39.052467+00:00"
+updated_at = "2026-07-05T09:44:39.052467+00:00"
+version = 1
+description = "Launches the real OpenZen Tauri desktop app and drives it via macOS CGEvent for end-to-end testing — sending messages, clicking UI elements, and verifying responses. Covers app launch, message input, and result verification. Use for any Tauri desktop testing task."
+success_count = 0
+failure_count = 0
+avg_completion_turns = 0.0
+quality_score = 0.5
+user_approved = false
+stale_flag = false
+tags = []

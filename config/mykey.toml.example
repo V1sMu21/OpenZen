@@ -1,0 +1,17 @@
+[sessions.default]
+session_type = "claude"
+api_key = "${ANTHROPIC_API_KEY}"
+model = "claude-sonnet-4-20250514"
+base_url = "https://api.anthropic.com"
+
+# [sessions.openai]
+# session_type = "openai"
+# api_key = "${OPENAI_API_KEY}"
+# model = "gpt-4o"
+# base_url = "https://api.openai.com"
+
+# [sessions.local]
+# session_type = "native_claude"
+# api_key = "${ANTHROPIC_API_KEY}"
+# model = "claude-sonnet-4-20250514"
+# base_url = "http://localhost:8080"

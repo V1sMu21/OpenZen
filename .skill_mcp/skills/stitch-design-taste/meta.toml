@@ -1,0 +1,12 @@
+id = "stitch-design-taste"
+created_at = "2026-06-21T00:19:40.779393+00:00"
+updated_at = "2026-06-21T00:19:40.779393+00:00"
+version = 1
+description = "Semantic Design System Skill for Google Stitch. Generates agent-friendly DESIGN.md files that enforce premium, anti-generic UI standards — strict typography, calibrated color, asymmetric layouts, perpetual micro-motion, and hardware-accelerated performance."
+success_count = 0
+failure_count = 0
+avg_completion_turns = 0.0
+quality_score = 0.5
+user_approved = false
+stale_flag = false
+tags = []

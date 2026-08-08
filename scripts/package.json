@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@tencent-connect/qqbot-connector": "^1.2.0"
+  }
+}

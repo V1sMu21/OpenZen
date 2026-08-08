@@ -1,0 +1,12 @@
+id = "verify-design"
+created_at = "2026-07-26T00:00:00+00:00"
+updated_at = "2026-07-26T00:00:00+00:00"
+version = 1
+description = "Song Celadon UI design compliance checker — verifies colors, typography, components, layout, and depth rules."
+success_count = 0
+failure_count = 0
+avg_completion_turns = 0.0
+quality_score = 0.5
+user_approved = false
+stale_flag = false
+tags = ["design", "ui", "check", "style", "css", "color", "typography", "layout", "svelte", "frontend", "song-celadon"]

@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenZen</title>
+<script>
+  window.__TAURI__ = window.__TAURI__ || {};
+</script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+header {
+  background: #16213e;
+  padding: 12px 20px;
+  border-bottom: 1px solid #0f3460;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  -webkit-app-region: drag;
+}
+header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #e94560;
+  flex: 1;
+}
+header select, header button {
+  -webkit-app-region: no-drag;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #533483;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+header button:hover { background: #533483; }
+
+#chat-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.message {
+  max-width: 80%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  line-height: 1.5;
+  font-size: 14px;
+  animation: fadeIn 0.2s ease;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.message.user {
+  align-self: flex-end;
+  background: #e94560;
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.message.assistant {
+  align-self: flex-start;
+  background: #16213e;
+  border: 1px solid #0f3460;
+  border-bottom-left-radius: 4px;
+}
+.message.system {
+  align-self: center;
+  background: #533483;
+  color: #e0e0e0;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  max-width: 60%;
+  text-align: center;
+}
+.message .tool-call {
+  margin-top: 8px;
+  padding: 8px;
+  background: #0f3460;
+  border-radius: 6px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.message .tool-result {
+  margin-top: 4px;
+  padding: 8px;
+  background: #1a1a2e;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #a0a0a0;
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+#input-area {
+  background: #16213e;
+  padding: 16px 20px;
+  border-top: 1px solid #0f3460;
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+}
+#input-area textarea {
+  flex: 1;
+  background: #0f3460;
+  border: 1px solid #533483;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-family: inherit;
+  resize: none;
+  min-height: 42px;
+  max-height: 120px;
+  outline: none;
+}
+#input-area textarea:focus { border-color: #e94560; }
+#input-area button {
+  background: #e94560;
+  color: #fff;
+  border: none;
+  padding: 10px 24px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+#input-area button:hover { background: #d63851; }
+#input-area button:disabled {
+  background: #533483;
+  cursor: not-allowed;
+}
+
+.typing-indicator {
+  align-self: flex-start;
+  display: flex;
+  gap: 4px;
+  padding: 12px 16px;
+  background: #16213e;
+  border: 1px solid #0f3460;
+  border-radius: 12px;
+  border-bottom-left-radius: 4px;
+}
+.typing-indicator span {
+  width: 8px;
+  height: 8px;
+  background: #e94560;
+  border-radius: 50%;
+  animation: bounce 1.4s infinite ease-in-out;
+}
+.typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+.typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes bounce {
+  0%, 80%, 100% { transform: scale(0); }
+  40% { transform: scale(1); }
+}
+
+pre { white-space: pre-wrap; word-break: break-word; }
+code {
+  background: #0f3460;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+.message p { margin: 0 0 8px 0; }
+.message p:last-child { margin-bottom: 0; }
+.message ul { margin: 4px 0 8px 0; padding-left: 20px; }
+.message li { margin-bottom: 2px; }
+.message h1, .message h2, .message h3 { margin: 12px 0 6px 0; color: #e94560; font-weight: 600; }
+.message h1 { font-size: 16px; }
+.message h2 { font-size: 15px; }
+.message h3 { font-size: 14px; }
+.message pre {
+  background: #0f3460;
+  padding: 10px;
+  border-radius: 6px;
+  margin: 8px 0;
+  overflow-x: auto;
+}
+.message code {
+  background: #0f3460;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.message pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>OpenZen</h1>
+  <select id="session-select">
+    <option value="local">local</option>
+  </select>
+  <button type="button" id="config-btn">Config</button>
+  <button type="button" id="checkpoints-btn" style="display:none">Checkpoints</button>
+  <button type="button" id="intervene-btn" style="display:none">Intervene</button>
+</header>
+
+<div id="chat-container"></div>
+
+<!-- Intervention Panel -->
+<div id="intervene-panel" style="display:none; background:#16213e; border-top:1px solid #0f3460; padding:12px 20px;">
+  <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
+    <span style="font-size:13px; color:#e94560; font-weight:600;">Intervene</span>
+    <select id="intervene-kind" style="background:#0f3460; color:#e0e0e0; border:1px solid #533483; padding:4px 8px; border-radius:4px; font-size:12px;">
+      <option value="inject_info">Inject Info</option>
+      <option value="new_strategy">New Strategy</option>
+      <option value="change_priority">Change Priority</option>
+      <option value="pause">Pause</option>
+    </select>
+  </div>
+  <div style="display:flex; gap:8px;">
+    <textarea id="intervene-input" rows="2" placeholder="Type your intervention..." style="flex:1; background:#0f3460; border:1px solid #533483; border-radius:6px; padding:8px; color:#e0e0e0; font-size:13px; font-family:inherit; resize:none; outline:none;"></textarea>
+    <button type="button" id="intervene-send-btn" style="background:#e94560; color:#fff; border:none; padding:8px 16px; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; align-self:flex-end;">Send</button>
+    <button type="button" id="intervene-cancel-btn" style="background:#533483; color:#e0e0e0; border:none; padding:8px 12px; border-radius:6px; font-size:12px; cursor:pointer; align-self:flex-end;">Cancel</button>
+  </div>
+</div>
+
+<!-- Checkpoint Panel -->
+<div id="checkpoint-panel" style="display:none; background:#16213e; border-top:1px solid #0f3460; padding:12px 20px; max-height:300px; overflow-y:auto;">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+    <span style="font-size:13px; color:#e94560; font-weight:600;">Checkpoints</span>
+    <button type="button" id="checkpoint-close-btn" style="background:#533483; color:#e0e0e0; border:none; padding:4px 10px; border-radius:4px; font-size:11px; cursor:pointer;">Close</button>
+  </div>
+  <div id="checkpoint-list" style="display:flex; flex-direction:column; gap:6px;"></div>
+</div>
+
+<div id="input-area">
+  <textarea id="input" rows="1" placeholder="Type your message..."></textarea>
+  <button type="button" id="send-btn">Send</button>
+</div>
+
+<script>
+const chatContainer = document.getElementById('chat-container');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send-btn');
+const sessionSelect = document.getElementById('session-select');
+
+let isProcessing = false;
+
+function renderMarkdown(text) {
+  if (!text) return '';
+  // Escape HTML first
+  let html = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  // Code blocks (``` ... ```)
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    return `<pre><code>${code.trim()}</code></pre>`;
+  });
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Convert \n\n to paragraph breaks, \n to <br>
+  const paragraphs = html.split(/\n\n+/);
+  html = paragraphs.map(p => {
+    p = p.trim();
+    if (!p) return '';
+    // Check if it's a list
+    if (/^[-*]\s/.test(p)) {
+      const items = p.split(/\n/).filter(l => /^[-*]\s/.test(l.trim()));
+      const lis = items.map(i => `<li>${i.replace(/^[-*]\s/, '')}</li>`).join('');
+      return `<ul>${lis}</ul>`;
+    }
+    // Headers
+    if (/^#{1,3}\s/.test(p)) {
+      const level = p.match(/^(#+)/)[1].length;
+      const text = p.replace(/^#+\s*/, '');
+      return `<h${Math.min(level, 3)}>${text}</h${Math.min(level, 3)}>`;
+    }
+    return `<p>${p.replace(/\n/g, '<br>')}</p>`;
+  }).join('');
+  return html;
+}
+
+function addMessage(role, content, details) {
+  const div = document.createElement('div');
+  div.className = `message ${role}`;
+
+  const textDiv = document.createElement('div');
+  textDiv.innerHTML = renderMarkdown(content);
+  div.appendChild(textDiv);
+
+  if (details) {
+    for (const d of (Array.isArray(details) ? details : [details])) {
+      const detailDiv = document.createElement('div');
+      detailDiv.className = d.type === 'tool_call' ? 'tool-call' : 'tool-result';
+      detailDiv.textContent = typeof d.content === 'string' ? d.content : JSON.stringify(d.content, null, 2);
+      div.appendChild(detailDiv);
+    }
+  }
+
+  chatContainer.appendChild(div);
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function showTyping() {
+  const div = document.createElement('div');
+  div.className = 'typing-indicator';
+  div.id = 'typing';
+  div.innerHTML = '<span></span><span></span><span></span>';
+  chatContainer.appendChild(div);
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function hideTyping() {
+  const el = document.getElementById('typing');
+  if (el) el.remove();
+}
+
+// Auto-resize textarea
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+});
+
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+
+async function send() {
+  const text = input.value.trim();
+  if (!text || isProcessing) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+  addMessage('user', text);
+  showTyping();
+  isProcessing = true;
+  sendBtn.disabled = true;
+
+  try {
+    if (window.__TAURI_INTERNALS__) {
+      // Tauri v2 — use IPC internals directly (no withGlobalTauri needed)
+      const result = await window.__TAURI_INTERNALS__.invoke('chat', {
+        prompt: text,
+        configPath: localStorage.getItem('config_path') || 'config/mykey.toml',
+        session: sessionSelect.value,
+      });
+      hideTyping();
+      let outcome;
+      try { outcome = JSON.parse(result); } catch { outcome = null; }
+      const msg = (outcome?.data?.full_response) || result || 'No response';
+      addMessage('assistant', msg);
+    } else if (window.__TAURI__ && window.__TAURI__.invoke) {
+      // Tauri v1 — withGlobalTauri
+      const result = await window.__TAURI__.invoke('chat', {
+        prompt: text,
+        configPath: localStorage.getItem('config_path') || 'config/mykey.toml',
+        session: sessionSelect.value,
+      });
+      hideTyping();
+      let outcome;
+      try { outcome = JSON.parse(result); } catch { outcome = null; }
+      const msg = (outcome?.data?.full_response) || result || 'No response';
+      addMessage('assistant', msg);
+    } else {
+      // Browser: POST /api/chat and wait for the response
+      const resp = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+      });
+      if (!resp.ok) {
+        hideTyping();
+        const errText = await resp.text().catch(() => `HTTP ${resp.status}`);
+        addMessage('assistant', `Server error: ${errText}`);
+        isProcessing = false;
+        sendBtn.disabled = false;
+        return;
+      }
+      const result = await resp.json();
+      hideTyping();
+      addMessage('assistant', result.response || 'Done');
+      isProcessing = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  } catch (err) {
+    hideTyping();
+    addMessage('assistant', `Error: ${err.message || err}`);
+    isProcessing = false;
+    sendBtn.disabled = false;
+    input.focus();
+  }
+}
+
+sendBtn.addEventListener('click', send);
+
+// Config button
+document.getElementById('config-btn').addEventListener('click', () => {
+  const current = localStorage.getItem('config_path') || 'config/mykey.toml';
+  const path = prompt('Config file path:', current);
+  if (path) {
+    localStorage.setItem('config_path', path);
+    addMessage('system', `Config set to: ${path}`);
+  }
+});
+
+// ── Intervention & Checkpoint UI ──
+
+const interveneBtn = document.getElementById('intervene-btn');
+const intervenePanel = document.getElementById('intervene-panel');
+const interveneKind = document.getElementById('intervene-kind');
+const interveneInput = document.getElementById('intervene-input');
+const interveneSendBtn = document.getElementById('intervene-send-btn');
+const interveneCancelBtn = document.getElementById('intervene-cancel-btn');
+const checkpointsBtn = document.getElementById('checkpoints-btn');
+const checkpointPanel = document.getElementById('checkpoint-panel');
+const checkpointList = document.getElementById('checkpoint-list');
+const checkpointCloseBtn = document.getElementById('checkpoint-close-btn');
+
+let currentSessionId = null;
+
+// Track session state changes via SSE
+function setupSSE() {
+  const evtSource = new EventSource('/api/events');
+  evtSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === 'session_state' && data.session_id) {
+        currentSessionId = data.session_id;
+        const isRunning = data.status === 'running';
+        interveneBtn.style.display = isRunning ? 'inline-block' : 'none';
+      }
+    } catch(e) { /* ignore parse errors */ }
+  };
+  evtSource.onerror = () => {
+    // Reconnect after 3s
+    setTimeout(setupSSE, 3000);
+  };
+}
+setupSSE();
+
+// Show/hide intervene panel
+interveneBtn.addEventListener('click', () => {
+  intervenePanel.style.display = intervenePanel.style.display === 'none' ? 'block' : 'none';
+  if (intervenePanel.style.display === 'block') {
+    interveneInput.focus();
+  }
+});
+
+interveneCancelBtn.addEventListener('click', () => {
+  intervenePanel.style.display = 'none';
+  interveneInput.value = '';
+});
+
+// Send intervention
+interveneSendBtn.addEventListener('click', async () => {
+  const kind = interveneKind.value;
+  const content = interveneInput.value.trim();
+  if (!content || !currentSessionId) return;
+
+  try {
+    const resp = await fetch(`/api/sessions/${currentSessionId}/intervene`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, content }),
+    });
+    if (resp.ok) {
+      const result = await resp.json();
+      addMessage('system', `Intervention sent (${kind}): ${content.substring(0, 100)}`);
+    } else {
+      addMessage('system', `Failed to send intervention: ${resp.status}`);
+    }
+  } catch (err) {
+    addMessage('system', `Error sending intervention: ${err.message}`);
+  }
+  interveneInput.value = '';
+  intervenePanel.style.display = 'none';
+});
+
+// Checkpoint panel
+checkpointsBtn.addEventListener('click', async () => {
+  if (!currentSessionId) {
+    addMessage('system', 'No active session');
+    return;
+  }
+  try {
+    const resp = await fetch(`/api/sessions/${currentSessionId}/checkpoints`);
+    if (!resp.ok) {
+      addMessage('system', `Failed to load checkpoints: ${resp.status}`);
+      return;
+    }
+    const data = await resp.json();
+    checkpointList.innerHTML = '';
+    if (data.checkpoints.length === 0) {
+      checkpointList.innerHTML = '<div style="color:#a0a0a0; font-size:13px; padding:8px;">No checkpoints found</div>';
+    } else {
+      data.checkpoints.forEach(cp => {
+        const item = document.createElement('div');
+        item.style.cssText = 'display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:#0f3460; border-radius:6px;';
+        item.innerHTML = `
+          <div>
+            <div style="font-size:13px; color:#e0e0e0;">Turn ${cp.turn}</div>
+            <div style="font-size:11px; color:#a0a0a0;">${cp.message_count} messages | ${new Date(cp.timestamp * 1000).toLocaleTimeString()}</div>
+          </div>
+          <button type="button" class="resume-btn" data-turn="${cp.turn}" style="background:#e94560; color:#fff; border:none; padding:4px 10px; border-radius:4px; font-size:11px; cursor:pointer;">Resume</button>
+        `;
+        checkpointList.appendChild(item);
+      });
+      // Add resume handlers
+      document.querySelectorAll('.resume-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const turn = parseInt(btn.dataset.turn);
+          const msg = prompt('Optional new instruction (or leave empty to just resume):');
+          try {
+            const resp = await fetch(`/api/sessions/${currentSessionId}/resume`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ turn, message: msg || null }),
+            });
+            if (resp.ok) {
+              addMessage('system', `Resumed from turn ${turn}`);
+              // Refresh the session messages
+              const sessionResp = await fetch(`/api/sessions/${currentSessionId}`);
+              if (sessionResp.ok) {
+                const sessionData = await sessionResp.json();
+                chatContainer.innerHTML = '';
+                sessionData.messages.forEach(m => {
+                  addMessage(m.role, typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
+                });
+              }
+            } else {
+              addMessage('system', `Failed to resume: ${resp.status}`);
+            }
+          } catch (err) {
+            addMessage('system', `Error resuming: ${err.message}`);
+          }
+          checkpointPanel.style.display = 'none';
+        });
+      });
+    }
+    checkpointPanel.style.display = 'block';
+  } catch (err) {
+    addMessage('system', `Error loading checkpoints: ${err.message}`);
+  }
+});
+
+checkpointCloseBtn.addEventListener('click', () => {
+  checkpointPanel.style.display = 'none';
+});
+
+// Update session select when a new session is created
+function handleSendMessage() {
+  const text = input.value.trim();
+  if (!text || isProcessing) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+  addMessage('user', text);
+  showTyping();
+  isProcessing = true;
+  sendBtn.disabled = true;
+
+  (async () => {
+    try {
+      if (window.__TAURI_INTERNALS__) {
+        const result = await window.__TAURI_INTERNALS__.invoke('chat', {
+          prompt: text,
+          configPath: localStorage.getItem('config_path') || 'config/mykey.toml',
+          session: sessionSelect.value,
+        });
+        hideTyping();
+        let outcome;
+        try { outcome = JSON.parse(result); } catch { outcome = null; }
+        const msg = (outcome?.data?.full_response) || result || 'No response';
+        addMessage('assistant', msg);
+      } else if (window.__TAURI__ && window.__TAURI__.invoke) {
+        const result = await window.__TAURI__.invoke('chat', {
+          prompt: text,
+          configPath: localStorage.getItem('config_path') || 'config/mykey.toml',
+          session: sessionSelect.value,
+        });
+        hideTyping();
+        let outcome;
+        try { outcome = JSON.parse(result); } catch { outcome = null; }
+        const msg = (outcome?.data?.full_response) || result || 'No response';
+        addMessage('assistant', msg);
+      } else {
+        // Browser: POST /api/chat and wait for the response
+        const resp = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text }),
+        });
+        if (!resp.ok) {
+          hideTyping();
+          const errText = await resp.text().catch(() => `HTTP ${resp.status}`);
+          addMessage('assistant', `Server error: ${errText}`);
+          isProcessing = false;
+          sendBtn.disabled = false;
+          return;
+        }
+        const result = await resp.json();
+        hideTyping();
+        currentSessionId = result.session_id;
+        // Update session select with new session
+        const opt = document.createElement('option');
+        opt.value = result.session_id;
+        opt.textContent = `Session ${result.session_id.substring(0, 8)}`;
+        sessionSelect.appendChild(opt);
+        sessionSelect.value = result.session_id;
+        addMessage('assistant', result.response || 'Done');
+        isProcessing = false;
+        sendBtn.disabled = false;
+        input.focus();
+      }
+    } catch (err) {
+      hideTyping();
+      addMessage('assistant', `Error: ${err.message || err}`);
+      isProcessing = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  })();
+}
+
+// Override the original send function
+sendBtn.removeEventListener('click', send);
+sendBtn.addEventListener('click', handleSendMessage);
+
+addMessage('system', 'OpenZen ready. Type a message to start.');
+</script>
+</body>
+</html>

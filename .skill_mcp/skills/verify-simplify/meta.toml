@@ -1,0 +1,12 @@
+id = "verify-simplify"
+created_at = "2026-07-26T00:00:00+00:00"
+updated_at = "2026-07-26T00:00:00+00:00"
+version = 1
+description = "Code cleanup and simplification — reviews changes for reuse, quality, and efficiency."
+success_count = 0
+failure_count = 0
+avg_completion_turns = 0.0
+quality_score = 0.5
+user_approved = false
+stale_flag = false
+tags = ["simplify", "cleanup", "refactor", "optimize", "polish", "code-quality"]

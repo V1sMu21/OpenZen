@@ -1,0 +1,16 @@
+[package]
+name = "oz-config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oz-core-types = { path = "../oz-core-types" }
+serde.workspace = true
+serde_json.workspace = true
+toml = "0.8"
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,16 @@
+# MCP Server Configuration for OpenZen
+# Works in both Tauri desktop and Web Server modes.
+
+[[servers]]
+name = "playwright"
+command = "npx"
+args = ["-y", "@playwright/mcp@latest"]
+enabled = false
+auto_start = false
+
+[[servers]]
+name = "exa"
+command = "npx"
+args = ["-y", "exa-mcp-server"]
+enabled = true
+auto_start = true
