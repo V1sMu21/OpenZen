@@ -52,3 +52,27 @@ docs/test-screenshots/
 
 # Personal skills (not for repo)
 .opencode/skills/
+
+# Local-only dev artifacts (not for repo)
+docs/
+count_lines.py
+current-snapshot.md
+final_verify.sh
+fix_models.sh
+go_analysis.md
+long_test.py
+markdown_test.md
+page-snapshot.yml
+summary.csv
+test_agents_a1_8bit.sh
+test_demo.py
+test_ipc.sh
+test_json.json
+test_list_models.html
+test_model_switch.sh
+test_output.txt
+test_py.py
+test_yaml.yaml
+test.md
+todo_20260622.md
+VERIFICATION_REPORT.md
