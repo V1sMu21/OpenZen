@@ -19,6 +19,13 @@ openzen/
 ~/
 facts/
 
+# Session / conversation records (do NOT push)
+.skill_mcp/
+.omo/
+.sisyphus/
+.ga/
+*.session.md
+
 # Config with secrets
 config/mykey.toml
 mykey.toml

@@ -1,7 +1,0 @@
-# [Global Memory Insight]
-L1: global_mem_insight.txt — 当前记忆概要
-L2: global_mem.txt — 持久化全局事实
-L3: memory/*.md — SOP 文档
-L4: L4_raw_sessions/ — 历史会话
-
-持久化记忆由 long_term 工具写入 L2/L3。
