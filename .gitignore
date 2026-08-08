@@ -51,4 +51,4 @@ docs/test-screenshots/
 *.swp
 
 # Personal skills (not for repo)
-.opencode/skills/git-skill/
+.opencode/skills/
