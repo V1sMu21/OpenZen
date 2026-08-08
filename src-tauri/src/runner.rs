@@ -23,6 +23,32 @@ use crate::{
     AppState, debug_log, data_dir, home_dir, tauri_ctx, load_system_prompt, lock_poison_guard,
 };
 
+/// Distills session transcripts into the skill/MCP knowledge store in the
+/// background (U3). Kept in the Tauri layer because it owns the store path.
+struct McpMemoryDistiller {
+    skill_dir: PathBuf,
+}
+
+impl McpMemoryDistiller {
+    fn new() -> Self {
+        McpMemoryDistiller {
+            skill_dir: home_dir().join(".skill_mcp"),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl oz_core::memory_job::MemoryDistiller for McpMemoryDistiller {
+    async fn distill(&self, _session_id: &str, transcript: &str) -> Result<usize, String> {
+        let store = oz_skill_mcp::SkillMcpStore::new(&self.skill_dir, None);
+        store
+            .distill_memory(transcript, &oz_core_types::SkillMcpType::Insight)
+            .await
+            .map(|_| 1)
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Build the agent-loop's `additional_messages` from persisted session
 /// messages. Translates the persistent JSON shape back into Claude
 /// Content-Block protocol:
@@ -373,6 +399,23 @@ pub async fn run_agent_for_session(
     loop_config.enable_crystallization = state.crystallization_enabled.load(std::sync::atomic::Ordering::Relaxed);
     loop_config.working_dir = project_root.to_string_lossy().to_string();
     loop_config.checkpoint_dir = Some(oz_core::checkpoint::checkpoint_dir(&project_root).to_string_lossy().to_string());
+
+    // Background memory distillation (U3): a worker drains the job queue so
+    // session distillation never blocks the agent loop.
+    let memory_scheduler = std::sync::Arc::new(oz_core::memory_job::MemoryJobScheduler::new(
+        std::sync::Arc::new(McpMemoryDistiller::new()),
+    ));
+    {
+        let scheduler = std::sync::Arc::clone(&memory_scheduler);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                scheduler.drain().await;
+            }
+        });
+    }
+    loop_config.memory_scheduler = Some(std::sync::Arc::clone(&memory_scheduler));
     loop_config.checkpoint_interval = 3;  // save every 3 turns
     if resume {
         loop_config.resume_from = loop_config.checkpoint_dir.clone();

@@ -306,6 +306,20 @@ where
     let mut consecutive_intent_hits: u32 = 0;
     let mut consecutive_empty_turns: u32 = 0;
 
+    // Session rollout recorder (U4): mirrors all stream events to a JSONL file.
+    let (git_sha, git_branch, _git_origin) =
+        crate::checkpoint::git_snapshot(std::path::Path::new(&config.working_dir));
+    let mut rollout: Option<crate::rollout::RolloutRecorder> = config.rollout_dir.as_ref().and_then(|dir| {
+        let meta = crate::rollout::RolloutMeta {
+            session_id: config.session_id.clone(),
+            cwd: config.working_dir.clone(),
+            model: "unknown".into(),
+            git_sha,
+            git_branch,
+        };
+        crate::rollout::RolloutRecorder::create(std::path::Path::new(dir), &meta).ok()
+    });
+
     // Helper: save a loop checkpoint before exiting due to user stop.
     // Ensures all stop paths (top of loop, LLM stream cancel, ask_user wait)
     // persist state for /resume.
@@ -316,6 +330,8 @@ where
         if !config.session_id.is_empty() {
             let cp_dir =
                 crate::checkpoint::checkpoint_dir(std::path::Path::new(&config.working_dir));
+            let (git_sha, git_branch, git_origin_url) =
+                crate::checkpoint::git_snapshot(std::path::Path::new(&config.working_dir));
             let cp = crate::checkpoint::LoopCheckpoint {
                 turn,
                 timestamp: chrono::Utc::now().timestamp() as f64,
@@ -324,10 +340,13 @@ where
                 full_response: full_response.to_string(),
                 exit_reason: Some(exit.to_string()),
                 session_id: Some(config.session_id.clone()),
-                plan: crate::checkpoint::CheckpointPlan::default(),
+                plan: crate::checkpoint::plan_from_todos(todos),
                 todos: todos.to_vec(),
                 interventions: vec![],
                 full_thinking: Some(full_thinking.to_string()),
+                git_sha,
+                git_branch,
+                git_origin_url,
             };
             crate::checkpoint::save_checkpoint_persist(&cp_dir, &config.session_id, &cp);
         }
@@ -499,6 +518,20 @@ where
         }
 
         turn += 1;
+
+        // Record turn boundary in rollout (U4).
+        if let Some(ref mut r) = rollout {
+            let ev = oz_core_types::StreamEvent::DataContextUsage {
+                current_tokens: last_turn_input_tokens,
+                output_tokens: total_output_tokens,
+                context_window: config.context_win,
+                turn,
+                message_count: messages.len(),
+                total_input_tokens: total_input_tokens,
+                total_output_tokens: total_output_tokens,
+            };
+            let _ = r.write(&ev);
+        }
 
         // Context compression before each LLM call.
         if config.enable_compression && config.context_win > 0 {
@@ -1812,6 +1845,8 @@ where
             let cp_dir = std::path::PathBuf::from(
                 config.checkpoint_dir.as_deref().unwrap_or("checkpoints")
             );
+            let (git_sha, git_branch, git_origin_url) =
+                crate::checkpoint::git_snapshot(std::path::Path::new(&config.working_dir));
             let cp = crate::checkpoint::LoopCheckpoint {
                 turn,
                 timestamp: chrono::Utc::now().timestamp() as f64,
@@ -1820,10 +1855,13 @@ where
                 full_response: full_response.clone(),
                 exit_reason: exit_reason.clone(),
                 session_id: Some(config.session_id.clone()),
-                plan: crate::checkpoint::CheckpointPlan::default(),
+                plan: crate::checkpoint::plan_from_todos(&handler.working().todos),
                 todos: handler.working().todos.clone(),
                 interventions: vec![],
                 full_thinking: Some(full_thinking.clone()),
+                git_sha,
+                git_branch,
+                git_origin_url,
             };
             crate::checkpoint::save_loop_checkpoint(&cp_dir, &config.session_id, &cp);
         }
@@ -2083,6 +2121,34 @@ where
                 if config.verbose {
                     tracing::info!("Crystallised SOP from {} tool calls", tool_sequence.len());
                 }
+            }
+        }
+    }
+
+    // Background memory distillation (U3): enqueue transcript for async
+    // knowledge extraction instead of blocking the loop. Falls back to the
+    // LLM-driven Crystallizer below when no scheduler is configured.
+    if let Some(ref scheduler) = config.memory_scheduler {
+        let transcript = messages.iter()
+            .filter_map(|m| {
+                if matches!(m.role, oz_core_types::Role::User | oz_core_types::Role::Assistant) {
+                    let text: Vec<&str> = m.content.iter()
+                        .filter_map(|b| match b {
+                            oz_core_types::ContentBlock::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    if text.is_empty() { None } else { Some(text.join(" ")) }
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !transcript.trim().is_empty() {
+            scheduler.submit(config.session_id.clone(), transcript).await;
+            if config.verbose {
+                tracing::info!("Enqueued session '{}' for memory distillation", config.session_id);
             }
         }
     }

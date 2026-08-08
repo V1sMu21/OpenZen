@@ -4,6 +4,8 @@ pub mod verifier;
 pub mod context;
 pub mod compress;
 pub mod checkpoint;
+pub mod rollout;
+pub mod memory_job;
 pub mod sop;
 pub mod meter;
 pub mod crystallizer;

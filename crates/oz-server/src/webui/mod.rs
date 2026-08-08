@@ -754,16 +754,16 @@ async fn run_agent_for_session(
         if let Err(e) = discovery.load() {
             tracing::warn!("[mcp] failed to load servers.toml: {e}");
         } else {
-            let mut manager = oz_mcp::McpManager::from_discovery(&discovery);
-            match manager.start_all().await {
+            let manager = std::sync::Arc::new(tokio::sync::Mutex::new(oz_mcp::McpManager::from_discovery(&discovery)));
+            match manager.lock().await.start_all().await {
                 Ok(n) => tracing::info!("[mcp] started {n} MCP server(s)"),
                 Err(e) => tracing::warn!("[mcp] start_all failed: {e}"),
             }
-            let mcp_count = oz_tools::mcp_bridge::register_mcp_tools(&mut registry, &manager);
+            let mcp_count = oz_tools::mcp_bridge::register_mcp_tools(&mut registry, &manager).await;
             tracing::info!("[mcp] registered {mcp_count} MCP tool(s)");
             // Keep the manager (and its subprocesses) alive past this
-            // scope — we registered the tools above, and dropping the
-            // manager would kill the child processes mid-run.
+            // scope — tool handlers hold an Arc, dropping this one keeps
+            // the child processes alive for the lifetime of the registry.
             std::mem::forget(manager);
         }
     }

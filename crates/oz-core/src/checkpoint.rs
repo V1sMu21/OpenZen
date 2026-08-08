@@ -239,6 +239,13 @@ pub struct LoopCheckpoint {
     /// Agent's thinking output up to this checkpoint (for UI recovery after crash).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_thinking: Option<String>,
+    /// Git snapshot of the working tree at checkpoint time (for replay/debug).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_origin_url: Option<String>,
 }
 
 /// Metadata about a saved checkpoint (used for listing without loading full data).
@@ -256,6 +263,50 @@ const CHECKPOINT_DIR: &str = "openzen/checkpoints";
 
 pub fn checkpoint_dir(base_dir: &Path) -> PathBuf {
     base_dir.join(CHECKPOINT_DIR)
+}
+
+/// Capture the git state of the working tree, if it is a git repo.
+pub fn git_snapshot(base_dir: &Path) -> (Option<String>, Option<String>, Option<String>) {
+    let sha = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(base_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    if sha.is_none() {
+        return (None, None, None);
+    }
+    let branch = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(base_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let origin = std::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(base_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    (sha, branch, origin)
+}
+
+/// Derive a CheckpointPlan from the current todo list.
+pub fn plan_from_todos(todos: &[oz_core_types::TodoItem]) -> CheckpointPlan {
+    let mut completed = Vec::new();
+    let mut pending = Vec::new();
+    let mut in_progress = None;
+    for t in todos {
+        match t.status.as_str() {
+            "completed" => completed.push(t.content.clone()),
+            "in_progress" => in_progress = Some(t.content.clone()),
+            _ => pending.push(t.content.clone()),
+        }
+    }
+    CheckpointPlan { completed, in_progress, pending, ..Default::default() }
 }
 
 /// Save a full loop checkpoint that can be used for resume.
@@ -507,6 +558,9 @@ mod tests {
             todos: vec![],
             interventions: vec![],
             full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
         };
 
         let json = serde_json::to_string_pretty(&cp).unwrap();
@@ -621,6 +675,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
             };
             save_loop_checkpoint(dir.path(), session_id, &cp);
         }
@@ -665,6 +722,9 @@ mod tests {
             todos: vec![],
             interventions: vec![],
             full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
         };
         save_loop_checkpoint(dir.path(), session_id, &cp);
 
@@ -696,6 +756,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
             };
             save_loop_checkpoint(dir.path(), sid, &cp);
         }
@@ -727,6 +790,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
             };
             save_loop_checkpoint(dir.path(), session_id, &cp);
         }
@@ -753,6 +819,9 @@ mod tests {
             todos: vec![],
             interventions: vec![],
             full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
         };
 
         save_loop_checkpoint(dir.path(), "session-1", &cp);
@@ -803,6 +872,9 @@ mod tests {
             todos: vec![],
             interventions: vec![],
             full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
         };
         wal.append(&cp).unwrap();
         wal.flush().unwrap();
@@ -833,6 +905,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
             };
             wal.append(&cp).unwrap();
         }
@@ -868,6 +943,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
             };
             wal.append(&cp).unwrap();
             wal.flush().unwrap();
@@ -909,6 +987,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
             };
             wal.append(&cp).unwrap();
         }

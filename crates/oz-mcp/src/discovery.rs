@@ -60,6 +60,15 @@ impl McpManager {
             .map(|c| c.tools().to_vec())
     }
 
+    /// Call a tool on a specific server.
+    pub async fn call_tool(&mut self, server_name: &str, tool_name: &str, arguments: serde_json::Value) -> Result<crate::types::CallToolResult, McpError> {
+        let client = self.clients
+            .iter_mut()
+            .find(|c| c.server_name() == server_name && c.state() == &McpState::Connected)
+            .ok_or_else(|| McpError::ServerNotFound(server_name.to_string()))?;
+        client.call_tool(tool_name, arguments).await
+    }
+
     /// Get the number of connected servers.
     pub fn connected_count(&self) -> usize {
         self.clients

@@ -160,7 +160,56 @@ store.recall_by_text(query, 5)  // → Vec<(Memory, f32, LayerId)>
 
 ---
 
-### Phase M5:开关切换 + 回滚演练
+### Phase M5:记忆调度层(两阶段蒸馏 + 后台 job 队列)
+
+> 借鉴 Codex harness 的两阶段记忆管线(见 [openzen-upgrade-plan.md](openzen-upgrade-plan.md) §4)。
+> 目标:会话结束后的知识蒸馏**异步化**,不阻塞 Agent 主循环,崩溃可恢复。
+
+**Codex 参考实现**(本地实证 `~/.codex/memories_1.sqlite`):
+
+```
+jobs(kind, job_key, status, worker_id, lease_until, retry_at, retry_remaining, last_error)
+stage1_outputs(thread_id, raw_memory, rollout_summary, selected_for_phase2, generated_at, usage_count)
+```
+
+- `jobs` = 通用后台任务队列:租约(lease_until 防双 worker)、重试(retry_at + retry_remaining)、错误记录
+- `stage1_outputs` = 两阶段记忆:阶段一从会话生成原始记忆+摘要 → `selected_for_phase2` 标记 → 阶段二固化入主记忆
+
+**OpenZen 落地设计**:
+
+```rust
+// oz-core 新增:记忆蒸馏 job 定义
+pub struct MemoryJob {
+    pub session_id: String,
+    pub transcript: String,        // 会话文本
+    pub status: MemoryJobStatus,   // Queued / Running / Done / Failed
+    pub lease_until: Option<Instant>,
+    pub retry_remaining: u32,
+    pub last_error: Option<String>,
+}
+
+// 调度层:spawn 后台 tokio task,不阻塞 agent_loop
+pub struct MemoryJobScheduler {
+    queue: Arc<Mutex<VecDeque<MemoryJob>>>,
+    store: Arc<MemoryStore>,              // ERME
+    consolidation: ConsolidationEngine,   // 蒸馏器
+}
+```
+
+**流程**:
+1. `agent_loop.rs:2092` 结晶钩子 → 只**入队**(`scheduler.submit(session_id, transcript)`),立即返回
+2. 后台 worker 轮询队列:
+   - 取 job → `extract_from_interaction()` → `store.store()` 逐条写入
+   - 成功 → `stage1` 记录摘要,标记待固化
+   - 失败 → `retry_remaining--`,`retry_at` 延迟重试(指数退避)
+3. 租约超时 → 其他 worker 可接管(防卡死)
+4. 与 `ConsolidationScheduler`(ERME 自带)二选一或叠加:ERME 的 scheduler 做 L2→L3 固化,OpenZen 的 job 队列做会话→L2 蒸馏
+
+**验证**:模拟会话结束,确认蒸馏在后台完成、Agent 主线程无阻塞;杀进程后重启,未完成 job 可恢复。
+
+---
+
+### Phase M6:开关切换 + 回滚演练
 
 1. `mykey.toml` 切到 `memory_backend = "erme"`,跑日常会话
 2. 确认异常时切回 `"file"` 立即恢复原状
@@ -168,7 +217,7 @@ store.recall_by_text(query, 5)  // → Vec<(Memory, f32, LayerId)>
 
 ---
 
-### Phase M6(可选):L0 灵魂层 + 内循环
+### Phase M7(可选):L0 灵魂层 + 内循环
 
 > 已提前至伙伴愿景的 **Phase 3-4**(见 [erme-companion-vision.md](erme-companion-vision.md))。
 > 本阶段从"可选收尾"提升为伙伴路线的主线,完成顺序为:
@@ -214,5 +263,6 @@ store.recall_by_text(query, 5)  // → Vec<(Memory, f32, LayerId)>
 | `src-tauri/Cargo.toml` | M1 | + 依赖 |
 | `src-tauri/src/runner.rs` | M2/M3 | ERME 初始化 + 读路径分支 |
 | `crates/oz-core/src/handler.rs` | M4 | `LoopConfig` + `memory_backend` / `erme_store` 字段 |
-| `crates/oz-core/src/agent_loop.rs` | M4 | 结晶钩子旁 ERME distill |
+| `crates/oz-core/src/agent_loop.rs` | M4/M5 | 结晶钩子入队 + `MemoryJobScheduler` 接入 |
+| `crates/oz-core/src/memory_job.rs`(新增) | M5 | job 定义 + 调度器 + 后台 worker |
 | `~/.openzen/mykey.toml` | M3 | + `memory_backend = "file"`(运行时配置,非代码) |

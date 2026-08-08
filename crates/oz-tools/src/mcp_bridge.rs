@@ -3,8 +3,11 @@
 //! Converts MCP tool definitions from `ga-mcp` into `ToolHandler` instances
 //! that can be dispatched by the agent loop.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use oz_core_types::{ToolContext, ToolError, ToolOutput};
+use tokio::sync::Mutex;
 
 use crate::registry::ToolHandler;
 
@@ -18,6 +21,7 @@ pub struct McpToolHandler {
     full_name: String,
     description: String,
     input_schema: serde_json::Value,
+    manager: Option<Arc<Mutex<oz_mcp::McpManager>>>,
 }
 
 impl McpToolHandler {
@@ -34,11 +38,18 @@ impl McpToolHandler {
             full_name,
             description: description.to_string(),
             input_schema,
+            manager: None,
         }
     }
 
     pub fn from_mcp_tool(server_name: &str, tool: &oz_mcp::McpTool) -> Self {
         Self::new(server_name, &tool.name, &tool.description, tool.input_schema.clone())
+    }
+
+    /// Attach the live MCP manager so tool calls reach the server.
+    pub fn with_manager(mut self, manager: Arc<Mutex<oz_mcp::McpManager>>) -> Self {
+        self.manager = Some(manager);
+        self
     }
 
     pub fn full_name(&self) -> &str {
@@ -64,38 +75,58 @@ impl ToolHandler for McpToolHandler {
         self.input_schema.clone()
     }
 
-    async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        // MCP tool execution would call the actual MCP client.
-        // For now, returns a placeholder indicating MCP integration is available.
+    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let Some(manager) = &self.manager else {
+            return Ok(ToolOutput::success_with_prompt(
+                serde_json::json!({
+                    "status": "mcp_not_connected",
+                    "server": self.server_name,
+                    "tool": self.tool_name,
+                    "note": "MCP tool execution requires a live MCP connection. The tool is registered and available for future use."
+                }),
+                format!("\n[MCP] Tool `{}` from server `{}` is registered. Connect the MCP server to use it.",
+                    self.tool_name, self.server_name),
+            ));
+        };
+
+        let mut manager = manager.lock().await;
+        let result = manager.call_tool(&self.server_name, &self.tool_name, args).await
+            .map_err(|e| ToolError::Custom(format!("MCP tool `{}` failed: {e}", self.tool_name)))?;
+
+        let text = result.content.iter()
+            .filter_map(|c| c.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let is_err = result.is_error;
+        if is_err {
+            return Err(ToolError::Custom(format!("MCP tool `{}` returned error: {}", self.tool_name, text)));
+        }
         Ok(ToolOutput::success_with_prompt(
-            serde_json::json!({
-                "status": "mcp_not_connected",
-                "server": self.server_name,
-                "tool": self.tool_name,
-                "note": "MCP tool execution requires a live MCP connection. The tool is registered and available for future use."
-            }),
-            format!("\n[MCP] Tool `{}` from server `{}` is registered. Connect the MCP server to use it.",
-                self.tool_name, self.server_name),
+            serde_json::json!({ "output": text }),
+            if text.is_empty() { format!("\n[MCP] Tool `{}` returned empty result.", self.tool_name) } else { text },
         ))
     }
 }
 
 /// Register all MCP tools from a manager into a ToolRegistry.
 /// Filters out known-broken tools (web_fetch_exa returns null on free tier).
-pub fn register_mcp_tools(
+pub async fn register_mcp_tools(
     registry: &mut crate::registry::ToolRegistry,
-    manager: &oz_mcp::McpManager,
+    manager: &Arc<Mutex<oz_mcp::McpManager>>,
 ) -> usize {
     // Known-broken MCP tools — these return empty/null content.
     const SKIP_TOOLS: &[&str] = &["web_fetch_exa"];
 
+    let manager_ref = Arc::clone(manager);
+    let tools = manager.lock().await.all_tools();
     let mut count = 0;
-    for tool in manager.all_tools() {
+    for tool in tools {
         if SKIP_TOOLS.contains(&tool.name.as_str()) {
             tracing::info!("[mcp] skipping known-broken tool: {}", tool.name);
             continue;
         }
-        let handler = McpToolHandler::from_mcp_tool("mcp", &tool);
+        let handler = McpToolHandler::from_mcp_tool("mcp", &tool)
+            .with_manager(manager_ref.clone());
         let name = handler.full_name().to_string();
         registry.register_with_name(&name, handler);
         count += 1;

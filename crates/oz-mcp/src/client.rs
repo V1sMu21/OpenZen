@@ -6,7 +6,7 @@
 use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::config::ServerConfig;
 use crate::types::*;
@@ -26,6 +26,8 @@ pub struct McpClient {
     config: ServerConfig,
     state: McpState,
     child: Option<Child>,
+    stdin: Option<ChildStdin>,
+    stdout: Option<BufReader<ChildStdout>>,
     next_id: u64,
     server_info: Option<ServerInfo>,
     tools: Vec<McpTool>,
@@ -38,6 +40,8 @@ impl McpClient {
             config,
             state: McpState::Disconnected,
             child: None,
+            stdin: None,
+            stdout: None,
             next_id: 1,
             server_info: None,
             tools: Vec::new(),
@@ -78,93 +82,24 @@ impl McpClient {
             cmd.env(key, value);
         }
 
-        let child = cmd.spawn().map_err(|e| {
+        let mut child = cmd.spawn().map_err(|e| {
             McpError::Config(format!("Failed to start '{}': {}", self.config.command, e))
         })?;
 
-        let _ = child.stdin.as_ref().ok_or_else(|| {
+        let stdin = child.stdin.take().ok_or_else(|| {
             McpError::Config("Failed to capture stdin".into())
         })?;
-
-        let _ = child.stdout.as_ref().ok_or_else(|| {
+        let stdout = BufReader::new(child.stdout.take().ok_or_else(|| {
             McpError::Config("Failed to capture stdout".into())
-        })?;
+        })?);
 
-        let mut stdin_writer = child.stdin.unwrap();
-        let stdout_reader = child.stdout.unwrap();
+        self.child = Some(child);
+        self.stdin = Some(stdin);
+        self.stdout = Some(stdout);
 
-        // Send initialize request
-        let init_params = serde_json::to_value(InitializeParams {
-            protocol_version: "2024-11-05".into(),
-            capabilities: ClientCapabilities {
-                roots: None,
-                sampling: None,
-            },
-            client_info: ImplementationInfo {
-                name: "openzen".into(),
-                version: "0.1.0".into(),
-            },
-        }).map_err(|e| McpError::Rpc(e.to_string()))?;
-
-        let init_req = JsonRpcRequest::new("initialize", Some(init_params));
-        let req_json = serde_json::to_string(&init_req).map_err(|e| McpError::Rpc(e.to_string()))?;
-
-        stdin_writer.write_all(req_json.as_bytes()).await.map_err(McpError::Io)?;
-        stdin_writer.write_all(b"\n").await.map_err(McpError::Io)?;
-        stdin_writer.flush().await.map_err(McpError::Io)?;
-
-        // Read initialize response
-        let mut reader = BufReader::new(stdout_reader);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.map_err(McpError::Io)?;
-
-        let resp: JsonRpcResponse = serde_json::from_str(&line)
-            .map_err(|e| McpError::Rpc(format!("Initialize response parse: {}", e)))?;
-
-        if let Some(err) = &resp.error {
-            return Err(McpError::Rpc(format!("Initialize failed: {} (code {})", err.message, err.code)));
-        }
-
-        if let Some(result) = &resp.result {
-            // The initialize result carries several top-level fields
-            // (protocolVersion, capabilities, serverInfo, instructions).
-            // Only the serverInfo subtree matches our ServerInfo struct.
-            if let Some(si) = result.get("serverInfo") {
-                self.server_info = serde_json::from_value(si.clone()).ok();
-            }
-        }
-
-        // Send initialized notification
-        let init_done = JsonRpcRequest::notification("notifications/initialized", None);
-        let done_json = serde_json::to_string(&init_done).map_err(|e| McpError::Rpc(e.to_string()))?;
-
-        stdin_writer.write_all(done_json.as_bytes()).await.map_err(McpError::Io)?;
-        stdin_writer.write_all(b"\n").await.map_err(McpError::Io)?;
-        stdin_writer.flush().await.map_err(McpError::Io)?;
-
-        // List tools
-        let tools_req = JsonRpcRequest::new("tools/list", None);
-        let tools_json = serde_json::to_string(&tools_req).map_err(|e| McpError::Rpc(e.to_string()))?;
-
-        stdin_writer.write_all(tools_json.as_bytes()).await.map_err(McpError::Io)?;
-        stdin_writer.write_all(b"\n").await.map_err(McpError::Io)?;
-        stdin_writer.flush().await.map_err(McpError::Io)?;
-
-        line.clear();
-        reader.read_line(&mut line).await.map_err(McpError::Io)?;
-
-        let tools_resp: JsonRpcResponse = serde_json::from_str(&line)
-            .map_err(|e| McpError::Rpc(format!("tools/list response parse: {}", e)))?;
-
-        if let Some(err) = &tools_resp.error {
-            return Err(McpError::Rpc(format!("tools/list failed: {}", err.message)));
-        }
-
-        if let Some(result) = &tools_resp.result {
-            let tools_result: ListToolsResult = serde_json::from_value(result.clone())
-                .map_err(|e| McpError::Rpc(format!("tools/list result parse: {}", e)))?;
-            self.tools = tools_result.tools;
-        }
+        self.send_request("initialize", Some(self.initialize_params()?)).await?;
+        self.send_notification("notifications/initialized", None).await?;
+        self.list_tools().await?;
 
         self.state = McpState::Connected;
         tracing::info!(
@@ -175,31 +110,88 @@ impl McpClient {
         Ok(())
     }
 
+    fn initialize_params(&self) -> Result<serde_json::Value, McpError> {
+        serde_json::to_value(InitializeParams {
+            protocol_version: "2024-11-05".into(),
+            capabilities: ClientCapabilities {
+                roots: None,
+                sampling: None,
+            },
+            client_info: ImplementationInfo {
+                name: "openzen".into(),
+                version: "0.1.0".into(),
+            },
+        }).map_err(|e| McpError::Rpc(e.to_string()))
+    }
+
+    async fn send_request(&mut self, method: &str, params: Option<serde_json::Value>) -> Result<serde_json::Value, McpError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(id),
+            method: method.into(),
+            params,
+        };
+        self.write_line(&serde_json::to_string(&req).map_err(|e| McpError::Rpc(e.to_string()))?).await?;
+        let resp = self.read_response(id).await?;
+        if let Some(err) = &resp.error {
+            return Err(McpError::Rpc(format!("{method} failed: {} (code {})", err.message, err.code)));
+        }
+        resp.result.ok_or_else(|| McpError::Rpc(format!("{method}: empty result")))
+    }
+
+    async fn send_notification(&mut self, method: &str, params: Option<serde_json::Value>) -> Result<(), McpError> {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: None,
+            method: method.into(),
+            params,
+        };
+        self.write_line(&serde_json::to_string(&req).map_err(|e| McpError::Rpc(e.to_string()))?).await
+    }
+
+    async fn write_line(&mut self, line: &str) -> Result<(), McpError> {
+        let stdin = self.stdin.as_mut().ok_or_else(|| McpError::Rpc("Not connected".into()))?;
+        stdin.write_all(line.as_bytes()).await.map_err(McpError::Io)?;
+        stdin.write_all(b"\n").await.map_err(McpError::Io)?;
+        stdin.flush().await.map_err(McpError::Io)
+    }
+
+    async fn read_response(&mut self, expected_id: u64) -> Result<JsonRpcResponse, McpError> {
+        let stdout = self.stdout.as_mut().ok_or_else(|| McpError::Rpc("Not connected".into()))?;
+        loop {
+            let mut line = String::new();
+            stdout.read_line(&mut line).await.map_err(McpError::Io)?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let resp: JsonRpcResponse = serde_json::from_str(&line)
+                .map_err(|e| McpError::Rpc(format!("Response parse: {e}")))?;
+            // Skip server-initiated notifications (no id); wait for our id.
+            if resp.id == Some(expected_id) {
+                return Ok(resp);
+            }
+        }
+    }
+
+    async fn list_tools(&mut self) -> Result<(), McpError> {
+        let result = self.send_request("tools/list", None).await?;
+        let tools_result: ListToolsResult = serde_json::from_value(result)
+            .map_err(|e| McpError::Rpc(format!("tools/list result parse: {e}")))?;
+        self.tools = tools_result.tools;
+        Ok(())
+    }
+
     /// Call a tool on the server and return the result.
     pub async fn call_tool(&mut self, name: &str, arguments: serde_json::Value) -> Result<CallToolResult, McpError> {
-        if self.state != McpState::Connected {
-            return Err(McpError::Rpc("Not connected".into()));
-        }
-
         let params = serde_json::to_value(CallToolParams {
             name: name.to_string(),
             arguments,
         }).map_err(|e| McpError::Rpc(e.to_string()))?;
-
-        let _req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            id: Some(self.next_id),
-            method: "tools/call".into(),
-            params: Some(params),
-        };
-        self.next_id += 1;
-
-        // Re-open the communication (simplified: we assume single-request model)
-        // For production, we'd keep the reader/writer alive.
-        // This is a simplest-possible implementation.
-        Err(McpError::Rpc(
-            "call_tool requires persistent bidirectional transport — use list_tools + register approach".into()
-        ))
+        let result = self.send_request("tools/call", Some(params)).await?;
+        serde_json::from_value(result)
+            .map_err(|e| McpError::Rpc(format!("tools/call result parse: {e}")))
     }
 
     /// Stop the server process.
@@ -207,6 +199,8 @@ impl McpClient {
         if let Some(ref mut child) = self.child.take() {
             let _ = child.kill().await;
         }
+        self.stdin = None;
+        self.stdout = None;
         self.state = McpState::Disconnected;
     }
 }

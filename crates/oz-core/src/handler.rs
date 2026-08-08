@@ -279,6 +279,13 @@ pub struct LoopConfig {
     /// streams repeatedly; a higher budget keeps long tasks alive through
     /// transient wedges. Default: 3.
     pub llm_error_retries: u32,
+    /// Directory for session rollout recording. When set, all stream events
+    /// are appended to {rollout_dir}/rollout-*.jsonl for replay/debug.
+    pub rollout_dir: Option<String>,
+    /// Background memory distillation scheduler. When set, session
+    /// transcripts are enqueued for async knowledge extraction instead of
+    /// blocking the loop (U3).
+    pub memory_scheduler: Option<std::sync::Arc<crate::memory_job::MemoryJobScheduler>>,
 }
 
 impl Default for LoopConfig {
@@ -313,6 +320,8 @@ impl Default for LoopConfig {
             log_fn: None,
             stream_timeout_secs: 300,
             llm_error_retries: 3,
+            rollout_dir: None,
+            memory_scheduler: None,
         }
     }
 }
@@ -359,6 +368,8 @@ impl Clone for LoopConfig {
             log_fn: self.log_fn.clone(),
             stream_timeout_secs: self.stream_timeout_secs,
             llm_error_retries: self.llm_error_retries,
+            rollout_dir: self.rollout_dir.clone(),
+            memory_scheduler: self.memory_scheduler.clone(),
         }
     }
 }
