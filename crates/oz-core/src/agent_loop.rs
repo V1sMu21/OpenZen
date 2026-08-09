@@ -2125,28 +2125,33 @@ where
         }
     }
 
-    // Background memory distillation (U3): enqueue transcript for async
-    // knowledge extraction instead of blocking the loop. Falls back to the
+    // Session transcript: built once for the background distillation queue.
+    let transcript = messages.iter()
+        .filter_map(|m| {
+            if matches!(m.role, oz_core_types::Role::User | oz_core_types::Role::Assistant) {
+                let text: Vec<&str> = m.content.iter()
+                    .filter_map(|b| match b {
+                        oz_core_types::ContentBlock::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if text.is_empty() { None } else { Some(text.join(" ")) }
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let transcript = transcript.trim();
+
+    // Background memory distillation (M5): enqueue the transcript for async
+    // knowledge extraction instead of blocking the loop. The distiller is
+    // chosen by the caller (ERME semantic store or legacy skill/MCP), and
+    // the worker retries with backoff under a lease. Falls back to the
     // LLM-driven Crystallizer below when no scheduler is configured.
     if let Some(ref scheduler) = config.memory_scheduler {
-        let transcript = messages.iter()
-            .filter_map(|m| {
-                if matches!(m.role, oz_core_types::Role::User | oz_core_types::Role::Assistant) {
-                    let text: Vec<&str> = m.content.iter()
-                        .filter_map(|b| match b {
-                            oz_core_types::ContentBlock::Text { text, .. } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect();
-                    if text.is_empty() { None } else { Some(text.join(" ")) }
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !transcript.trim().is_empty() {
-            scheduler.submit(config.session_id.clone(), transcript).await;
+        if !transcript.is_empty() {
+            scheduler.submit(config.session_id.clone(), transcript.to_string()).await;
             if config.verbose {
                 tracing::info!("Enqueued session '{}' for memory distillation", config.session_id);
             }

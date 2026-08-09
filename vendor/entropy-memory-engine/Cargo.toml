@@ -1,0 +1,50 @@
+[package]
+name = "entropy_memory_engine"
+version = "0.1.0"
+edition = "2021"
+description = "熵减记忆引擎 (Entropy-Reduced Memory Engine) — L1-L2-L3 AI Agent Memory Architecture"
+
+[dependencies]
+# L1 并发哈希表
+dashmap = "6"
+
+# 哈希算法
+foldhash = "0.1"
+
+# 缓存淘汰基线 (W-TinyLFU)
+moka = { version = "0.12", features = ["sync"] }
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+
+# 并行计算
+rayon = "1"
+
+# 零拷贝序列化
+rkyv = { version = "0.8", features = ["bytecheck"] }
+bytemuck = "1"
+
+# 随机数
+rand = "0.8"
+
+# 日志/观测
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 序列化 (WAL)
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+serde_json = "1"
+
+# 小向量优化
+smallvec = { version = "1", features = ["write"] }
+
+# 工具
+thiserror = "2"
+parking_lot = "0.12"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports", "async_tokio", "async"] }
+tempfile = "3"
+
+

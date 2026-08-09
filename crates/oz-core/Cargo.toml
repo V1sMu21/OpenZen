@@ -9,6 +9,7 @@ oz-skill-mcp = { path = "../oz-skill-mcp" }
 oz-safety = { path = "../oz-safety" }
 oz-llm = { path = "../oz-llm" }
 oz-config = { path = "../oz-config" }
+entropy_memory_engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -37,6 +37,36 @@ impl McpMemoryDistiller {
     }
 }
 
+/// Distills session transcripts into the long-lived ERME semantic store
+/// (M5). Runs inside the shared MemoryJobScheduler worker so distillation
+/// never blocks the agent loop; failures are retried with backoff by the
+/// scheduler instead of being lost.
+struct ErmeMemoryDistiller {
+    store: std::sync::Arc<entropy_memory_engine::memory_store::MemoryStore>,
+}
+
+impl ErmeMemoryDistiller {
+    fn new(store: std::sync::Arc<entropy_memory_engine::memory_store::MemoryStore>) -> Self {
+        ErmeMemoryDistiller { store }
+    }
+}
+
+#[async_trait::async_trait]
+impl oz_core::memory_job::MemoryDistiller for ErmeMemoryDistiller {
+    async fn distill(&self, session_id: &str, transcript: &str) -> Result<usize, String> {
+        let store = std::sync::Arc::clone(&self.store);
+        let transcript = transcript.to_string();
+        let result = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+            let stored = store.distill_and_store(&transcript).map_err(|e| e.to_string())?;
+            store.consolidate();
+            Ok(stored)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        result.map_err(|e| format!("erme distill failed for {session_id}: {e}"))
+    }
+}
+
 #[async_trait::async_trait]
 impl oz_core::memory_job::MemoryDistiller for McpMemoryDistiller {
     async fn distill(&self, _session_id: &str, transcript: &str) -> Result<usize, String> {
@@ -330,7 +360,61 @@ pub async fn run_agent_for_session(
     let _ = std::fs::create_dir_all(&project_ga_dir);
 
     let memory = MemorySystem::new(&project_root, &ctx.lang);
-    let memory_context = memory.get_global_memory().await.unwrap_or_default();
+    let memory_context = if cfg.memory_backend == "erme" {
+        // ERME semantic recall: inject top-k memories relevant to the user
+        // message instead of the legacy full-text scan.
+        match &state.erme_store {
+            Some(runtime) => {
+                let store = &runtime.store;
+                let query = {
+                    let store = lock_poison_guard(&state.sessions);
+                    store
+                        .get(session_id)
+                        .and_then(|s| s.messages.last())
+                        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let query = if query.is_empty() {
+                    "resume session context".to_string()
+                } else {
+                    query
+                };
+                let store = std::sync::Arc::clone(store);
+                let recalls = tokio::task::spawn_blocking(move || store.recall_by_text(&query, 5))
+                    .await
+                    .unwrap_or_else(|e| {
+                        debug_log(&format!("ERME recall task failed: {e}"));
+                        Ok(Vec::new())
+                    })
+                    .unwrap_or_default();
+                if recalls.is_empty() {
+                    debug_log("ERME recall returned 0 memories; falling back to file memory");
+                    memory.get_global_memory().await.unwrap_or_default()
+                } else {
+                    let mut buf = String::new();
+                    for (mem, score, _layer) in &recalls {
+                        let text = match &mem.content {
+                            entropy_memory_engine::core::types::MemoryContent::Fact(f) => {
+                                format!("{} {} {}", f.subject, f.predicate, f.object)
+                            }
+                            entropy_memory_engine::core::types::MemoryContent::Summary(s) => s.clone(),
+                            _ => continue,
+                        };
+                        buf.push_str(&format!("- [rel {score:.2}] {text}\n"));
+                    }
+                    debug_log(&format!("ERME recall injected {} memories", recalls.len()));
+                    buf
+                }
+            }
+            None => {
+                debug_log("ERME store unavailable; falling back to file memory");
+                memory.get_global_memory().await.unwrap_or_default()
+            }
+        }
+    } else {
+        memory.get_global_memory().await.unwrap_or_default()
+    };
 
     let registry = ToolRegistry::build_default();
 
@@ -341,6 +425,16 @@ pub async fn run_agent_for_session(
     let mut handler = ToolRegistryHandler::new(registry);
 
     let mut system_prompt = load_system_prompt(&ctx);
+    // L0 soul-layer injection (M7): prepend the persistent soul-model prefix
+    // so every turn carries identity/narrative/portrait state.
+    if cfg.memory_backend == "erme" {
+        if let Some(runtime) = &state.erme_store {
+            let prefix = runtime.injector.build_system_prefix();
+            if !prefix.is_empty() {
+                system_prompt = format!("{prefix}{system_prompt}");
+            }
+        }
+    }
     if !memory_context.is_empty() {
         system_prompt.push_str("\n\n## Persistent Memory Context\n\n");
         system_prompt.push_str(&memory_context);
@@ -401,10 +495,23 @@ pub async fn run_agent_for_session(
     loop_config.checkpoint_dir = Some(oz_core::checkpoint::checkpoint_dir(&project_root).to_string_lossy().to_string());
 
     // Background memory distillation (U3): a worker drains the job queue so
-    // session distillation never blocks the agent loop.
-    let memory_scheduler = std::sync::Arc::new(oz_core::memory_job::MemoryJobScheduler::new(
-        std::sync::Arc::new(McpMemoryDistiller::new()),
-    ));
+    // session distillation never blocks the agent loop. The distiller is
+    // selected by memory_backend: ERME semantic store vs legacy skill/MCP.
+    let distiller: std::sync::Arc<dyn oz_core::memory_job::MemoryDistiller> =
+        if cfg.memory_backend == "erme" {
+            match &state.erme_store {
+                Some(runtime) => std::sync::Arc::new(ErmeMemoryDistiller::new(
+                    std::sync::Arc::clone(&runtime.store),
+                )),
+                None => {
+                    debug_log("ERME store unavailable; using MCP distiller for memory jobs");
+                    std::sync::Arc::new(McpMemoryDistiller::new())
+                }
+            }
+        } else {
+            std::sync::Arc::new(McpMemoryDistiller::new())
+        };
+    let memory_scheduler = std::sync::Arc::new(oz_core::memory_job::MemoryJobScheduler::new(distiller));
     {
         let scheduler = std::sync::Arc::clone(&memory_scheduler);
         tokio::spawn(async move {

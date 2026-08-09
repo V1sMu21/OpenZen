@@ -76,6 +76,8 @@ pub struct MyKeyConfig {
     pub default_session: Option<String>,
     /// Model to use for compression summaries. When set, overrides auto-detection.
     pub summary_model: Option<String>,
+    /// Memory backend: "file" (default, legacy full-text) or "erme" (semantic).
+    pub memory_backend: String,
     #[serde(default)]
     pub tui: TuiConfig,
     #[serde(default)]
@@ -145,6 +147,11 @@ impl MyKeyConfig {
         let summary_model = raw.get("summary_model")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let memory_backend = raw.get("memory_backend")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| s == "file" || s == "erme")
+            .unwrap_or_else(|| "file".to_string());
         let mut sessions = HashMap::new();
 
         // Walk raw table to collect session entries. Dotted section names
@@ -185,6 +192,7 @@ impl MyKeyConfig {
         for (key, value) in &raw {
             if key == "default_session" { continue; }
             if key == "summary_model" { continue; }
+            if key == "memory_backend" { continue; }
             if key == "tui" { continue; }
             if key == "router" { continue; }
             if !value.is_table() { continue; }
@@ -205,6 +213,7 @@ impl MyKeyConfig {
         Ok(MyKeyConfig {
             default_session,
             summary_model,
+            memory_backend,
             tui: TuiConfig::default(),
             router: RouterConfig::default(),
             sessions,
@@ -551,6 +560,7 @@ model = "mixin-llm"
             sessions: HashMap::new(),
             default_session: None,
             summary_model: None,
+            memory_backend: "file".to_string(),
             tui: TuiConfig::default(),
             router: RouterConfig::default(),
         };
@@ -573,6 +583,7 @@ model = "mixin-llm"
             sessions,
             default_session: None,
             summary_model: None,
+            memory_backend: "file".to_string(),
             tui: TuiConfig::default(),
             router: RouterConfig::default(),
         };
@@ -621,5 +632,76 @@ model = "mixin-llm"
             "#,
         ).unwrap();
         assert_eq!(cfg.api_mode, ApiMode::ChatCompletions);
+    }
+
+    fn write_config(tmp_name: &str, body: &str) -> std::path::PathBuf {
+        let tmp_dir = env::temp_dir().join(tmp_name);
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let path = tmp_dir.join("config.toml");
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn memory_backend_defaults_to_file() {
+        let path = write_config("oz_config_test_mb_default", r#"
+default_session = "gpt4"
+
+[gpt4]
+apikey = "sk-test"
+apibase = "https://api.example.com/v1"
+model = "gpt-4"
+"#);
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert_eq!(cfg.memory_backend, "file");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn memory_backend_parses_erme() {
+        let path = write_config("oz_config_test_mb_erme", r#"
+memory_backend = "erme"
+default_session = "gpt4"
+
+[gpt4]
+apikey = "sk-test"
+apibase = "https://api.example.com/v1"
+model = "gpt-4"
+"#);
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert_eq!(cfg.memory_backend, "erme");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn memory_backend_unknown_value_falls_back_to_file() {
+        let path = write_config("oz_config_test_mb_unknown", r#"
+memory_backend = "quantum"
+default_session = "gpt4"
+
+[gpt4]
+apikey = "sk-test"
+apibase = "https://api.example.com/v1"
+model = "gpt-4"
+"#);
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert_eq!(cfg.memory_backend, "file");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn memory_backend_whitespace_trimmed() {
+        let path = write_config("oz_config_test_mb_trim", r#"
+memory_backend = "  erme  "
+default_session = "gpt4"
+
+[gpt4]
+apikey = "sk-test"
+apibase = "https://api.example.com/v1"
+model = "gpt-4"
+"#);
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert_eq!(cfg.memory_backend, "erme");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

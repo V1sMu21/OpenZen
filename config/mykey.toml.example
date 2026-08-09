@@ -1,3 +1,6 @@
+# Top-level options:
+#   memory_backend = "file"   # "file" (legacy full-text) or "erme" (semantic memory engine)
+
 [sessions.default]
 session_type = "claude"
 api_key = "${ANTHROPIC_API_KEY}"

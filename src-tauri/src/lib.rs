@@ -43,6 +43,155 @@ pub(crate) fn data_dir() -> PathBuf {
     home_dir().join(".openzen")
 }
 
+/// Long-lived ERME runtime: semantic store + L0 soul layer (M7).
+///
+/// The reflection engine subscribes to store events via [`MemoryStore::attach_soul`]
+/// and runs curiosity-driven introspection on an idle interval; its soul model
+/// is exposed through [`PromptInjector::build_system_prefix`] so the agent loop
+/// injects the soul state into every system prompt.
+pub struct ErmeRuntime {
+    pub store: Arc<entropy_memory_engine::memory_store::MemoryStore>,
+    pub reflection: Arc<entropy_memory_engine::l0::ReflectionEngine>,
+    pub injector: entropy_memory_engine::l0::PromptInjector,
+}
+
+/// Build the long-lived ERME semantic memory store rooted at `base_dir`.
+///
+/// Storage lands in `{base_dir}/memory_erme/erme_memory.bin` (sibling of the
+/// legacy `memory/` tree). Returns `None` on failure so the app degrades to
+/// the file backend instead of crashing at startup.
+fn init_erme_store(base_dir: &std::path::Path) -> Option<Arc<ErmeRuntime>> {
+    use entropy_memory_engine::consolidation::ConsolidationConfig;
+    use entropy_memory_engine::l0::{PromptInjector, ReflectionConfig, ReflectionEngine};
+    use entropy_memory_engine::l0::soul::{SoulHandle, SoulModel};
+    use entropy_memory_engine::l1::L1Cache;
+    use entropy_memory_engine::l2::{HnswConfig, L2Config, L2Engine};
+    use entropy_memory_engine::l3::{BudgetConfig, L3Config, L3Engine};
+    use entropy_memory_engine::memory_store::MemoryStore;
+    use entropy_memory_engine::orchestrator::MemoryOrchestrator;
+    use entropy_memory_engine::phase1::ConflictResolver;
+    use entropy_memory_engine::phase2::{RamblingConfig, RamblingEngine};
+    use entropy_memory_engine::phase4::{QuarantineConfig, QuarantineManager};
+    use std::sync::RwLock;
+
+    let memory_erme_dir = base_dir.join("memory_erme");
+    if std::fs::create_dir_all(&memory_erme_dir).is_err() {
+        return None;
+    }
+
+    let l1 = L1Cache::builder().capacity(10_000).build();
+    let l2 = Arc::new(L2Engine::new(L2Config {
+        hnsw: HnswConfig {
+            dimension: 384,
+            ..Default::default()
+        },
+        ..Default::default()
+    }));
+    let l3 = L3Engine::new(L3Config {
+        storage_path: memory_erme_dir.join("erme_memory.bin"),
+        budget: BudgetConfig {
+            daily_token_limit: 256_000,
+            annual_storage_limit: 50_000_000,
+            ..Default::default()
+        },
+        compression_max_chars: 400,
+        ..Default::default()
+    });
+
+    let store = Arc::new(MemoryStore::new(
+        l1,
+        Arc::clone(&l2),
+        l3,
+        ConsolidationConfig {
+            align_on_write: true,
+            ..Default::default()
+        },
+    ));
+
+    let conflict_resolver = Arc::new(ConflictResolver::new(Arc::new(L2Engine::new(L2Config {
+        hnsw: HnswConfig {
+            dimension: 384,
+            ..Default::default()
+        },
+        ..Default::default()
+    }))));
+
+    let quarantine = Arc::new(QuarantineManager::new(
+        Arc::new(L2Engine::new(L2Config {
+            hnsw: HnswConfig {
+                dimension: 384,
+                ..Default::default()
+            },
+            ..Default::default()
+        })),
+        QuarantineConfig::default(),
+    ));
+
+    // L0 灵魂模型：从磁盘加载（首次运行则新建默认模型）。
+    let soul_path = memory_erme_dir.join("soul.json");
+    let soul: SoulHandle = Arc::new(RwLock::new(
+        SoulModel::load_from(&soul_path).unwrap_or_default(),
+    ));
+
+    // 联想引擎与 store 共享同一 L2 语义图（含时间图 seed），
+    // 并被 orchestrator 与 reflection 共用同一实例（状态不分裂）。
+    let rambling = Arc::new(RamblingEngine::new(
+        RamblingConfig::default(),
+        Arc::clone(&l2.graph),
+        Arc::clone(&l2),
+    ));
+
+    let orchestrator = Arc::new(
+        MemoryOrchestrator::new(
+            Arc::clone(&store),
+            Arc::clone(&conflict_resolver),
+            quarantine,
+        )
+        .with_idle_cycle(Arc::clone(&rambling)),
+    );
+    store.attach_orchestrator(Arc::clone(&orchestrator));
+
+    // L0 反思引擎：订阅 store 事件，共享 orchestrator 的行为观察日志与
+    // 联想引擎；画像持久化到 soul.json（与加载路径一致，进程内升级可复用）。
+    let observer = Arc::new(orchestrator.observer().clone());
+    let reflection = Arc::new(
+        ReflectionEngine::new(
+            Arc::clone(&soul),
+            Arc::clone(&store),
+            observer,
+            conflict_resolver,
+            ReflectionConfig::default(),
+        )
+        .with_rambling(Arc::clone(&rambling))
+        .with_persist_path(soul_path),
+    );
+    store.attach_soul(Arc::clone(&reflection));
+
+    let injector = PromptInjector::new(Arc::clone(&soul));
+
+    // 后台内省循环：idle 间隔驱动 L0 完整内省 + Phase2-5 idle 管道。
+    {
+        let reflection = Arc::clone(&reflection);
+        let orchestrator = Arc::clone(&orchestrator);
+        let idle_secs = ReflectionConfig::default().idle_interval_secs;
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(idle_secs));
+            reflection.run_full_cycle();
+            orchestrator.run_idle_cycle();
+        });
+    }
+
+    tracing::info!(
+        "ERME memory engine initialised at {}",
+        memory_erme_dir.display()
+    );
+    Some(Arc::new(ErmeRuntime {
+        store,
+        reflection,
+        injector,
+    }))
+}
+
 fn load_locale() -> String {
     let path = data_dir().join("locale.json");
     if let Ok(content) = std::fs::read_to_string(&path) {
@@ -162,6 +311,9 @@ pub struct AppState {
     pub skill_mcp_dir: Option<String>,
     pub projects: Mutex<Vec<projects::store::ProjectRecord>>,
     pub crystallization_enabled: AtomicBool,
+    /// Long-lived ERME runtime (semantic store + L0 soul layer).
+    /// Created once at startup; None when construction failed.
+    pub erme_store: Option<Arc<ErmeRuntime>>,
     pub intervention_queues: Mutex<HashMap<String, Arc<Mutex<std::collections::VecDeque<oz_core::checkpoint::InterventionEvent>>>>>,
 }
 
@@ -209,6 +361,7 @@ impl AppState {
                 .map(|p| p.to_string_lossy().to_string()),
             projects: Mutex::new(projects::store::load_projects()),
             crystallization_enabled: AtomicBool::new(false),
+            erme_store: init_erme_store(&working_dir),
             intervention_queues: Mutex::new(HashMap::new()),
         }
     }

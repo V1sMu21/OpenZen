@@ -37,6 +37,7 @@ oz-platform = { path = "../crates/oz-platform" }
 oz-platform-feishu = { path = "../crates/oz-platform-feishu" }
 oz-platform-telegram = { path = "../crates/oz-platform-telegram" }
 oz-platform-wechat = { path = "../crates/oz-platform-wechat" }
+entropy_memory_engine.workspace = true
 uuid.workspace = true
 nix = { version = "0.27", features = ["process", "signal", "term", "fs"] }
 libc = "0.2"

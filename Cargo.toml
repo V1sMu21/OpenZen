@@ -50,6 +50,8 @@ crossterm = "0.28"
 memmap2 = "0.9"
 linkme = "0.3"
 toml = "0.8"
+# ERME — entropy-reduced memory engine (vendored for CI-buildable path dependency)
+entropy_memory_engine = { path = "vendor/entropy-memory-engine" }
 
 [package]
 name = "openzen"
