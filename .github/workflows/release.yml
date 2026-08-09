@@ -1,0 +1,71 @@
+name: Release
+
+# 触发: 推送 v* tag（scripts/release.sh 创建 tag 后自动触发）
+# 闸门: 复用 ci.yml 的 check + test（本文件只处理构建与发布）
+# 产物: macOS dmg + app 上传到 GitHub Release，版本号 = tag 名
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # 测试闸门: 发布前强制全绿（与 ci.yml 的 test job 相同配置）
+  test:
+    name: Test gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: cargo test
+        run: cargo test --workspace --test-threads=1
+
+  build-macos:
+    name: Build macOS dmg
+    needs: [test]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontends/package-lock.json
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Build frontend
+        working-directory: frontends
+        run: npm ci && npm run build
+
+      - name: Install scripts deps
+        working-directory: scripts
+        run: npm ci || npm install --no-audit --no-fund || true
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --locked
+
+      - name: Build release bundle
+        run: cargo tauri build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          files: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

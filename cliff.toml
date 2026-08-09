@@ -1,0 +1,80 @@
+# git-cliff ~ configuration file
+# https://git-cliff.org/docs/configuration
+# OpenZen: 版本推导 + CHANGELOG 自动化（方案 A）
+# 用法:
+#   git-cliff --bump           # 推导下一个版本号
+#   git-cliff --unreleased -o CHANGELOG.md   # 全量生成（含已发布段）
+#   git-cliff --prepend CHANGELOG.md         # 仅把新段插到文件头部
+
+[changelog]
+# 头部留空：--prepend 模式插入时避免重复 "# Changelog"
+header = """
+"""
+# 与手写格式保持一致: ## v0.1.0 (2026-08-09)
+body = """
+{% if version %}\
+    ## v{{ version | trim_start_matches(pat="v") }} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% else %}\
+    ## Unreleased
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+            {% if commit.breaking %}[**breaking**] {% endif %}\
+            {{ commit.message | upper_first }}\
+    {% endfor %}
+{% endfor %}
+"""
+# Remove leading and trailing whitespaces from the changelog's body.
+trim = true
+# Render body even when there are no releases to process.
+render_always = true
+# Postprocessors (keep empty; add <REPO> link template later once public).
+postprocessors = []
+
+[git]
+# Parse commits according to the conventional commits specification.
+conventional_commits = true
+# Exclude commits that do not match the conventional commits specification.
+# (历史 commit 无前缀会被过滤; 发布 v0.1.0 打 tag 后, 后续 commit 用前缀风格)
+filter_unconventional = true
+# Require all commits to be conventional. Takes precedence over filter_unconventional.
+require_conventional = false
+# Split commits on newlines, treating each line as an individual commit.
+split_commits = false
+# Regex-based parsers to modify commit messages prior to further processing.
+commit_preprocessors = []
+# Prevent commits that are breaking from being excluded by commit parsers.
+protect_breaking_commits = true
+# Assigns commits to groups; matching order matters (first match wins).
+commit_parsers = [
+    { message = "^feat", group = "🚀 Features" },
+    { message = "^fix", group = "🐛 Bug Fixes" },
+    { message = "^doc", group = "📚 Documentation" },
+    { message = "^perf", group = "⚡ Performance" },
+    { message = "^refactor", group = "🚜 Refactoring" },
+    { message = "^style", group = "🎨 Styling" },
+    { message = "^test", group = "🧪 Testing" },
+    { message = "^chore\\(release\\): prepare for", skip = true },
+    { message = "^chore|^ci", group = "⚙️ Miscellaneous Tasks" },
+    { body = ".*security", group = "🛡️ Security" },
+    { message = "^revert", group = "◀️ Revert" },
+    { message = ".*", group = "💼 Other" },
+]
+# Exclude commits that are not matched by any commit parser.
+filter_commits = false
+# Fail on a commit that is not matched by any commit parser.
+fail_on_unmatched_commit = false
+# Link parsers (enable after public repo is known).
+link_parsers = []
+# Only include tags belonging to the current branch.
+use_branch_tags = true
+# Order releases topologically instead of chronologically.
+topo_order = false
+# Order commits topologically instead of chronologically.
+topo_order_commits = true
+# Order of commits in each group/release within the changelog.
+sort_commits = "oldest"
+# Process submodules commits.
+recurse_submodules = false

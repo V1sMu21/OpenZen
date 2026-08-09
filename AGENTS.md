@@ -116,3 +116,58 @@ returns 401 "API key required" (not a FastAPI 404), then re-run/resume.
 If a generated project (e.g. a longtask kanban-board) must run a backend,
 use **port 8001+** and update every hardcoded `:8000` reference
 (vite proxy, ws client, run.sh, docker-compose, docs).
+
+## Release process & versioning (2026-08-09)
+
+Version numbers are DERIVED from commit history (git-cliff), not chosen by hand.
+The FIRST public release is **v0.1.0** (currently private — do not tag or publish yet).
+
+### Commit convention (MANDATORY for all future commits)
+
+Every commit must use Conventional Commits prefixes — git-cliff derives the
+next version from them:
+
+| Prefix | Effect on version | Example |
+|--------|-------------------|---------|
+| `feat:` | MINOR (0.1.0 → 0.2.0) | `feat(erme): add idle rambling cycle` |
+| `fix:` | PATCH (0.1.0 → 0.1.1) | `fix(core): correct token accounting` |
+| `feat!:` / `BREAKING` | MAJOR | `feat!: switch to protocol v2` |
+| `refactor:` / `docs:` / `test:` / `chore:` / `ci:` | no bump | `chore: remove dev artifacts` |
+
+Scope in parens is optional but recommended (`feat(erme):`, `fix(webui):`).
+
+### Release flow
+
+```bash
+scripts/release.sh --dry-run   # preview: next version + changelog (no changes)
+scripts/release.sh             # full: test gate → bump → sync version → CHANGELOG → build → tag
+```
+
+`release.sh` WILL NOT run if:
+- working tree is dirty, or not on `main`
+- `cargo test --workspace -- --test-threads=1` has any failure (test gate)
+
+After the script creates tag `vX.Y.Z`, push with `git push origin main --tags`.
+`.github/workflows/release.yml` (triggered on `v*` tag) re-runs the test gate,
+builds the macOS dmg, and attaches it to the GitHub Release — the Release
+version number always equals the tag name.
+
+Version fields that must stay in sync: `src-tauri/tauri.conf.json` +
+`frontends/package.json` (handled by release.sh). Rust crate versions in
+`Cargo.toml` are internal and stay at 0.1.0.
+
+### Known pre-existing test fixes (2026-08-09)
+
+- `recover_from_real_checkpoint_populates_store`: session_id was hardcoded to a
+  stale UUID — now matches `tests/longtask/2/` checkpoint data (`fe54c2c0-…`).
+  Test self-skips when the local dir is absent (CI-safe).
+- `adr_count_matches_readme_index`: ADR file filter `starts_with("000")` failed
+  at 0010 (4-digit prefix check now used).
+- `test_temporal_query` (vendor): now sleeps before sampling `before` so the
+  first edge timestamp is strictly less than the query window (closed-interval
+  `temporal_query` was flaky when both landed on the same clock tick).
+- `test_run_idle_cycle_promote_dedup` (vendor): assertion compared two
+  unrelated random counts (`second.promoted <= first.rambled`); with
+  `max_conjectures=3` the second cycle legitimately promotes fresh ids.
+  Now asserts the promoted-id set only grows and its delta equals
+  `second.promoted` (true dedup invariant, deterministic under randomness).
