@@ -53,8 +53,24 @@ docs/test-screenshots/
 # Personal skills (not for repo)
 .opencode/skills/
 
+# Personal system prompts (keep local; only the *.example.txt template ships)
+assets/sys_prompt.txt
+assets/sys_prompt_en.txt
+assets/sys_prompt_backup.txt
+assets/sys_prompt_en_backup.txt
+
+# Large icon intermediates (not referenced by tauri.conf.json; icons/icon.* is the source)
+src-tauri/openzen-icon*.png
+src-tauri/icons/openzen-icon*.png
+
+# Test scratch files inside src-tauri (not real tests)
+src-tauri/test.md
+src-tauri/docs/
+
 # Local-only dev artifacts (not for repo)
 docs/
+TESTING_GUIDE.md
+tests/longtask-rag-and-vision-design.md
 count_lines.py
 current-snapshot.md
 final_verify.sh
