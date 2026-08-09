@@ -55,6 +55,68 @@ impl SkillMcpStore {
         }
     }
 
+    /// Build a compact index (name + description) of ALL active skills and
+    /// SOPs for progressive disclosure — injected at loop start so the model
+    /// knows what exists (~100 tokens) without paying for every body. Full
+    /// bodies are fetched on demand via `skill_mcp_search`.
+    pub fn build_index(&self) -> String {
+        let mut index = String::from("## 可用技能 / SOP 清单\n");
+        index.push_str("匹配任务时用 skill_mcp_search 获取对应技能正文后执行。\n\n");
+
+        let active_skills: Vec<&crate::skill::Skill> = self
+            .skills
+            .list()
+            .iter()
+            .filter(|s| s.metadata.is_active())
+            .collect();
+        if !active_skills.is_empty() {
+            index.push_str(&format!("**Skills ({}):**\n", active_skills.len()));
+            for s in &active_skills {
+                index.push_str(&format!("- `skill:{}` — {}\n", s.name, s.description));
+            }
+            index.push('\n');
+        }
+
+        let active_sops: Vec<&crate::sop::Sop> = self
+            .sops
+            .all()
+            .iter()
+            .filter(|s| s.metadata.is_active())
+            .collect();
+        if !active_sops.is_empty() {
+            index.push_str(&format!("**SOPs ({}):**\n", active_sops.len()));
+            for s in &active_sops {
+                index.push_str(&format!("- `sop:{}` — {}\n", s.name, s.description));
+            }
+        }
+
+        // Recent auto-insights (L1a): compact one-line summary so the model
+        // knows past experience exists, without loading full bodies. Full
+        // content is retrievable via skill_mcp_search.
+        let recent = self.memory.read_recent_auto_insights_sync(7).unwrap_or_default();
+        let insight_lines: Vec<&str> = recent
+            .lines()
+            .filter(|l| l.starts_with("- "))
+            .map(|l| l.trim_start_matches("- "))
+            .take(15)
+            .collect();
+        if !insight_lines.is_empty() {
+            index.push_str("\n**Recent auto insights (7d):**\n");
+            for line in insight_lines {
+                let truncated: String = line.chars().take(100).collect();
+                index.push_str(&format!("- insight:auto — {truncated}\n"));
+            }
+        }
+
+        index
+    }
+
+    /// Append a session-derived experience line to the auto-insight store
+    /// (weekly archive, deduplicated). Called after session distillation.
+    pub async fn append_auto_insight(&self, line: &str) -> Result<(), SkillMcpError> {
+        self.memory.append_auto_insight(line).await
+    }
+
     /// Build combined prompt context for injection into the agent's system prompt.
     ///
     /// Includes:
@@ -334,5 +396,42 @@ mod tests {
         let (_dir, store) = tmp_skill_mcp();
         assert!(store.find_skills("anything").is_empty());
         assert!(store.find_sops("anything").is_empty());
+    }
+
+    #[test]
+    fn test_build_index_empty() {
+        let (_dir, store) = tmp_skill_mcp();
+        let index = store.build_index();
+        // Empty store: index has header but no skill/SOP entries.
+        assert!(index.contains("可用技能"));
+        assert!(!index.contains("`skill:"));
+        assert!(!index.contains("`sop:"));
+    }
+
+    #[test]
+    fn test_build_index_lists_active_items() {
+        let (_dir, mut store) = tmp_skill_mcp();
+
+        use crate::skill::Skill;
+        let skill = Skill {
+            name: "brandkit".into(),
+            description: "高级品牌设计".into(),
+            tags: vec!["design".into()],
+            required_tools: vec![],
+            content: "# brandkit\n\nBody.\n".into(),
+            source_path: PathBuf::new(),
+            metadata: oz_core_types::SkillMcpMetadata::new("brandkit", "", vec![]),
+            quality: 0.9,
+        };
+        store.skills.register(skill).unwrap();
+
+        let seq = vec![("grep".to_string(), serde_json::json!({}))];
+        store.crystallise_sop("deploy", "平台部署 SOP", &seq, None).unwrap();
+
+        let index = store.build_index();
+        assert!(index.contains("`skill:brandkit` — 高级品牌设计"));
+        assert!(index.contains("`sop:deploy` — 平台部署 SOP"));
+        // Index is compact — never contains full bodies.
+        assert!(!index.contains("# brandkit"));
     }
 }

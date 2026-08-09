@@ -39,8 +39,16 @@ pub(crate) fn home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/tmp"))
 }
 
+/// Runtime data root. Overridable via `OPENZEN_DATA_DIR` so a dev build can
+/// run against an isolated data tree instead of the user's real one.
+/// Otherwise the active profile's `data_dir` (P1-6) wins, falling back to
+/// `~/.openzen`.
 pub(crate) fn data_dir() -> PathBuf {
-    home_dir().join(".openzen")
+    if let Ok(d) = std::env::var("OPENZEN_DATA_DIR") {
+        return PathBuf::from(d);
+    }
+    let profile = oz_config::load_profile();
+    profile.data_dir.unwrap_or_else(|| home_dir().join(".openzen"))
 }
 
 /// Long-lived ERME runtime: semantic store + L0 soul layer (M7).
@@ -252,12 +260,13 @@ pub(crate) fn find_assets_dir() -> PathBuf {
 }
 
 pub(crate) fn tauri_ctx() -> ToolContext {
-    let project_root = home_dir().join("Documents").join("apps").join("openzen");
-    let working_dir = project_root.to_string_lossy().to_string();
+    // Agent working dir lives under the data root, never the source tree.
+    let working_dir = data_dir().join("workspace");
+    let working_dir = working_dir.to_string_lossy().to_string();
     let assets_dir = find_assets_dir().to_string_lossy().to_string();
     let _ = std::fs::create_dir_all(&working_dir);
 
-    let skill_mcp_dir = [project_root.join(SKILL_MCP_DIR)]
+    let skill_mcp_dir = [data_dir().join(SKILL_MCP_DIR)]
         .into_iter()
         .chain(std::env::current_dir().ok().map(|cwd| cwd.join(SKILL_MCP_DIR)))
         .find(|p| p.is_dir())
@@ -319,18 +328,20 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
-        let working_dir = home_dir().join("Documents").join("apps").join("openzen");
+        let data_root = data_dir();
+        // Agent working dir lives under the data root, never the source tree.
+        let working_dir = data_root.join("workspace");
         let _ = std::fs::create_dir_all(&working_dir);
 
         // Data migration: ensure projects.json exists (first-run)
         {
-            let pp = data_dir().join("projects.json");
+            let pp = data_root.join("projects.json");
             if !pp.exists() {
                 let _ = std::fs::write(&pp, "[]");
             }
         }
 
-        let state_path = data_dir().join(SESSION_STATE_FILE);
+        let state_path = data_root.join(SESSION_STATE_FILE);
         AppState {
             sessions: Arc::new(Mutex::new(SessionStore::persisted(state_path))),
             sse_bus: SseBus::new(10_000),
@@ -343,7 +354,7 @@ impl AppState {
             sidepanel: Mutex::new(SidePanelState::new()),
             html_roots: std::sync::Mutex::new(Vec::new()),
             terminal_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            config_path: data_dir()
+            config_path: data_root
                 .join("mykey.toml")
                 .to_string_lossy()
                 .to_string(),
@@ -354,14 +365,14 @@ impl AppState {
             app_handle: Mutex::new(None),
             reminder_tx: Mutex::new(None),
             locale: Arc::new(Mutex::new(load_locale())),
-            skill_mcp_dir: [working_dir.join(SKILL_MCP_DIR)]
+            skill_mcp_dir: [data_root.join(SKILL_MCP_DIR)]
                 .into_iter()
                 .chain(std::env::current_dir().ok().map(|cwd| cwd.join(SKILL_MCP_DIR)))
                 .find(|p| p.is_dir())
                 .map(|p| p.to_string_lossy().to_string()),
             projects: Mutex::new(projects::store::load_projects()),
             crystallization_enabled: AtomicBool::new(false),
-            erme_store: init_erme_store(&working_dir),
+            erme_store: init_erme_store(&data_root),
             intervention_queues: Mutex::new(HashMap::new()),
         }
     }
@@ -508,9 +519,7 @@ pub fn run() {
             }));
             scheduler.register(Box::new(oz_scheduler::TrustDecay::default()));
             {
-                let skill_mcp_exists = std::path::Path::new(&state.working_dir)
-                    .join(SKILL_MCP_DIR)
-                    .is_dir();
+                let skill_mcp_exists = state.skill_mcp_dir.as_deref().is_some_and(|d| std::path::Path::new(d).is_dir());
                 if skill_mcp_exists {
                     scheduler.register(Box::new(oz_scheduler::SkillMcpScan::default()));
                 }
@@ -560,9 +569,10 @@ pub fn run() {
                 let ask_user_rxs = state_for_platforms.ask_user_rxs.clone();
                 let approval_handler = state_for_platforms.approval_handler.clone();
                 let locale = state_for_platforms.locale.clone();
-                let skill_mcp_dir = home_dir().join("Documents").join("apps").join("openzen").join(SKILL_MCP_DIR)
+                let skill_mcp_dir = data_dir()
+                    .join(SKILL_MCP_DIR)
                     .is_dir()
-                    .then(|| home_dir().join("Documents").join("apps").join("openzen").join(SKILL_MCP_DIR).to_string_lossy().to_string());
+                    .then(|| data_dir().join(SKILL_MCP_DIR).to_string_lossy().to_string());
 
                 let bridge = Arc::new(AgentBridge {
                     sessions,
@@ -791,4 +801,116 @@ commands::get_working_dir_for_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plan B (2026-08-09): `OPENZEN_DATA_DIR` must override the default data
+    /// root so a dev build runs against an isolated data tree (zero pollution
+    /// of `~/.openzen/` and of the source tree). Serialized via a file-level
+    /// mutex because `set_var` is process-global and cargo runs tests in
+    /// parallel threads.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn data_dir_respects_openzen_data_dir_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original = std::env::var("OPENZEN_DATA_DIR").ok();
+
+        std::env::set_var("OPENZEN_DATA_DIR", "/tmp/openzen-dev-test");
+        assert_eq!(
+            data_dir(),
+            PathBuf::from("/tmp/openzen-dev-test"),
+            "OPENZEN_DATA_DIR must override the default ~/.openzen root"
+        );
+
+        match original {
+            Some(v) => std::env::set_var("OPENZEN_DATA_DIR", v),
+            None => std::env::remove_var("OPENZEN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn data_dir_defaults_to_home_dot_openzen() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original = std::env::var("OPENZEN_DATA_DIR").ok();
+        let original_home = std::env::var("HOME").ok();
+        let tmp_home = std::env::temp_dir().join("oz-data-dir-default-test");
+        std::fs::remove_dir_all(&tmp_home).ok();
+        std::env::remove_var("OPENZEN_DATA_DIR");
+        std::env::set_var("HOME", &tmp_home);
+
+        assert_eq!(
+            data_dir(),
+            home_dir().join(".openzen"),
+            "without OPENZEN_DATA_DIR, data root defaults to ~/.openzen"
+        );
+
+        match original {
+            Some(v) => std::env::set_var("OPENZEN_DATA_DIR", v),
+            None => {}
+        }
+        match original_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn data_dir_uses_profile_data_dir_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original_dir = std::env::var("OPENZEN_DATA_DIR").ok();
+        let original_profile = std::env::var("OPENZEN_PROFILE").ok();
+        let original_home = std::env::var("HOME").ok();
+        let tmp_home = std::env::temp_dir().join("oz-data-dir-profile-test");
+        std::fs::create_dir_all(tmp_home.join(".openzen")).unwrap();
+        std::fs::write(
+            tmp_home.join(".openzen/profiles.toml"),
+            "[profiles.dev]\ndata_dir = \"/tmp/openzen-dev-profile\"\n",
+        )
+        .unwrap();
+
+        std::env::remove_var("OPENZEN_DATA_DIR");
+        std::env::set_var("OPENZEN_PROFILE", "dev");
+        std::env::set_var("HOME", &tmp_home);
+        assert_eq!(
+            data_dir(),
+            PathBuf::from("/tmp/openzen-dev-profile"),
+            "active profile's data_dir must override the default ~/.openzen root"
+        );
+
+        match original_dir {
+            Some(v) => std::env::set_var("OPENZEN_DATA_DIR", v),
+            None => std::env::remove_var("OPENZEN_DATA_DIR"),
+        }
+        match original_profile {
+            Some(v) => std::env::set_var("OPENZEN_PROFILE", v),
+            None => std::env::remove_var("OPENZEN_PROFILE"),
+        }
+        match original_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn working_dir_lives_under_data_root() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original = std::env::var("OPENZEN_DATA_DIR").ok();
+        std::env::set_var("OPENZEN_DATA_DIR", "/tmp/openzen-dev-test");
+
+        let ctx = tauri_ctx();
+        assert!(
+            ctx.working_dir.starts_with("/tmp/openzen-dev-test/workspace"),
+            "agent working dir must live under the data root, got: {}",
+            ctx.working_dir
+        );
+
+        match original {
+            Some(v) => std::env::set_var("OPENZEN_DATA_DIR", v),
+            None => std::env::remove_var("OPENZEN_DATA_DIR"),
+        }
+    }
 }

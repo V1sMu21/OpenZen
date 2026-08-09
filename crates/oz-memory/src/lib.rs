@@ -7,6 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod fts;
+
+pub use fts::{FtsHit, MemoryFts};
+
 /// Error type for memory operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryError {

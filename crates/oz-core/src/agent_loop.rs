@@ -205,21 +205,29 @@ pub fn extract_tool_calls(response: &MockResponse) -> Vec<oz_core_types::MockToo
     response.tool_calls.clone()
 }
 
-/// Extract the first bash command from SOP context for directive injection.
-fn extract_bash_hint(sop_context: &str) -> String {
-    for line in sop_context.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("./target/") || trimmed.starts_with("cargo ") {
-            return trimmed.to_string();
-        }
-        if trimmed.starts_with('`') && trimmed.ends_with('`') {
-            let inner = &trimmed[1..trimmed.len()-1];
-            if inner.contains("openzen") || inner.contains("cargo") {
-                return inner.to_string();
-            }
-        }
+/// Build the `<system-reminder>` block carrying dynamic context that must NOT
+/// live in the system prompt (so the system prompt stays byte-stable and
+/// keeps the omlx prefix-cache chain intact). Injected as a prefix of the
+/// first user message, mirroring Claude Code's dynamic-reminder pattern.
+fn build_system_reminder(working_dir: &str, session_id: &str) -> String {
+    let (git_sha, git_branch, _origin) =
+        crate::checkpoint::git_snapshot(std::path::Path::new(working_dir));
+    let date = chrono::Local::now().format("%Y-%m-%d");
+    let mut block = format!(
+        "<system-reminder>\nToday's date: {date}\nWorking directory: {working_dir}\n"
+    );
+    if let Some(branch) = git_branch {
+        block.push_str(&format!("Git branch: {branch}\n"));
     }
-    String::new()
+    if let Some(sha) = git_sha {
+        let short = &sha[..sha.len().min(7)];
+        block.push_str(&format!("Git commit: {short}\n"));
+    }
+    if !session_id.is_empty() {
+        block.push_str(&format!("Session: {session_id}\n"));
+    }
+    block.push_str("</system-reminder>");
+    block
 }
 
 /// Wait (bounded) for the LLM summary from `spawn_summary`. Returns the
@@ -270,6 +278,36 @@ where
     let mut messages = Vec::with_capacity(2 + additional_messages.len());
     messages.push(Message::system(&system_prompt));
     messages.extend(additional_messages);
+    // Dynamic context (date/cwd/git) goes in a `<system-reminder>` prefix on
+    // the first user message — never in the system prompt — so the system
+    // block stays byte-stable for prefix caching.
+    let reminder = build_system_reminder(&config.working_dir, &config.session_id);
+    // P2-8: compile diagnostics ride inside the reminder block when enabled.
+    let reminder = if config.include_diagnostics {
+        match crate::diagnostics::collect_diagnostics_block(&config.working_dir).await {
+            block if !block.is_empty() => format!("{reminder}\n{block}"),
+            _ => reminder,
+        }
+    } else {
+        reminder
+    };
+    // SessionStart hooks append extra context inside the reminder block,
+    // keeping it byte-stable for prefix caching.
+    let reminder = if let Some(ref hooks) = config.hooks {
+        match hooks.fire(&crate::hooks::HookEvent::SessionStart) {
+            Some(extra) if !extra.is_empty() => {
+                reminder.replace("</system-reminder>", &format!("{extra}\n</system-reminder>"))
+            }
+            _ => reminder,
+        }
+    } else {
+        reminder
+    };
+    let user_input = if reminder.is_empty() {
+        user_input
+    } else {
+        format!("{reminder}\n\n{user_input}")
+    };
     messages.push(Message::user(&user_input));
 
     let mut turn: u32 = 0;
@@ -373,34 +411,23 @@ where
         eprintln!("[openzen] WARNING: skill_mcp_dir is None — NO SKILLS OR SOPS WILL BE LOADED. config.skill_mcp_dir={:?}", config.skill_mcp_dir);
     }
 
-    // If skill_mcp_store is active, inject matched skills + SOPs at loop start
+    // If skill_mcp_store is active, inject the compact skill/SOP index at
+    // loop start (progressive disclosure: name+description only, ~100 tokens).
+    // Full bodies are fetched on demand via skill_mcp_search.
     if let Some(ref store) = skill_mcp_store {
-        let skill_mcp_context = store.build_context(
-            &user_input,
-            std::path::Path::new(&config.working_dir),
-            None,
-        ).await;
-        if !skill_mcp_context.is_empty() {
-            let preview: String = skill_mcp_context.chars().take(200).collect();
-            eprintln!("[openzen] Injected SOP/skill context ({} chars): {}", skill_mcp_context.len(), preview);
+        let skill_index = store.build_index();
+        if !skill_index.is_empty() {
+            eprintln!(
+                "[openzen] Injected skill/SOP index ({} chars)",
+                skill_index.len()
+            );
             if let Some(system_msg) = messages.iter_mut().find(|m| m.role == Role::System) {
-                system_msg.content.push(ContentBlock::text(&skill_mcp_context));
+                system_msg.content.push(ContentBlock::text(&skill_index));
             } else {
-                messages.insert(0, Message::system(&skill_mcp_context));
-            }
-            // Extract the first bash command from the SOP content and prepend it
-            // directly to the user message. Some local models produce thinking
-            // but no tool calls — this forces the command into the instruction.
-            let cmd_hint = extract_bash_hint(&skill_mcp_context);
-            if let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == Role::User) {
-                if let Some(ContentBlock::Text { ref mut text, .. }) = last_user.content.first_mut() {
-                    if !cmd_hint.is_empty() {
-                        *text = format!("[Run: {}]\n{}", cmd_hint, text);
-                    }
-                }
+                messages.insert(0, Message::system(&skill_index));
             }
         } else {
-            eprintln!("[openzen] SkillMcpStore active but no SOP/skill matched query: '{}'", user_input);
+            eprintln!("[openzen] SkillMcpStore active but no active skills/SOPs registered");
         }
     }
 
@@ -994,6 +1021,31 @@ where
                 };
                 // Inject hint for the next turn — push to messages so the model sees it.
                 messages.push(Message::user(hint));
+                // Fallback for progressive disclosure: the model expressed
+                // intent but did not call skill_mcp_search. Local models
+                // sometimes never discover the tool; degrade to injecting the
+                // matched skill/SOP bodies once (first intent-only turn only)
+                // so the intent can proceed.
+                if consecutive_intent_hits == 1 {
+                    if let Some(ref store) = skill_mcp_store {
+                        let matched = store.build_context(
+                            &user_input,
+                            std::path::Path::new(&config.working_dir),
+                            None,
+                        ).await;
+                        if !matched.is_empty() {
+                            let mut blocks = Vec::new();
+                            blocks.push(ContentBlock::text(&format!(
+                                "<system-reminder>Detected intent without tool calls — matched skill/SOP context injected below:</system-reminder>\n{matched}"
+                            )));
+                            messages.push(Message::user_with_blocks(blocks));
+                            eprintln!(
+                                "[openzen] Degraded to full skill/SOP context ({} chars) after intent-only turn",
+                                matched.len()
+                            );
+                        }
+                    }
+                }
                 // Return empty vec — no respond → no exit → loop continues naturally.
                 vec![]
             } else {
@@ -1276,6 +1328,17 @@ where
         for (ii, ref tool_name, ref outcome) in &parallel_results {
             if let Some(meta) = tool_meta.iter().find(|m| m.ii == *ii) {
                 handler.tool_after(tool_name, &meta.args, outcome.clone());
+                // PostToolUse hooks fire only for successful file-writing
+                // tools, with the target file path for {file} substitution.
+                if outcome.is_ok() && matches!(tool_name.as_str(), "write" | "edit" | "patch") {
+                    if let Some(ref hooks) = config.hooks {
+                        let file = meta.args.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string());
+                        hooks.fire(&crate::hooks::HookEvent::PostToolUse {
+                            tool: tool_name.clone(),
+                            file,
+                        });
+                    }
+                }
             }
         }
 

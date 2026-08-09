@@ -286,6 +286,12 @@ pub struct LoopConfig {
     /// transcripts are enqueued for async knowledge extraction instead of
     /// blocking the loop (U3).
     pub memory_scheduler: Option<std::sync::Arc<crate::memory_job::MemoryJobScheduler>>,
+    /// Hook handler for SessionStart / PostToolUse automation. When set,
+    /// hook events are fired at loop start and after file-writing tools.
+    pub hooks: Option<std::sync::Arc<dyn crate::hooks::HookHandler>>,
+    /// Collect compile diagnostics (cargo check / tsc) into the startup
+    /// reminder block (P2-8). Off by default; runner opts in.
+    pub include_diagnostics: bool,
 }
 
 impl Default for LoopConfig {
@@ -322,6 +328,8 @@ impl Default for LoopConfig {
             llm_error_retries: 3,
             rollout_dir: None,
             memory_scheduler: None,
+            hooks: None,
+            include_diagnostics: false,
         }
     }
 }
@@ -370,6 +378,8 @@ impl Clone for LoopConfig {
             llm_error_retries: self.llm_error_retries,
             rollout_dir: self.rollout_dir.clone(),
             memory_scheduler: self.memory_scheduler.clone(),
+            hooks: self.hooks.clone(),
+            include_diagnostics: self.include_diagnostics,
         }
     }
 }

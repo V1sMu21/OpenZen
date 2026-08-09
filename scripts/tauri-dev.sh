@@ -2,6 +2,7 @@
 # ──────────────────────────────────────────────────────────
 # OpenZen Tauri 开发模式启动脚本
 # 用法: bash scripts/tauri-dev.sh
+#      OPENZEN_PROFILE=dev bash scripts/tauri-dev.sh   # 隔离数据根（P1-6）
 #
 # 步骤:
 #   1. 安装前端依赖（如未安装）

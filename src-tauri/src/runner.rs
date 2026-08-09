@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use oz_config::mykey::{MyKeyConfig, SessionType};
+use oz_config::profile::load_profile;
 use oz_core::handler::LoopConfig;
 use oz_core_types::{ContentBlock, Message, StreamEvent};
 use oz_memory::MemorySystem;
@@ -272,7 +273,9 @@ pub async fn run_agent_for_session(
 
     let cfg = MyKeyConfig::from_file(std::path::Path::new(&config_path))
         .map_err(|e| anyhow::anyhow!("Config error: {e} (path: {config_path})"))?;
+    let profile = load_profile();
     let session_name = model_name
+        .or(profile.default_model.as_deref())
         .or_else(|| cfg.default_session.as_deref())
         .unwrap_or("claude_sonnet");
     let sess_config = cfg
@@ -571,7 +574,43 @@ pub async fn run_agent_for_session(
     }
 
     let trust_store = oz_safety::TrustStore::new(Some(project_ga_dir.join("trust.json")));
-    loop_config.safety_guard = Some(Arc::new(oz_safety::SafetyGuard::new(trust_store)));
+    let mut guard = oz_safety::SafetyGuard::new(trust_store);
+    // B7a: project trust level from {data_dir}/trust.json gates coarse
+    // capabilities (execution / writes) per project root. Default Full.
+    let trust_level = oz_safety::project_trust(&data_dir(), &project_root.to_string_lossy());
+    if trust_level != oz_safety::ProjectTrustLevel::Full {
+        debug_log(&format!(
+            "project trust level for {}: {:?}",
+            project_root.display(),
+            trust_level
+        ));
+        guard = guard.with_project_trust(trust_level);
+    }
+    let permissions = match &profile.permission_file {
+        Some(f) => {
+            let path = if f.is_absolute() { f.clone() } else { data_dir().join(f) };
+            debug_log(&format!("permission policy (profile {}): loading {}", profile.name, path.display()));
+            oz_safety::Permissions::from_toml(&std::fs::read_to_string(&path).unwrap_or_default())
+        }
+        None => oz_safety::Permissions::load_from_dir(&data_dir()),
+    };
+    if !permissions.rules.is_empty() {
+        debug_log(&format!(
+            "permission policy loaded: {} rule(s)",
+            permissions.rules.len(),
+        ));
+        guard = guard.with_permissions(permissions);
+    }
+    loop_config.safety_guard = Some(Arc::new(guard));
+    if let Some(hooks) = oz_core::TomlHooks::load_from_dir(&data_dir()) {
+        debug_log(&format!(
+            "hooks loaded from {}",
+            data_dir().join("hooks.toml").display()
+        ));
+        loop_config.hooks = Some(Arc::new(hooks));
+    }
+    // P2-8: surface compile diagnostics in the startup reminder.
+    loop_config.include_diagnostics = true;
     loop_config.approval_handler = lock_poison_guard(&state.approval_handler).clone();
 
     // Wire ask_user reply slot

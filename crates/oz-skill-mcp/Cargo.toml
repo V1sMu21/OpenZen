@@ -15,6 +15,7 @@ thiserror.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 toml = "0.8"
+oz-memory = { version = "0.1.0", path = "../oz-memory" }
 
 [dev-dependencies]
 tempfile.workspace = true

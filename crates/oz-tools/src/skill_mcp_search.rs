@@ -127,6 +127,13 @@ impl ToolHandler for SkillMcpSearchTool {
 
         let mut results = Vec::new();
 
+        // P2-7: FTS5 memory backend — search distilled facts/insights too.
+        let fts_memory = oz_memory::MemoryFts::open(&std::path::PathBuf::from(skill_mcp_dir).join("memory_fts.sqlite")).ok();
+        let fts_hits = fts_memory
+            .as_ref()
+            .and_then(|f| f.search(&query, max).ok())
+            .unwrap_or_default();
+
         for skill in skills.iter().take(max) {
             results.push(serde_json::json!({
                 "type": "skill",
@@ -146,6 +153,14 @@ impl ToolHandler for SkillMcpSearchTool {
                 "tags": sop.tags,
                 "quality": sop.metadata.quality_score,
                 "success_count": sop.metadata.success_count,
+            }));
+        }
+
+        for hit in fts_hits.iter().take(max) {
+            results.push(serde_json::json!({
+                "type": "memory",
+                "category": hit.category,
+                "content": hit.content,
             }));
         }
 
@@ -176,6 +191,12 @@ impl ToolHandler for SkillMcpSearchTool {
                 };
                 p.push_str(&body);
                 p.push_str("\n\n");
+            }
+            if !fts_hits.is_empty() {
+                p.push_str(&format!("**Memory hits ({}):**\n", fts_hits.len()));
+                for hit in &fts_hits {
+                    p.push_str(&format!("- [{}] {}\n", hit.category, hit.content));
+                }
             }
             p
         };
@@ -361,6 +382,25 @@ mod tests {
             &c,
         ).await.unwrap();
         assert_eq!(result.data["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_skill_mcp_search_fts_memory_backend() {
+        let c = ctx();
+        setup_test_skill(&c);
+        let fts_path = std::path::PathBuf::from(c.skill_mcp_dir.as_deref().unwrap()).join("memory_fts.sqlite");
+        let fts = oz_memory::MemoryFts::open(&fts_path).unwrap();
+        fts.insert("", "fact", "deployment uses port 8001 for the kanban backend").unwrap();
+        drop(fts);
+        let result = SkillMcpSearchTool.execute(
+            serde_json::json!({"query": "deployment"}),
+            &c,
+        ).await.unwrap();
+        let results = result.data["results"].as_array().unwrap();
+        assert!(
+            results.iter().any(|r| r["type"] == "memory" && r["category"] == "fact"),
+            "FTS memory backend must surface indexed facts, got: {results:?}"
+        );
     }
 
     #[tokio::test]

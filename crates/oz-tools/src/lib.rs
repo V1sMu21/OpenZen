@@ -18,6 +18,7 @@ pub mod web_scan;
 pub mod web_search;
 pub mod web_execute_js;
 pub mod working_mem;
+pub mod harness_refine;
 pub mod skill_mcp_search;
 pub mod mcp_bridge;
 pub mod skill_mcp_write;

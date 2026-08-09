@@ -2,6 +2,7 @@
 # ──────────────────────────────────────────────────────────
 # OpenZen Tauri 快速启动（后台模式）
 # 用法: bash scripts/tauri.sh
+#      OPENZEN_PROFILE=dev bash scripts/tauri.sh       # 隔离数据根（P1-6）
 #
 # 与 tauri-dev.sh 的区别：
 #   - Tauri 在后台运行，不受 shell 超时影响

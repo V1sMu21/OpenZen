@@ -18,6 +18,8 @@ pub struct SkillMcpMemory {
     insight_path: PathBuf,
     fact_path: PathBuf,
     sessions_dir: PathBuf,
+    auto_insight_dir: PathBuf,
+    fts: Option<oz_memory::MemoryFts>,
 }
 
 impl SkillMcpMemory {
@@ -31,12 +33,29 @@ impl SkillMcpMemory {
             .join(SkillMcpType::Fact.as_dir())
             .join("global_mem.txt");
         let sessions_dir = base_dir.join("sessions");
+        let auto_insight_dir = base_dir
+            .join(SkillMcpType::Insight.as_dir())
+            .join("auto");
+
+        // P2-7: attach the FTS5 index (fail-open — memory still works without it).
+        let fts = oz_memory::MemoryFts::open(&base_dir.join("memory_fts.sqlite")).ok();
 
         SkillMcpMemory {
             base_dir: base_dir.to_path_buf(),
             insight_path,
             fact_path,
             sessions_dir,
+            auto_insight_dir,
+            fts,
+        }
+    }
+
+    /// Index a memory line in FTS5 (P2-7). Failures are logged, never fatal.
+    fn index_line(&self, category: &str, line: &str) {
+        if let Some(fts) = &self.fts {
+            if let Err(e) = fts.insert("", category, line) {
+                tracing::warn!("[memory_fts] index failed ({category}): {e}");
+            }
         }
     }
 
@@ -67,7 +86,91 @@ impl SkillMcpMemory {
         }
         current.push_str(line);
         current.push('\n');
-        self.write_insight(&current).await
+        self.write_insight(&current).await?;
+        self.index_line("insight", line);
+        Ok(())
+    }
+
+    // ── L1a: Auto insights (session-derived, weekly archived) ──
+
+    /// Append an auto-derived experience line to this week's auto-insight
+    /// file (`insights/auto/YYYY-Www.md`), deduplicated against existing
+    /// content by session-topic prefix (`[topic] ...`). Auto insights are
+    /// separate from manual insights so the manual
+    /// `global_mem_insight.txt` stays curated.
+    pub async fn append_auto_insight(&self, line: &str) -> Result<(), SkillMcpError> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(());
+        }
+        let topic_prefix = line.split(']').next().map(|s| s.to_string()).unwrap_or_default();
+        let week = chrono::Utc::now().format("%Y-W%V");
+        let path = self.auto_insight_dir.join(format!("{week}.md"));
+        let mut current = if path.exists() {
+            tokio::fs::read_to_string(&path).await?
+        } else {
+            String::new()
+        };
+        let dedup_key = if topic_prefix.is_empty() || !line.starts_with('[') {
+            line.to_string()
+        } else {
+            topic_prefix
+        };
+        let exists = current
+            .lines()
+            .any(|l| l.contains(&dedup_key));
+        if exists {
+            return Ok(());
+        }
+        if !current.is_empty() && !current.ends_with('\n') {
+            current.push('\n');
+        }
+        if current.is_empty() {
+            current.push_str(&format!("# Auto Insights {week}\n\n"));
+        }
+        current.push_str(&format!("- {line}\n"));
+        tokio::fs::create_dir_all(&self.auto_insight_dir).await?;
+        tokio::fs::write(&path, current).await?;
+        self.index_line("auto_insight", line);
+        Ok(())
+    }
+
+    /// Read auto insights from the last `days` days (weekly files are whole
+    /// weeks, so this returns any weekly file overlapping the window).
+    pub async fn read_recent_auto_insights(&self, days: i64) -> Result<String, SkillMcpError> {
+        self.read_recent_auto_insights_sync(days)
+    }
+
+    /// Sync core of [`Self::read_recent_auto_insights`] — used by the
+    /// (sync) index builder so recent insights can ride along in the
+    /// startup injection without an async boundary.
+    pub fn read_recent_auto_insights_sync(&self, days: i64) -> Result<String, SkillMcpError> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days)).date_naive();
+        if !self.auto_insight_dir.exists() {
+            return Ok(String::new());
+        }
+        let mut out = String::new();
+        let entries = std::fs::read_dir(&self.auto_insight_dir)?;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".md") {
+                continue;
+            }
+            // "2026-W32.md" — ISO week; keep files whose week overlaps the window.
+            if let Some(stem) = name.strip_suffix(".md") {
+                if let Some(monday) = iso_week_monday(stem) {
+                    if monday >= cutoff {
+                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                            out.push_str(&content);
+                            if !out.ends_with('\n') {
+                                out.push('\n');
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     // ── L2: Facts ──
@@ -99,6 +202,7 @@ impl SkillMcpMemory {
             current.push_str(&format!("- {fact}"));
             current.push('\n');
             self.write_facts(&current).await?;
+            self.index_line("fact", fact);
         }
         Ok(())
     }
@@ -157,6 +261,21 @@ impl SkillMcpMemory {
             }
         }
     }
+}
+
+/// Monday of ISO week `Www` in `year`, from a `"2026-W32"`-style stem.
+/// ISO 8601: week 1 contains Jan 4; its Monday is Jan 4 minus its weekday offset.
+fn iso_week_monday(stem: &str) -> Option<chrono::NaiveDate> {
+    let (year, week) = stem.split_once("-W")?;
+    let year: i32 = year.parse().ok()?;
+    let week: u32 = week.parse().ok()?;
+    if !(1..=53).contains(&week) {
+        return None;
+    }
+    let jan4 = chrono::NaiveDate::from_ymd_opt(year, 1, 4)?;
+    let offset = chrono::Datelike::weekday(&jan4).num_days_from_monday() as i64;
+    let week1_monday = jan4 - chrono::Duration::days(offset);
+    Some(week1_monday + chrono::Duration::weeks(week as i64 - 1))
 }
 
 #[cfg(test)]
@@ -251,5 +370,43 @@ mod tests {
         let mem = SkillMcpMemory::new(dir.path());
         let result = mem.distill("some sop", &SkillMcpType::Sop).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_append_auto_insight_dedup() {
+        let dir = tmp_dir();
+        let mem = SkillMcpMemory::new(dir.path());
+        mem.append_auto_insight("retry with backoff on 429").await.unwrap();
+        mem.append_auto_insight("retry with backoff on 429").await.unwrap();
+        mem.append_auto_insight("use CGEvent for WKWebView typing").await.unwrap();
+
+        let recent = mem.read_recent_auto_insights(7).await.unwrap();
+        assert_eq!(recent.matches("retry with backoff on 429").count(), 1);
+        assert!(recent.contains("use CGEvent for WKWebView typing"));
+    }
+
+    #[tokio::test]
+    async fn test_read_auto_insights_empty_dir() {
+        let dir = tmp_dir();
+        let mem = SkillMcpMemory::new(dir.path());
+        let recent = mem.read_recent_auto_insights(7).await.unwrap();
+        assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn test_iso_week_monday() {
+        // 2026-W32: week of Aug 9 2026 (Sunday) — Monday is Aug 3.
+        assert_eq!(
+            iso_week_monday("2026-W32"),
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 8, 3).unwrap())
+        );
+        // 2025-W01: Jan 1 2025 is a Wednesday → week 1 Monday is Dec 30 2024.
+        assert_eq!(
+            iso_week_monday("2025-W01"),
+            Some(chrono::NaiveDate::from_ymd_opt(2024, 12, 30).unwrap())
+        );
+        assert_eq!(iso_week_monday("2026-W00"), None);
+        assert_eq!(iso_week_monday("2026-W54"), None);
+        assert_eq!(iso_week_monday("garbage"), None);
     }
 }

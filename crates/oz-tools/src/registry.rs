@@ -123,6 +123,7 @@ impl ToolRegistry {
         reg.register(crate::file_ops::LsTool);
         reg.register(crate::no_tool::NoTool);
         reg.register(crate::working_mem::WorkingMemTool);
+        reg.register(crate::harness_refine::HarnessRefineTool);
         reg.register(crate::ask_user::AskUserTool);
         reg.register(crate::web_fetch::WebFetchTool);
         reg.register(crate::web_scan::WebScanTool::new());

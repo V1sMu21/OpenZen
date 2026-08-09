@@ -1,5 +1,9 @@
 pub mod agent_loop;
+pub mod hooks;
 pub mod handler;
+pub mod diagnostics;
+pub mod goal;
+pub mod harness;
 pub mod verifier;
 pub mod context;
 pub mod compress;
@@ -15,6 +19,7 @@ pub mod sanitize;
 pub mod audit;
 
 pub use agent_loop::*;
+pub use hooks::{HookEvent, HookHandler, TomlHooks};
 pub use handler::*;
 pub use context::*;
 pub use compress::*;

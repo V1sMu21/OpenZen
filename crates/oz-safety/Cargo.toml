@@ -7,6 +7,7 @@ description = "OpenZen progressive trust and agent safety guard"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
