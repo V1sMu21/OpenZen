@@ -22,7 +22,11 @@ mod tests {
             .filter(|p| {
                 p.extension().map(|ext| ext == "md").unwrap_or(false)
                     && p.file_name().and_then(|n| n.to_str())
-                        .map(|n| n.starts_with("000"))
+                        .map(|n| {
+                            // ADR 文件以 4 位数字序号开头 (0001-9999)
+                            let digits: String = n.chars().take_while(|c| c.is_ascii_digit()).collect();
+                            digits.len() == 4
+                        })
                         .unwrap_or(false)
             })
             .collect();
