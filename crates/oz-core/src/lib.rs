@@ -3,6 +3,7 @@ pub mod hooks;
 pub mod handler;
 pub mod diagnostics;
 pub mod goal;
+pub mod quality;
 pub mod harness;
 pub mod verifier;
 pub mod context;

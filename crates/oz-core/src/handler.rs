@@ -292,6 +292,18 @@ pub struct LoopConfig {
     /// Collect compile diagnostics (cargo check / tsc) into the startup
     /// reminder block (P2-8). Off by default; runner opts in.
     pub include_diagnostics: bool,
+    /// Master switch for the delivery-quality pipeline (spec anchor +
+    /// [verify] assertions + independent review). Off = legacy behaviour.
+    pub quality_gates: bool,
+    /// Max fix rounds allowed when a [verify] assertion fails before the
+    /// loop forces an exit (with a "not verified" note attached).
+    pub assertion_max_rounds: u32,
+    /// When true, run an independent multi-perspective review before exit
+    /// for important tasks (write count >= review_min_tools).
+    pub review_enabled: bool,
+    /// Minimum number of file-writing tool calls for a task to be
+    /// considered "important" enough for the independent review.
+    pub review_min_tools: u32,
 }
 
 impl Default for LoopConfig {
@@ -330,6 +342,10 @@ impl Default for LoopConfig {
             memory_scheduler: None,
             hooks: None,
             include_diagnostics: false,
+            quality_gates: true,
+            assertion_max_rounds: 2,
+            review_enabled: true,
+            review_min_tools: 3,
         }
     }
 }
@@ -380,6 +396,10 @@ impl Clone for LoopConfig {
             memory_scheduler: self.memory_scheduler.clone(),
             hooks: self.hooks.clone(),
             include_diagnostics: self.include_diagnostics,
+            quality_gates: self.quality_gates,
+            assertion_max_rounds: self.assertion_max_rounds,
+            review_enabled: self.review_enabled,
+            review_min_tools: self.review_min_tools,
         }
     }
 }

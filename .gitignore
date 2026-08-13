@@ -99,3 +99,7 @@ test_yaml.yaml
 test.md
 todo_20260622.md
 VERIFICATION_REPORT.md
+
+# ZCode tool dir + benchmark run data (local only)
+.zcode/
+bench/

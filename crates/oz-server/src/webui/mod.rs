@@ -1514,7 +1514,7 @@ async fn handle_compress(
                 })
                 .collect::<Vec<_>>()
         };
-        let summary = oz_core::compress::build_compression_summary(&removed_json);
+        let summary = oz_core::compress::build_compression_summary(&removed_json, "");
 
         sessions.save();
 

@@ -1175,7 +1175,7 @@ pub async fn compress_session(
                 .cloned()
                 .collect()
         };
-        let template_summary = oz_core::compress::build_compression_summary(&removed_json);
+        let template_summary = oz_core::compress::build_compression_summary(&removed_json, "");
 
         store.save();
 

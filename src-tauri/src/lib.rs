@@ -460,6 +460,8 @@ pub(crate) fn lock_poison_guard<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexG
 /// not focused — when the user is looking at the app, the UI itself is the
 /// notification. Used for task completion, pending questions and
 /// compression alerts so background work is always noticeable.
+/// Every outcome is logged to `~/.openzen/logs/openzen.log` with a
+/// `[notify]` prefix so notification issues are diagnosable remotely.
 pub(crate) fn notify_if_unfocused(app: &AppHandle, title: &str, body: &str) {
     use tauri_plugin_notification::NotificationExt;
     let focused = app
@@ -467,15 +469,20 @@ pub(crate) fn notify_if_unfocused(app: &AppHandle, title: &str, body: &str) {
         .map(|w| w.is_focused().unwrap_or(false))
         .unwrap_or(false);
     if focused {
+        debug_log(&format!("[notify] skipped (main window focused): {title}"));
         return;
     }
-    let _ = app
+    match app
         .notification()
         .builder()
         .title(title)
         .body(body)
         .sound("default")
-        .show();
+        .show()
+    {
+        Ok(_) => debug_log(&format!("[notify] sent: {title}")),
+        Err(e) => debug_log(&format!("[notify] FAILED ({title}): {e}")),
+    }
 }
 
 // ── Sub-modules ──

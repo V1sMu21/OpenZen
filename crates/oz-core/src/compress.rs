@@ -554,7 +554,7 @@ pub fn emergency_compress(
         &snapshot_before[..]
     };
 
-    let mut template = build_compression_summary(summary_json);
+    let mut template = build_compression_summary(summary_json, "");
     let previous = extract_compression_summaries(messages);
     if !previous.is_empty() {
         template = format!("[Prior context (merge into summary below)]:\n{previous}\n\n---\n\n{template}");
@@ -951,7 +951,10 @@ pub fn build_compression_prompt(removed_messages: &[Value]) -> String {
 /// Build a structured fallback summary from removed messages.
 /// Extracts task, files touched, tool actions, progress, and user messages
 /// — providing meaningful context even when the LLM summary fails.
-pub fn build_compression_summary(removed_messages: &[Value]) -> String {
+/// `working_dir` anchors the task spec (spec-first): when a `task_spec.md`
+/// exists there, the summary points the model back to it so long tasks do
+/// not drift from the original spec. Empty string skips the reference.
+pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) -> String {
     if removed_messages.is_empty() {
         return String::new();
     }
@@ -971,12 +974,14 @@ pub fn build_compression_summary(removed_messages: &[Value]) -> String {
             _ => continue,
         };
 
-        // Capture first user message as the task
+        // Capture first user message as the task. 800 chars (was 200) so
+        // the original spec survives repeated compressions long enough for
+        // the task_spec.md anchor (below) to take over.
         if task.is_empty() && role == "user" {
             for block in blocks {
                 if let Some(text) = extract_text(block) {
                     if !text.starts_with("[Compression summary]") {
-                        task = truncate_safe(text, 200);
+                        task = truncate_safe(text, 800);
                         break;
                     }
                 }
@@ -1076,6 +1081,19 @@ pub fn build_compression_summary(removed_messages: &[Value]) -> String {
 
     if !user_msgs.is_empty() {
         parts.push(format!("## User messages\n- {}", user_msgs.join("\n- ")));
+    }
+
+    // Spec anchor: if the agent wrote a task_spec.md (spec-first protocol),
+    // reference it so a later turn can re-read the full original spec
+    // instead of relying on the degraded task summary above.
+    if !working_dir.is_empty() {
+        let spec_path = std::path::Path::new(working_dir).join(crate::quality::SPEC_FILE);
+        if spec_path.is_file() {
+            parts.push(format!(
+                "## Task spec\n{}\n(re-read for the full original spec / 完整规格见该文件，必要时重读)",
+                spec_path.display()
+            ));
+        }
     }
 
     parts.join("\n\n")
@@ -1460,7 +1478,7 @@ mod tests {
         assert!(!summary_json[0].to_string().contains("you are openzen"));
 
         // Template summary built from the removed window reflects real content.
-        let template = build_compression_summary(summary_json);
+        let template = build_compression_summary(summary_json, "");
         assert!(template.contains("user message 0"), "template should cover removed window, got: {template}");
         assert!(!template.contains("you are openzen"), "system prompt must not leak into summary");
     }
@@ -1521,7 +1539,7 @@ mod tests {
                 "content": [{"text": {"text": "Please write a chess engine in Rust"}}]
             }),
         ];
-        let summary = build_compression_summary(&removed);
+        let summary = build_compression_summary(&removed, "");
         // Should NOT use system prompt as preview
         assert!(!summary.contains("You are a helpful assistant"),
             "should skip system message preview, got: {summary}");
@@ -1542,7 +1560,7 @@ mod tests {
                 ]
             }),
         ];
-        let summary = build_compression_summary(&removed);
+        let summary = build_compression_summary(&removed, "");
         assert!(summary.contains("read"), "should list read tool, got: {summary}");
         assert!(summary.contains("write"), "should list write tool, got: {summary}");
     }
@@ -1559,7 +1577,7 @@ mod tests {
                 "content": [{"text": {"text": "real task description here"}}]
             }),
         ];
-        let summary = build_compression_summary(&removed);
+        let summary = build_compression_summary(&removed, "");
         assert!(!summary.contains("[Compression summary]"),
             "should skip compression summary text, got: {summary}");
         // System role should not contribute to user/assistant counts
@@ -1575,7 +1593,7 @@ mod tests {
                 "content": [{"text": {"text": chinese}}]
             }),
         ];
-        let summary = build_compression_summary(&removed);
+        let summary = build_compression_summary(&removed, "");
         // New format uses "Compressed:" prefix
         assert!(summary.contains("Compressed: 1 messages removed"),
             "unexpected format: {summary}");
@@ -1645,7 +1663,7 @@ mod tests {
         if removed_count > 0 {
             let removed_json: Vec<serde_json::Value> =
                 snapshot.into_iter().take(removed_count).collect();
-            let summary = build_compression_summary(&removed_json);
+            let summary = build_compression_summary(&removed_json, "");
 
             assert!(!summary.contains("# Role:"),
                 "system prompt leaked into compression summary: {summary}");
