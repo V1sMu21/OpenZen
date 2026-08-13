@@ -1080,6 +1080,7 @@ pub fn open_session_window(
 pub async fn compress_session(
     id: String,
     state: State<'_, Arc<AppState>>,
+    app_handle: AppHandle,
 ) -> Result<serde_json::Value, String> {
     let (
         before,
@@ -1218,6 +1219,23 @@ pub async fn compress_session(
     let before_tokens = before_chars / 4;
     let after_tokens = after_chars / 4;
     let saved_tokens = before_tokens.saturating_sub(after_tokens);
+    // System notification when the user isn't looking at the main window —
+    // compression takes a while and users usually switch away to wait.
+    {
+        let lang = lock_poison_guard(&state.locale).clone();
+        let body = if lang == "zh" {
+            format!(
+                "上下文压缩完成：{} → {} 条消息，节省 {:.1}% tokens",
+                before, after, saved_pct
+            )
+        } else {
+            format!(
+                "Context compressed: {} → {} messages, saved {:.1}% tokens",
+                before, after, saved_pct
+            )
+        };
+        crate::notify_if_unfocused(&app_handle, "OpenZen", &body);
+    }
     Ok(serde_json::json!({
         "session_id": id,
         "before_chars": before_chars,

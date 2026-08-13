@@ -18,11 +18,22 @@ use oz_server::webui::sse_bus::SseEvent;
 use oz_tools::handler::ToolRegistryHandler;
 use oz_tools::registry::ToolRegistry;
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_notification::NotificationExt;
 
 use crate::{
     data_dir, debug_log, home_dir, load_system_prompt, lock_poison_guard, tauri_ctx, AppState,
 };
+
+/// Truncate a string to at most `max` chars (boundary-safe) for use in
+/// notification bodies — a hostile/loquacious question must not produce a
+/// wall-of-text banner.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
 
 /// Distills session transcripts into the skill/MCP knowledge store in the
 /// background (U3). Kept in the Tauri layer because it owns the store path.
@@ -715,6 +726,7 @@ pub async fn run_agent_for_session(
         let events_for_collector = collected_events.clone();
         let arrivals_for_collector = event_arrival_ms.clone();
         let start_for_collector = start_ms.clone();
+        let lang_for_collector = ctx.lang.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 let now_ms = std::time::SystemTime::now()
@@ -731,6 +743,27 @@ pub async fn run_agent_for_session(
                 let arr = now_ms.saturating_sub(base);
                 lock_poison_guard(&arrivals_for_collector).push(arr);
                 lock_poison_guard(&events_for_collector).push(event.clone());
+
+                // ask_user pending → system notification so the user knows
+                // the agent is waiting even when the app is in the background.
+                if let oz_core_types::StreamEvent::AskUserPending { data } = &event {
+                    let question = serde_json::from_str::<serde_json::Value>(data)
+                        .ok()
+                        .and_then(|v| {
+                            v.pointer("/payload/question")
+                                .or_else(|| v.get("question"))
+                                .and_then(|q| q.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .unwrap_or_default();
+                    let question = truncate_chars(&question, 80);
+                    let (title, body) = if lang_for_collector == "zh" {
+                        ("OpenZen 需要你的回答", format!("等待你的回答：{question}"))
+                    } else {
+                        ("OpenZen needs you", format!("Waiting for your reply: {question}"))
+                    };
+                    crate::notify_if_unfocused(&app_for_collector, title, &body);
+                }
 
                 if !matches!(event, oz_core_types::StreamEvent::ToolCallReady { .. }) {
                     if let Ok(value) = serde_json::to_value(&event) {
@@ -1054,7 +1087,8 @@ pub async fn run_agent_for_session(
         serde_json::to_value(&done_evt).unwrap_or_default(),
     );
 
-    // Send desktop notification
+    // Desktop notification (with sound) — skipped when the user is looking
+    // at the main window, since the chat UI already shows the result.
     let summary = outcome
         .data
         .as_ref()
@@ -1072,12 +1106,7 @@ pub async fn run_agent_for_session(
             }
         })
         .unwrap_or_else(|| "Task completed".to_string());
-    let _ = app
-        .notification()
-        .builder()
-        .title("OpenZen")
-        .body(&summary)
-        .show();
+    crate::notify_if_unfocused(app, "OpenZen", &summary);
 
     Ok(())
 }

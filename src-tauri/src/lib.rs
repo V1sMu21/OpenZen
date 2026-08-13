@@ -455,6 +455,29 @@ pub(crate) fn lock_poison_guard<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexG
     })
 }
 
+// ── Desktop notification helper ──
+/// Fire a system notification WITH sound, but only when the main window is
+/// not focused — when the user is looking at the app, the UI itself is the
+/// notification. Used for task completion, pending questions and
+/// compression alerts so background work is always noticeable.
+pub(crate) fn notify_if_unfocused(app: &AppHandle, title: &str, body: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let focused = app
+        .get_webview_window("main")
+        .map(|w| w.is_focused().unwrap_or(false))
+        .unwrap_or(false);
+    if focused {
+        return;
+    }
+    let _ = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .sound("default")
+        .show();
+}
+
 // ── Sub-modules ──
 pub(crate) mod commands;
 pub(crate) mod runner;
