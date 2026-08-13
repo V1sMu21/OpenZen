@@ -74,7 +74,7 @@
   <div class="sidebar-divider"></div>
 
   <div class="sidebar-content">
-    <div class="side-head">项 目</div>
+    <div class="side-head">{$t("sidebar.projects")}</div>
     <ProjectList
       bind:filterText
       bind:currentSessionId={$sessions.currentId}
@@ -86,7 +86,7 @@
 
     <div class="sidebar-divider"></div>
 
-    <div class="side-head">会 话</div>
+    <div class="side-head">{$t("sidebar.sessions")}</div>
     <UngroupedSection
       bind:sessions={ungroupedSessions}
       bind:currentSessionId={$sessions.currentId}

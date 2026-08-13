@@ -581,7 +581,13 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <rect width="18" height="18" x="3" y="3" rx="2"/>
           <path d="M9 3v18"/>
-          <path d="m14 9 3 3-3 3"/>
+          {#if sidebarOpen}
+            <!-- 打开中 → 点击将收起（向左） -->
+            <path d="m14 9-3 3 3 3"/>
+          {:else}
+            <!-- 已收起 → 点击将展开（向右） -->
+            <path d="m11 9 3 3-3 3"/>
+          {/if}
         </svg>
       </button>
       <span class="seal" title="OpenZen"><img class="seal-icon" src="/cat-icon.png" alt="OpenZen" /></span>
@@ -626,7 +632,13 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <rect width="18" height="18" x="3" y="3" rx="2"/>
           <path d="M15 3v18"/>
-          <path d="m10 15-3-3 3-3"/>
+          {#if sidepanel.visible}
+            <!-- 已打开 → 点击将收起（向右） -->
+            <path d="m7 15 3-3-3-3"/>
+          {:else}
+            <!-- 关闭中 → 点击将展开（向左） -->
+            <path d="m10 15-3-3 3-3"/>
+          {/if}
         </svg>
       </button>
     </div>

@@ -5,7 +5,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
   import CommandPalette from "./CommandPalette.svelte";
-  import { t, localT } from "../i18n";
+  import { t, localT, locale } from "../i18n";
 
 let {
   disabled = $bindable(false),
@@ -325,23 +325,25 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
           </div>
         {/if}
       </div>
-      <span class="composer-hint"><kbd>⌘</kbd> 发送 · <kbd>⇧⏎</kbd> 换行</span>
+      <span class="composer-hint"><kbd>⌘</kbd> {$t("input.send")} · <kbd>⇧⏎</kbd> {$t("input.newline")}</span>
       <span class="composer-spacer"></span>
       {#if $chat.isProcessing}
         <button
           class="seal-btn stop-btn"
+          class:en-seal={$locale === "en"}
           data-busy="1"
           onclick={() => chat.cancelCurrent()}
           aria-label={$t("chat.stop")}
           title={$t("chat.stop") + " (Esc)"}
-        >止</button>
+        >{$t("chat.stopSeal")}</button>
       {:else}
         <button
           class="seal-btn send-btn"
+          class:en-seal={$locale === "en"}
           onclick={send}
           aria-label={$t("chat.send")}
           disabled={disabled || (!inputText.trim() && !$chat.attachments.length)}
-        >言</button>
+        >{$t("chat.sendSeal")}</button>
       {/if}
     </div>
   </div>
@@ -577,6 +579,15 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
     height: 34px;
     font-size: 15px;
     flex-shrink: 0;
+  }
+  /* English labels ("Send"/"Stop") need a wider seal than the single
+     Chinese glyphs — auto width with padding keeps the square for zh. */
+  .seal-btn.en-seal {
+    width: auto;
+    min-width: 34px;
+    padding: 0 10px;
+    font-size: 12px;
+    letter-spacing: 0.02em;
   }
   .seal-btn:disabled {
     background: var(--color-surface-elevated);
