@@ -68,6 +68,12 @@ src-tauri/icons/openzen-icon*.png
 src-tauri/test.md
 src-tauri/docs/
 
+# Runtime SQLite artifacts — belong in OPENZEN_DATA_DIR, never the source tree
+# (a dev build currently drops memory_fts.sqlite under src-tauri/)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
 # Local-only dev artifacts (not for repo)
 docs/
 TESTING_GUIDE.md
