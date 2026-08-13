@@ -745,6 +745,16 @@ pub fn run() {
                                         let _ = app.emit("sse_event", serde_json::to_value(&SseEvent::system(
                                             &session_id, &format!("[Reminder] {}", message),
                                         )).unwrap_or_default());
+                                        // Structured event so the right-rail
+                                        // reminder card can decrement repeats.
+                                        let _ = app.emit("sse_event", serde_json::json!({
+                                            "session_id": session_id,
+                                            "event_type": "reminder_fired",
+                                            "data": serde_json::to_string(&serde_json::json!({
+                                                "message": message.clone(),
+                                                "remaining_repeats": reminder.repeat_count,
+                                            })).unwrap_or_default(),
+                                        }));
                                         let next_reminder = if reminder.repeat_count > 0 {
                                             Some(oz_core_types::Reminder {
                                                 session_id: session_id.clone(),
@@ -785,6 +795,16 @@ pub fn run() {
                                         let _ = app.emit("sse_event", serde_json::to_value(&SseEvent::system(
                                             &session_id, &format!("[Reminder] {}", message),
                                         )).unwrap_or_default());
+                                        // Structured event so the right-rail
+                                        // reminder card can decrement repeats.
+                                        let _ = app.emit("sse_event", serde_json::json!({
+                                            "session_id": session_id,
+                                            "event_type": "reminder_fired",
+                                            "data": serde_json::to_string(&serde_json::json!({
+                                                "message": message.clone(),
+                                                "remaining_repeats": reminder.repeat_count,
+                                            })).unwrap_or_default(),
+                                        }));
                                         let next_reminder = if reminder.repeat_count > 0 {
                                             Some(oz_core_types::Reminder {
                                                 session_id: session_id.clone(),

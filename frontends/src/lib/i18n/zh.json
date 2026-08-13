@@ -284,5 +284,14 @@
   "status.waiting": "待确认",
   "status.done": "完成",
   "status.on": "开",
-  "status.off": "关"
+  "status.off": "关",
+  "reminder.title": "定时任务",
+  "reminder.active": "运行中",
+  "reminder.allDone": "全部完成",
+  "reminder.done": "已完成",
+  "reminder.heartbeat": "心跳",
+  "reminder.every": "每",
+  "reminder.next": "下次",
+  "reminder.once": "定时",
+  "reminder.left": "次剩余"
 }

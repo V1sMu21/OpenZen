@@ -284,5 +284,14 @@
   "status.waiting": "Awaiting",
   "status.done": "Done",
   "status.on": "on",
-  "status.off": "off"
+  "status.off": "off",
+  "reminder.title": "Scheduled",
+  "reminder.active": "active",
+  "reminder.allDone": "all done",
+  "reminder.done": "done",
+  "reminder.heartbeat": "heartbeat",
+  "reminder.every": "every",
+  "reminder.next": "next",
+  "reminder.once": "one-shot",
+  "reminder.left": "left"
 }

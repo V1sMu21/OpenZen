@@ -56,6 +56,8 @@ export type SSEEvent =
   | { type: "ask_user_pending"; data: { tool_use_id: string; tool_name: string; payload: { data?: { question?: string; candidates?: string[] }; [k: string]: unknown } } }
   /** Approval required before the next tool call can execute. */
   | { type: "approval_needed"; data: { request_id: string; session_id?: string; tool_name: string; pattern: string; arguments?: unknown; approved_count?: number; current_level?: string } }
+  /** A scheduled/heartbeat reminder fired — decrements the card's repeats. */
+  | { type: "reminder_fired"; data: { message: string; remaining_repeats?: number } }
   /** Protocol v1 event — data is a ProtocolV1Event JSON object */
   | { type: "protocol_v1"; data: import("./parts").ProtocolV1Event };
 

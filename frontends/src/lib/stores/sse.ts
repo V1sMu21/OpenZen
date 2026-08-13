@@ -23,7 +23,7 @@ export const heartbeat = writable<HeartbeatStatus>({
 });
 
 /** Event types whose data field is a JSON-encoded object (not plain text) */
-const OBJECT_EVENTS = new Set(["tool_call", "tool_result", "done", "model_info", "protocol_v1", "approval_needed", "ask_user_pending"]);
+const OBJECT_EVENTS = new Set(["tool_call", "tool_result", "done", "model_info", "protocol_v1", "approval_needed", "ask_user_pending", "reminder_fired"]);
 
 /** Try to JSON-parse a string; return parsed value on success, original on failure */
 function tryParseJSON(s: string): unknown {

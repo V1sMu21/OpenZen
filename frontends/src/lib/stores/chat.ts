@@ -24,6 +24,26 @@ export interface Attachment {
   type: "file" | "image";
 }
 
+/** A scheduled or repeating reminder scheduled by the agent. */
+export interface ReminderTask {
+  /** tool call id (dedup key) */
+  id: string;
+  /** The reminder message (card title) */
+  title: string;
+  /** Seconds until the first fire */
+  delaySeconds: number;
+  /** Total repeat count (0 = one-shot; >0 = heartbeat task) */
+  repeatCount: number;
+  /** Remaining repeats (updated by reminder_fired SSE events) */
+  remaining: number;
+  /** Seconds between repeats */
+  repeatIntervalSecs: number;
+  /** When the next fire happens (ms epoch) */
+  fireAtMs: number;
+  /** active until all repeats fired, then done */
+  status: "active" | "done";
+}
+
 // ── Streaming event coalescing ──
 // text_delta / reasoning_delta arrive at token frequency from SSE; each
 // one used to trigger a full store update (streamingParts copy + all
@@ -62,6 +82,10 @@ export interface ChatState {
     attachments: Attachment[];
     /** Todo items from the agent's todowrite/todoupdate tools. */
    todos: Array<{id:string;content:string;status:string;priority:string;order:number}>;
+   /** Scheduled/heartbeat reminders from the schedule_reminder tool.
+    *  Parsed from tool invocations in the message stream; rendered as a
+    *  card under the todo rail. */
+   reminders: ReminderTask[];
    compressionNotice: string | null;
    cumulativeInputTokens: number;
    cumulativeOutputTokens: number;
@@ -71,6 +95,50 @@ export interface ChatState {
 // tool calls, and the watchdog is *reset* on every incoming token,
 // so this only fires if the server truly stops talking to us.
 const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** Parse scheduled/heartbeat reminders from schedule_reminder tool
+ *  invocations in the message stream (dedup by tool call id). */
+function scanRemindersFromMessages(messages: Message[]): ReminderTask[] {
+  const out: ReminderTask[] = [];
+  for (const m of messages) {
+    if (m.role !== "assistant") continue;
+    for (const p of m.parts ?? []) {
+      if (p.type !== "tool-invocation" || p.name !== "schedule_reminder") continue;
+      let args: Record<string, unknown> = {};
+      try { args = JSON.parse(p.args); } catch { continue; }
+      const title = typeof args.message === "string" ? args.message : "";
+      if (!title) continue;
+      const delay = typeof args.delay_seconds === "number" ? args.delay_seconds : 60;
+      const repeat = typeof args.repeat_count === "number" ? args.repeat_count : 0;
+      const interval = typeof args.repeat_interval_seconds === "number"
+        ? args.repeat_interval_seconds : delay;
+      // Prefer the real fire_at_ms from the tool result; fall back to
+      // now + delay when the result is unavailable (e.g. after reload).
+      let fireAtMs = Date.now() + delay * 1000;
+      if (p.result) {
+        try {
+          const r = JSON.parse(p.result);
+          if (typeof r.fire_at_ms === "number") fireAtMs = r.fire_at_ms;
+          else if (r && typeof r === "object" && "data" in r) {
+            const inner = (r as { data?: { fire_at_ms?: number } }).data;
+            if (typeof inner?.fire_at_ms === "number") fireAtMs = inner.fire_at_ms;
+          }
+        } catch { /* keep the estimate */ }
+      }
+      out.push({
+        id: p.toolCallId,
+        title,
+        delaySeconds: delay,
+        repeatCount: repeat,
+        remaining: repeat,
+        repeatIntervalSecs: interval,
+        fireAtMs,
+        status: "active",
+      });
+    }
+  }
+  return out;
+}
 
 function createChatStore() {
   const { subscribe, set, update } = writable<ChatState>({
@@ -85,6 +153,7 @@ function createChatStore() {
      pendingAskUser: null,
       attachments: [],
       todos: [],
+      reminders: [],
      compressionNotice: null,
      cumulativeInputTokens: 0,
      cumulativeOutputTokens: 0,
@@ -802,6 +871,24 @@ function createChatStore() {
         case "error":
           this.setError(event.data);
           break;
+        case "reminder_fired": {
+          // A scheduled/heartbeat reminder fired — decrement its remaining
+          // repeats so the right-rail card reflects live status.
+          const d = event.data as { message?: string; remaining_repeats?: number };
+          if (d && typeof d.message === "string") {
+            update((s) => {
+              const reminders = s.reminders.map((r) => {
+                if (r.title !== d.message) return r;
+                const remaining = typeof d.remaining_repeats === "number"
+                  ? d.remaining_repeats
+                  : Math.max(0, r.remaining - 1);
+                return { ...r, remaining, status: remaining > 0 ? "active" : "done" };
+              });
+              return { ...s, reminders };
+            });
+          }
+          break;
+        }
         case "system":
           if (typeof event.data === "string" && event.data === "reminder fired") {
             const sid = get(sessions).currentId;
@@ -877,6 +964,7 @@ function createChatStore() {
           pendingAskUser: cached.pendingAskUser,
           attachments: cached.attachments,
           todos: cached.todos,
+          reminders: scanRemindersFromMessages(cached.messages),
           compressionNotice: cached.compressionNotice,
           cumulativeInputTokens: 0,
           cumulativeOutputTokens: 0,
@@ -979,7 +1067,8 @@ function createChatStore() {
         if (lastMsg?.role === "assistant" && lastMsg.exitReason === "ASK_USER") {
           set({ messages, isProcessing: false, error: null, modelInfo: null,
                 selectedModel: null, modelList: [], showModelSwitcher: false,
-                streamingParts: [], pendingAskUser: null, attachments: [], todos: serverTodos, compressionNotice: null,
+                streamingParts: [], pendingAskUser: null, attachments: [], todos: serverTodos,
+                reminders: scanRemindersFromMessages(messages), compressionNotice: null,
                 cumulativeInputTokens: 0, cumulativeOutputTokens: 0 });
           pendingAskUser = this.findPendingAskUser();
         }
@@ -996,6 +1085,7 @@ function createChatStore() {
           pendingAskUser,
           attachments: [],
           todos: serverTodos,
+          reminders: scanRemindersFromMessages(messages),
           compressionNotice: null,
           cumulativeInputTokens: 0,
           cumulativeOutputTokens: 0,

@@ -19,6 +19,7 @@
   import ShortcutsPanel from "./lib/components/ShortcutsPanel.svelte";
   import SidePanel from "./lib/components/SidePanel.svelte";
   import TodoProgress from "./lib/components/TodoProgress.svelte";
+  import ReminderCard from "./lib/components/ReminderCard.svelte";
   import { initLocale } from "./lib/i18n";
   import { t, locale } from "./lib/i18n";
   import { sidepanel } from "./lib/stores/sidepanel.svelte";
@@ -679,9 +680,15 @@
             <div bind:this={messagesEnd}></div>
           </div>
 
-          {#if $chat.todos.length > 0}
+          {#if $chat.todos.length > 0 || $chat.reminders.length > 0}
             <div class="todo-rail">
-              <TodoProgress items={$chat.todos} />
+              {#if $chat.todos.length > 0}
+                <TodoProgress items={$chat.todos} />
+              {/if}
+              {#if $chat.reminders.length > 0}
+                <!-- 定时/心跳任务卡片：位于待办事项卡片下方 -->
+                <ReminderCard items={$chat.reminders} />
+              {/if}
             </div>
           {/if}
         </div>
