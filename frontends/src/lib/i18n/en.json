@@ -14,6 +14,9 @@
   "chat.send": "Send message",
   "chat.attachFile": "Attach file",
   "chat.attachImage": "Attach image",
+  "chat.attach": "Attachment",
+  "chat.attachMenuFile": "File",
+  "chat.attachMenuImage": "Image",
   "chat.dragHint": "Drop to attach",
   "chat.removeAttachment": "Remove",
   "chat.copy": "Copy message",
@@ -267,5 +270,11 @@
   "status.localDeploy": "Local",
   "status.msgs": "msgs",
   "status.out": "out",
-  "status.in": "in"
+  "status.in": "in",
+  "status.fullAccess": "approvals",
+  "status.running": "Running",
+  "status.waiting": "Awaiting",
+  "status.done": "Done",
+  "status.on": "on",
+  "status.off": "off"
 }

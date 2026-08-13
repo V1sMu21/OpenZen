@@ -1,14 +1,15 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { t, locale, tSync } from "../i18n";
   let lang = $state("zh");
   $effect(() => { lang = $locale; });
 
   let {
-    thinking = $bindable(""),
-    duration = $bindable(0),
-    durationMs = $bindable<number | undefined>(undefined),
-    streaming = $bindable(false),
-    showTimer = $bindable(false),
+    thinking = "",
+    duration = 0,
+    durationMs = undefined as number | undefined,
+    streaming = false,
+    showTimer = false,
     runningTool = "",
     showPausedWarning = true,
   } = $props();
@@ -70,17 +71,51 @@
 
   // Strip stray HTML/XML tags and Cursor paste markers from thinking content,
   // then decompress whitespace-free model output for readable display.
-  let cleanDisplay = $derived(
-    decompressText(
-      thinking
+  // The full-text pipeline (8 regex passes) used to be a $derived recomputed
+  // on EVERY token during streaming — O(n²) regex work per block. It is now
+  // trailing-edge-throttled state: at most one recompute per ~50ms batch of
+  // tokens, with the first chunk rendered immediately.
+  const CLEAN_THROTTLE_MS = 50;
+  let cleanDisplay = $state("");
+  let wordN = $state(0);
+  let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastRawThinking = "";
+
+  function applyClean(raw: string) {
+    const cleaned = decompressText(
+      raw
         .replace(/\[Pasted ~[^\]]+\]/g, "")
         .replace(/<[^>]*>/g, "")
         .replace(/^\s+/, "")
         .trim()
-    )
-  );
+    );
+    cleanDisplay = cleaned;
+    wordN = wordCount(cleaned);
+  }
 
-  let wordN = $derived(wordCount(cleanDisplay));
+  $effect(() => {
+    const raw = thinking;
+    if (raw === lastRawThinking) return;
+    const isFirst = lastRawThinking === "";
+    lastRawThinking = raw;
+    if (throttleTimer !== null) return; // batched — trailing edge uses latest raw
+    throttleTimer = setTimeout(() => {
+      throttleTimer = null;
+      applyClean(lastRawThinking);
+    }, isFirst ? 0 : CLEAN_THROTTLE_MS);
+  });
+
+  onMount(() => {
+    return () => {
+      // Cancel a pending throttle on unmount — nothing may write state
+      // after teardown.
+      if (throttleTimer !== null) {
+        clearTimeout(throttleTimer);
+        throttleTimer = null;
+      }
+    };
+  });
+
   let wordsLabel = $derived.by(() => {
     if (wordN === 0) return "";
     if (wordN === 1) return tSync(lang, "thinking.word");
@@ -135,11 +170,12 @@
   }
 
   // Track word-count growth to accumulate active thinking time.
+  // Depends on throttled `wordN` instead of recomputing wordCount() over the
+  // full text on every token.
   $effect(() => {
     if (!streaming) return;
-    void thinking;
+    const wc = wordN;
     const now = Date.now();
-    const wc = wordCount(cleanDisplay);
     if (wc !== prevWordCount) {
       const since = now - lastGrowthMs;
       accumulatedMs += Math.min(since, PAUSE_THRESHOLD_MS);

@@ -298,6 +298,7 @@ async fn main() -> anyhow::Result<()> {
                 script_dir: assets_dir.to_string_lossy().to_string(),
                 lang: std::env::var("OZ_LANG").unwrap_or_default(),
                 skill_mcp_dir: None,
+                session_id: String::new(),
             };
             let registry = ToolRegistry::build_default();
             let state = Arc::new(tokio::sync::Mutex::new(
@@ -536,6 +537,7 @@ async fn run_ask(
         script_dir: assets_dir.to_string_lossy().to_string(),
         lang: lang.clone(),
         skill_mcp_dir: skill_mcp_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+        session_id: String::new(),
     };
 
     let memory = MemorySystem::new(working_dir, &lang);

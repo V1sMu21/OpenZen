@@ -1,5 +1,6 @@
 //! Tauri IPC command handlers for Side Panel operations.
 
+use std::io::Read;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -11,13 +12,13 @@ use super::terminal;
 
 /// Toggle side panel visibility. Returns new state.
 #[tauri::command]
-pub fn toggle_sidepanel(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<bool, String> {
+pub fn toggle_sidepanel(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<bool, String> {
     let mut sp = lock_poison_guard(&state.sidepanel);
     sp.visible = !sp.visible;
-    eprintln!("[sidepanel::commands] toggle_sidepanel: visible={}", sp.visible);
+    eprintln!(
+        "[sidepanel::commands] toggle_sidepanel: visible={}",
+        sp.visible
+    );
     app.emit("sidepanel:toggle", sp.visible)
         .map_err(|e| e.to_string())?;
     Ok(sp.visible)
@@ -37,8 +38,99 @@ pub fn set_sidepanel_width(
     Ok(())
 }
 
+/// Detect the artifact viewer type from a file extension — mirrors the
+/// frontend detectType map (SidePanel.svelte).
+fn detect_artifact_type(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "html" | "htm" => "html",
+        "pdf" => "pdf",
+        "xlsx" | "xls" | "csv" | "tsv" => "spreadsheet",
+        "py" | "rs" | "ts" | "js" | "go" | "svelte" | "json" | "yaml" | "yml"
+        | "toml" | "sql" | "sh" | "css" | "scss" | "txt" | "sty" | "cls" | "bib" => "code",
+        "md" | "rtf" => "markdown",
+        "tex" | "lt" => "latex",
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" => "image",
+        "doc" | "docx" | "ppt" | "pptx" => "office",
+        _ => "code",
+    }
+    .to_string()
+}
+
+/// Register a resolved path in the artifact whitelist (and the ozfile html
+/// root when needed), push the artifact tab and emit the open event.
+/// Shared by the agent-facing `open_artifact` and the user-dialog path.
+fn register_and_show(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    artifact_type: String,
+    resolved_path: String,
+    label: String,
+) -> Result<serde_json::Value, String> {
+    if artifact_type != "terminal" {
+        // Register the file (and, for html artifacts, its parent dir for
+        // relative resources) in the artifact whitelist so the read_file_*
+        // commands can serve it. The parent dir replaces the previous html
+        // root: the latest artifact's directory is the only one being
+        // displayed by the ozfile:// scheme.
+        let p = std::path::PathBuf::from(&resolved_path);
+        let mut roots = lock_poison_guard(&state.artifact_roots);
+        if !roots.contains(&p) {
+            roots.push(p.clone());
+        }
+        if artifact_type == "html" {
+            if let Some(parent) = p.parent() {
+                let canonical_parent = parent.to_path_buf();
+                if let Err(e) = app
+                    .state::<tauri::scope::Scopes>()
+                    .allow_directory(parent, true)
+                {
+                    eprintln!("[sidepanel] allow_directory failed: {e}");
+                }
+                if !roots.contains(&canonical_parent) {
+                    roots.push(canonical_parent.clone());
+                }
+                let mut html_roots = lock_poison_guard(&state.html_roots);
+                html_roots.clear();
+                html_roots.push(canonical_parent.clone());
+                eprintln!(
+                    "[sidepanel::commands] ozfile root: {}",
+                    canonical_parent.display()
+                );
+            }
+        }
+    }
+
+    let artifact = ArtifactInfo {
+        id: uuid::Uuid::new_v4().to_string(),
+        artifact_type,
+        path: resolved_path,
+        label,
+    };
+
+    let mut sp = lock_poison_guard(&state.sidepanel);
+    sp.artifacts.push(artifact.clone());
+    sp.active_id = Some(artifact.id.clone());
+    sp.visible = true;
+
+    let payload = serde_json::to_value(&artifact).map_err(|e| e.to_string())?;
+    eprintln!(
+        "[sidepanel::commands] open_artifact emit payload: {}",
+        payload
+    );
+    app.emit("sidepanel:artifact-opened", payload.clone())
+        .map_err(|e| e.to_string())?;
+    Ok(payload)
+}
+
 /// Open an artifact in the side panel. Auto-expands the panel.
-/// Path is validated to be within the working directory.
+/// Agent-facing channel: the path must resolve inside the app working dir
+/// or a registered project root (P2-3) — the agent's open_side_panel tool
+/// already validates this, and this is the second, IPC-level fence.
 #[tauri::command]
 pub fn open_artifact(
     app: AppHandle,
@@ -47,40 +139,19 @@ pub fn open_artifact(
     artifact_path: String,
     artifact_label: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    eprintln!("[sidepanel::commands] open_artifact called: type={}, path={}, label={:?}",
-        artifact_type, artifact_path, artifact_label);
-    let mut sp = lock_poison_guard(&state.sidepanel);
+    eprintln!(
+        "[sidepanel::commands] open_artifact called: type={}, path={}, label={:?}",
+        artifact_type, artifact_path, artifact_label
+    );
 
-    // For non-terminal artifacts, verify the path exists and resolve to absolute.
-    // Working-directory restriction removed: the user explicitly picks files via
-    // a native file dialog, and the agent's open_side_panel tool validates paths
-    // at the tool level before calling this command.
     let resolved_path = if artifact_type != "terminal" {
-        let p = std::fs::canonicalize(&artifact_path)
-            .map_err(|e| format!("Cannot open file: {e}"))?;
-        if artifact_type == "html" {
-            if let Some(parent) = p.parent() {
-                if let Err(e) = app
-                    .state::<tauri::scope::Scopes>()
-                    .allow_directory(parent, true)
-                {
-                    eprintln!("[sidepanel] allow_directory failed: {e}");
-                }
-                // Whitelist for the `ozfile://` custom scheme (real-slash URL
-                // serving for relative resources). Replace, not append: the
-                // latest artifact's directory is the only one being displayed.
-                let canonical_parent = parent.to_path_buf();
-                let mut roots = state
-                    .html_roots
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                roots.clear();
-                roots.push(canonical_parent.clone());
-                eprintln!(
-                    "[sidepanel::commands] ozfile root: {}",
-                    canonical_parent.display()
-                );
-            }
+        let p =
+            std::fs::canonicalize(&artifact_path).map_err(|e| format!("Cannot open file: {e}"))?;
+        if !is_within_allowed_roots(&state, &p) {
+            return Err(format!(
+                "Access denied: {} is outside the working directory and project roots",
+                p.display()
+            ));
         }
         p.to_string_lossy().to_string()
     } else {
@@ -95,30 +166,64 @@ pub fn open_artifact(
             .unwrap_or_else(|| "unnamed".into())
     });
 
-    let artifact = ArtifactInfo {
-        id: uuid::Uuid::new_v4().to_string(),
-        artifact_type,
-        path: resolved_path,
-        label,
+    register_and_show(&app, &state, artifact_type, resolved_path, label)
+}
+
+/// Open a file the USER picks in a native dialog. The dialog runs in Rust,
+/// so the path never crosses the webview boundary — no JS (benign or
+/// compromised) can claim "the user picked /etc/passwd". Dialog picks bypass
+/// the working-dir restriction (explicit user consent) but are still
+/// canonicalised and registered in the whitelist.
+#[tauri::command]
+pub fn open_artifact_dialog(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter(
+            "Documents",
+            &["md", "html", "htm", "pdf", "doc", "docx", "txt", "rtf", "ppt", "pptx", "xls", "tex"],
+        )
+        .add_filter(
+            "Images",
+            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"],
+        )
+        .add_filter("Spreadsheets", &["xlsx", "xls", "csv", "tsv"])
+        .add_filter(
+            "Code",
+            &["py", "rs", "ts", "js", "go", "sh", "css", "scss", "sql", "txt", "svelte"],
+        )
+        .add_filter("Data", &["json", "yaml", "toml"])
+        .add_filter("All files", &["*"])
+        .blocking_pick_file();
+    let Some(picked) = picked else {
+        return Err("cancelled".into());
     };
-
-    sp.artifacts.push(artifact.clone());
-    sp.active_id = Some(artifact.id.clone());
-    sp.visible = true;
-
-    let payload = serde_json::to_value(&artifact).map_err(|e| e.to_string())?;
-    eprintln!("[sidepanel::commands] open_artifact emit payload: {}", payload);
-    app.emit("sidepanel:artifact-opened", payload.clone())
-        .map_err(|e| e.to_string())?;
-    Ok(payload)
+    let path = picked
+        .into_path()
+        .map_err(|e| format!("Invalid picked path: {e}"))?;
+    let canonical =
+        std::fs::canonicalize(&path).map_err(|e| format!("Cannot open file: {e}"))?;
+    let artifact_type = detect_artifact_type(&canonical);
+    let label = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unnamed".into());
+    register_and_show(
+        &app,
+        &state,
+        artifact_type,
+        canonical.to_string_lossy().to_string(),
+        label,
+    )
 }
 
 /// Close the side panel.
 #[tauri::command]
-pub fn close_sidepanel(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+pub fn close_sidepanel(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let mut sp = lock_poison_guard(&state.sidepanel);
     sp.visible = false;
     app.emit("sidepanel:toggle", false)
@@ -128,9 +233,7 @@ pub fn close_sidepanel(
 
 /// Get current side panel state (for frontend initialization).
 #[tauri::command]
-pub fn get_sidepanel_state(
-    state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+pub fn get_sidepanel_state(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let sp = lock_poison_guard(&state.sidepanel);
     let current = serde_json::json!({
         "visible": sp.visible,
@@ -208,7 +311,10 @@ pub async fn spawn_terminal(
     shell: Option<String>,
     cwd: Option<String>,
 ) -> Result<String, String> {
-    eprintln!("[sidepanel::commands] spawn_terminal COMMAND called: shell={:?} cwd={:?}", shell, cwd);
+    eprintln!(
+        "[sidepanel::commands] spawn_terminal COMMAND called: shell={:?} cwd={:?}",
+        shell, cwd
+    );
     let session_id = uuid::Uuid::new_v4().to_string();
     let id = session_id.clone();
     let registry = state.terminal_registry.clone();
@@ -231,11 +337,9 @@ pub async fn write_to_terminal(
     let registry = state.terminal_registry.clone();
     let sid = session_id.clone();
     let bytes = data.into_bytes();
-    tokio::task::spawn_blocking(move || {
-        terminal::write_to_terminal(registry, &sid, &bytes)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || terminal::write_to_terminal(registry, &sid, &bytes))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Resize a terminal session.
@@ -248,11 +352,9 @@ pub async fn resize_terminal(
 ) -> Result<(), String> {
     let registry = state.terminal_registry.clone();
     let sid = session_id.clone();
-    tokio::task::spawn_blocking(move || {
-        terminal::resize_terminal(registry, &sid, cols, rows)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || terminal::resize_terminal(registry, &sid, cols, rows))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Close a terminal session.
@@ -263,57 +365,105 @@ pub async fn close_terminal(
 ) -> Result<(), String> {
     let registry = state.terminal_registry.clone();
     let sid = session_id.clone();
-    tokio::task::spawn_blocking(move || {
-        terminal::close_terminal(registry, &sid)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || terminal::close_terminal(registry, &sid))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ─── File content commands (Phase 3) ──────────────────────────────────────
 
+/// Only files explicitly opened in the side panel (via `open_artifact`, be
+/// it through the native dialog or the agent's open_side_panel tool) may be
+/// read. Canonicalise first so symlink tricks cannot bypass the whitelist.
+fn is_artifact_allowed(state: &AppState, canonical: &std::path::Path) -> bool {
+    let roots = lock_poison_guard(&state.artifact_roots);
+    roots
+        .iter()
+        .any(|r| canonical == r || canonical.starts_with(r))
+}
+
+/// Roots an artifact may live under: the app working dir plus every
+/// registered project root (both canonicalised, so `..`/symlink prefix
+/// tricks can't escape them).
+fn is_within_allowed_roots(state: &AppState, canonical: &std::path::Path) -> bool {
+    let mut roots = Vec::new();
+    let mut push_root = |s: &str| {
+        match std::fs::canonicalize(s) {
+            Ok(c) => roots.push(c),
+            Err(_) => roots.push(std::path::PathBuf::from(s)),
+        }
+    };
+    push_root(&state.working_dir);
+    let projects = lock_poison_guard(&state.projects);
+    for p in projects.iter() {
+        push_root(&p.root_path);
+    }
+    roots.iter().any(|r| canonical.starts_with(r))
+}
+
+/// Hard cap for files returned over IPC (images and office docs are served
+/// as raw bytes; a multi-GB file must not be materialised in memory).
+const MAX_BYTES_FILE: u64 = 32 * 1024 * 1024;
+/// Hard cap for text files returned as strings.
+const MAX_TEXT_FILE: u64 = 8 * 1024 * 1024;
+
+/// Canonicalise → whitelist-check → OPEN ONCE. The returned `File` pins the
+/// inode, so a rename between the check and the read cannot swap in a
+/// different file (TOCTOU). Size is verified via `fstat` on the same handle.
+fn open_whitelisted(path: &str, state: &AppState, max_bytes: u64) -> Result<std::fs::File, String> {
+    let resolved = std::fs::canonicalize(path).map_err(|e| format!("Cannot resolve path: {e}"))?;
+    if !is_artifact_allowed(state, &resolved) {
+        return Err("Access denied: only files opened in the side panel can be read".into());
+    }
+    let file = std::fs::File::open(&resolved).map_err(|e| format!("Cannot open file: {e}"))?;
+    let meta = file.metadata().map_err(|e| format!("Cannot stat file: {e}"))?;
+    if meta.len() > max_bytes {
+        return Err(format!(
+            "File too large to preview (max {} bytes)",
+            max_bytes
+        ));
+    }
+    Ok(file)
+}
+
 /// Read a file's binary content as a byte array (for images).
 #[tauri::command]
-pub fn read_file_bytes(
-    path: String,
-) -> Result<Vec<u8>, String> {
-    let resolved = std::fs::canonicalize(&path)
-        .map_err(|e| format!("Cannot resolve path: {e}"))?;
-    // Same relaxed boundary as open_artifact: files are explicitly opened by
-    // the user via native dialog, or validated by the agent's open_side_panel
-    // tool at the tool level.
-    std::fs::read(&resolved)
-        .map_err(|e| format!("Cannot read file: {e}"))
+pub fn read_file_bytes(path: String, state: State<'_, Arc<AppState>>) -> Result<Vec<u8>, String> {
+    let mut file = open_whitelisted(&path, &state, MAX_BYTES_FILE)?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .map_err(|e| format!("Cannot read file: {e}"))?;
+    Ok(buf)
 }
 
 /// Read a text file's content for code view.
 #[tauri::command]
-pub fn read_file_content(
-    _state: State<'_, Arc<AppState>>,
-    path: String,
-) -> Result<String, String> {
-    eprintln!("[sidepanel::commands] read_file_content called: path={}", path);
-    let resolved = std::fs::canonicalize(&path)
-        .map_err(|e| format!("Cannot resolve path: {e}"))?;
-    // SidePanel files are explicitly opened by the user via native dialog;
-    // same relaxed boundary as open_artifact.
-    std::fs::read_to_string(&resolved)
-        .map_err(|e| format!("Cannot read file: {e}"))
+pub fn read_file_content(state: State<'_, Arc<AppState>>, path: String) -> Result<String, String> {
+    eprintln!(
+        "[sidepanel::commands] read_file_content called: path={}",
+        path
+    );
+    let mut file = open_whitelisted(&path, &state, MAX_TEXT_FILE)?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)
+        .map_err(|e| format!("Cannot read file: {e}"))?;
+    Ok(buf)
 }
 
 /// Parse an Excel (.xlsx/.xls/.xlsb) or CSV/TSV file into a 2D string array.
 #[tauri::command]
 pub fn parse_excel(
     path: String,
+    state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<Vec<String>>, String> {
-    use calamine::{open_workbook_auto, Reader};
-    let resolved = std::fs::canonicalize(&path)
-        .map_err(|e| format!("Cannot resolve path: {e}"))?;
-    // Same relaxed boundary as open_artifact: files are explicitly opened by
-    // the user via native dialog, or validated by the agent's open_side_panel
-    // tool at the tool level.
+    use calamine::{open_workbook_auto, open_workbook_auto_from_rs, Reader};
+    let resolved = std::fs::canonicalize(&path).map_err(|e| format!("Cannot resolve path: {e}"))?;
+    if !is_artifact_allowed(&state, &resolved) {
+        return Err("Access denied: only files opened in the side panel can be read".into());
+    }
 
-    let ext = resolved.extension()
+    let ext = resolved
+        .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
@@ -321,25 +471,63 @@ pub fn parse_excel(
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     if ext == "csv" || ext == "tsv" {
-        let content = std::fs::read_to_string(&resolved)
+        // Open-once (fd pins the inode — no TOCTOU re-open by path).
+        let mut file = open_whitelisted(&path, &state, MAX_BYTES_FILE)?;
+        let mut content = String::new();
+        file.read_to_string(&mut content)
             .map_err(|e| format!("Cannot read CSV: {e}"))?;
         let sep = if ext == "tsv" { '\t' } else { ',' };
         for line in content.lines() {
-            if line.trim().is_empty() { continue; }
-            rows.push(line.split(sep).map(|c| c.trim().trim_matches('"').to_string()).collect());
+            if line.trim().is_empty() {
+                continue;
+            }
+            rows.push(
+                line.split(sep)
+                    .map(|c| c.trim().trim_matches('"').to_string())
+                    .collect(),
+            );
         }
         return Ok(rows);
     }
 
-    // `open_workbook_auto` picks the correct reader by file extension, so
-    // legacy .xls (BIFF8) is supported in addition to .xlsx/.xlsb.
-    let mut wb = open_workbook_auto(&resolved)
-        .map_err(|e| format!("Cannot open workbook: {e}"))?;
+    if ext == "xls" || ext == "xlsx" {
+        // Open once, read the pinned fd fully (≤32MB), then parse from
+        // memory — the workbook reader never touches the filesystem again,
+        // eliminating the canonicalize→open TOCTOU window entirely.
+        let mut file = open_whitelisted(&path, &state, MAX_BYTES_FILE)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)
+            .map_err(|e| format!("Cannot read workbook: {e}"))?;
+        let mut wb = open_workbook_auto_from_rs(std::io::Cursor::new(data))
+            .map_err(|e| format!("Cannot open workbook: {e}"))?;
+        let sheet_names = wb.sheet_names().to_vec();
+        if sheet_names.is_empty() {
+            return Err("No sheets found".into());
+        }
+        let range = wb
+            .worksheet_range(&sheet_names[0])
+            .map_err(|e| format!("Cannot read sheet: {e}"))?;
+        for r in range.rows() {
+            let row: Vec<String> = r.iter().map(|cell| cell.to_string()).collect();
+            rows.push(row);
+        }
+        return Ok(rows);
+    }
+
+    // .xlsb has no reader-from-file-handle variant in calamine — path-based
+    // read (whitelisted + size-capped). `open_workbook_auto` picks the
+    // correct reader by file extension.
+    let meta = std::fs::metadata(&resolved).map_err(|e| format!("Cannot stat file: {e}"))?;
+    if meta.len() > MAX_BYTES_FILE {
+        return Err("File too large to preview (max 32 MB)".into());
+    }
+    let mut wb = open_workbook_auto(&resolved).map_err(|e| format!("Cannot open workbook: {e}"))?;
     let sheet_names = wb.sheet_names().to_vec();
     if sheet_names.is_empty() {
         return Err("No sheets found".into());
     }
-    let range = wb.worksheet_range(&sheet_names[0])
+    let range = wb
+        .worksheet_range(&sheet_names[0])
         .map_err(|e| format!("Cannot read sheet: {e}"))?;
 
     for r in range.rows() {
@@ -354,14 +542,12 @@ pub fn parse_excel(
 
 /// Run `git diff` for a specific file and return the output.
 #[tauri::command]
-pub fn get_git_diff(
-    state: State<'_, Arc<AppState>>,
-    path: String,
-) -> Result<String, String> {
-    let resolved = std::fs::canonicalize(&path)
-        .map_err(|e| format!("Cannot resolve path: {e}"))?;
-    // Same relaxed boundary as open_artifact (user dialog / agent tool layer
-    // validation); workdir is used only as the git invocation cwd.
+pub fn get_git_diff(state: State<'_, Arc<AppState>>, path: String) -> Result<String, String> {
+    let resolved = std::fs::canonicalize(&path).map_err(|e| format!("Cannot resolve path: {e}"))?;
+    if !is_artifact_allowed(&state, &resolved) {
+        return Err("Access denied: only files opened in the side panel can be read".into());
+    }
+    // workdir is used only as the git invocation cwd.
     let workdir = std::fs::canonicalize(&state.working_dir)
         .unwrap_or_else(|_| std::path::PathBuf::from(&state.working_dir));
 
@@ -388,12 +574,17 @@ pub fn get_git_diff(
 
 /// Get basic file metadata for display in the side panel.
 #[tauri::command]
-pub fn get_file_info(path: String) -> Result<serde_json::Value, String> {
-    // Same relaxed boundary as open_artifact (user dialog / agent tool layer).
-    let resolved = std::fs::canonicalize(&path)
-        .map_err(|e| e.to_string())?;
+pub fn get_file_info(
+    path: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let resolved = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    if !is_artifact_allowed(&state, &resolved) {
+        return Err("Access denied: only files opened in the side panel can be read".into());
+    }
     let meta = std::fs::metadata(&resolved).map_err(|e| e.to_string())?;
-    let modified = meta.modified()
+    let modified = meta
+        .modified()
         .map(|t| {
             let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
             chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
@@ -409,10 +600,11 @@ pub fn get_file_info(path: String) -> Result<serde_json::Value, String> {
 
 /// Open a file with the system default application.
 #[tauri::command]
-pub fn open_external_file(path: String) -> Result<(), String> {
-    // Same relaxed boundary as open_artifact (user dialog / agent tool layer).
-    let resolved = std::fs::canonicalize(&path)
-        .map_err(|e| format!("Cannot resolve path: {e}"))?;
+pub fn open_external_file(path: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let resolved = std::fs::canonicalize(&path).map_err(|e| format!("Cannot resolve path: {e}"))?;
+    if !is_artifact_allowed(&state, &resolved) {
+        return Err("Access denied: only files opened in the side panel can be opened".into());
+    }
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")

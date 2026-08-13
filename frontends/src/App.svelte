@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
+  import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { sessions } from "./lib/stores/sessions";
   import { projects } from "./lib/stores/projects";
   import { chat } from "./lib/stores/chat";
@@ -19,7 +20,7 @@
   import SidePanel from "./lib/components/SidePanel.svelte";
   import TodoProgress from "./lib/components/TodoProgress.svelte";
   import { initLocale } from "./lib/i18n";
-  import { t } from "./lib/i18n";
+  import { t, locale } from "./lib/i18n";
   import { sidepanel } from "./lib/stores/sidepanel.svelte";
   import ThemeSwitcher from "./lib/components/ThemeSwitcher.svelte";
 
@@ -30,6 +31,7 @@
   let sidebarFocused = $state(false);
   let workingDir = $state("");
   let crystallizationOn = $state(false);
+  let fullAccessOn = $state(false);
   let showThinkingTimer = $state(false);
   let messagesEnd: HTMLDivElement | undefined = $state();
   let isDragOver = $state(false);
@@ -150,6 +152,14 @@
   // would otherwise recompute on every ChatMessage re-render.
   let tokenTotals = $derived(aggregateTokens($chat.messages));
 
+  // 标题栏运行状态指示: 待确认(ask_user 阻塞中) > 运行中 > 完成.
+  // 信号全部来自现有 chat store, 无需后端改动.
+  let runState = $derived.by((): { cls: "running" | "waiting" | "done"; key: string } => {
+    if ($chat.pendingAskUser) return { cls: "waiting", key: "status.waiting" };
+    if ($chat.isProcessing) return { cls: "running", key: "status.running" };
+    return { cls: "done", key: "status.done" };
+  });
+
   // Subscribe to processing state. When ask_user is pending, the agent
   // loop is still running (just blocked on the user reply), so we keep
   // the chat input enabled — only the AskUserDialog is interactive.
@@ -198,6 +208,7 @@
     initLocale();
     invoke<string>("get_working_dir").then(d => workingDir = d).catch(() => {});
     invoke<boolean>("get_crystallization").then(v => crystallizationOn = v).catch(() => {});
+    invoke<boolean>("get_full_access").then(v => fullAccessOn = v).catch(() => {});
     let prevMessageCount = 0;
     let prevStreamingTextLen = 0;
     let userScrolledUp = false;
@@ -365,6 +376,11 @@
     invoke("set_crystallization", { enabled: crystallizationOn }).catch(() => {});
   }
 
+  function toggleFullAccess() {
+    fullAccessOn = !fullAccessOn;
+    invoke("set_full_access", { enabled: fullAccessOn }).catch(() => {});
+  }
+
   function focusSidebar() {
     if (!sidebarOpen) sidebarOpen = true;
     sidebarFocused = true;
@@ -498,13 +514,27 @@
     // Load session list FIRST to know what exists on the server
     await sessions.load();
 
+    // Dedicated session windows (`session-{id}`) bind to their own session.
+    // The label is set by open_session_window in Rust — authoritative, does
+    // not depend on localStorage or on window open order (P2-1).
+    let windowSessionId: string | null = null;
+    try {
+      const label = getCurrentWebviewWindow().label;
+      if (label.startsWith("session-")) {
+        windowSessionId = label.slice("session-".length);
+      }
+    } catch {
+      // Browser (non-Tauri) context — no window label available.
+    }
+
     const savedId = localStorage.getItem("currentSessionId");
+    const restoreId = windowSessionId ?? savedId;
 
     if ($sessions.sessions.length > 0) {
-      // If the saved session still exists on server, restore it
-      const stillExists = savedId && $sessions.sessions.some((s) => s.id === savedId);
-      if (stillExists && savedId) {
-        handleSelectSession(savedId);
+      // If the window-bound/saved session still exists on server, restore it
+      const stillExists = restoreId && $sessions.sessions.some((s) => s.id === restoreId);
+      if (stillExists && restoreId) {
+        handleSelectSession(restoreId);
       } else {
         // Pick the most recent session from what the server has
         const latest = [...$sessions.sessions].sort(
@@ -547,10 +577,29 @@
   >
     <!-- 器物底款标题栏 -->
     <div class="main-header">
-      <button class="header-btn header-btn-left" onclick={toggleSidebar} title="Toggle Sidebar (⌘⇧S)">☰</button>
+      <button class="header-btn header-btn-left" onclick={toggleSidebar} title="Toggle Sidebar (⌘⇧S)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect width="18" height="18" x="3" y="3" rx="2"/>
+          <path d="M9 3v18"/>
+          <path d="m14 9 3 3-3 3"/>
+        </svg>
+      </button>
       <span class="seal" title="OpenZen"><img class="seal-icon" src="/cat-icon.png" alt="OpenZen" /></span>
       <span class="title-name">修砚</span>
       <span class="inscription era">丙午 制</span>
+      <!-- 运行状态指示: 活跃态(运行中/待确认)带墨滴涟漪动画, 完成态静态圆点 -->
+      <span class="run-state {runState.cls}" title={$t(runState.key)}>
+        {#if runState.cls === "done"}
+          <span class="state-dot"></span>
+        {:else}
+          <span class="ink-ripple" aria-hidden="true">
+            <span class="ink-ring"></span>
+            <span class="ink-ring"></span>
+            <span class="ink-dot"></span>
+          </span>
+        {/if}
+        <span class="state-label">{$t(runState.key)}</span>
+      </span>
       {#if workingDir}
         <span class="title-path" title={workingDir}>{workingDir}</span>
       {/if}
@@ -561,13 +610,25 @@
         <span class="switch-track"></span>
         <span class="switch-label">{$t("status.autoCrystallize")}</span>
       </label>
-      <label class="crystallization-switch" title={showThinkingTimer ? $t("status.timer") + "：开" : $t("status.timer") + "：关"}>
+      <label class="crystallization-switch" title={showThinkingTimer ? $t("status.timer") + "：" + $t("status.on") : $t("status.timer") + "：" + $t("status.off")}>
         <input type="checkbox" checked={showThinkingTimer} onchange={() => showThinkingTimer = !showThinkingTimer} />
         <span class="switch-track"></span>
         <span class="switch-label">{$t("status.timer")}</span>
       </label>
+      <!-- 完全访问: 开启后 agent 执行任务不再请求权限 (免弹窗自动放行) -->
+      <label class="crystallization-switch" title={$t("status.fullAccess") + "：" + (fullAccessOn ? $t("status.on") : $t("status.off"))}>
+        <input type="checkbox" checked={fullAccessOn} onchange={toggleFullAccess} />
+        <span class="switch-track"></span>
+        <span class="switch-label">{$t("status.fullAccess")}</span>
+      </label>
       <ThemeSwitcher />
-      <button class="header-btn header-btn-right" onclick={() => sidepanel.toggle()} title="Toggle Panel (⌘⇧E)">☰</button>
+      <button class="header-btn header-btn-right" onclick={() => sidepanel.toggle()} title="Toggle Panel (⌘⇧E)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect width="18" height="18" x="3" y="3" rx="2"/>
+          <path d="M15 3v18"/>
+          <path d="m10 15-3-3 3-3"/>
+        </svg>
+      </button>
     </div>
 
     <!-- Chat messages -->
@@ -646,13 +707,6 @@
       {/if}
 
       <div class="model-bar">
-        {#if $chat.isProcessing}
-          <span class="ink-ripple" aria-hidden="true">
-            <span class="ink-ring"></span>
-            <span class="ink-ring"></span>
-            <span class="ink-dot"></span>
-          </span>
-        {/if}
         {#if $chat.modelInfo}
           <span class="m-tag m-tag-model">
             <span class="m-tag-num">{$chat.modelInfo.model}</span>
@@ -780,6 +834,9 @@
     border-radius: 4px;
     line-height: 1;
     transition: color 0.15s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
   .header-btn:hover {
     color: var(--text-primary, #eee);
@@ -994,9 +1051,42 @@
     white-space: nowrap;
   }
 
-  /* 墨滴涟漪: "运行中"指示器，天青墨点 + 两圈扩散渐隐的涟漪。
-     常驻状态栏最左侧, 仅任务运行中($chat.isProcessing)显示。 */
-  .ink-ripple {
+  /* 运行状态指示 (标题栏, 标题右侧):
+     运行中/待确认 = 墨滴涟漪动画(天青/琥珀), 完成 = 静态暗灰圆点.
+     model-bar 不再承载状态动画, 只保留数据统计. */
+  .run-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    user-select: none;
+    --state-color: var(--color-dim);
+  }
+  .run-state.running {
+    --state-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+  .run-state.waiting {
+    --state-color: #f59e0b;
+    color: #f59e0b;
+  }
+  .run-state.done {
+    color: var(--color-dim);
+  }
+  .state-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-dim);
+    flex: none;
+  }
+  .state-label {
+    font-family: var(--font-serif);
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    white-space: nowrap;
+  }
+  .run-state .ink-ripple {
     position: relative;
     width: 12px;
     height: 12px;
@@ -1004,21 +1094,21 @@
     pointer-events: none;
     align-self: center;
   }
-  .ink-dot {
+  .run-state .ink-dot {
     position: absolute;
     inset: 3px;
     border-radius: 50%;
-    background: var(--color-primary);
-    box-shadow: 0 0 8px var(--color-primary);
+    background: var(--state-color);
+    box-shadow: 0 0 8px var(--state-color);
   }
-  .ink-ring {
+  .run-state .ink-ring {
     position: absolute;
     inset: 0;
     border-radius: 50%;
-    border: 1px solid var(--color-primary);
+    border: 1px solid var(--state-color);
     animation: inkRipple 2.4s ease-out infinite;
   }
-  .ink-ring:nth-of-type(2) {
+  .run-state .ink-ring:nth-of-type(2) {
     animation-delay: 1.2s;
   }
   @keyframes inkRipple {

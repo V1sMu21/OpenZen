@@ -44,13 +44,19 @@ impl SseEvent {
 
     /// Model info event — broadcast session model configuration at start.
     pub fn model_info(session_id: &str, model: &str, provider: &str, context_window: usize, is_local: bool) -> Self {
+        // serde_json instead of hand-built format! — a model name containing
+        // a quote previously produced broken JSON that the frontend silently
+        // dropped.
         Self::new(
             session_id,
             "model_info",
-            &format!(
-                r#"{{"model":"{}","provider":"{}","context_window":{},"is_local":{}}}"#,
-                model, provider, context_window, is_local
-            ),
+            &serde_json::json!({
+                "model": model,
+                "provider": provider,
+                "context_window": context_window,
+                "is_local": is_local,
+            })
+            .to_string(),
         )
     }
 

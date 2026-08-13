@@ -16,15 +16,24 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let pdfDoc: pdfjsLib.PDFDocumentProxy | null = null;
+  let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null;
+  let disposed = false;
+  // Monotonic token: rapid page/zoom changes supersede in-flight renders so
+  // a stale render can never paint over the current page.
+  let renderToken = 0;
 
   async function loadPDF() {
     try {
       const bytes: number[] = await invoke("read_file_bytes", { path: artifact.path });
-      pdfDoc = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise;
+      if (disposed) return;
+      loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(bytes) });
+      pdfDoc = await loadingTask.promise;
+      if (disposed) return;
       numPages = pdfDoc.numPages;
       loading = false;
       renderPage();
     } catch (e) {
+      if (disposed) return;
       error = String(e);
       loading = false;
     }
@@ -32,13 +41,25 @@
 
   async function renderPage() {
     if (!canvasEl || !pdfDoc) return;
+    const myToken = ++renderToken;
     loading = true;
-    const page = await pdfDoc.getPage(pageNum);
-    const viewport = page.getViewport({ scale });
-    canvasEl.height = viewport.height;
-    canvasEl.width = viewport.width;
-    await page.render({ canvas: canvasEl, viewport }).promise;
-    loading = false;
+    try {
+      const page = await pdfDoc.getPage(pageNum);
+      if (disposed || myToken !== renderToken) { page.cleanup(); return; }
+      const viewport = page.getViewport({ scale });
+      canvasEl.height = viewport.height;
+      canvasEl.width = viewport.width;
+      await page.render({ canvas: canvasEl, viewport }).promise;
+      // Release page-owned resources (fonts, worker objects) immediately.
+      page.cleanup();
+      if (!disposed && myToken === renderToken) loading = false;
+    } catch (e) {
+      // Rendering against a destroyed doc throws — expected during teardown
+      // or when a newer render superseded this one.
+      if (!disposed && myToken === renderToken) {
+        error = String(e);
+      }
+    }
   }
 
   async function goToPage(n: number) {
@@ -58,7 +79,17 @@
   onMount(() => {
     loadPDF();
     window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
+    return () => {
+      disposed = true;
+      renderToken++;
+      window.removeEventListener("keydown", handleKey);
+      // Destroy the loading task (document + worker) when the tab closes —
+      // the previous code leaked both on every artifact switch. In
+      // pdfjs-dist v6 cleanup goes through the loading task; the proxy no
+      // longer exposes a public destroy().
+      loadingTask?.destroy().catch(() => {});
+      pdfDoc = null;
+    };
   });
 </script>
 

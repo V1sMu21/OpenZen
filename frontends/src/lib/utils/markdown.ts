@@ -89,6 +89,17 @@ function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Allow-list for markdown link/image URLs. Anything else (javascript:,
+ * data:, vbscript: …) is left as escaped plain text instead of being
+ * rendered as a clickable href/src.
+ */
+const SAFE_URL_SCHEME = /^(https?:\/\/|ozfile:\/\/|asset:\/\/)/i;
+
+function isSafeUrl(url: string): boolean {
+  return SAFE_URL_SCHEME.test(url);
+}
+
 function buildKeywordRegex(word: string): RegExp {
   // Pure-CJK terms sit between other CJK chars without separators, so no
   // word boundaries — instead capture an optional negation prefix and let
@@ -173,7 +184,11 @@ export function renderMarkdown(text: string, opts?: { highlight?: boolean }): st
   let html = text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    // Double quotes are not touched by the entity escapes above; escape
+    // them too so user/agent content can never break out of an attribute
+    // value we interpolate it into below (href/src). Renders identically.
+    .replace(/"/g, "&quot;");
 
   html = html.replace(
     /```(\w*)\n?([\s\S]*?)```/g,
@@ -249,13 +264,18 @@ export function renderMarkdown(text: string, opts?: { highlight?: boolean }): st
 
   html = html.replace(
     /\[([^\]]+)\]\(((?:[^\s)]|\([^\s()]*\))+)\)/g,
-    (_m: string, text: string, url: string) =>
-      `<a href="${url}" target="_blank" rel="noopener noreferrer" class="md-link">${text}</a>`,
+    (_m: string, text: string, url: string) => {
+      if (!isSafeUrl(url)) return _m; // leave as escaped plain text
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="md-link">${text}</a>`;
+    },
   );
 
   html = html.replace(
     /!\[([^\]]*)\]\(([^)]+)\)/g,
-    '<img src="$2" alt="$1" loading="lazy">',
+    (_m: string, alt: string, url: string) => {
+      if (!isSafeUrl(url)) return _m; // leave as escaped plain text
+      return `<img src="${url}" alt="${alt}" loading="lazy">`;
+    },
   );
 
   html = html.replace(/~~(.+?)~~/g, "<del>$1</del>");

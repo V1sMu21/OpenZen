@@ -9,7 +9,9 @@ use oz_server::webui::sessions::{SessionInfo, SessionStatus, SessionStore};
 use oz_server::webui::sse_bus::SseEvent;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::{AppState, SendMessageResponse, ModelEntry, debug_log, lock_poison_guard, data_dir, runner};
+use crate::{
+    data_dir, debug_log, lock_poison_guard, runner, AppState, ModelEntry, SendMessageResponse,
+};
 
 #[tauri::command]
 pub fn clear_session_messages(
@@ -35,25 +37,33 @@ pub fn ping(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     let agent_count = lock_poison_guard(&state.running_agents).len();
     let cfg_path = std::path::Path::new(&state.config_path);
     let models: Vec<serde_json::Value> = match MyKeyConfig::from_file(cfg_path) {
-        Ok(cfg) => cfg.sessions.iter().map(|(name, sess)| {
-            let provider = match cfg.session_type(name) {
-                SessionType::Claude | SessionType::NativeClaude => "claude",
-                SessionType::Oai | SessionType::NativeOai | SessionType::Mixin => "openai",
-            };
-            serde_json::json!({
-                "name": name,
-                "model": sess.model,
-                "provider": provider,
-                "context_win": sess.context_win,
-                "is_local": crate::is_local_deploy(&sess.apibase),
+        Ok(cfg) => cfg
+            .sessions
+            .iter()
+            .map(|(name, sess)| {
+                let provider = match cfg.session_type(name) {
+                    SessionType::Claude | SessionType::NativeClaude => "claude",
+                    SessionType::Oai | SessionType::NativeOai | SessionType::Mixin => "openai",
+                };
+                serde_json::json!({
+                    "name": name,
+                    "model": sess.model,
+                    "provider": provider,
+                    "context_win": sess.context_win,
+                    "is_local": crate::is_local_deploy(&sess.apibase),
+                })
             })
-        }).collect(),
+            .collect(),
         Err(e) => {
             debug_log(&format!("ping: config error: {}", e));
             vec![]
         }
     };
-    debug_log(&format!("ping: {} models, config_path={}", models.len(), cfg_path.display()));
+    debug_log(&format!(
+        "ping: {} models, config_path={}",
+        models.len(),
+        cfg_path.display()
+    ));
     serde_json::json!({
         "status": "ok",
         "service": "openzen-tauri",
@@ -73,10 +83,7 @@ pub fn get_working_dir(state: State<'_, Arc<AppState>>) -> String {
 }
 
 #[tauri::command]
-pub fn get_working_dir_for_session(
-    session_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> String {
+pub fn get_working_dir_for_session(session_id: String, state: State<'_, Arc<AppState>>) -> String {
     // Resolve working directory from session's project, matching runner.rs logic
     let store = lock_poison_guard(&state.sessions);
     let pid = store.get(&session_id).and_then(|e| e.project_id.clone());
@@ -100,21 +107,27 @@ pub fn list_models(state: State<'_, Arc<AppState>>) -> Vec<ModelEntry> {
         Ok(cfg) => {
             let count = cfg.sessions.len();
             debug_log(&format!("list_models: parsed OK, {} sessions", count));
-            cfg.sessions.iter().map(|(name, sess)| {
-                let provider = match cfg.session_type(name) {
-                    SessionType::Claude | SessionType::NativeClaude => "claude",
-                    SessionType::Oai | SessionType::NativeOai | SessionType::Mixin => "openai",
-                };
-                let is_local = crate::is_local_deploy(&sess.apibase);
-                debug_log(&format!("list_models:   [{}] model={} provider={} ctx={} local={}", name, sess.model, provider, sess.context_win, is_local));
-                ModelEntry {
-                    name: name.clone(),
-                    model: sess.model.clone(),
-                    provider: provider.to_string(),
-                    context_win: sess.context_win,
-                    is_local,
-                }
-            }).collect()
+            cfg.sessions
+                .iter()
+                .map(|(name, sess)| {
+                    let provider = match cfg.session_type(name) {
+                        SessionType::Claude | SessionType::NativeClaude => "claude",
+                        SessionType::Oai | SessionType::NativeOai | SessionType::Mixin => "openai",
+                    };
+                    let is_local = crate::is_local_deploy(&sess.apibase);
+                    debug_log(&format!(
+                        "list_models:   [{}] model={} provider={} ctx={} local={}",
+                        name, sess.model, provider, sess.context_win, is_local
+                    ));
+                    ModelEntry {
+                        name: name.clone(),
+                        model: sess.model.clone(),
+                        provider: provider.to_string(),
+                        context_win: sess.context_win,
+                        is_local,
+                    }
+                })
+                .collect()
         }
         Err(e) => {
             debug_log(&format!("list_models: parse error: {e}"));
@@ -137,7 +150,9 @@ pub fn list_sessions(
 ) -> Vec<SessionInfo> {
     let mut store = lock_poison_guard(&state.sessions);
     store.reload();
-    let interrupted: Vec<String> = store.list().iter()
+    let interrupted: Vec<String> = store
+        .list()
+        .iter()
         .filter(|s| s.status == "running")
         .map(|s| s.id.clone())
         .collect();
@@ -160,16 +175,18 @@ pub fn list_sessions(
 }
 
 #[tauri::command]
-pub fn create_session(
-    name: Option<String>,
-    state: State<'_, Arc<AppState>>,
-) -> serde_json::Value {
+pub fn create_session(name: Option<String>, state: State<'_, Arc<AppState>>) -> serde_json::Value {
     let session_name = name.unwrap_or_else(|| {
         let ts = chrono::Local::now();
         format!("Session {}", ts.format("%H:%M"))
     });
     let working_dir = state.working_dir.clone();
-    let info = lock_poison_guard(&state.sessions).create_with_project(&session_name, None, None, Some(&working_dir));
+    let info = lock_poison_guard(&state.sessions).create_with_project(
+        &session_name,
+        None,
+        None,
+        Some(&working_dir),
+    );
     serde_json::json!({ "session_id": info.id, "name": info.name, "working_dir": info.working_dir })
 }
 
@@ -185,14 +202,27 @@ pub fn create_session_in_project(
     });
     let project_name = project_id.as_ref().and_then(|pid| {
         let projects = lock_poison_guard(&state.projects);
-        projects.iter().find(|p| p.id == *pid).map(|p| p.name.clone())
+        projects
+            .iter()
+            .find(|p| p.id == *pid)
+            .map(|p| p.name.clone())
     });
-    let working_dir = project_id.as_ref().and_then(|pid| {
-        let projects = lock_poison_guard(&state.projects);
-        projects.iter().find(|p| p.id == *pid).map(|p| p.root_path.clone())
-    }).unwrap_or_else(|| state.working_dir.clone());
-    let info = lock_poison_guard(&state.sessions)
-        .create_with_project(&session_name, project_id.as_deref(), project_name.as_deref(), Some(&working_dir));
+    let working_dir = project_id
+        .as_ref()
+        .and_then(|pid| {
+            let projects = lock_poison_guard(&state.projects);
+            projects
+                .iter()
+                .find(|p| p.id == *pid)
+                .map(|p| p.root_path.clone())
+        })
+        .unwrap_or_else(|| state.working_dir.clone());
+    let info = lock_poison_guard(&state.sessions).create_with_project(
+        &session_name,
+        project_id.as_deref(),
+        project_name.as_deref(),
+        Some(&working_dir),
+    );
     debug_log(&format!(
         "create_session_in_project: session_id={}, project_id={:?}, project_name={:?}, working_dir={}",
         info.id, project_id, project_name, working_dir
@@ -224,8 +254,7 @@ pub fn move_session_to_project(
 
     let current_project_id = {
         let store = lock_poison_guard(&state.sessions);
-        store.get(&session_id)
-            .and_then(|e| e.project_id.clone())
+        store.get(&session_id).and_then(|e| e.project_id.clone())
     };
 
     if current_project_id.as_deref() == Some(&project_id) {
@@ -273,7 +302,11 @@ pub fn get_session(id: String, state: State<'_, Arc<AppState>>) -> serde_json::V
                     // so checkpoints are found for project sessions.
                     recover_session_from_checkpoints(&mut store, &id, &wd);
                 }
-            } else if store.get(&id).map(|e| !has_assistant_message(e)).unwrap_or(true) {
+            } else if store
+                .get(&id)
+                .map(|e| !has_assistant_message(e))
+                .unwrap_or(true)
+            {
                 // Not running and no assistant message persisted: restore the
                 // full conversation (and todos) from the checkpoint. This is
                 // the "bubbles vanished after restart" case — the agent was
@@ -295,11 +328,23 @@ fn has_assistant_message(entry: &oz_server::webui::sessions::SessionEntry) -> bo
     })
 }
 
-fn recover_session_from_checkpoints(
-    store: &mut SessionStore,
-    session_id: &str,
-    working_dir: &str,
-) {
+/// Pop trailing messages until the last user message with non-empty text.
+/// Assistant turns, user-role tool_results carriers (empty content) and any
+/// system summaries are discarded. Returns the seed text for a regenerate.
+fn pop_regenerate_seed(messages: &mut Vec<serde_json::Value>) -> Option<String> {
+    while let Some(m) = messages.pop() {
+        if m.get("role").and_then(|v| v.as_str()) == Some("user") {
+            let content = m.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if !content.is_empty() {
+                return Some(content.to_string());
+            }
+        }
+        // assistant turn / tool_results carrier / system summary — keep walking
+    }
+    None
+}
+
+fn recover_session_from_checkpoints(store: &mut SessionStore, session_id: &str, working_dir: &str) {
     let cp_dir = oz_core::checkpoint::checkpoint_dir(std::path::Path::new(working_dir));
     if let Some(cp) = oz_core::checkpoint::load_best_loop_checkpoint(&cp_dir, session_id) {
         if let Some(entry) = store.get_mut(session_id) {
@@ -346,9 +391,9 @@ fn checkpoint_messages_to_store(
     // When the session already carries the trigger message (user input),
     // the checkpoint's first user message is the same trigger replayed —
     // skip it to avoid a duplicated bubble.
-    let existing_has_trigger = out.iter().any(|m| {
-        m.get("role").and_then(|v| v.as_str()) == Some("user")
-    });
+    let existing_has_trigger = out
+        .iter()
+        .any(|m| m.get("role").and_then(|v| v.as_str()) == Some("user"));
     let mut skip_first_user = existing_has_trigger;
     for m in &cp.messages {
         let role = match m.role {
@@ -387,7 +432,11 @@ fn checkpoint_messages_to_store(
                         "input": input,
                     }));
                 }
-                oz_core_types::ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                oz_core_types::ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => {
                     tool_results.push(serde_json::json!({
                         "tool_use_id": tool_use_id,
                         "content": content.as_text().unwrap_or_default(),
@@ -487,9 +536,11 @@ fn checkpoint_messages_to_store(
     // so marking them "interrupted" would show a "任务已停止" banner on
     // every historical bubble.
     if let Some(exit) = cp.exit_reason.as_deref().or(Some("interrupted")) {
-        if let Some(last_asst) = out.iter_mut().rev().find(|m| {
-            m.get("role").and_then(|v| v.as_str()) == Some("assistant")
-        }) {
+        if let Some(last_asst) = out
+            .iter_mut()
+            .rev()
+            .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+        {
             last_asst["exitReason"] = serde_json::json!(exit);
         }
     }
@@ -497,7 +548,10 @@ fn checkpoint_messages_to_store(
 }
 
 #[tauri::command]
-pub fn delete_session(id: String, state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+pub fn delete_session(
+    id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
     if lock_poison_guard(&state.running_agents).contains_key(&id) {
         return Err("Session is running; stop the agent before deleting".to_string());
     }
@@ -511,9 +565,16 @@ pub fn rename_session(id: String, name: String, state: State<'_, Arc<AppState>>)
 }
 
 #[tauri::command]
-pub async fn stop_session(id: String, state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+pub async fn stop_session(
+    id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
     let state = state.inner().clone();
-    if lock_poison_guard(&state.sessions).get(&id).map(|e| e.status != SessionStatus::Running).unwrap_or(false) {
+    if lock_poison_guard(&state.sessions)
+        .get(&id)
+        .map(|e| e.status != SessionStatus::Running)
+        .unwrap_or(false)
+    {
         return Ok(serde_json::json!({"status": "already_stopped"}));
     }
     stop_running_agent(&id, &state).await;
@@ -554,18 +615,27 @@ pub fn inject_message(
                 content: text.clone(),
             };
             lock_poison_guard(queue).push_back(intervention);
-            debug_log(&format!("inject_message: pushed intervention to session={}", session_id));
+            debug_log(&format!(
+                "inject_message: pushed intervention to session={}",
+                session_id
+            ));
         } else {
             // Agent not running — just added to store, that's fine
-            debug_log(&format!("inject_message: no running agent for session={}, stored only", session_id));
+            debug_log(&format!(
+                "inject_message: no running agent for session={}, stored only",
+                session_id
+            ));
         }
     }
 
     // 3. Notify frontend to re-render
-    let _ = app_handle.emit("sse_event", serde_json::json!({
-        "type": "protocol_v1",
-        "data": { "type": "user_message_stored", "session_id": session_id }
-    }));
+    let _ = app_handle.emit(
+        "sse_event",
+        serde_json::json!({
+            "type": "protocol_v1",
+            "data": { "type": "user_message_stored", "session_id": session_id }
+        }),
+    );
 
     Ok(serde_json::json!({"status": "ok"}))
 }
@@ -598,7 +668,10 @@ async fn stop_running_agent(session_id: &str, state: &Arc<AppState>) {
     let handle = lock_poison_guard(&state.running_agents).remove(session_id);
     if let Some(handle) = handle {
         lock_poison_guard(&state.detached_agents).insert(session_id.to_string(), handle);
-        debug_log(&format!("stop_running_agent: detaching slow agent session={}", session_id));
+        debug_log(&format!(
+            "stop_running_agent: detaching slow agent session={}",
+            session_id
+        ));
     }
 }
 
@@ -609,8 +682,41 @@ fn abort_detached_agent(session_id: &str, state: &Arc<AppState>) {
     if let Some(handle) = lock_poison_guard(&state.detached_agents).remove(session_id) {
         if !handle.is_finished() {
             handle.abort();
-            debug_log(&format!("abort_detached_agent: aborted stale task session={}", session_id));
+            debug_log(&format!(
+                "abort_detached_agent: aborted stale task session={}",
+                session_id
+            ));
         }
+    }
+}
+
+/// Serializes read-modify-write cycles on mykey.toml (add_platform,
+/// remove_platform, …) so concurrent commands can't clobber each other.
+static CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard: removes a session's agent handles when its run task exits —
+/// including the panic path. Without this, a panic inside
+/// `run_agent_for_session` (e.g. a poisoned lock elsewhere) skips the
+/// cleanup block and leaves the session stuck in "Running" forever, with
+/// its JoinHandle leaking in `running_agents`.
+struct AgentSessionGuard {
+    state: Arc<AppState>,
+    session_id: String,
+}
+
+impl Drop for AgentSessionGuard {
+    fn drop(&mut self) {
+        let my_id = tokio::task::try_id();
+        if let Some(my_id) = my_id {
+            let mut agents = lock_poison_guard(&self.state.running_agents);
+            if let Some(h) = agents.get(&self.session_id) {
+                if Some(h.id()) == Some(my_id) {
+                    agents.remove(&self.session_id);
+                }
+            }
+        }
+        lock_poison_guard(&self.state.detached_agents).remove(&self.session_id);
+        lock_poison_guard(&self.state.intervention_queues).remove(&self.session_id);
     }
 }
 
@@ -626,7 +732,8 @@ pub async fn send_message(
     let state = state.inner().clone();
     debug_log(&format!(
         "send_message: session_id={}, msg_len={}",
-        session_id, message.len()
+        session_id,
+        message.len()
     ));
 
     {
@@ -676,30 +783,39 @@ pub async fn send_message(
     }
 
     let handle = tokio::spawn(async move {
-        if let Err(e) = runner::run_agent_for_session(&app_clone, &state_clone, &session_id_clone, model_name_clone.as_deref(), false).await {
+        // RAII cleanup — runs even if run_agent_for_session panics.
+        let _cleanup = AgentSessionGuard {
+            state: state_clone.clone(),
+            session_id: session_id_clone.clone(),
+        };
+        if let Err(e) = runner::run_agent_for_session(
+            &app_clone,
+            &state_clone,
+            &session_id_clone,
+            model_name_clone.as_deref(),
+            false,
+        )
+        .await
+        {
             debug_log(&format!("run_agent error: {e}"));
-            let _ = state_clone
-                .sse_bus
-                .send(SseEvent::error(&session_id_clone, &e.to_string()));
+            // Safety net: an early error return (config parse, session
+            // missing, …) skips the runner's own status writeback — reset
+            // Running → Idle here so the UI can't be stuck on "Running".
+            {
+                let mut store = lock_poison_guard(&state_clone.sessions);
+                if let Some(s) = store.get_mut(&session_id_clone) {
+                    if s.status == SessionStatus::Running {
+                        s.status = SessionStatus::Idle;
+                    }
+                }
+                store.save();
+            }
             let _ = app_clone.emit(
                 "sse_event",
                 serde_json::to_value(&SseEvent::error(&session_id_clone, &e.to_string()))
                     .unwrap_or_default(),
             );
         }
-        // Only remove our own handle — a detached stale task must not
-        // erase a newer agent's entry when it finishes late.
-        let my_id = tokio::task::try_id();
-        {
-            let mut agents = lock_poison_guard(&state_clone.running_agents);
-            if let Some(h) = agents.get(&session_id_clone) {
-                if Some(h.id()) == my_id {
-                    agents.remove(&session_id_clone);
-                }
-            }
-        }
-        lock_poison_guard(&state_clone.detached_agents).remove(&session_id_clone);
-        lock_poison_guard(&state_clone.intervention_queues).remove(&session_id_clone);
     });
 
     lock_poison_guard(&state.running_agents).insert(session_id.clone(), handle);
@@ -734,18 +850,13 @@ pub async fn regenerate(
             .get_mut(&session_id)
             .ok_or_else(|| format!("Session {session_id} not found"))?;
 
-        while session
-            .messages
-            .last()
-            .map_or(false, |m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
-        {
-            session.messages.pop();
-        }
-
-        let msg = session
-            .messages
-            .pop()
-            .and_then(|m| m.get("content").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        // Walk back to the last user message that actually carries text.
+        // Trailing assistant turns and user-role tool_results carriers
+        // (persisted with empty content) are popped; without this, a
+        // session whose last turn ended with tool results seeded an
+        // empty user message and the runner bailed with
+        // "No user message to process".
+        let msg = pop_regenerate_seed(&mut session.messages)
             .ok_or_else(|| "No user message to regenerate".to_string())?;
 
         session.messages.push(serde_json::json!({
@@ -763,9 +874,10 @@ pub async fn regenerate(
     let sid = session_id.clone();
 
     let handle = tokio::spawn(async move {
-        if let Err(e) = runner::run_agent_for_session(&app_clone, &state_clone, &sid, None, false).await {
+        if let Err(e) =
+            runner::run_agent_for_session(&app_clone, &state_clone, &sid, None, false).await
+        {
             debug_log(&format!("regenerate agent error: {e}"));
-            let _ = state_clone.sse_bus.send(SseEvent::error(&sid, &e.to_string()));
             let _ = app_clone.emit(
                 "sse_event",
                 serde_json::to_value(&SseEvent::error(&sid, &e.to_string())).unwrap_or_default(),
@@ -814,7 +926,10 @@ pub async fn resume_session(
         drop(store);
         if let Some(ref pid) = pid {
             let projects = lock_poison_guard(&state.projects);
-            projects.iter().find(|p| p.id == *pid).map(|p| p.root_path.clone())
+            projects
+                .iter()
+                .find(|p| p.id == *pid)
+                .map(|p| p.root_path.clone())
                 .unwrap_or(state.working_dir.clone())
         } else {
             state.working_dir.clone()
@@ -822,7 +937,10 @@ pub async fn resume_session(
     };
     let cp_dir = oz_core::checkpoint::checkpoint_dir(std::path::Path::new(&working_dir));
     if oz_core::checkpoint::load_latest_loop_checkpoint(&cp_dir, &session_id).is_none() {
-        return Err("No checkpoint found for this session; the agent must have been run at least once".to_string());
+        return Err(
+            "No checkpoint found for this session; the agent must have been run at least once"
+                .to_string(),
+        );
     }
 
     // Mark session as running. The agent loop uses checkpoint data directly
@@ -842,10 +960,20 @@ pub async fn resume_session(
     let sid = session_id.clone();
 
     let handle = tokio::spawn(async move {
-        if let Err(e) = runner::run_agent_for_session(&app_clone, &state_clone, &sid, model_name.as_deref(), true).await {
+        if let Err(e) = runner::run_agent_for_session(
+            &app_clone,
+            &state_clone,
+            &sid,
+            model_name.as_deref(),
+            true,
+        )
+        .await
+        {
             debug_log(&format!("resume_agent error: {e}"));
-            let _ = state_clone.sse_bus.send(SseEvent::error(&sid, &e.to_string()));
-            let _ = app_clone.emit("sse_event", serde_json::to_value(&SseEvent::error(&sid, &e.to_string())).unwrap_or_default());
+            let _ = app_clone.emit(
+                "sse_event",
+                serde_json::to_value(&SseEvent::error(&sid, &e.to_string())).unwrap_or_default(),
+            );
         }
         let my_id = tokio::task::try_id();
         {
@@ -871,6 +999,7 @@ pub async fn resume_session(
 pub fn ask_user_response(
     session_id: String,
     response: String,
+    app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
     {
@@ -888,17 +1017,28 @@ pub fn ask_user_response(
             ));
         }
     };
-    *slot.lock().unwrap() = Some(response);
-    let _ = state.sse_bus.send(SseEvent::system(
-        &session_id,
-        "ask_user reply received; agent resuming the same run",
-    ));
+    *lock_poison_guard(&slot) = Some(response);
+    let _ = app_handle.emit(
+        "sse_event",
+        serde_json::to_value(&SseEvent::system(
+            &session_id,
+            "ask_user reply received; agent resuming the same run",
+        ))
+        .unwrap_or_default(),
+    );
     Ok(serde_json::json!({ "received": true }))
 }
 
 #[tauri::command]
-pub fn open_session_window(session_id: String, app_handle: AppHandle) -> serde_json::Value {
+pub fn open_session_window(
+    session_id: String,
+    app_handle: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> serde_json::Value {
     let label = format!("session-{session_id}");
+    // Register the mapping so session-scoped events (e.g. approvals) are
+    // routed to this window instead of being broadcast everywhere.
+    lock_poison_guard(&state.session_windows).insert(session_id.clone(), label.clone());
     if app_handle.get_webview_window(&label).is_some() {
         if let Some(w) = app_handle.get_webview_window(&label) {
             let _ = w.show();
@@ -924,8 +1064,18 @@ pub async fn compress_session(
     id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    let (before, after, saved_chars, saved_pct, messages_removed, before_chars, after_chars,
-         metrics, template_summary, _llm) = {
+    let (
+        before,
+        after,
+        saved_chars,
+        saved_pct,
+        messages_removed,
+        before_chars,
+        after_chars,
+        metrics,
+        template_summary,
+        _llm,
+    ) = {
         let mut store = lock_poison_guard(&state.sessions);
         let entry = match store.get_mut(&id) {
             Some(e) => e,
@@ -937,7 +1087,11 @@ pub async fn compress_session(
             .iter()
             .filter_map(|v| {
                 let role = v.get("role")?.as_str()?;
-                let content = v.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                let content = v
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 match role {
                     "user" => Some(oz_core_types::Message::user(&content)),
                     "assistant" => Some(oz_core_types::Message::assistant(&content)),
@@ -972,15 +1126,32 @@ pub async fn compress_session(
         let original_msgs = entry.messages.clone();
         entry.messages = oz_core::compress::match_messages_to_originals(&messages, &entry.messages);
 
-        let metrics = oz_core::compress::CompressionMetrics::compute(before_chars, after_chars, before, after);
+        let metrics = oz_core::compress::CompressionMetrics::compute(
+            before_chars,
+            after_chars,
+            before,
+            after,
+        );
         let removed_json: Vec<serde_json::Value> = {
-            let surviving_ids: std::collections::HashSet<String> = entry.messages.iter()
-                .filter_map(|v| Some(format!("{}_{}", v.get("role")?.as_str()?, v.get("content")?.as_str()?)))
+            let surviving_ids: std::collections::HashSet<String> = entry
+                .messages
+                .iter()
+                .filter_map(|v| {
+                    Some(format!(
+                        "{}_{}",
+                        v.get("role")?.as_str()?,
+                        v.get("content")?.as_str()?
+                    ))
+                })
                 .collect();
-            original_msgs.iter()
+            original_msgs
+                .iter()
                 .filter(|v| {
-                    let id = format!("{}_{}", v.get("role").and_then(|r| r.as_str()).unwrap_or(""),
-                        v.get("content").and_then(|c| c.as_str()).unwrap_or(""));
+                    let id = format!(
+                        "{}_{}",
+                        v.get("role").and_then(|r| r.as_str()).unwrap_or(""),
+                        v.get("content").and_then(|c| c.as_str()).unwrap_or("")
+                    );
                     !surviving_ids.contains(&id)
                 })
                 .cloned()
@@ -991,8 +1162,18 @@ pub async fn compress_session(
         store.save();
 
         let messages_removed = before.saturating_sub(after);
-        (before, after, saved_chars, saved_pct, messages_removed, before_chars, after_chars,
-         metrics, template_summary, None::<String>)
+        (
+            before,
+            after,
+            saved_chars,
+            saved_pct,
+            messages_removed,
+            before_chars,
+            after_chars,
+            metrics,
+            template_summary,
+            None::<String>,
+        )
     };
 
     let llm_summary = if messages_removed >= 4 {
@@ -1004,11 +1185,14 @@ pub async fn compress_session(
     if let Some(ref summary) = llm_summary {
         let mut store = lock_poison_guard(&state.sessions);
         if let Some(entry) = store.get_mut(&id) {
-            entry.messages.insert(0, serde_json::json!({
-                "role": "system",
-                "content": format!("[Compression summary]: {summary}"),
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            }));
+            entry.messages.insert(
+                0,
+                serde_json::json!({
+                    "role": "system",
+                    "content": format!("[Compression summary]: {summary}"),
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
             store.save();
         }
     }
@@ -1042,25 +1226,31 @@ async fn generate_compact_summary(state: &AppState, template: &str) -> Option<St
     // Manual /compact must use the same summary model as the agent
     // loop's auto-compression (summary_model), not default_session,
     // so local deployments get a small fast model for the summary.
-    let (sess_name, sess_config): (String, oz_config::mykey::SessionConfig) = if let Some(ref name) = cfg.summary_model {
-        let found = cfg.get(name).or_else(|| {
-            cfg.sessions.iter().find(|(_, s)| s.model == *name).map(|(_, s)| s)
-        });
-        if let Some(sc) = found {
-            (name.clone(), sc.clone())
+    let (sess_name, sess_config): (String, oz_config::mykey::SessionConfig) =
+        if let Some(ref name) = cfg.summary_model {
+            let found = cfg.get(name).or_else(|| {
+                cfg.sessions
+                    .iter()
+                    .find(|(_, s)| s.model == *name)
+                    .map(|(_, s)| s)
+            });
+            if let Some(sc) = found {
+                (name.clone(), sc.clone())
+            } else {
+                return None;
+            }
         } else {
-            return None;
-        }
-    } else {
-        let name = cfg.default_session.as_deref().unwrap_or("claude_sonnet");
-        (name.to_string(), cfg.get(name)?.clone())
-    };
+            let name = cfg.default_session.as_deref().unwrap_or("claude_sonnet");
+            (name.to_string(), cfg.get(name)?.clone())
+        };
     let sess_type = cfg.session_type(&sess_name);
 
     let backend: Box<dyn oz_llm::Session> = match sess_type {
         SessionType::Claude => Box::new(oz_llm::ClaudeSession::new(sess_config.clone())),
         SessionType::Oai => Box::new(oz_llm::OaiSession::new(sess_config.clone())),
-        SessionType::NativeClaude => Box::new(oz_llm::NativeClaudeSession::new(sess_config.clone())),
+        SessionType::NativeClaude => {
+            Box::new(oz_llm::NativeClaudeSession::new(sess_config.clone()))
+        }
         SessionType::NativeOai => Box::new(oz_llm::NativeOAISession::new(sess_config.clone())),
         _ => return None,
     };
@@ -1071,10 +1261,8 @@ async fn generate_compact_summary(state: &AppState, template: &str) -> Option<St
          continue the conversation.\n\n{template}"
     ));
     let msgs = [prompt];
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        client.chat(&msgs, &[]),
-    ).await;
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(10), client.chat(&msgs, &[])).await;
     match result {
         Ok(Ok(resp)) if !resp.content.is_empty() => Some(resp.content),
         _ => None,
@@ -1123,6 +1311,7 @@ pub fn add_platform(
     allowed_users: Option<Vec<String>>,
     sandbox: Option<bool>,
 ) -> Result<String, String> {
+    let _lock = lock_poison_guard(&CONFIG_WRITE_LOCK);
     let path = std::path::Path::new(&state.config_path);
     let content = std::fs::read_to_string(path).map_err(|e| format!("read config: {e}"))?;
 
@@ -1156,7 +1345,10 @@ pub fn add_platform(
     }
     if let Some(users) = &allowed_users {
         if !users.is_empty() {
-            let arr: Vec<toml::Value> = users.iter().map(|u| toml::Value::String(u.clone())).collect();
+            let arr: Vec<toml::Value> = users
+                .iter()
+                .map(|u| toml::Value::String(u.clone()))
+                .collect();
             entry.insert("allowed_users".into(), toml::Value::Array(arr));
         }
     }
@@ -1164,19 +1356,45 @@ pub fn add_platform(
     platforms_table.insert(name.clone(), toml::Value::Table(entry));
 
     let output = toml::to_string(&root).map_err(|e| format!("serialize TOML: {e}"))?;
-    std::fs::write(path, &output).map_err(|e| format!("write config: {e}"))?;
+    // Atomic write (tmp + rename) so a crash can't truncate the config.
+    let tmp = path.with_extension(format!("toml.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, &output).map_err(|e| format!("write config: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename config: {e}"))?;
+    // mykey.toml holds platform secrets (app_secret / bot_token) — restrict
+    // to owner-only so other local users can't read them.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
 
     Ok(format!("Platform '{name}' configured in mykey.toml. Rebuild with `cargo build --release` and restart."))
 }
 
 #[tauri::command]
 pub fn get_crystallization(state: State<'_, Arc<AppState>>) -> bool {
-    state.crystallization_enabled.load(std::sync::atomic::Ordering::Relaxed)
+    state
+        .crystallization_enabled
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[tauri::command]
 pub fn set_crystallization(enabled: bool, state: State<'_, Arc<AppState>>) {
-    state.crystallization_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    state
+        .crystallization_enabled
+        .store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[tauri::command]
+pub fn get_full_access(state: State<'_, Arc<AppState>>) -> bool {
+    state.full_access.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[tauri::command]
+pub fn set_full_access(enabled: bool, state: State<'_, Arc<AppState>>) {
+    state
+        .full_access
+        .store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -1190,19 +1408,21 @@ mod tests {
             timestamp: 0.0,
             messages: vec![
                 Message::user("[FILE:task.md] 构建后端"),
-                Message::assistant_with_blocks(vec![
-                    ContentBlock::tool_use("call_1", "read", serde_json::json!({"file_path": "/tmp/a.py"})),
-                ]),
+                Message::assistant_with_blocks(vec![ContentBlock::tool_use(
+                    "call_1",
+                    "read",
+                    serde_json::json!({"file_path": "/tmp/a.py"}),
+                )]),
                 Message::user_with_blocks(vec![ContentBlock::tool_result(
                     "call_1",
                     "file contents",
                 )]),
-                Message::assistant_with_blocks(vec![
-                    ContentBlock::text("后端已完成"),
-                ]),
-                Message::assistant_with_blocks(vec![
-                    ContentBlock::tool_use("call_2", "todoupdate", serde_json::json!({"id": "t1", "status": "completed"})),
-                ]),
+                Message::assistant_with_blocks(vec![ContentBlock::text("后端已完成")]),
+                Message::assistant_with_blocks(vec![ContentBlock::tool_use(
+                    "call_2",
+                    "todoupdate",
+                    serde_json::json!({"id": "t1", "status": "completed"}),
+                )]),
             ],
             history_info: vec![],
             full_response: "后端已完成".into(),
@@ -1230,6 +1450,50 @@ mod tests {
         assert_eq!(out.len(), 5);
     }
 
+    /// Regression: a session whose last turn ended with tool results
+    /// persists as [.., user(trigger), assistant, user(tool_results, ""),
+    /// assistant]. regenerate must walk back to the trigger instead of
+    /// seeding an empty user message (which made the runner bail with
+    /// "No user message to process").
+    #[test]
+    fn regenerate_seed_skips_tool_result_carriers() {
+        let mut msgs = vec![
+            serde_json::json!({"role": "user", "content": "写一个脚本"}),
+            serde_json::json!({"role": "assistant", "content": "正在执行"}),
+            serde_json::json!({"role": "user", "content": "", "tool_results": [{"tool_use_id": "c1", "content": "ok"}]}),
+            serde_json::json!({"role": "assistant", "content": "完成"}),
+        ];
+        assert_eq!(
+            pop_regenerate_seed(&mut msgs),
+            Some("写一个脚本".to_string())
+        );
+        // Everything after the trigger was popped.
+        assert_eq!(msgs.len(), 0);
+    }
+
+    #[test]
+    fn regenerate_seed_finds_last_user_with_text() {
+        let mut msgs = vec![
+            serde_json::json!({"role": "user", "content": "第一轮"}),
+            serde_json::json!({"role": "assistant", "content": "a"}),
+            serde_json::json!({"role": "user", "content": "第二轮"}),
+            serde_json::json!({"role": "assistant", "content": "b"}),
+        ];
+        assert_eq!(pop_regenerate_seed(&mut msgs), Some("第二轮".to_string()));
+        // Only the trailing assistant turn was popped; the first round stays.
+        assert_eq!(msgs.len(), 2);
+    }
+
+    #[test]
+    fn regenerate_seed_empty_when_no_user_text() {
+        let mut msgs = vec![
+            serde_json::json!({"role": "system", "content": "[Compression summary]"}),
+            serde_json::json!({"role": "user", "content": "", "tool_results": []}),
+        ];
+        assert_eq!(pop_regenerate_seed(&mut msgs), None);
+        assert!(msgs.is_empty());
+    }
+
     #[test]
     fn checkpoint_tool_use_becomes_stream_events() {
         let cp = sample_checkpoint();
@@ -1246,9 +1510,9 @@ mod tests {
     fn checkpoint_tool_result_becomes_user_tool_results() {
         let cp = sample_checkpoint();
         let out = checkpoint_messages_to_store(&cp, &[]);
-        let user_tr = out.iter().find(|m| {
-            m["role"] == "user" && m.get("tool_results").is_some()
-        });
+        let user_tr = out
+            .iter()
+            .find(|m| m["role"] == "user" && m.get("tool_results").is_some());
         assert!(user_tr.is_some(), "tool_result user message must exist");
         let tr = user_tr.unwrap()["tool_results"].as_array().unwrap();
         assert_eq!(tr[0]["tool_use_id"], "call_1");
@@ -1295,27 +1559,48 @@ mod tests {
         store.create_with_id(session_id, "test");
         if let Some(e) = store.get_mut(session_id) {
             e.working_dir = Some(working_dir.to_string());
-            e.messages.push(serde_json::json!({"role": "user", "content": "[FILE:trigger]" }));
+            e.messages
+                .push(serde_json::json!({"role": "user", "content": "[FILE:trigger]" }));
         }
         recover_session_from_checkpoints(&mut store, session_id, working_dir);
 
         let entry = store.get(session_id).expect("session exists");
         // The trigger user message is preserved; checkpoint messages follow.
-        assert!(entry.messages.len() >= 2, "expected rebuilt conversation, got {}", entry.messages.len());
+        assert!(
+            entry.messages.len() >= 2,
+            "expected rebuilt conversation, got {}",
+            entry.messages.len()
+        );
         assert_eq!(entry.messages[0]["role"], "user");
         // Dedup: the checkpoint's first user message (the same trigger)
         // must NOT be replayed — only one trigger bubble.
-        let trigger_count = entry.messages.iter().filter(|m| {
-            m.get("role").and_then(|v| v.as_str()) == Some("user")
-                && m.get("content").and_then(|v| v.as_str()).map(|s| s.contains("trigger")).unwrap_or(false)
-        }).count();
-        assert_eq!(trigger_count, 1, "trigger message must not be duplicated, found {trigger_count}");
+        let trigger_count = entry
+            .messages
+            .iter()
+            .filter(|m| {
+                m.get("role").and_then(|v| v.as_str()) == Some("user")
+                    && m.get("content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.contains("trigger"))
+                        .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            trigger_count, 1,
+            "trigger message must not be duplicated, found {trigger_count}"
+        );
         // At least one assistant message with renderable streamEvents.
         let has_assistant = entry.messages.iter().any(|m| {
             m.get("role").and_then(|v| v.as_str()) == Some("assistant")
-                && m.get("streamEvents").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false)
+                && m.get("streamEvents")
+                    .and_then(|v| v.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false)
         });
-        assert!(has_assistant, "expected assistant message with streamEvents");
+        assert!(
+            has_assistant,
+            "expected assistant message with streamEvents"
+        );
         // Todos restored from checkpoint.
         assert!(!entry.todos.is_empty(), "todos must be restored");
     }

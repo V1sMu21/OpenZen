@@ -99,6 +99,7 @@ impl AgentBridge {
             script_dir: self.script_dir.clone(),
             lang: self.locale.lock().unwrap().clone(),
             skill_mcp_dir: self.skill_mcp_dir.clone(),
+            session_id: String::new(),
         };
 
         let backend: Box<dyn oz_llm::Session> = match sess_type {

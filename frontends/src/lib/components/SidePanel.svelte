@@ -12,8 +12,8 @@
   import ArtifactDocxView from "./ArtifactDocxView.svelte";
   import ArtifactEmpty from "./ArtifactEmpty.svelte";
   import { sidepanel, type Artifact } from "../stores/sidepanel.svelte";
-  import { open } from "@tauri-apps/plugin-dialog";
-  import { t, localT } from "../i18n";
+  import { invoke } from "@tauri-apps/api/core";
+  import { t } from "../i18n";
 
   // ── Detect artifact type from extension ──
   function detectType(path: string): string {
@@ -64,6 +64,9 @@
   }
 
   // ── Open file via native dialog ──
+  // The dialog now runs in Rust (`open_artifact_dialog`): the picked path
+  // never crosses the webview boundary, so no JS can register arbitrary
+  // files in the preview whitelist (P2-3).
   let openingFile = false;
   let fileError = $state<string | null>(null);
   async function openFile() {
@@ -71,46 +74,9 @@
     openingFile = true;
     fileError = null;
     try {
-      const selected = await open({
-        multiple: false,
-        filters: [
-          {
-            name: localT("sidepanel.filterDocuments"),
-            extensions: ["md", "html", "htm", "pdf", "doc", "docx", "txt", "rtf", "ppt", "pptx", "xls"],
-          },
-          {
-            name: localT("sidepanel.filterImages"),
-            extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"],
-          },
-          {
-            name: localT("sidepanel.filterSpreadsheets"),
-            extensions: ["xlsx", "xls", "csv", "tsv"],
-          },
-          {
-            name: localT("sidepanel.filterCode"),
-            extensions: ["py", "rs", "ts", "js", "go", "sh", "css", "scss", "sql", "txt"],
-          },
-          {
-            name: localT("sidepanel.filterData"),
-            extensions: ["json", "yaml", "toml"],
-          },
-          {
-            name: localT("sidepanel.filterAll"),
-            extensions: ["*"],
-          },
-        ],
-      });
-      if (!selected) return; // user cancelled
-      const path: string = selected as string;
-      if (!path) return;
-      const type = detectType(path);
-      await sidepanel.open({
-        type,
-        path,
-        label: path.split("/").pop() ?? path,
-      });
+      await invoke<Artifact>("open_artifact_dialog");
     } catch (e) {
-      fileError = String(e);
+      if (String(e) !== "cancelled") fileError = String(e);
     } finally {
       openingFile = false;
     }
@@ -222,38 +188,44 @@
     <!-- Content area -->
     <div class="sidepanel-content">
       {#if sidepanel.activeArtifact}
-        {@const renderer = rendererFor(sidepanel.activeArtifact)}
-        {#if renderer === "html"}
-          <ArtifactHTMLView artifact={sidepanel.activeArtifact} />
-        {:else if renderer === "terminal"}
-          <ArtifactTerminal cwd={sidepanel.activeArtifact.path} />
-        {:else if renderer === "markdown"}
-          <ArtifactMarkdownView artifact={sidepanel.activeArtifact} />
-        {:else if renderer === "pdf"}
-          <ArtifactPDFView artifact={sidepanel.activeArtifact} />
-        {:else if renderer === "spreadsheet"}
-          <ArtifactSheetView artifact={sidepanel.activeArtifact} />
-        {:else if renderer === "code"}
-          <ArtifactCodeView artifact={sidepanel.activeArtifact} />
-        {:else if renderer === "diff"}
-          <ArtifactDiffView artifact={sidepanel.activeArtifact} />
-        {:else if renderer === "latex"}
-          <ArtifactLatexView artifact={sidepanel.activeArtifact} />
-        {:else if renderer === "image"}
-          <ArtifactImageView artifact={sidepanel.activeArtifact} />
-        {:else if renderer === "office"}
-          {#if sidepanel.activeArtifact.path.endsWith(".docx")}
-            <ArtifactDocxView artifact={sidepanel.activeArtifact} />
+        <!-- {#key} remounts the view whenever the active artifact changes.
+             Every Artifact view loads only in onMount, so without the key
+             switching between same-type tabs kept showing the previous
+             file (and terminal tabs shared one PTY). -->
+        {#key sidepanel.activeArtifact.id}
+          {@const renderer = rendererFor(sidepanel.activeArtifact)}
+          {#if renderer === "html"}
+            <ArtifactHTMLView artifact={sidepanel.activeArtifact} />
+          {:else if renderer === "terminal"}
+            <ArtifactTerminal cwd={sidepanel.activeArtifact.path} />
+          {:else if renderer === "markdown"}
+            <ArtifactMarkdownView artifact={sidepanel.activeArtifact} />
+          {:else if renderer === "pdf"}
+            <ArtifactPDFView artifact={sidepanel.activeArtifact} />
+          {:else if renderer === "spreadsheet"}
+            <ArtifactSheetView artifact={sidepanel.activeArtifact} />
+          {:else if renderer === "code"}
+            <ArtifactCodeView artifact={sidepanel.activeArtifact} />
+          {:else if renderer === "diff"}
+            <ArtifactDiffView artifact={sidepanel.activeArtifact} />
+          {:else if renderer === "latex"}
+            <ArtifactLatexView artifact={sidepanel.activeArtifact} />
+          {:else if renderer === "image"}
+            <ArtifactImageView artifact={sidepanel.activeArtifact} />
+          {:else if renderer === "office"}
+            {#if sidepanel.activeArtifact.path.toLowerCase().endsWith(".docx")}
+              <ArtifactDocxView artifact={sidepanel.activeArtifact} />
+            {:else}
+              <ArtifactOfficeView artifact={sidepanel.activeArtifact} />
+            {/if}
           {:else}
-            <ArtifactOfficeView artifact={sidepanel.activeArtifact} />
+            <!-- Future: PDF, code, spreadsheet renderers -->
+            <div class="sidepanel-placeholder">
+              <p>📄 {sidepanel.activeArtifact.label}</p>
+              <p class="hint">{$t("sidepanel.comingSoon").replace("{renderer}", renderer)}</p>
+            </div>
           {/if}
-        {:else}
-          <!-- Future: PDF, code, spreadsheet renderers -->
-          <div class="sidepanel-placeholder">
-            <p>📄 {sidepanel.activeArtifact.label}</p>
-            <p class="hint">{$t("sidepanel.comingSoon").replace("{renderer}", renderer)}</p>
-          </div>
-        {/if}
+        {/key}
       {:else}
         <ArtifactEmpty />
       {/if}

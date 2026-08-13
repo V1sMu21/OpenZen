@@ -8,11 +8,14 @@
   let current = $state<DataPart | null>(null);
   let shownIds = new Set<string>();
 
+  // Enqueue new transient parts. This effect re-runs whenever `parts`
+  // changes (the parent passes a freshly-filtered array), so it must stay
+  // cheap and side-effect-light: it only appends to the queue.
   $effect(() => {
     const v = visible;
     for (const p of v) {
       if (shownIds.has(p.id)) continue;
-      if (!queued.some((q) => q.id === p.id) && !(current && current.id === p.id)) {
+      if (!queued.some((q) => q.id === p.id) && current?.id !== p.id) {
         queued = [...queued, p];
       }
     }
@@ -20,11 +23,25 @@
       current = queued[0];
       queued = queued.slice(1);
       shownIds.add(current.id);
-      const timeout = setTimeout(() => {
-        current = null;
-      }, 4000);
-      return () => clearTimeout(timeout);
+      // Bound memory: transient ids are per-session and short-lived.
+      if (shownIds.size > 500) {
+        const oldest = shownIds.values().next();
+        if (oldest.value !== undefined) shownIds.delete(oldest.value);
+      }
     }
+  });
+
+  // Auto-dismiss. The 4s timeout lives in its own effect keyed only on the
+  // current part's id — the enqueue effect re-runs on every parts change
+  // and used to clear this very timeout in its cleanup, so the bar got
+  // stuck on the first notification forever.
+  $effect(() => {
+    const id = current?.id;
+    if (!id) return;
+    const t = setTimeout(() => {
+      if (current?.id === id) current = null;
+    }, 4000);
+    return () => clearTimeout(t);
   });
 </script>
 

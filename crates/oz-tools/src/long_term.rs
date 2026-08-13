@@ -91,6 +91,7 @@ mod tests {
             script_dir: "/tmp".into(),
             lang: "en".into(),
             skill_mcp_dir: Some(tmp.to_string_lossy().to_string()),
+            session_id: String::new(),
         }
     }
 

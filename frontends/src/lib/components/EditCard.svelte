@@ -20,6 +20,7 @@
     result = undefined as any,
     completed = false,
     showTimer = false,
+    workingDir = "",
   } = $props();
 
   let collapsed = $state(true);
@@ -36,6 +37,17 @@
   function dirname(path: string): string {
     const idx = path.lastIndexOf("/");
     return idx >= 0 ? path.slice(0, idx) : "";
+  }
+
+  /** path 显示优化: 等于工作目录 → 只显示目录名; 是工作目录子路径
+   *  → 显示相对路径; 其余原样. (与 ToolCallCard 的 displayPath 一致) */
+  function displayPath(p: string): string {
+    if (!workingDir) return p;
+    const base = workingDir.replace(/\/+$/, "");
+    if (!base) return p;
+    if (p === base) return p.split("/").pop() || p;
+    if (p.startsWith(base + "/")) return p.slice(base.length + 1);
+    return p;
   }
 
   function formatDuration(ms: number | undefined): string {
@@ -193,7 +205,9 @@
     return result;
   }
 
-  let dir = $derived(dirname(filePath));
+  // 卡片头部显示相对路径 + 文件名 (悬停 title 可看完整绝对路径)
+  let relPath = $derived(displayPath(filePath));
+  let dir = $derived(dirname(relPath));
   let name = $derived(basename(filePath));
   let hasError = $derived(isError());
 
@@ -207,7 +221,7 @@
 </script>
 
 <div class="edit-card">
-  <button class="edit-header" onclick={toggle}>
+  <button class="edit-header" onclick={toggle} title={filePath}>
     <svg class="edit-icon" width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true">
       <path d="M9.5 1.5l3 3-7 7H2.5v-3l7-7z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
       <path d="M8 3l3 3" stroke="currentColor" stroke-width="1.2"/>

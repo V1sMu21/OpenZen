@@ -7,9 +7,18 @@
 
   $effect(() => {
     const unsub = chat.subscribe((s) => {
-      modelInfo = s.modelInfo ? { contextWindow: s.modelInfo.contextWindow } : null;
+      // chat fires on every stream token — only touch state when the values
+      // actually change, so the bar doesn't re-render per token and doesn't
+      // churn a fresh modelInfo object each update.
+      const cw = s.modelInfo?.contextWindow ?? null;
+      if (cw !== (modelInfo?.contextWindow ?? null)) {
+        modelInfo = cw != null ? { contextWindow: cw } : null;
+      }
       const last = s.messages[s.messages.length - 1];
-      contextUsed = last?.contextTokens ?? 0;
+      const used = last?.contextTokens ?? 0;
+      if (used !== contextUsed) {
+        contextUsed = used;
+      }
     });
     return unsub;
   });

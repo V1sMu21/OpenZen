@@ -2512,6 +2512,7 @@ mod tests {
             script_dir: "/tmp".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            session_id: String::new(),
         }
     }
 

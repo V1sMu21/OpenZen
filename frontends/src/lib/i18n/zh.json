@@ -14,6 +14,9 @@
   "chat.send": "发送消息",
   "chat.attachFile": "添加文件",
   "chat.attachImage": "添加图片",
+  "chat.attach": "附 件",
+  "chat.attachMenuFile": "文 件",
+  "chat.attachMenuImage": "图 片",
   "chat.dragHint": "释放以添加文件",
   "chat.removeAttachment": "移除",
   "chat.copy": "复制消息",
@@ -267,5 +270,11 @@
   "status.localDeploy": "本地部署",
   "status.msgs": "条消息",
   "status.out": "输出",
-  "status.in": "输入"
+  "status.in": "输入",
+  "status.fullAccess": "完全访问",
+  "status.running": "运行中",
+  "status.waiting": "待确认",
+  "status.done": "完成",
+  "status.on": "开",
+  "status.off": "关"
 }

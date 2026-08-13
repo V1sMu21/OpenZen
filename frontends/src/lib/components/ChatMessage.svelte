@@ -465,6 +465,7 @@ import { t, locale, tSync } from "../i18n";
                 result={p.result}
                 completed={isToolPartDone(p)}
                 showTimer={showTimer}
+                workingDir={workingDir}
               />
             {:else if p.type === "tool-invocation" && isSkillOrMcpInvocation(p.name)}
               <SkillMcpCard

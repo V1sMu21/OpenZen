@@ -304,14 +304,23 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
           onclick={() => attachMenuOpen = !attachMenuOpen}
           aria-label={$t("chat.attachFile")}
           title={$t("chat.attachFile")}
-        >附 件</button>
+        >{$t("chat.attach")}</button>
         {#if attachMenuOpen}
           <div class="attach-menu">
             <button class="attach-menu-item" onclick={() => { attachMenuOpen = false; pickFile(); }}>
-              <span class="am-ic">文</span>文 件
+              <svg class="am-ic" width="14" height="14" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <path d="M5 2h6l4 4v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" stroke="currentColor" stroke-width="1.3"/>
+                <path d="M11 2v4h4" stroke="currentColor" stroke-width="1.3"/>
+              </svg>
+              {$t("chat.attachMenuFile")}
             </button>
             <button class="attach-menu-item" onclick={() => { attachMenuOpen = false; pickImage(); }}>
-              <span class="am-ic">图</span>图 片
+              <svg class="am-ic" width="14" height="14" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <rect x="2" y="4" width="14" height="12" rx="2" stroke="currentColor" stroke-width="1.3"/>
+                <circle cx="6" cy="8" r="1.5" fill="currentColor"/>
+                <path d="M2 14l4-5 3 3 3-4 4 6H2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+              </svg>
+              {$t("chat.attachMenuImage")}
             </button>
           </div>
         {/if}

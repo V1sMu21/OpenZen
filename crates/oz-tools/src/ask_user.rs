@@ -59,7 +59,7 @@ mod tests {
     use oz_core_types::ToolContext as TC;
 
     fn ctx() -> TC {
-        TC { working_dir: "/tmp".into(), assets_dir: "/tmp".into(), script_dir: "/tmp".into(), lang: "en".into(), skill_mcp_dir: None }
+        TC { working_dir: "/tmp".into(), assets_dir: "/tmp".into(), script_dir: "/tmp".into(), lang: "en".into(), skill_mcp_dir: None, session_id: String::new() }
     }
 
     #[tokio::test]

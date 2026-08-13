@@ -33,6 +33,7 @@ fn test_handler_integration() {
             script_dir: ".".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            session_id: String::new(),
         };
         handler.execute(serde_json::json!({"x": 1}), &ctx).await
     }).unwrap();

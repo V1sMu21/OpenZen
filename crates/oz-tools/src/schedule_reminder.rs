@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use oz_core_types::{ToolContext, ToolError, ToolOutput, Reminder, REMINDER_TX, CURRENT_REMINDER_SESSION, ToolDefinition, ToolFunction};
+use oz_core_types::{ToolContext, ToolError, ToolOutput, Reminder, REMINDER_TX, ToolDefinition, ToolFunction};
 
 use crate::registry::ToolHandler;
 
@@ -16,10 +16,11 @@ pub fn definition() -> ToolDefinition {
 }
 
 pub fn handler() -> crate::ToolHandler {
-    std::sync::Arc::new(move |_name, args, _ctx| {
+    std::sync::Arc::new(move |_name, args, ctx| {
         let tool = ScheduleReminderTool;
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        match rt.block_on(tool.execute(args.clone(), &ToolContext::default())) {
+        // Pass the real ToolContext through — session_id lives on it now.
+        match rt.block_on(tool.execute(args.clone(), ctx)) {
             Ok(output) => oz_core_types::StepOutcome {
                 data: output.data,
                 next_prompt: output.next_prompt,
@@ -72,7 +73,7 @@ impl ToolHandler for ScheduleReminderTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
         let delay_secs = args["delay_seconds"].as_u64().unwrap_or(60).max(5).min(3600);
         let message = args["message"].as_str().unwrap_or("").to_string();
         let repeat_count = args["repeat_count"].as_u64().unwrap_or(0).min(10) as u32;
@@ -88,11 +89,9 @@ impl ToolHandler for ScheduleReminderTool {
             .unwrap_or(0);
         let fire_at_ms = now_ms + (delay_secs * 1000);
 
-        let session_id = CURRENT_REMINDER_SESSION
-            .get()
-            .and_then(|s| s.lock().ok())
-            .and_then(|g| g.clone())
-            .unwrap_or_default();
+        // Session identity travels on ToolContext (per-run) instead of a
+        // process-global that concurrent sessions overwrote.
+        let session_id = ctx.session_id.clone();
 
         let tx_exists = REMINDER_TX.get().is_some();
 

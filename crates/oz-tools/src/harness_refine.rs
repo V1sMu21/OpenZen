@@ -96,6 +96,7 @@ mod tests {
             script_dir: String::new(),
             lang: "en".into(),
             skill_mcp_dir: Some(skill.to_string_lossy().to_string()),
+            session_id: String::new(),
         }
     }
 

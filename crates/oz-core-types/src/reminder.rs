@@ -5,7 +5,7 @@
 //! the message into the session and runs the agent again.
 
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// A scheduled reminder created by the agent during a turn.
@@ -22,7 +22,7 @@ pub struct Reminder {
 /// to the Tauri reminder manager. Initialized once by the Tauri setup.
 pub static REMINDER_TX: OnceLock<UnboundedSender<Reminder>> = OnceLock::new();
 
-/// Tracks the currently running session ID so the schedule_reminder tool
-/// can tag reminders with the correct session. Set by Tauri before each
-/// agent run, cleared after.
-pub static CURRENT_REMINDER_SESSION: OnceLock<Arc<Mutex<Option<String>>>> = OnceLock::new();
+// NOTE: the old CURRENT_REMINDER_SESSION process-global was removed — it held
+// a single session id that concurrent agent runs overwrote, so reminders
+// could be tagged with the wrong session. The session id now travels on
+// `ToolContext::session_id`.

@@ -92,6 +92,7 @@ mod tests {
             working_dir: "/tmp".into(), assets_dir: "/tmp".into(),
             script_dir: "/tmp".into(), lang: "en".into(),
             skill_mcp_dir: None,
+            session_id: String::new(),
         }
     }
 

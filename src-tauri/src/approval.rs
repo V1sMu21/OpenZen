@@ -8,6 +8,7 @@
 //! 5. IPC command resolves the oneshot → agent_loop continues
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,7 +18,15 @@ use tokio::sync::oneshot;
 
 use crate::AppState;
 
-pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>;
+/// A pending approval entry — the owning session is recorded so that only
+/// the window/session that owns the request can adjudicate it (a request_id
+/// alone is guessable/leakable across windows).
+pub struct PendingApproval {
+    pub session_id: String,
+    pub tx: oneshot::Sender<ApprovalDecision>,
+}
+
+pub type PendingApprovals = Arc<Mutex<HashMap<String, PendingApproval>>>;
 
 pub fn new_pending() -> PendingApprovals {
     Arc::new(Mutex::new(HashMap::new()))
@@ -26,6 +35,12 @@ pub fn new_pending() -> PendingApprovals {
 pub struct TauriApprovalHandler {
     app_handle: AppHandle,
     pending: PendingApprovals,
+    /// "完全访问" flag — when set, every approval request is auto-allowed
+    /// (no modal, no blocking) so the agent can run without asking.
+    full_access: Arc<AtomicBool>,
+    /// session_id → window label. Requests are emitted to the owning window
+    /// when mapped (dedicated session windows); otherwise broadcast.
+    session_windows: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Clone for TauriApprovalHandler {
@@ -33,13 +48,25 @@ impl Clone for TauriApprovalHandler {
         TauriApprovalHandler {
             app_handle: self.app_handle.clone(),
             pending: self.pending.clone(),
+            full_access: self.full_access.clone(),
+            session_windows: self.session_windows.clone(),
         }
     }
 }
 
 impl TauriApprovalHandler {
-    pub fn new(app_handle: AppHandle, pending: PendingApprovals) -> Self {
-        TauriApprovalHandler { app_handle, pending }
+    pub fn new(
+        app_handle: AppHandle,
+        pending: PendingApprovals,
+        full_access: Arc<AtomicBool>,
+        session_windows: Arc<Mutex<HashMap<String, String>>>,
+    ) -> Self {
+        TauriApprovalHandler {
+            app_handle,
+            pending,
+            full_access,
+            session_windows,
+        }
     }
 }
 
@@ -50,10 +77,28 @@ impl ApprovalHandler for TauriApprovalHandler {
         request: ApprovalRequest,
         timeout: Duration,
     ) -> Result<ApprovalDecision, ApprovalError> {
+        // Full-access mode: auto-allow every request without showing the
+        // modal, so the agent can execute without user intervention.
+        if self.full_access.load(Ordering::Relaxed) {
+            tracing::info!(
+                "[safety] full_access enabled — auto-allowed {}/{} (session={})",
+                request.tool_name,
+                request.pattern,
+                request.session_id,
+            );
+            return Ok(ApprovalDecision::Allow);
+        }
+
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, mut rx) = oneshot::channel();
 
-        self.pending.lock().unwrap().insert(request_id.clone(), tx);
+        crate::lock_poison_guard(&self.pending).insert(
+            request_id.clone(),
+            PendingApproval {
+                session_id: request.session_id.clone(),
+                tx,
+            },
+        );
 
         let payload = serde_json::json!({
             "session_id": request.session_id,
@@ -68,7 +113,21 @@ impl ApprovalHandler for TauriApprovalHandler {
             })).unwrap_or_default(),
         });
 
-        let _ = self.app_handle.emit("sse_event", payload);
+        // Route to the owning window when a dedicated session window exists;
+        // fall back to broadcast (main window / closed session window).
+        let targeted = {
+            let mapping = crate::lock_poison_guard(&self.session_windows);
+            match mapping.get(&request.session_id) {
+                Some(label) => self
+                    .app_handle
+                    .emit_to(label, "sse_event", &payload)
+                    .is_ok(),
+                None => false,
+            }
+        };
+        if !targeted {
+            let _ = self.app_handle.emit("sse_event", payload);
+        }
 
         tracing::info!(
             "[safety] tauri approval_needed: session={session_id}, tool={tool}/{pattern}, id={id}",
@@ -82,7 +141,7 @@ impl ApprovalHandler for TauriApprovalHandler {
             Ok(Ok(decision)) => Ok(decision),
             Ok(Err(_)) => Err(ApprovalError::Cancelled),
             Err(_) => {
-                self.pending.lock().unwrap().remove(&request_id);
+                crate::lock_poison_guard(&self.pending).remove(&request_id);
                 Err(ApprovalError::Timeout)
             }
         }
@@ -92,10 +151,12 @@ impl ApprovalHandler for TauriApprovalHandler {
 /// Tauri IPC command: approve_tool
 ///
 /// Called from the frontend when the user clicks a decision button
-/// in the approval modal.
+/// in the approval modal. `session_id` must match the session that owns
+/// the pending request — otherwise another window holding the request_id
+/// could adjudicate someone else's approval.
 #[tauri::command]
 pub fn approve_tool(
-    _session_id: String,
+    session_id: String,
     request_id: String,
     decision: String,
     state: State<'_, Arc<AppState>>,
@@ -109,10 +170,23 @@ pub fn approve_tool(
         _ => return Err(format!("invalid decision: {decision}")),
     };
 
-    let sender = state.pending_approvals.lock().unwrap().remove(&request_id);
-    match sender {
-        Some(s) => {
-            let _ = s.send(dec);
+    let entry = crate::lock_poison_guard(&state.pending_approvals).remove(&request_id);
+    match entry {
+        Some(entry) => {
+            if entry.session_id != session_id {
+                // Wrong session — put the request back so the rightful
+                // session can still answer it.
+                let owner = entry.session_id.clone();
+                crate::lock_poison_guard(&state.pending_approvals)
+                    .insert(request_id.clone(), entry);
+                tracing::warn!(
+                    "[safety] tauri approval rejected: {request_id} belongs to session {owner}, got {session_id}"
+                );
+                return Err(format!(
+                    "approval request {request_id} belongs to another session"
+                ));
+            }
+            let _ = entry.tx.send(dec);
             tracing::info!("[safety] tauri approval resolved: {request_id} → {decision}");
             Ok("ok".into())
         }

@@ -7,17 +7,17 @@ use std::sync::{Arc, Mutex};
 use oz_core_types::ToolContext;
 use oz_platform::{AgentBridge, PlatformAdapter, PlatformContext, PlatformRegistry};
 use oz_server::webui::sessions::SessionStore;
-use oz_server::webui::sse_bus::{SseBus, SseEvent};
+use oz_server::webui::sse_bus::SseEvent;
 use oz_skill_mcp::SKILL_MCP_DIR;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
-use tauri::tray::{TrayIconBuilder, MouseButton, MouseButtonState, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::JoinHandle;
 
 mod approval;
-mod sidepanel;
 pub mod projects;
+mod sidepanel;
 
 const SESSION_STATE_FILE: &str = "openzen/sessions.json";
 
@@ -48,7 +48,9 @@ pub(crate) fn data_dir() -> PathBuf {
         return PathBuf::from(d);
     }
     let profile = oz_config::load_profile();
-    profile.data_dir.unwrap_or_else(|| home_dir().join(".openzen"))
+    profile
+        .data_dir
+        .unwrap_or_else(|| home_dir().join(".openzen"))
 }
 
 /// Long-lived ERME runtime: semantic store + L0 soul layer (M7).
@@ -70,8 +72,8 @@ pub struct ErmeRuntime {
 /// the file backend instead of crashing at startup.
 fn init_erme_store(base_dir: &std::path::Path) -> Option<Arc<ErmeRuntime>> {
     use entropy_memory_engine::consolidation::ConsolidationConfig;
-    use entropy_memory_engine::l0::{PromptInjector, ReflectionConfig, ReflectionEngine};
     use entropy_memory_engine::l0::soul::{SoulHandle, SoulModel};
+    use entropy_memory_engine::l0::{PromptInjector, ReflectionConfig, ReflectionEngine};
     use entropy_memory_engine::l1::L1Cache;
     use entropy_memory_engine::l2::{HnswConfig, L2Config, L2Engine};
     use entropy_memory_engine::l3::{BudgetConfig, L3Config, L3Engine};
@@ -268,7 +270,11 @@ pub(crate) fn tauri_ctx() -> ToolContext {
 
     let skill_mcp_dir = [data_dir().join(SKILL_MCP_DIR)]
         .into_iter()
-        .chain(std::env::current_dir().ok().map(|cwd| cwd.join(SKILL_MCP_DIR)))
+        .chain(
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| cwd.join(SKILL_MCP_DIR)),
+        )
         .find(|p| p.is_dir())
         .map(|p| p.to_string_lossy().to_string());
 
@@ -278,12 +284,17 @@ pub(crate) fn tauri_ctx() -> ToolContext {
         script_dir: assets_dir,
         lang: load_locale(),
         skill_mcp_dir,
+        session_id: String::new(),
     }
 }
 
 /// Load the system prompt based on the current locale stored in ctx.lang.
 pub(crate) fn load_system_prompt(ctx: &ToolContext) -> String {
-    let sys_prompt_filename = if ctx.lang == "en" { "sys_prompt_en.txt" } else { "sys_prompt.txt" };
+    let sys_prompt_filename = if ctx.lang == "en" {
+        "sys_prompt_en.txt"
+    } else {
+        "sys_prompt.txt"
+    };
     let sys_prompt_path = std::path::PathBuf::from(&ctx.assets_dir).join(sys_prompt_filename);
     if sys_prompt_path.exists() {
         std::fs::read_to_string(&sys_prompt_path).unwrap_or_default()
@@ -299,7 +310,6 @@ type AskUserSlot = Arc<Mutex<Option<String>>>;
 
 pub struct AppState {
     pub sessions: Arc<Mutex<SessionStore>>,
-    pub sse_bus: SseBus,
     pub stop_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     pub approval_handler: Arc<Mutex<Option<Arc<dyn oz_safety::ApprovalHandler>>>>,
     pub pending_approvals: approval::PendingApprovals,
@@ -308,6 +318,12 @@ pub struct AppState {
     pub ask_user_rxs: Arc<Mutex<HashMap<String, AskUserSlot>>>,
     pub sidepanel: Mutex<SidePanelState>,
     pub html_roots: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    /// Files (and, for html artifacts, their parent directories) that were
+    /// explicitly opened in the side panel. The read_file_* / parse_excel /
+    /// get_git_diff / get_file_info / open_external_file commands only serve
+    /// paths inside this whitelist, so the webview cannot read arbitrary
+    /// files off disk.
+    pub artifact_roots: std::sync::Mutex<Vec<std::path::PathBuf>>,
     pub terminal_registry: TerminalRegistry,
     pub config_path: String,
     pub working_dir: String,
@@ -320,10 +336,22 @@ pub struct AppState {
     pub skill_mcp_dir: Option<String>,
     pub projects: Mutex<Vec<projects::store::ProjectRecord>>,
     pub crystallization_enabled: AtomicBool,
+    /// "完全访问" (full access): when set, the approval handler auto-allows
+    /// every request so the agent never asks the user for permission.
+    pub full_access: Arc<AtomicBool>,
     /// Long-lived ERME runtime (semantic store + L0 soul layer).
     /// Created once at startup; None when construction failed.
     pub erme_store: Option<Arc<ErmeRuntime>>,
-    pub intervention_queues: Mutex<HashMap<String, Arc<Mutex<std::collections::VecDeque<oz_core::checkpoint::InterventionEvent>>>>>,
+    pub intervention_queues: Mutex<
+        HashMap<
+            String,
+            Arc<Mutex<std::collections::VecDeque<oz_core::checkpoint::InterventionEvent>>>,
+        >,
+    >,
+    /// session_id → webview window label for dedicated session windows
+    /// (`session-{id}`), used to route session-scoped events (approvals)
+    /// to the owning window instead of broadcasting to all windows.
+    pub session_windows: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -344,7 +372,6 @@ impl AppState {
         let state_path = data_root.join(SESSION_STATE_FILE);
         AppState {
             sessions: Arc::new(Mutex::new(SessionStore::persisted(state_path))),
-            sse_bus: SseBus::new(10_000),
             stop_signals: Arc::new(Mutex::new(HashMap::new())),
             approval_handler: Arc::new(Mutex::new(None)),
             pending_approvals: approval::new_pending(),
@@ -353,11 +380,9 @@ impl AppState {
             ask_user_rxs: Arc::new(Mutex::new(HashMap::new())),
             sidepanel: Mutex::new(SidePanelState::new()),
             html_roots: std::sync::Mutex::new(Vec::new()),
+            artifact_roots: std::sync::Mutex::new(Vec::new()),
             terminal_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            config_path: data_root
-                .join("mykey.toml")
-                .to_string_lossy()
-                .to_string(),
+            config_path: data_root.join("mykey.toml").to_string_lossy().to_string(),
             working_dir: working_dir.to_string_lossy().to_string(),
             assets_dir: find_assets_dir().to_string_lossy().to_string(),
             scheduler_started: AtomicBool::new(false),
@@ -367,13 +392,19 @@ impl AppState {
             locale: Arc::new(Mutex::new(load_locale())),
             skill_mcp_dir: [data_root.join(SKILL_MCP_DIR)]
                 .into_iter()
-                .chain(std::env::current_dir().ok().map(|cwd| cwd.join(SKILL_MCP_DIR)))
+                .chain(
+                    std::env::current_dir()
+                        .ok()
+                        .map(|cwd| cwd.join(SKILL_MCP_DIR)),
+                )
                 .find(|p| p.is_dir())
                 .map(|p| p.to_string_lossy().to_string()),
             projects: Mutex::new(projects::store::load_projects()),
             crystallization_enabled: AtomicBool::new(false),
+            full_access: Arc::new(AtomicBool::new(false)),
             erme_store: init_erme_store(&data_root),
             intervention_queues: Mutex::new(HashMap::new()),
+            session_windows: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -419,24 +450,24 @@ pub(crate) fn lock_poison_guard<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexG
     })
 }
 
-
 // ── Sub-modules ──
 pub(crate) mod commands;
 pub(crate) mod runner;
 
 pub fn run() {
     // Initialize tracing so agent loop / LLM errors are visible on stderr.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info".into());
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .try_init();
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 
     // Panic hook: log panic location and message before unwinding.
     // With panic="abort", the backtrace is lost; with panic="unwind",
     // this hook captures it to stderr (visible in macOS crash reports).
     std::panic::set_hook(Box::new(|info| {
-        let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "unknown".into());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".into());
         let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
             s.to_string()
         } else if let Some(s) = info.payload().downcast_ref::<String>() {
@@ -508,9 +539,14 @@ pub fn run() {
                 .build(app)?;
 
             let state = app.state::<Arc<AppState>>();
-            *state.app_handle.lock().unwrap() = Some(app_handle.clone());
-            let handler = Arc::new(approval::TauriApprovalHandler::new(app_handle.clone(), state.pending_approvals.clone())) as Arc<dyn oz_safety::ApprovalHandler>;
-            *state.approval_handler.lock().unwrap() = Some(handler);
+            *lock_poison_guard(&state.app_handle) = Some(app_handle.clone());
+            let handler = Arc::new(approval::TauriApprovalHandler::new(
+                app_handle.clone(),
+                state.pending_approvals.clone(),
+                state.full_access.clone(),
+                state.session_windows.clone(),
+            )) as Arc<dyn oz_safety::ApprovalHandler>;
+            *lock_poison_guard(&state.approval_handler) = Some(handler);
 
             let mut scheduler = oz_scheduler::Scheduler::new();
             scheduler.register(Box::new(oz_scheduler::SessionCleanup {
@@ -646,12 +682,9 @@ pub fn run() {
             tauri::async_runtime::spawn(scheduler.run());
 
             let (reminder_tx, mut reminder_rx) = tokio::sync::mpsc::unbounded_channel::<oz_core_types::Reminder>();
-            *state.reminder_tx.lock().unwrap() = Some(reminder_tx.clone());
+            *lock_poison_guard(&state.reminder_tx) = Some(reminder_tx.clone());
             let set_result = oz_core_types::REMINDER_TX.set(reminder_tx);
             eprintln!("[reminder] REMINDER_TX.set() ok={}", set_result.is_ok());
-            let reminder_session = Arc::new(Mutex::new(None::<String>));
-            let sess_result = oz_core_types::CURRENT_REMINDER_SESSION.set(reminder_session.clone());
-            eprintln!("[reminder] CURRENT_REMINDER_SESSION.set() ok={}", sess_result.is_ok());
 
             let state_for_reminders = Arc::clone(&state);
             debug_log("reminder checker: starting");
@@ -663,7 +696,7 @@ pub fn run() {
                             debug_log(&format!("reminder received: sid={} msg='{}' fire_at={}", 
                                 reminder.session_id, reminder.message, reminder.fire_at_ms));
                             if reminder.session_id.is_empty() {
-                                state_for_reminders.pending_reminders.lock().unwrap().push(reminder);
+                                lock_poison_guard(&state_for_reminders.pending_reminders).push(reminder);
                             } else {
                                 let now = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -672,7 +705,7 @@ pub fn run() {
                                 if reminder.fire_at_ms <= now + 100 {
                                     let session_id = reminder.session_id.clone();
                                     let message = reminder.message.clone();
-                                    let app = state_for_reminders.app_handle.lock().unwrap().clone();
+                                    let app = lock_poison_guard(&state_for_reminders.app_handle).clone();
                                     if let Some(app) = app {
                                         let _ = app.emit("sse_event", serde_json::to_value(&SseEvent::system(
                                             &session_id, &format!("[Reminder] {}", message),
@@ -687,15 +720,15 @@ pub fn run() {
                                             })
                                         } else { None };
                                         if let Some(r) = next_reminder {
-                                            state_for_reminders.pending_reminders.lock().unwrap().push(r);
+                                            lock_poison_guard(&state_for_reminders.pending_reminders).push(r);
                                         }
                                     } else {
                                         // app_handle not yet available (platform mode / early startup):
                                         // keep the reminder for the next tick instead of dropping it.
-                                        state_for_reminders.pending_reminders.lock().unwrap().push(reminder);
+                                        lock_poison_guard(&state_for_reminders.pending_reminders).push(reminder);
                                     }
                                 } else {
-                                    state_for_reminders.pending_reminders.lock().unwrap().push(reminder);
+                                    lock_poison_guard(&state_for_reminders.pending_reminders).push(reminder);
                                 }
                             }
                         }
@@ -704,7 +737,7 @@ pub fn run() {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_millis() as u64)
                                 .unwrap_or(0);
-                            let mut pending = state_for_reminders.pending_reminders.lock().unwrap();
+                            let mut pending = lock_poison_guard(&state_for_reminders.pending_reminders);
                             let mut i = 0;
                             while i < pending.len() {
                                 let reminder = &pending[i];
@@ -712,7 +745,7 @@ pub fn run() {
                                     let reminder = pending.remove(i);
                                     let session_id = reminder.session_id.clone();
                                     let message = reminder.message.clone();
-                                    let app = state_for_reminders.app_handle.lock().unwrap().clone();
+                                    let app = lock_poison_guard(&state_for_reminders.app_handle).clone();
                                     if let Some(app) = app {
                                         let _ = app.emit("sse_event", serde_json::to_value(&SseEvent::system(
                                             &session_id, &format!("[Reminder] {}", message),
@@ -774,6 +807,8 @@ commands::get_working_dir_for_session,
             commands::add_platform,
             commands::get_crystallization,
             commands::set_crystallization,
+            commands::get_full_access,
+            commands::set_full_access,
             projects::commands::add_project,
             projects::commands::list_projects,
             projects::commands::remove_project,
@@ -783,6 +818,7 @@ commands::get_working_dir_for_session,
             crate::sidepanel::commands::toggle_sidepanel,
             crate::sidepanel::commands::set_sidepanel_width,
             crate::sidepanel::commands::open_artifact,
+            crate::sidepanel::commands::open_artifact_dialog,
             crate::sidepanel::commands::close_sidepanel,
             crate::sidepanel::commands::get_sidepanel_state,
             crate::sidepanel::commands::close_artifact_tab,
@@ -816,7 +852,7 @@ mod tests {
 
     #[test]
     fn data_dir_respects_openzen_data_dir_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_poison_guard(&ENV_LOCK);
         let original = std::env::var("OPENZEN_DATA_DIR").ok();
 
         std::env::set_var("OPENZEN_DATA_DIR", "/tmp/openzen-dev-test");
@@ -834,7 +870,7 @@ mod tests {
 
     #[test]
     fn data_dir_defaults_to_home_dot_openzen() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_poison_guard(&ENV_LOCK);
         let original = std::env::var("OPENZEN_DATA_DIR").ok();
         let original_home = std::env::var("HOME").ok();
         let tmp_home = std::env::temp_dir().join("oz-data-dir-default-test");
@@ -860,7 +896,7 @@ mod tests {
 
     #[test]
     fn data_dir_uses_profile_data_dir_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_poison_guard(&ENV_LOCK);
         let original_dir = std::env::var("OPENZEN_DATA_DIR").ok();
         let original_profile = std::env::var("OPENZEN_PROFILE").ok();
         let original_home = std::env::var("HOME").ok();
@@ -897,13 +933,14 @@ mod tests {
 
     #[test]
     fn working_dir_lives_under_data_root() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_poison_guard(&ENV_LOCK);
         let original = std::env::var("OPENZEN_DATA_DIR").ok();
         std::env::set_var("OPENZEN_DATA_DIR", "/tmp/openzen-dev-test");
 
         let ctx = tauri_ctx();
         assert!(
-            ctx.working_dir.starts_with("/tmp/openzen-dev-test/workspace"),
+            ctx.working_dir
+                .starts_with("/tmp/openzen-dev-test/workspace"),
             "agent working dir must live under the data root, got: {}",
             ctx.working_dir
         );

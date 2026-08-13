@@ -69,6 +69,7 @@ pub fn spawn_agent_loop(
         script_dir: app.assets_dir.clone(),
         lang: std::env::var("OZ_LANG").unwrap_or_default(),
         skill_mcp_dir: None,
+        session_id: String::new(),
     };
 
     let backend: Box<dyn oz_llm::Session> = match sess_type {

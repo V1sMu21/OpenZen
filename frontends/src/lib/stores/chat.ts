@@ -106,6 +106,11 @@ function createChatStore() {
     modelInfo: ModelInfo | null;
   }>();
 
+  // Monotonic sequence for loadSession calls: a stale getSession response
+  // from a previously-selected session must never overwrite the state of
+  // the session the user switched to in the meantime.
+  let loadSeq = 0;
+
   /**
    * Wall-clock arrival time of every part, indexed by a stable
    * identity (partId for text/reasoning parts, toolCallId for
@@ -800,7 +805,10 @@ function createChatStore() {
         case "system":
           if (typeof event.data === "string" && event.data === "reminder fired") {
             const sid = get(sessions).currentId;
-            if (sid) this.loadSession(sid);
+            // Reloading mid-stream would cancel the pending rAF batch and
+            // wipe the live bubble (sessionCache only exists after a
+            // switch) — defer until the agent is idle.
+            if (sid && !get(this).isProcessing) this.loadSession(sid);
           }
           break;
         case "model_info":
@@ -852,6 +860,7 @@ function createChatStore() {
 
     async loadSession(sessionId: string) {
       cancelPendingStreamEvents();
+      const seq = ++loadSeq;
       // Restore in-progress state from cache if available — prevents
       // the streaming bubble from disappearing when switching sessions.
       const cached = sessionCache.get(sessionId);
@@ -880,6 +889,10 @@ function createChatStore() {
       try {
         const { getSession } = await import("../api/sessions");
         const data = await getSession(sessionId);
+        // Stale response: the user switched to another session while this
+        // request was in flight — discard instead of painting the wrong
+        // conversation into the current view.
+        if (seq !== loadSeq) return;
         const serverTodos = (data.todos ?? []) as Array<{id:string;content:string;status:string;priority:string;order:number}>;
         const serverMessages = (data.messages ?? []) as Array<{
           role?: string;
@@ -988,6 +1001,7 @@ function createChatStore() {
           cumulativeOutputTokens: 0,
         });
       } catch (err) {
+        if (seq !== loadSeq) return; // superseded by a newer load
         console.error("Failed to load session:", err);
         set({
           messages: [],

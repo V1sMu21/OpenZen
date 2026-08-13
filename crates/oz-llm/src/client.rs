@@ -25,6 +25,14 @@ impl NativeToolClient {
 #[async_trait::async_trait]
 impl LlmClient for NativeToolClient {
     async fn chat(&mut self, messages: &[Message], tools: &[ToolDefinition]) -> Result<MockResponse, LlmError> {
+        // Mirror stream_chat: the non-streaming path must also hand the tool
+        // schemas to the backend, otherwise OaiSession sends the request
+        // without a "tools" payload and tool-capable models (e.g. DeepSeek
+        // V4 Flash) can only emit reasoning + an empty reply.
+        if !tools.is_empty() {
+            self.backend.set_tools(tools.to_vec());
+        }
+
         // Fold ALL system messages (main prompt + any injected compression
         // summaries) into the backend system prompt. The last system message
         // must NOT clobber the earlier ones.

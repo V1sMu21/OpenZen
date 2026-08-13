@@ -18,7 +18,32 @@
 
   let { shell, cwd } = $props<{ shell?: string; cwd?: string }>();
 
-  onMount(async () => {
+  // True once the component has been unmounted; guards every continuation
+  // after an `await` so a detached component never spawns a PTY, attaches
+  // listeners, or mutates state after teardown.
+  let disposed = false;
+  // Plain (non-reactive) copy of the live session id, used by cleanup and
+  // event filters. `sessionId` stays $state only for the template.
+  let spawnedSessionId: string | null = null;
+
+  onMount(() => {
+    void initTerminal();
+    // Synchronous cleanup: runs on unmount regardless of where initTerminal
+    // is parked, so listeners/PTY can never outlive the component.
+    return () => {
+      disposed = true;
+      if (spawnedSessionId) {
+        invoke("close_terminal", { sessionId: spawnedSessionId }).catch(() => {});
+      }
+      term?.dispose();
+      term = null;
+      resizeObserver?.disconnect();
+      unlisteners.forEach((u) => u());
+      unlisteners = [];
+    };
+  });
+
+  async function initTerminal() {
     const hasSize = () => {
       if (!containerEl) return false;
       const r = containerEl.getBoundingClientRect();
@@ -36,10 +61,7 @@
         requestAnimationFrame(poll);
       });
     }
-
-    if (!hasSize()) return;
-
-    const rect = containerEl.getBoundingClientRect();
+    if (disposed || !hasSize()) return;
 
     // Try xterm.js — if it throws or produces no visible output, fall
     // back to the plain <pre> element so the user always sees the shell.
@@ -92,13 +114,13 @@
 
     if (term) {
       term.onData((data) => {
-        if (!sessionId) return;
-        invoke("write_to_terminal", { sessionId, data }).catch(() => {});
+        if (!spawnedSessionId) return;
+        invoke("write_to_terminal", { sessionId: spawnedSessionId, data }).catch(() => {});
       });
 
       term.onResize(({ cols, rows }) => {
-        if (!sessionId) return;
-        invoke("resize_terminal", { sessionId, cols, rows }).catch(() => {});
+        if (!spawnedSessionId) return;
+        invoke("resize_terminal", { sessionId: spawnedSessionId, cols, rows }).catch(() => {});
       });
     }
 
@@ -113,6 +135,10 @@
     const u1 = await listen<{ session_id: string; data: string }>(
       "terminal:data",
       (event) => {
+        // Only render our own session's output — with several terminal
+        // tabs open each tab receives every terminal's events. Before the
+        // PTY exists (spawnedSessionId === null) there is nothing to mirror.
+        if (spawnedSessionId === null || event.payload.session_id !== spawnedSessionId) return;
         if (term) {
           term.write(event.payload.data);
         }
@@ -124,12 +150,13 @@
       },
     );
     unlisteners.push(u1);
+    if (disposed) return;
 
     const u2 = await listen<{
       session_id: string;
       exit_code: number | null;
     }>("terminal:exited", (event) => {
-      if (event.payload.session_id === sessionId) {
+      if (event.payload.session_id === spawnedSessionId) {
         connected = false;
         const code = event.payload.exit_code;
         const msg =
@@ -141,9 +168,11 @@
       }
     });
     unlisteners.push(u2);
+    if (disposed) return;
 
+    let sid: string;
     try {
-      sessionId = await invoke<string>("spawn_terminal", {
+      sid = await invoke<string>("spawn_terminal", {
         shell: shell ?? null,
         cwd: cwd ?? null,
       });
@@ -153,24 +182,22 @@
       return;
     }
 
+    if (disposed) {
+      // The tab was closed while the PTY was spawning — close it now so it
+      // doesn't outlive the component.
+      invoke("close_terminal", { sessionId: sid }).catch(() => {});
+      return;
+    }
+
+    spawnedSessionId = sid;
+    sessionId = sid;
     connected = true;
     fitAddon?.fit();
 
     const onResize = () => fitAddon?.fit();
     window.addEventListener("resize", onResize);
     unlisteners.push(() => window.removeEventListener("resize", onResize));
-  });
-
-  $effect(() => {
-    return () => {
-      if (sessionId) {
-        invoke("close_terminal", { sessionId }).catch(() => {});
-      }
-      term?.dispose();
-      resizeObserver?.disconnect();
-      unlisteners.forEach((u) => { u(); });
-    };
-  });
+  }
 </script>
 
 <div class="terminal-wrapper">

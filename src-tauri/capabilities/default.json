@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "OpenZen desktop default permissions",
-  "windows": ["main"],
+  "windows": ["*"],
   "permissions": [
     "core:default",
     "core:window:default",

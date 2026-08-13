@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +63,70 @@ pub struct SessionStore {
     sessions: HashMap<String, SessionEntry>,
     path: Option<PathBuf>,
     max_sessions: usize,
+    writer: Option<PersistWriter>,
+}
+
+/// Background persistence writer. `save()` snapshots the session map and
+/// hands it to a dedicated thread which serialises and writes it with
+/// "latest wins" coalescing: a burst of saves during a long agent run
+/// collapses into a single disk write, and serialisation never blocks the
+/// IPC thread. Stores built with `SessionStore::new()` (no path, e.g. in
+/// tests) keep the old synchronous write path.
+struct PersistWriter {
+    wake: Sender<()>,
+    slot: Arc<Mutex<Option<(PathBuf, HashMap<String, SessionEntry>)>>>,
+    /// Snapshots submitted but not yet written (or discarded). `reload()`
+    /// must skip while this is non-zero: the on-disk file is older than
+    /// memory in that window and reloading would clobber newer state.
+    pending: Arc<AtomicU64>,
+}
+
+impl PersistWriter {
+    fn spawn() -> Self {
+        let (wake, rx) = mpsc::channel::<()>();
+        let slot: Arc<Mutex<Option<(PathBuf, HashMap<String, SessionEntry>)>>> =
+            Arc::new(Mutex::new(None));
+        let pending = Arc::new(AtomicU64::new(0));
+        let worker_slot = Arc::clone(&slot);
+        let worker_pending = Arc::clone(&pending);
+        std::thread::Builder::new()
+            .name("openzen-session-persist".into())
+            .spawn(move || loop {
+                if rx.recv().is_err() {
+                    break;
+                }
+                // Keep only the newest snapshot; every discarded snapshot
+                // must decrement the pending counter (it will never be
+                // written), otherwise reload() would block forever.
+                let snapshot = loop {
+                    let snap = worker_slot.lock().unwrap().take();
+                    match rx.try_recv() {
+                        Ok(()) => {
+                            if snap.is_some() {
+                                worker_pending.fetch_sub(1, Ordering::SeqCst);
+                            }
+                            continue;
+                        }
+                        Err(TryRecvError::Empty) => break snap,
+                        Err(TryRecvError::Disconnected) => break snap,
+                    }
+                };
+                if let Some((path, sessions)) = snapshot {
+                    if let Ok(json) = serde_json::to_string(&sessions) {
+                        SessionStore::write_atomic(&path, &json);
+                    }
+                    worker_pending.fetch_sub(1, Ordering::SeqCst);
+                }
+            })
+            .expect("failed to spawn session persist thread");
+        PersistWriter { wake, slot, pending }
+    }
+
+    fn submit(&self, path: PathBuf, sessions: HashMap<String, SessionEntry>) {
+        *self.slot.lock().unwrap() = Some((path, sessions));
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        let _ = self.wake.send(());
+    }
 }
 
 impl SessionStore {
@@ -68,6 +135,7 @@ impl SessionStore {
             sessions: HashMap::new(),
             path: None,
             max_sessions: 0,
+            writer: None,
         }
     }
 
@@ -130,6 +198,7 @@ impl SessionStore {
             sessions: HashMap::new(),
             path: Some(path.clone()),
             max_sessions: 0,
+            writer: Some(PersistWriter::spawn()),
         };
         if let Ok(data) = std::fs::read_to_string(&path) {
             if let Ok(sessions) = serde_json::from_str::<HashMap<String, SessionEntry>>(&data) {
@@ -158,7 +227,15 @@ impl SessionStore {
 
     /// Reload sessions from disk. Useful when another process or adapter
     /// (e.g. platform bridge) has written to the same persistence file.
+    /// Skipped while a background write is in flight — the on-disk file is
+    /// older than memory in that window and reloading would clobber the
+    /// newer in-memory state.
     pub fn reload(&mut self) {
+        if let Some(ref w) = self.writer {
+            if w.pending.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+        }
         if let Some(ref path) = self.path {
             if let Ok(data) = std::fs::read_to_string(path) {
                 if let Ok(sessions) = serde_json::from_str::<HashMap<String, SessionEntry>>(&data) {
@@ -169,16 +246,28 @@ impl SessionStore {
     }
 
     /// Save all sessions to disk atomically (write temp file, then rename).
+    /// When a background writer is present the snapshot is submitted to it
+    /// and the disk write happens off the caller's thread; otherwise the
+    /// write is synchronous (stores without a path, e.g. in tests).
     fn save_to_disk(&self) {
         if let Some(ref path) = self.path {
-            if let Ok(json) = serde_json::to_string(&self.sessions) {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let tmp = path.with_extension("tmp");
-                let _ = std::fs::write(&tmp, &json);
-                let _ = std::fs::rename(&tmp, path);
+            if let Some(ref w) = self.writer {
+                w.submit(path.clone(), self.sessions.clone());
+            } else if let Ok(json) = serde_json::to_string(&self.sessions) {
+                Self::write_atomic(path, &json);
             }
+        }
+    }
+
+    /// Atomic tmp-file + rename write. Errors are best-effort by design:
+    /// a failed persist must never crash the app mid-conversation.
+    fn write_atomic(path: &std::path::Path, json: &str) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
         }
     }
 

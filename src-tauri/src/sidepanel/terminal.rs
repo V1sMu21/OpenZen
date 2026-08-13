@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -66,53 +65,55 @@ pub fn spawn_terminal(
     // here (safe: fd is owned, in-bounds struct).
     unsafe { libc::ioctl(master_raw, libc::TIOCSWINSZ, &winsize); }
 
-    eprintln!("[sidepanel::terminal] calling fork…");
-    let fork_res = unsafe {
-        nix::unistd::fork().map_err(|e| {
-            eprintln!("[sidepanel::terminal] fork failed: {e}");
-            format!("fork failed: {e}")
-        })?
-    };
-
-    match fork_res {
-        nix::unistd::ForkResult::Child => {
+    eprintln!("[sidepanel::terminal] spawning shell via Command + pre_exec…");
+    // `Command::spawn` with `pre_exec` still forks internally, but the
+    // closure runs in the child right after fork where the process is
+    // single-threaded — the correct window for PTY wiring. Argv/env are
+    // built by std in the parent *before* forking, and our closure only
+    // performs async-signal-safe libc/nix syscalls (no allocation, no
+    // locking), so this is safe in a multithreaded Tauri process.
+    // The previous bare `nix::fork()` + `Command::exec()` pattern ran std
+    // allocations and set_var inside the forked child, which is UB in a
+    // multithreaded process (deadlock / memory corruption risk).
+    let mut cmd = Command::new(&shell_path);
+    cmd.arg("-i")
+        .current_dir(&workdir)
+        .env("TERM", "xterm-256color")
+        .env("PROMPT_EOL_MARK", "")
+        .env("ZSH_DISABLE_COMPFIX", "true");
+    // Unsafe block: pre_exec contract — child-side PTY setup after fork.
+    // Required to make the slave the controlling tty and wire stdio to it;
+    // all fds are the ones produced by openpty in this function, so the
+    // raw-fd use is valid. Errors are ignored because exec is the
+    // definitive failure point for the child.
+    unsafe {
+        cmd.pre_exec(move || {
             let _ = nix::unistd::setsid();
-            // Unsafe block: child-side PTY setup after fork. Required to make
-            // the slave the controlling tty and wire stdio to it; all fds are
-            // the ones produced by openpty in this function, so the raw-fd
-            // conversions are valid. Error results are ignored here because
-            // `exec` below is the definitive failure point for the child.
-            unsafe { libc::ioctl(slave_raw, libc::TIOCSCTTY.into(), 0); }
-            // Unsafe block: child-side stdio wiring. dup2 is required to
-            // attach the PTY slave to stdin/stdout/stderr before exec; the
-            // raw fds come from openpty above and are valid in the child
-            // after fork. Errors are ignored because exec is the definitive
-            // failure point.
+            libc::ioctl(slave_raw, libc::TIOCSCTTY.into(), 0);
             let _ = nix::unistd::dup2(slave_raw, 0);
             let _ = nix::unistd::dup2(slave_raw, 1);
             let _ = nix::unistd::dup2(slave_raw, 2);
             if slave_raw > 2 { let _ = nix::unistd::close(slave_raw); }
             let _ = nix::unistd::close(master_raw);
-
-            std::env::set_var("TERM", "xterm-256color");
-            std::env::set_var("PROMPT_EOL_MARK", "");
-            std::env::set_var("ZSH_DISABLE_COMPFIX", "true");
-            if let Ok(p) = CString::new(workdir.clone()) { let _ = nix::unistd::chdir(p.as_c_str()); }
-
-            // Force interactive shell so the prompt is emitted even when
-            // stdin is non-tty (defensive — we did dup2 the slave PTY).
-            let err = Command::new(&shell_path).arg("-i").exec();
-            let _ = nix::unistd::write(2, format!("exec failed: {err}\n").as_bytes());
-            std::process::exit(1);
-        }
-        nix::unistd::ForkResult::Parent { child } => {
+            Ok(())
+        });
+    }
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
             let _ = nix::unistd::close(slave_raw);
-            let pid = child.as_raw() as u32;
-            eprintln!(
-                "[sidepanel::terminal] parent PID={} child={} master_raw={}",
-                std::process::id(), pid, master_raw
-            );
-
+            let _ = nix::unistd::close(master_raw);
+            eprintln!("[sidepanel::terminal] spawn failed: {e}");
+            return Err(format!("spawn shell failed: {e}"));
+        }
+    };
+    let _ = nix::unistd::close(slave_raw);
+    let pid = child.id();
+    eprintln!(
+        "[sidepanel::terminal] parent PID={} child={} master_raw={}",
+        std::process::id(), pid, master_raw
+    );
+    {
             eprintln!("[sidepanel::terminal] STEP: creating master_owned from raw fd");
             // OwnedFd::from_raw_fd: takes ownership of master_raw, which we
             // obtained via into_raw_fd above — no double-close, fd is owned
@@ -131,7 +132,7 @@ pub fn spawn_terminal(
 
             eprintln!("[sidepanel::terminal] STEP: locking registry to insert session");
             {
-                let mut sessions = registry.lock().unwrap();
+                let mut sessions = crate::lock_poison_guard(&registry);
                 sessions.insert(session_id.clone(), session);
             }
             eprintln!("[sidepanel::terminal] STEP: session inserted, cloning handles");
@@ -189,7 +190,7 @@ pub fn spawn_terminal(
                         }
                     }
 
-                    let sessions = reg2.lock().unwrap();
+                    let sessions = crate::lock_poison_guard(&reg2);
                     if let Some(s) = sessions.get(&sid2) {
                         if s.exited { break; }
                     } else { break; }
@@ -209,7 +210,7 @@ pub fn spawn_terminal(
                 );
 
                 {
-                    let mut sessions = reg2.lock().unwrap();
+                    let mut sessions = crate::lock_poison_guard(&reg2);
                     if let Some(s) = sessions.get_mut(&sid2) {
                         s.exited = true;
                         s.exit_code = exit_code;
@@ -230,7 +231,6 @@ pub fn spawn_terminal(
             }));
 
             Ok(session_id)
-        }
     }
 }
 
@@ -239,7 +239,7 @@ pub fn write_to_terminal(
     session_id: &str,
     data: &[u8],
 ) -> Result<(), String> {
-    let sessions = registry.lock().unwrap();
+    let sessions = crate::lock_poison_guard(&registry);
     let s = sessions.get(session_id)
         .ok_or_else(|| format!("Terminal session not found: {session_id}"))?;
     if s.exited { return Err("Terminal session has exited".into()); }
@@ -255,7 +255,7 @@ pub fn resize_terminal(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let sessions = registry.lock().unwrap();
+    let sessions = crate::lock_poison_guard(&registry);
     let s = sessions.get(session_id)
         .ok_or_else(|| format!("Terminal session not found: {session_id}"))?;
     if s.exited { return Err("Terminal session has exited".into()); }
@@ -273,7 +273,7 @@ pub fn close_terminal(
     registry: TerminalRegistry,
     session_id: &str,
 ) -> Result<(), String> {
-    let mut sessions = registry.lock().unwrap();
+    let mut sessions = crate::lock_poison_guard(&registry);
     let s = sessions.remove(session_id)
         .ok_or_else(|| format!("Terminal session not found: {session_id}"))?;
     let _ = signal::kill(Pid::from_raw(s.pid as i32), Signal::SIGTERM);

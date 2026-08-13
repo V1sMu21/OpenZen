@@ -21,31 +21,38 @@
   }
 
   function renderLatexToHtml(content: string): string {
-    const body = stripPreamble(content);
+    // ── Security: escape ALL raw file text before any transformation ──
+    // The LaTeX file is untrusted content rendered via {@html}. Escaping
+    // first guarantees that no capture group interpolated into generated
+    // tags below (headings, formatting, list items, paragraphs) can ever
+    // inject markup — user text like `\textbf{<img onerror=...>}` degrades
+    // to visible text instead. Only the tags we generate ourselves are raw
+    // HTML after this point.
+    const body = escapeHtml(stripPreamble(content));
     let out = body;
 
     // ── Step 1: render display math $$...$$ and \[...\] ──
     out = out.replace(/\$\$([\s\S]+?)\$\$/g, (_m, math: string) => {
       try {
         return katex.renderToString(math.trim(), { displayMode: true, throwOnError: false, output: "html" });
-      } catch { return `<div class="math-block-fallback">${escapeHtml(math.trim())}</div>`; }
+      } catch { return `<div class="math-block-fallback">${math.trim()}</div>`; }
     });
     out = out.replace(/\\\[([\s\S]+?)\\\]/g, (_m, math: string) => {
       try {
         return katex.renderToString(math.trim(), { displayMode: true, throwOnError: false, output: "html" });
-      } catch { return `<div class="math-block-fallback">${escapeHtml(math.trim())}</div>`; }
+      } catch { return `<div class="math-block-fallback">${math.trim()}</div>`; }
     });
 
     // ── Step 2: render inline math $...$ and \(...\) ──
     out = out.replace(/\$([^$]+?)\$/g, (_m, math: string) => {
       try {
         return katex.renderToString(math.trim(), { displayMode: false, throwOnError: false, output: "html" });
-      } catch { return escapeHtml(math); }
+      } catch { return math; }
     });
     out = out.replace(/\\\(([\s\S]+?)\\\)/g, (_m, math: string) => {
       try {
         return katex.renderToString(math.trim(), { displayMode: false, throwOnError: false, output: "html" });
-      } catch { return escapeHtml(math); }
+      } catch { return math; }
     });
 
     // ── Step 3: section headings ──
@@ -76,13 +83,14 @@
     );
 
     // ── Step 6: figures / includegraphics → placeholder ──
+    // Captures are already HTML-escaped (whole body escaped up front).
     out = out.replace(/\\begin\{figure\}[\s\S]*?\\end\{figure\}/g, (_m) => {
       const src = _m.match(/\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}/)?.[1] ?? "";
       const caption = _m.match(/\\caption\{([^}]+)\}/)?.[1] ?? "";
-      return `<figure class="latex-figure"><div class="latex-figure-placeholder">📐 ${escapeHtml(src)}</div>${caption ? `<figcaption>${escapeHtml(caption)}</figcaption>` : ""}</figure>`;
+      return `<figure class="latex-figure"><div class="latex-figure-placeholder">📐 ${src}</div>${caption ? `<figcaption>${caption}</figcaption>` : ""}</figure>`;
     });
     out = out.replace(/\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}/g, (_m, src: string) =>
-      `<div class="latex-inline-figure-placeholder">📐 ${escapeHtml(src)}</div>`
+      `<div class="latex-inline-figure-placeholder">📐 ${src}</div>`
     );
 
     // ── Step 7: \\ → <br>, blank lines → paragraphs ──
@@ -108,7 +116,11 @@
   }
 
   function escapeHtml(s: string): string {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
   onMount(async () => {

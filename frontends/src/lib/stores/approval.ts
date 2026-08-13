@@ -1,5 +1,11 @@
 // Approval store — manages the queue of pending tool approval requests.
 // Shown one at a time via ApprovalModal.svelte.
+//
+// Svelte 5 writable stores only notify subscribers when the NEW state is
+// not the same reference (safe_not_equal), so every update() here returns
+// a fresh object instead of mutating in place — previously the countdown
+// and modal visibility only updated when an unrelated re-render happened
+// to pick up the mutation.
 
 import { get, writable } from "svelte/store";
 import { isTauri, tauriInvoke } from "../api/tauri";
@@ -20,7 +26,6 @@ export interface ApprovalState {
   current: ApprovalRequest | null;
   showModal: boolean;
   countdown: number;
-  countdownInterval: ReturnType<typeof setInterval> | null;
 }
 
 function createApprovalStore() {
@@ -29,49 +34,56 @@ function createApprovalStore() {
     current: null,
     showModal: false,
     countdown: 30,
-    countdownInterval: null,
   });
 
-  function push(request: ApprovalRequest) {
-    update((s) => {
-      s.queue.push(request);
-      if (!s.current) {
-        s.current = s.queue.shift()!;
-        s.showModal = true;
-        s.countdown = 30;
-        startCountdown();
-      }
-      return s;
-    });
+  // The interval handle is UI-irrelevant bookkeeping — keep it out of the
+  // reactive state so interval churn doesn't trigger subscriber noise.
+  let countdownInterval: ReturnType<typeof setInterval> | null = null;
+
+  function clearCountdownInterval() {
+    if (countdownInterval) {
+      clearInterval(countdownInterval);
+      countdownInterval = null;
+    }
   }
 
   function startCountdown() {
-    update((s) => {
-      if (s.countdownInterval) clearInterval(s.countdownInterval);
-      s.countdownInterval = setInterval(() => {
-        update((inner) => {
-          inner.countdown -= 1;
-          if (inner.countdown <= 0) {
-            if (inner.countdownInterval) clearInterval(inner.countdownInterval);
-            inner.countdownInterval = null;
-            // Auto-deny on timeout
-            const current = inner.current;
-            if (current) {
-              respondInner("deny");
-            }
+    clearCountdownInterval();
+    countdownInterval = setInterval(() => {
+      update((s) => {
+        const countdown = s.countdown - 1;
+        if (countdown <= 0) {
+          clearCountdownInterval();
+          // Auto-deny on timeout. The network call must run outside
+          // update(), so fire-and-forget it.
+          if (s.current) {
+            void respondInner("deny");
           }
-          return inner;
-        });
-      }, 1000);
-      return s;
-    });
+          return { ...s, countdown: 0 };
+        }
+        return { ...s, countdown };
+      });
+    }, 1000);
   }
 
   function stopCountdown() {
+    clearCountdownInterval();
+  }
+
+  function push(request: ApprovalRequest) {
     update((s) => {
-      if (s.countdownInterval) clearInterval(s.countdownInterval);
-      s.countdownInterval = null;
-      return s;
+      if (s.current) {
+        return { ...s, queue: [...s.queue, request] };
+      }
+      const current = request;
+      startCountdown();
+      return {
+        ...s,
+        queue: s.queue,
+        current,
+        showModal: true,
+        countdown: 30,
+      };
     });
   }
 
@@ -109,14 +121,17 @@ function createApprovalStore() {
 
     // Advance queue
     update((s) => {
-      s.current = s.queue.shift() || null;
-      if (s.current) {
-        s.countdown = 30;
+      const current = s.queue[0] ?? null;
+      if (current) {
         startCountdown();
-      } else {
-        s.showModal = false;
+        return {
+          ...s,
+          queue: s.queue.slice(1),
+          current,
+          countdown: 30,
+        };
       }
-      return s;
+      return { ...s, queue: [], current: null, showModal: false, countdown: 0 };
     });
   }
 
