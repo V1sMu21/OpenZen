@@ -371,7 +371,12 @@ impl AppState {
 
         let state_path = data_root.join(SESSION_STATE_FILE);
         AppState {
-            sessions: Arc::new(Mutex::new(SessionStore::persisted(state_path))),
+            // Cap live sessions at 500; evicted ones are archived to
+            // sessions_archive/ by the store, so nothing is silently lost
+            // (P3/A8).
+            sessions: Arc::new(Mutex::new(
+                SessionStore::persisted(state_path).with_max(500),
+            )),
             stop_signals: Arc::new(Mutex::new(HashMap::new())),
             approval_handler: Arc::new(Mutex::new(None)),
             pending_approvals: approval::new_pending(),

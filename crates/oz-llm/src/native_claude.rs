@@ -171,7 +171,10 @@ impl Session for NativeClaudeSession {
         let session_id = self.session_id.clone();
         let beta_header = beta_parts.join(",");
 
-        retry_with_backoff(
+        // Retry only the send/status phase — a mid-stream failure is NOT
+        // re-sent here: the agent loop owns turn-level retry, and re-sending
+        // would duplicate TextDelta events already rendered (P3/A3).
+        let resp = retry_with_backoff(
             move || {
                 let cfg = cfg_clone.clone();
                 let tools = tools.clone();
@@ -182,7 +185,6 @@ impl Session for NativeClaudeSession {
                 let url = url.clone();
                 let model = model.clone();
                 let messages = messages.clone();
-                let event_tx = event_tx.clone();
 
                 Box::pin(async move {
                     use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
@@ -245,11 +247,12 @@ impl Session for NativeClaudeSession {
                         let body = resp.text().await.unwrap_or_default();
                         return Err(LlmError::HttpError { status, body });
                     }
-                    parse_claude_sse(resp, Some(event_tx), &cfg.apibase).await
+                    Ok(resp)
                 })
             },
             &self.config,
-        ).await
+        ).await?;
+        parse_claude_sse(resp, Some(event_tx), &self.config.apibase).await
     }
 
     async fn ask(&self, prompt: &str) -> Result<Vec<ContentBlock>, LlmError> {

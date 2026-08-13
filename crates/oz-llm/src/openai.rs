@@ -15,6 +15,10 @@ pub struct OaiSession {
     pub history: Mutex<Vec<Message>>,
     pub system: Option<String>,
     pub tools: Option<Vec<ToolDefinition>>,
+    /// One client per session, reused across calls and retries — the
+    /// previous code rebuilt the client (and its connection pool) for
+    /// every request, defeating keep-alive (P3/A3).
+    http_client: reqwest::Client,
 }
 
 /// Total request timeout for streaming responses. reqwest's `.timeout()`
@@ -28,7 +32,17 @@ fn http_timeout(apibase: &str) -> std::time::Duration {
 
 impl OaiSession {
     pub fn new(config: SessionConfig) -> Self {
-        OaiSession { config, history: Mutex::new(Vec::new()), system: None, tools: None }
+        let http_client = crate::build_http_client(
+            &config.apibase,
+            http_timeout(&config.apibase).as_secs(),
+        );
+        OaiSession {
+            config,
+            history: Mutex::new(Vec::new()),
+            system: None,
+            tools: None,
+            http_client,
+        }
     }
 }
 
@@ -50,12 +64,14 @@ impl Session for OaiSession {
         let cfg_for_responses = cfg_responses.clone();
         if cfg_responses.api_mode == ApiMode::Responses {
             let url = format!("{}/responses", cfg_responses.apibase.trim_end_matches('/'));
+            let http_client = self.http_client.clone();
             retry_with_backoff(
                 move || {
                     let oai_msgs = oai_msgs_base.clone();
                     let tools = tools.clone();
                     let cfg = cfg_for_responses.clone();
                     let url = url.clone();
+                    let http_client = http_client.clone();
                     Box::pin(async move {
                         let mut payload = serde_json::json!({
                             "model": cfg.model,
@@ -65,8 +81,7 @@ impl Session for OaiSession {
                         if let Some(ref tw) = tools {
                             payload["tools"] = serde_json::to_value(tw).unwrap_or_default();
                         }
-                        let client = crate::build_http_client(&cfg.apibase, http_timeout(&cfg.apibase).as_secs());
-                        let resp = client.post(&url)
+                        let resp = http_client.post(&url)
                             .bearer_auth(&cfg.apikey)
                             .json(&payload)
                             .send().await
@@ -86,6 +101,7 @@ impl Session for OaiSession {
             let model_lower = cfg_responses.model.to_lowercase();
             let cfg_chat = cfg_responses.clone();
             let cfg_for_chat = cfg_chat.clone();
+            let http_client = self.http_client.clone();
 
             retry_with_backoff(
                 move || {
@@ -95,6 +111,7 @@ impl Session for OaiSession {
                     let url = url.clone();
                     let model_lower = model_lower.clone();
                     let system = system.clone();
+                    let http_client = http_client.clone();
                     Box::pin(async move {
                         if let Some(ref sys) = system {
                             oai_msgs.insert(0, serde_json::json!({"role": "system", "content": sys}));
@@ -125,8 +142,7 @@ impl Session for OaiSession {
                             payload["tools"] = serde_json::to_value(tw).unwrap_or_default();
                             payload["tool_choice"] = serde_json::json!("required");
                         }
-                        let client = crate::build_http_client(&cfg.apibase, http_timeout(&cfg.apibase).as_secs());
-                        let resp = client.post(&url)
+                        let resp = http_client.post(&url)
                             .bearer_auth(&cfg.apikey)
                             .json(&payload)
                             .send().await
@@ -159,14 +175,17 @@ impl Session for OaiSession {
         let cfg_for_responses = cfg_responses.clone();
         if cfg_responses.api_mode == ApiMode::Responses {
             let url = format!("{}/responses", cfg_responses.apibase.trim_end_matches('/'));
-            retry_with_backoff(
+            let http_client = self.http_client.clone();
+            // Retry only the send/status phase — a mid-stream failure is NOT
+            // re-sent here: the agent loop owns turn-level retry, and
+            // re-sending would duplicate TextDelta events already rendered.
+            let resp = retry_with_backoff(
                 move || {
                     let oai_msgs = oai_msgs_base.clone();
                     let tools = tools.clone();
                     let cfg = cfg_for_responses.clone();
                     let url = url.clone();
-                    let event_tx = event_tx.clone();
-                    let spec_tx = speculative_tx.clone();
+                    let http_client = http_client.clone();
                     Box::pin(async move {
                         let mut payload = serde_json::json!({
                             "model": cfg.model,
@@ -176,7 +195,6 @@ impl Session for OaiSession {
                         if let Some(ref tw) = tools {
                             payload["tools"] = serde_json::to_value(tw).unwrap_or_default();
                         }
-                        let client = crate::build_http_client(&cfg.apibase, http_timeout(&cfg.apibase).as_secs());
                         // Send-phase timeout: headers may never arrive even
                         // after connect succeeds (wedged server). Without it,
                         // send() blocks for http_timeout (1h local) and the
@@ -184,7 +202,7 @@ impl Session for OaiSession {
                         let header_timeout = if is_local_apibase(&cfg.apibase) { 180 } else { 60 };
                         let resp = match tokio::time::timeout(
                             std::time::Duration::from_secs(header_timeout),
-                            client.post(&url)
+                            http_client.post(&url)
                                 .bearer_auth(&cfg.apikey)
                                 .json(&payload)
                                 .send(),
@@ -200,18 +218,22 @@ impl Session for OaiSession {
                             let body = resp.text().await.unwrap_or_default();
                             return Err(LlmError::HttpError { status, body });
                         }
-                        parse_openai_sse(resp, "responses", Some(event_tx), spec_tx, &cfg.apibase).await
+                        Ok(resp)
                     })
                 },
                 &cfg_responses,
-            ).await
+            ).await?;
+            parse_openai_sse(resp, "responses", Some(event_tx), speculative_tx, &cfg_responses.apibase).await
         } else {
             let url = format!("{}/chat/completions", cfg_responses.apibase.trim_end_matches('/'));
             let model_lower = cfg_responses.model.to_lowercase();
             let cfg_chat = cfg_responses.clone();
             let cfg_for_chat = cfg_chat.clone();
+            let http_client = self.http_client.clone();
 
-            retry_with_backoff(
+            // Retry only the send/status phase — mid-stream failures are
+            // surfaced to the agent loop, not re-sent (see responses branch).
+            let resp = retry_with_backoff(
                 move || {
                     let mut oai_msgs = oai_msgs_base.clone();
                     let tools = tools.clone();
@@ -219,8 +241,7 @@ impl Session for OaiSession {
                     let url = url.clone();
                     let model_lower = model_lower.clone();
                     let system = system.clone();
-                    let event_tx = event_tx.clone();
-                    let spec_tx = speculative_tx.clone();
+                    let http_client = http_client.clone();
                     Box::pin(async move {
                         if let Some(ref sys) = system {
                             oai_msgs.insert(0, serde_json::json!({"role": "system", "content": sys}));
@@ -251,15 +272,11 @@ impl Session for OaiSession {
                             payload["tools"] = serde_json::to_value(tw).unwrap_or_default();
                             payload["tool_choice"] = serde_json::json!("required");
                         }
-                        let client = crate::build_http_client(&cfg.apibase, http_timeout(&cfg.apibase).as_secs());
-                        // Send-phase timeout: headers may never arrive even
-                        // after connect succeeds (wedged server). Without it,
-                        // send() blocks for http_timeout (1h local) and the
-                        // agent looks frozen — fail fast, retry instead.
+                        // Send-phase timeout (see responses branch).
                         let header_timeout = if is_local_apibase(&cfg.apibase) { 180 } else { 60 };
                         let resp = match tokio::time::timeout(
                             std::time::Duration::from_secs(header_timeout),
-                            client.post(&url)
+                            http_client.post(&url)
                                 .bearer_auth(&cfg.apikey)
                                 .json(&payload)
                                 .send(),
@@ -275,11 +292,12 @@ impl Session for OaiSession {
                             let body = resp.text().await.unwrap_or_default();
                             return Err(LlmError::HttpError { status, body });
                         }
-                        parse_openai_sse(resp, "chat_completions", Some(event_tx), spec_tx, &cfg.apibase).await
+                        Ok(resp)
                     })
                 },
                 &cfg_chat,
-            ).await
+            ).await?;
+            parse_openai_sse(resp, "chat_completions", Some(event_tx), speculative_tx, &cfg_chat.apibase).await
         }
     }
 

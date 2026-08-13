@@ -40,9 +40,12 @@ where
     Err(LlmError::MaxRetriesExceeded("All retry attempts failed".into()))
 }
 
-fn compute_delay(attempt: usize, _timeout: Option<u64>) -> f64 {
+fn compute_delay(attempt: usize, timeout: Option<u64>) -> f64 {
     let delay = 1.5 * (2u64.pow(attempt as u32) as f64);
-    delay.min(30.0)
+    // Cap backoff at the configured request timeout (default 30s) so a
+    // retry never waits longer than a full request may take.
+    let cap = timeout.unwrap_or(30).min(30) as f64;
+    delay.min(cap)
 }
 
 pub fn trim_history(history: &mut Vec<Message>, context_win: usize) {
@@ -129,6 +132,16 @@ mod tests {
     #[test]
     fn test_compute_delay_capped() {
         let delay = compute_delay(10, None);
+        assert!((delay - 30.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_compute_delay_respects_timeout_cap() {
+        // A tight request timeout must shrink the backoff cap below 30s.
+        let delay = compute_delay(10, Some(5));
+        assert!((delay - 5.0).abs() < f64::EPSILON);
+        // A generous timeout (e.g. default 120s) must not raise the 30s cap.
+        let delay = compute_delay(10, Some(120));
         assert!((delay - 30.0).abs() < f64::EPSILON);
     }
 

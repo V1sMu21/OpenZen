@@ -581,6 +581,11 @@ pub async fn stop_session(
     Ok(serde_json::json!({"status": "ok"}))
 }
 
+/// Hard cap on user-supplied message bodies accepted over IPC — a webview
+/// (or a buggy client) must not be able to force multi-GB strings into the
+/// session store (P3/A8).
+const MAX_MESSAGE_CHARS: usize = 1_000_000;
+
 /// Inject a user message into a running agent session without interrupting it.
 /// The message is appended to the session store and pushed to the agent's
 /// intervention queue — the agent loop picks it up before the next LLM turn.
@@ -591,6 +596,12 @@ pub fn inject_message(
     state: State<'_, Arc<AppState>>,
     app_handle: AppHandle,
 ) -> Result<serde_json::Value, String> {
+    if text.chars().count() > MAX_MESSAGE_CHARS {
+        return Err(format!(
+            "Message too large (max {} characters)",
+            MAX_MESSAGE_CHARS
+        ));
+    }
     // 1. Append to session store so the UI shows it immediately
     {
         let mut store = lock_poison_guard(&state.sessions);
@@ -730,6 +741,12 @@ pub async fn send_message(
     state: State<'_, Arc<AppState>>,
 ) -> Result<SendMessageResponse, String> {
     let state = state.inner().clone();
+    if message.chars().count() > MAX_MESSAGE_CHARS {
+        return Err(format!(
+            "Message too large (max {} characters)",
+            MAX_MESSAGE_CHARS
+        ));
+    }
     debug_log(&format!(
         "send_message: session_id={}, msg_len={}",
         session_id,

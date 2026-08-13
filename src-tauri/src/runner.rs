@@ -296,7 +296,10 @@ pub async fn run_agent_for_session(
     debug_log(&format!("config_path={config_path}"));
 
     let cfg = MyKeyConfig::from_file(std::path::Path::new(&config_path))
-        .map_err(|e| anyhow::anyhow!("Config error: {e} (path: {config_path})"))?;
+        // config_path is already debug_logged above — keep it out of the
+        // error string, which is broadcast to all windows via sse_event
+        // (local paths must not leak into the UI) (P3/A7).
+        .map_err(|e| anyhow::anyhow!("Config error: {e}"))?;
     let profile = load_profile();
     let session_name = model_name
         .or(profile.default_model.as_deref())

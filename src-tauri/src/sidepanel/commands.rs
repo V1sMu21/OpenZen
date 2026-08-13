@@ -451,12 +451,17 @@ pub fn read_file_content(state: State<'_, Arc<AppState>>, path: String) -> Resul
 }
 
 /// Parse an Excel (.xlsx/.xls/.xlsb) or CSV/TSV file into a 2D string array.
+/// Rows/cells are truncated at MAX_EXCEL_ROWS / MAX_EXCEL_CELLS_PER_ROW so a
+/// hostile spreadsheet can't blow up the IPC payload or the frontend grid
+/// (P3/A8).
 #[tauri::command]
 pub fn parse_excel(
     path: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<Vec<String>>, String> {
     use calamine::{open_workbook_auto, open_workbook_auto_from_rs, Reader};
+    const MAX_EXCEL_ROWS: usize = 50_000;
+    const MAX_EXCEL_CELLS_PER_ROW: usize = 2_000;
     let resolved = std::fs::canonicalize(&path).map_err(|e| format!("Cannot resolve path: {e}"))?;
     if !is_artifact_allowed(&state, &resolved) {
         return Err("Access denied: only files opened in the side panel can be read".into());
@@ -481,11 +486,15 @@ pub fn parse_excel(
             if line.trim().is_empty() {
                 continue;
             }
-            rows.push(
-                line.split(sep)
-                    .map(|c| c.trim().trim_matches('"').to_string())
-                    .collect(),
-            );
+            let mut row: Vec<String> = line
+                .split(sep)
+                .map(|c| c.trim().trim_matches('"').to_string())
+                .collect();
+            row.truncate(MAX_EXCEL_CELLS_PER_ROW);
+            rows.push(row);
+            if rows.len() >= MAX_EXCEL_ROWS {
+                break;
+            }
         }
         return Ok(rows);
     }
@@ -508,8 +517,12 @@ pub fn parse_excel(
             .worksheet_range(&sheet_names[0])
             .map_err(|e| format!("Cannot read sheet: {e}"))?;
         for r in range.rows() {
-            let row: Vec<String> = r.iter().map(|cell| cell.to_string()).collect();
+            let mut row: Vec<String> = r.iter().map(|cell| cell.to_string()).collect();
+            row.truncate(MAX_EXCEL_CELLS_PER_ROW);
             rows.push(row);
+            if rows.len() >= MAX_EXCEL_ROWS {
+                break;
+            }
         }
         return Ok(rows);
     }
@@ -531,8 +544,12 @@ pub fn parse_excel(
         .map_err(|e| format!("Cannot read sheet: {e}"))?;
 
     for r in range.rows() {
-        let row: Vec<String> = r.iter().map(|cell| cell.to_string()).collect();
+        let mut row: Vec<String> = r.iter().map(|cell| cell.to_string()).collect();
+        row.truncate(MAX_EXCEL_CELLS_PER_ROW);
         rows.push(row);
+        if rows.len() >= MAX_EXCEL_ROWS {
+            break;
+        }
     }
 
     Ok(rows)

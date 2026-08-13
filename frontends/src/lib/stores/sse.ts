@@ -208,6 +208,9 @@ function startHealthCheck() {
   }
   checkHealth(); // fire immediately for initial status
   healthCheckTimer = setInterval(async () => {
+    // Background session windows skip health pings; the next tick after
+    // the window becomes visible covers it (P3/A9).
+    if (document.hidden) return;
     const healthy = await checkHealth();
     if (!healthy) {
       // Server might be restarting — try to reconnect SSE

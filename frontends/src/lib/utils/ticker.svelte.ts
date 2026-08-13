@@ -15,14 +15,24 @@ const TICK_MS = 1000;
 export const tickerState = $state({ now: Date.now() });
 
 // Module-level interval: started on first read, never stopped (the
-// page lives as long as the ticker).
+// page lives as long as the ticker). Hidden pages (background session
+// windows) skip per-second wakeups and catch up on visibilitychange,
+// so idle windows don't burn CPU (P3/A9).
 let intervalId: ReturnType<typeof setInterval> | null = null;
+
+function onVisibilityChange() {
+  if (!document.hidden) {
+    tickerState.now = Date.now();
+  }
+}
 
 function ensureTickerRunning() {
   if (intervalId !== null) return;
   intervalId = setInterval(() => {
+    if (document.hidden) return;
     tickerState.now = Date.now();
   }, TICK_MS);
+  document.addEventListener("visibilitychange", onVisibilityChange);
 }
 
 // Called by components when they mount. Starts the ticker if not
