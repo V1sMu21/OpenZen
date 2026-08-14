@@ -144,24 +144,24 @@ pub fn get_dashboard_stats() -> serde_json::Value {
 }
 
 /// Read-only memory status for the SoulCard UI: ERME soul state, semantic
-/// store counters and the harness ledger entry count. Never blocks on agent
-/// loops; `enabled: false` when the file backend is active.
+/// store counters and the harness ledger Memory-entry count. Never blocks on
+/// agent loops; `enabled: false` when the file backend is active.
 #[tauri::command]
 pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
-    let harness_entry_count = oz_core::harness::HarnessState::load(
-        &crate::data_dir().join("harness"),
-    )
-    .entries
-    .len();
     let Some(runtime) = &state.erme_store else {
         return serde_json::json!({
             "enabled": false,
-            "harness": { "entry_count": harness_entry_count },
+            "harness": { "entry_count": 0 },
         });
     };
 
     let stats = runtime.store.stats();
     let counters = runtime.store.counters().snapshot();
+    let recall_hit_rate = if counters.recalls > 0 {
+        counters.recall_hits as f64 / counters.recalls as f64
+    } else {
+        0.0
+    };
     let soul = {
         let handle = runtime.injector.soul();
         let model = handle.read().unwrap_or_else(|e| e.into_inner());
@@ -174,6 +174,11 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
             "version": model.version,
         })
     };
+    // Mirror what the distiller ingests (Memory kind only), so the UI number
+    // matches what is actually recallable as semantic memory.
+    let harness_entry_count = oz_core::harness::HarnessState::load(&crate::harness_dir())
+        .entries_of(oz_core::harness::HarnessKind::Memory)
+        .len();
 
     serde_json::json!({
         "enabled": true,
@@ -189,7 +194,7 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
             "recall_hits": counters.recall_hits,
             "recall_misses": counters.recall_misses,
             "consolidations": counters.consolidations,
-            "recall_hit_rate": runtime.store.counters().recall_hit_rate(),
+            "recall_hit_rate": recall_hit_rate,
         },
         "harness": { "entry_count": harness_entry_count },
     })

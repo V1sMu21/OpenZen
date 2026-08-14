@@ -3,6 +3,7 @@
   import { isTauri, tauriInvoke } from "../api/tauri";
   import { t } from "../i18n";
 
+  /** Mirrors the get_memory_status command response (commands.rs). */
   interface SoulStatus {
     enabled: boolean;
     soul?: {
@@ -15,41 +16,70 @@
     };
     store?: {
       total_entries: number;
-      recalls: number;
-      recall_hit_rate: number;
+      l1_entries: number;
+      l2_entries: number;
+      l3_entries: number;
       l3_storage_bytes: number;
+      stores: number;
+      recalls: number;
+      recall_hits: number;
+      recall_misses: number;
+      consolidations: number;
+      recall_hit_rate: number;
     };
     harness?: { entry_count: number };
   }
 
-  let { onVisible = (_v: boolean) => {} } = $props();
-
   let status = $state<SoulStatus | null>(null);
   let expanded = $state(false);
   let timer: ReturnType<typeof setInterval> | null = null;
+  let destroyed = false;
 
   async function refresh() {
     if (!isTauri()) return;
     try {
       const s = (await tauriInvoke("get_memory_status")) as SoulStatus;
+      if (destroyed) return; // unmounted mid-invoke — drop the write
       status = s;
-      if (s.enabled) onVisible(true);
+      if (!s.enabled && timer) {
+        clearInterval(timer); // file backend: nothing to poll
+        timer = null;
+      }
     } catch {
-      status = null;
+      if (!destroyed) status = null;
     }
   }
 
   onMount(() => {
-    refresh();
-    timer = setInterval(refresh, 30_000);
+    if (isTauri()) {
+      refresh();
+      timer = setInterval(refresh, 30_000);
+    }
   });
   onDestroy(() => {
+    destroyed = true;
     if (timer) clearInterval(timer);
   });
 
   const fmtBytes = (b: number) =>
     b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : b >= 1024 ? `${(b / 1024).toFixed(0)} KB` : `${b} B`;
   const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
+
+  let rows = $derived(
+    status?.enabled && status.soul && status.store
+      ? [
+          { key: "soul.identity", value: status.soul.identity },
+          { key: "soul.mood", value: status.soul.mood },
+          { key: "soul.confidence", value: pct(status.soul.confidence) },
+          { key: "soul.portraitFacts", value: String(status.soul.portrait_facts) },
+          { key: "soul.narrative", value: `${status.soul.narrative_chapters} ${$t("soul.chapters")}` },
+          { key: "soul.memories", value: String(status.store.total_entries) },
+          { key: "soul.recalls", value: `${status.store.recalls} · ${$t("soul.hitRate")} ${pct(status.store.recall_hit_rate)}` },
+          { key: "soul.storage", value: fmtBytes(status.store.l3_storage_bytes) },
+          { key: "soul.harness", value: String(status.harness?.entry_count ?? 0) },
+        ]
+      : [],
+  );
 </script>
 
 {#if status?.enabled}
@@ -64,42 +94,12 @@
 
     {#if expanded}
       <div class="soul-list">
-        <div class="soul-row">
-          <span class="soul-key">{$t("soul.identity")}</span>
-          <span class="soul-val">{status.soul?.identity}</span>
-        </div>
-        <div class="soul-row">
-          <span class="soul-key">{$t("soul.mood")}</span>
-          <span class="soul-val">{status.soul?.mood}</span>
-        </div>
-        <div class="soul-row">
-          <span class="soul-key">{$t("soul.confidence")}</span>
-          <span class="soul-val">{pct(status.soul?.confidence ?? 0)}</span>
-        </div>
-        <div class="soul-row">
-          <span class="soul-key">{$t("soul.portraitFacts")}</span>
-          <span class="soul-val">{status.soul?.portrait_facts}</span>
-        </div>
-        <div class="soul-row">
-          <span class="soul-key">{$t("soul.narrative")}</span>
-          <span class="soul-val">{status.soul?.narrative_chapters} {$t("soul.chapters")}</span>
-        </div>
-        <div class="soul-row">
-          <span class="soul-key">{$t("soul.memories")}</span>
-          <span class="soul-val">{status.store?.total_entries}</span>
-        </div>
-        <div class="soul-row">
-          <span class="soul-key">{$t("soul.recalls")}</span>
-          <span class="soul-val">{status.store?.recalls} · {$t("soul.hitRate")} {pct(status.store?.recall_hit_rate ?? 0)}</span>
-        </div>
-        <div class="soul-row">
-          <span class="soul-key">{$t("soul.storage")}</span>
-          <span class="soul-val">{fmtBytes(status.store?.l3_storage_bytes ?? 0)}</span>
-        </div>
-        <div class="soul-row">
-          <span class="soul-key">{$t("soul.harness")}</span>
-          <span class="soul-val">{status.harness?.entry_count}</span>
-        </div>
+        {#each rows as row (row.key)}
+          <div class="soul-row">
+            <span class="soul-key">{$t(row.key)}</span>
+            <span class="soul-val">{row.value}</span>
+          </div>
+        {/each}
       </div>
     {/if}
   </div>
@@ -107,7 +107,12 @@
 
 <style>
   .soul-card {
-    margin: 4px 0;
+    flex: none;
+    width: 320px;
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    margin-top: 4px;
   }
 
   .soul-toggle {
@@ -189,5 +194,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* 窄窗口下与 todo-rail 同步隐藏 */
+  @media (max-width: 1100px) {
+    .soul-card {
+      display: none;
+    }
   }
 </style>

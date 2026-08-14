@@ -165,8 +165,10 @@ impl MyKeyConfig {
         let erme_idle_interval_secs = raw
             .get("erme_idle_interval_secs")
             .and_then(|v| v.as_integer())
-            .map(|i| i as u64)
-            .filter(|s| *s > 0);
+            // Filter on i64 BEFORE casting: a negative value would wrap to a
+            // huge u64 and sleep the idle thread ~forever.
+            .filter(|i| *i > 0)
+            .map(|i| i as u64);
         let mut sessions = HashMap::new();
 
         // Walk raw table to collect session entries. Dotted section names
@@ -754,6 +756,25 @@ model = "gpt-4"
 "#);
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.erme_idle_interval_secs, None, "0 must fall back to default");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn erme_idle_interval_negative_is_ignored() {
+        let path = write_config("oz_config_test_erme_idle_neg", r#"
+erme_idle_interval_secs = -1
+default_session = "gpt4"
+
+[gpt4]
+apikey = "sk-test"
+apibase = "https://api.example.com/v1"
+model = "gpt-4"
+"#);
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert_eq!(
+            cfg.erme_idle_interval_secs, None,
+            "negative must not wrap to a huge u64"
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

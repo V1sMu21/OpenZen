@@ -37,7 +37,6 @@
   let showThinkingTimer = $state(false);
   let messagesEnd: HTMLDivElement | undefined = $state();
   let isDragOver = $state(false);
-  let memoryCardVisible = $state(false);
 
   function attachFromPaths(paths: string[]) {
     for (let i = 0; i < paths.length; i++) {
@@ -682,7 +681,7 @@
             <div bind:this={messagesEnd}></div>
           </div>
 
-          {#if $chat.todos.length > 0 || $chat.reminders.length > 0 || memoryCardVisible}
+          {#if $chat.todos.length > 0 || $chat.reminders.length > 0}
             <div class="todo-rail">
               {#if $chat.todos.length > 0}
                 <TodoProgress items={$chat.todos} />
@@ -691,10 +690,11 @@
                 <!-- 定时/心跳任务卡片：位于待办事项卡片下方 -->
                 <ReminderCard items={$chat.reminders} />
               {/if}
-              <!-- 灵魂/记忆状态卡片：ERME 启用时显示 -->
-              <SoulCard onVisible={(v) => (memoryCardVisible = v)} />
             </div>
           {/if}
+          <!-- 灵魂/记忆状态卡片：自隐藏（未启用/未加载时不占布局），
+               ERME 启用时以 sticky 卡片显示在会话区右侧 -->
+          <SoulCard />
         </div>
       {/if}
 

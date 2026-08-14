@@ -71,11 +71,15 @@ impl ErmeMemoryDistiller {
     }
 }
 
+/// Distance below which a recall hit is treated as the same lesson
+/// (aligned with the vendor's `SearchConfig::default().full_match_dist`).
+const NEAR_DUP_DIST: f32 = 0.05;
+
 /// Ingest `HarnessKind::Memory` entries from the ledger into the semantic
-/// store as high-importance summaries. Idempotent across sessions: a lesson
-/// already present at near-zero distance (identical hash embedding) is
-/// skipped, so re-running distillation never duplicates entries. Returns the
-/// number stored.
+/// store as high-importance summaries. A lesson is skipped when a recall of
+/// its own text already surfaces it (near-zero distance, or an exact content
+/// match in the top results — the latter survives consolidation, which folds
+/// L2 sources into L3 summaries). Returns the number stored.
 fn ingest_harness_entries(
     store: &entropy_memory_engine::memory_store::MemoryStore,
     harness_dir: &std::path::Path,
@@ -87,10 +91,13 @@ fn ingest_harness_entries(
         // recall returns distance (ascending, lower = closer); an identical
         // lesson embeds to the same vector → distance ≈ 0.
         let already_present = store
-            .recall_by_text(&entry.content, 1)
+            .recall_by_text(&entry.content, 5)
             .ok()
-            .and_then(|r| r.into_iter().next())
-            .map(|(_, dist, _)| dist <= 0.05)
+            .map(|recalls| {
+                recalls.iter().any(|(mem, dist, _)| {
+                    *dist <= NEAR_DUP_DIST || mem.content_text().trim() == entry.content.trim()
+                })
+            })
             .unwrap_or(false);
         if already_present {
             continue;
@@ -334,22 +341,10 @@ pub async fn run_agent_for_session(
     model_name: Option<&str>,
     resume: bool,
 ) -> anyhow::Result<()> {
-    // Resolve config
-    let config_path = if std::path::Path::new(&state.config_path).exists() {
-        state.config_path.clone()
-    } else {
-        [
-            data_dir().join("mykey.toml"),
-            home_dir().join("mykey.toml"),
-            PathBuf::from("config/mykey.toml"),
-            PathBuf::from("mykey.toml"),
-        ]
-        .into_iter()
-        .find(|c| c.exists())
-        .map(|c| c.to_string_lossy().to_string())
-        .unwrap_or_else(|| state.config_path.clone())
-    };
-    debug_log(&format!("config_path={config_path}"));
+    // Resolve config through the same fallback chain as the ERME backend
+    // gate (AppState::new) so both always agree on the active config.
+    let config_path = crate::resolve_config_path(&state.config_path);
+    debug_log(&format!("config_path={}", config_path.display()));
 
     let cfg = MyKeyConfig::from_file(std::path::Path::new(&config_path))
         // config_path is already debug_logged above — keep it out of the

@@ -53,6 +53,45 @@ pub(crate) fn data_dir() -> PathBuf {
         .unwrap_or_else(|| home_dir().join(".openzen"))
 }
 
+/// Resolve the mykey.toml config path: explicit state path first, then the
+/// data-root / home / repo / cwd fallback chain. Shared between the ERME
+/// backend gate (AppState::new) and the agent runner so both always see the
+/// same config — a config living at a fallback path must not silently flip
+/// the memory backend decision.
+pub(crate) fn resolve_config_path(state_config_path: impl AsRef<std::path::Path>) -> PathBuf {
+    let explicit = state_config_path.as_ref();
+    if explicit.exists() {
+        return explicit.to_path_buf();
+    }
+    [
+        data_dir().join("mykey.toml"),
+        home_dir().join("mykey.toml"),
+        PathBuf::from("config/mykey.toml"),
+        PathBuf::from("mykey.toml"),
+    ]
+    .into_iter()
+    .find(|c| c.exists())
+    .unwrap_or_else(|| explicit.to_path_buf())
+}
+
+/// Harness ledger directory under the data root (never the source tree).
+pub(crate) fn harness_dir() -> PathBuf {
+    data_dir().join("harness")
+}
+
+/// Shared L2 engine construction (384-dim HNSW semantic index). One place so
+/// a dimension/metric change applies everywhere.
+fn l2_engine() -> Arc<entropy_memory_engine::l2::L2Engine> {
+    use entropy_memory_engine::l2::{HnswConfig, L2Config};
+    Arc::new(entropy_memory_engine::l2::L2Engine::new(L2Config {
+        hnsw: HnswConfig {
+            dimension: 384,
+            ..Default::default()
+        },
+        ..Default::default()
+    }))
+}
+
 /// Long-lived ERME runtime: semantic store + L0 soul layer (M7).
 ///
 /// The reflection engine subscribes to store events via [`MemoryStore::attach_soul`]
@@ -63,8 +102,6 @@ pub struct ErmeRuntime {
     pub store: Arc<entropy_memory_engine::memory_store::MemoryStore>,
     pub reflection: Arc<entropy_memory_engine::l0::ReflectionEngine>,
     pub injector: entropy_memory_engine::l0::PromptInjector,
-    /// Handle to the idle introspection thread (kept for lifecycle control).
-    pub idle_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Build the long-lived ERME semantic memory store rooted at `base_dir`.
@@ -80,7 +117,6 @@ fn init_erme_store(
     use entropy_memory_engine::l0::soul::{SoulHandle, SoulModel};
     use entropy_memory_engine::l0::{PromptInjector, ReflectionConfig, ReflectionEngine};
     use entropy_memory_engine::l1::L1Cache;
-    use entropy_memory_engine::l2::{HnswConfig, L2Config, L2Engine};
     use entropy_memory_engine::l3::{BudgetConfig, L3Config, L3Engine};
     use entropy_memory_engine::memory_store::MemoryStore;
     use entropy_memory_engine::orchestrator::MemoryOrchestrator;
@@ -95,13 +131,7 @@ fn init_erme_store(
     }
 
     let l1 = L1Cache::builder().capacity(10_000).build();
-    let l2 = Arc::new(L2Engine::new(L2Config {
-        hnsw: HnswConfig {
-            dimension: 384,
-            ..Default::default()
-        },
-        ..Default::default()
-    }));
+    let l2 = l2_engine();
     let l3 = L3Engine::new(L3Config {
         storage_path: memory_erme_dir.join("erme_memory.bin"),
         budget: BudgetConfig {
@@ -123,22 +153,10 @@ fn init_erme_store(
         },
     ));
 
-    let conflict_resolver = Arc::new(ConflictResolver::new(Arc::new(L2Engine::new(L2Config {
-        hnsw: HnswConfig {
-            dimension: 384,
-            ..Default::default()
-        },
-        ..Default::default()
-    }))));
+    let conflict_resolver = Arc::new(ConflictResolver::new(l2_engine()));
 
     let quarantine = Arc::new(QuarantineManager::new(
-        Arc::new(L2Engine::new(L2Config {
-            hnsw: HnswConfig {
-                dimension: 384,
-                ..Default::default()
-            },
-            ..Default::default()
-        })),
+        l2_engine(),
         QuarantineConfig::default(),
     ));
 
@@ -189,7 +207,7 @@ fn init_erme_store(
     // 后台内省循环：idle 间隔驱动 L0 完整内省 + Phase2-5 idle 管道。
     // Hardened: a panic inside a cycle is caught and logged so the thread
     // never dies silently (the soul would stop evolving with no signal).
-    let idle_handle = {
+    {
         let reflection = Arc::clone(&reflection);
         let orchestrator = Arc::clone(&orchestrator);
         std::thread::Builder::new()
@@ -208,8 +226,8 @@ fn init_erme_store(
                 }
             })
             .map_err(|e| tracing::error!("failed to spawn ERME idle thread: {e}"))
-            .ok()
-    };
+            .ok();
+    }
 
     tracing::info!(
         "ERME memory engine initialised at {} (idle cycle every {}s)",
@@ -220,7 +238,6 @@ fn init_erme_store(
         store,
         reflection,
         injector,
-        idle_thread: idle_handle,
     }))
 }
 
@@ -301,8 +318,8 @@ pub(crate) fn tauri_ctx() -> ToolContext {
         .map(|p| p.to_string_lossy().to_string());
 
     // Harness ledger lives under the data root, never the source tree.
-    let harness_dir = data_dir().join("harness");
-    let _ = std::fs::create_dir_all(&harness_dir);
+    let ledger_dir = harness_dir();
+    let _ = std::fs::create_dir_all(&ledger_dir);
 
     ToolContext {
         working_dir,
@@ -310,7 +327,7 @@ pub(crate) fn tauri_ctx() -> ToolContext {
         script_dir: assets_dir,
         lang: load_locale(),
         skill_mcp_dir,
-        harness_dir: Some(harness_dir.to_string_lossy().to_string()),
+        harness_dir: Some(ledger_dir.to_string_lossy().to_string()),
         session_id: String::new(),
     }
 }
@@ -396,16 +413,43 @@ impl AppState {
             }
         }
 
+        // One-time migration: the pre-P0 harness ledger lived at
+        // {data_root}/.skill_mcp/harness — move it to {data_root}/harness so
+        // the unified ledger dir does not orphan historical lessons.
+        {
+            let old = data_root.join(SKILL_MCP_DIR).join("harness").join("harness_state.json");
+            let new_dir = harness_dir();
+            let new = new_dir.join("harness_state.json");
+            if old.exists() && !new.exists() {
+                let _ = std::fs::create_dir_all(&new_dir);
+                match std::fs::copy(&old, &new) {
+                    Ok(_) => tracing::info!("migrated harness ledger from {}", old.display()),
+                    Err(e) => tracing::warn!("harness ledger migration failed: {e}"),
+                }
+            }
+        }
+
         let state_path = data_root.join(SESSION_STATE_FILE);
 
         // ERME semantic memory: build the long-lived runtime only when the
         // memory backend is "erme" (the default). A "file" backend skips
         // construction entirely — no HNSW resident memory, no idle thread.
-        let memory_cfg = oz_config::mykey::MyKeyConfig::from_file(&data_root.join("mykey.toml")).ok();
+        // Uses the same config fallback chain as the runner so a config at a
+        // fallback path never silently flips this decision.
+        let config_path = resolve_config_path(data_root.join("mykey.toml"));
+        let memory_cfg = match oz_config::mykey::MyKeyConfig::from_file(&config_path) {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                tracing::warn!(
+                    "mykey.toml unreadable ({e}); memory backend defaults to \"erme\""
+                );
+                None
+            }
+        };
         let memory_backend = memory_cfg
             .as_ref()
-            .map(|c| c.memory_backend.clone())
-            .unwrap_or_else(|| "erme".to_string());
+            .map(|c| c.memory_backend.as_str())
+            .unwrap_or("erme");
         let erme_idle_secs = memory_cfg
             .as_ref()
             .and_then(|c| c.erme_idle_interval_secs)
