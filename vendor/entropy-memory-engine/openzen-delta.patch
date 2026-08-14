@@ -1,0 +1,331 @@
+diff -ruN upstream/src/l0/generator.rs vendor/src/l0/generator.rs
+--- upstream/src/l0/generator.rs	2026-08-14 18:31:36
++++ vendor/src/l0/generator.rs	2026-08-14 18:31:36
+@@ -180,7 +180,7 @@
+             },
+             ..Default::default()
+         });
+-        Arc::new(MemoryStore::new(l1, l2, l3, ConsolidationConfig::default()))
++        Arc::new(MemoryStore::new(l1, Arc::new(l2), l3, ConsolidationConfig::default()))
+     }
+ 
+     #[test]
+diff -ruN upstream/src/l0/reflection.rs vendor/src/l0/reflection.rs
+--- upstream/src/l0/reflection.rs	2026-08-14 18:31:36
++++ vendor/src/l0/reflection.rs	2026-08-14 18:31:36
+@@ -504,7 +504,7 @@
+             },
+             ..Default::default()
+         });
+-        Arc::new(MemoryStore::new(l1, l2, l3, ConsolidationConfig::default()))
++        Arc::new(MemoryStore::new(l1, Arc::new(l2), l3, ConsolidationConfig::default()))
+     }
+ 
+     fn make_engine(store: Arc<MemoryStore>) -> Arc<ReflectionEngine> {
+diff -ruN upstream/src/l1/wal.rs vendor/src/l1/wal.rs
+--- upstream/src/l1/wal.rs	2026-08-14 18:31:36
++++ vendor/src/l1/wal.rs	2026-08-14 18:31:36
+@@ -160,7 +160,7 @@
+     }
+ 
+     pub fn flush(&self) {
+-        let _ = self.inner.buffer.write();
++        std::mem::drop(self.inner.buffer.write());
+     }
+ 
+     pub fn len(&self) -> usize {
+diff -ruN upstream/src/l2/engine.rs vendor/src/l2/engine.rs
+--- upstream/src/l2/engine.rs	2026-08-14 18:31:36
++++ vendor/src/l2/engine.rs	2026-08-14 18:31:36
+@@ -45,7 +45,9 @@
+ pub struct L2Engine {
+     config: L2Config,
+     pub hnsw: HnswIndex,
+-    pub graph: TimeGraph,
++    /// 时间感知图。以 `Arc` 共享, 使 Phase2 RamblingEngine 能基于同一张
++    /// 关系图做联想(它持有独立的 `Arc<TimeGraph>` 副本则看不到记忆关系)。
++    pub graph: Arc<TimeGraph>,
+     pub storage: L2Storage,
+     write_buffer: Arc<WriteBuffer>,
+     embedder: Box<dyn EmbeddingModel>,
+@@ -76,7 +78,7 @@
+         Self {
+             config: config.clone(),
+             hnsw: HnswIndex::new(hnsw_config),
+-            graph: TimeGraph::new(),
++            graph: Arc::new(TimeGraph::new()),
+             storage: L2Storage::new(),
+             write_buffer: wb,
+             embedder,
+diff -ruN upstream/src/l2/time_graph.rs vendor/src/l2/time_graph.rs
+--- upstream/src/l2/time_graph.rs	2026-08-14 18:31:36
++++ vendor/src/l2/time_graph.rs	2026-08-14 18:31:36
+@@ -476,6 +476,7 @@
+     fn test_temporal_query() {
+         let g = TimeGraph::new();
+         g.add_edge(1, 2, "meets".into(), 1.0);
++        std::thread::sleep(std::time::Duration::from_millis(2));
+         let before = now_nanos();
+         std::thread::sleep(std::time::Duration::from_millis(2));
+         g.add_edge(2, 3, "meets".into(), 1.0);
+diff -ruN upstream/src/memory_store.rs vendor/src/memory_store.rs
+--- upstream/src/memory_store.rs	2026-08-14 18:31:36
++++ vendor/src/memory_store.rs	2026-08-14 18:31:36
+@@ -3,7 +3,7 @@
+ 
+ use crate::consolidation::{ConsolidationConfig, ConsolidationEngine, ConsolidationStats};
+ use crate::core::traits::MemoryLayer;
+-use crate::core::types::{KnowledgeSource, LayerId, Memory, MemoryContent, MemoryInput, Query};
++use crate::core::types::{Fact, KnowledgeSource, LayerId, Memory, MemoryContent, MemoryInput, Query};
+ use crate::core::MemoryResult;
+ use crate::l0::{ReflectionEngine, ReflectionEvent};
+ use crate::l1::L1Cache;
+@@ -91,7 +91,7 @@
+ }
+ 
+ impl MemoryStore {
+-    pub fn new(l1: L1Cache, l2: L2Engine, l3: L3Engine, config: ConsolidationConfig) -> Self {
++    pub fn new(l1: L1Cache, l2: Arc<L2Engine>, l3: L3Engine, config: ConsolidationConfig) -> Self {
+         let router = Arc::new(MemoryRouter::new(l1, l2, l3));
+         Self {
+             router,
+@@ -228,8 +228,22 @@
+         Ok(new_id)
+     }
+ 
+-    pub(crate) fn mark_superseded(&self, old_id: u64, new_id: u64) {
+-        let now = crate::core::now_nanos();
++    /// Distill a raw interaction transcript into facts and store them.
++    /// Returns the number of facts persisted; 0 when extraction yields nothing.
++    /// Errors are returned as MemoryError (callers should log and continue).
++    pub fn distill_and_store(&self, raw_text: &str) -> MemoryResult<usize> {
++        let facts = self.consolidation.extract_from_interaction(raw_text);
++        let mut stored = 0usize;
++        for (subject, predicate, object, confidence) in facts {
++            let input = MemoryInput::new(MemoryContent::Fact(Fact::new(subject, predicate, object)))
++                .with_importance(confidence.clamp(0.0, 1.0));
++            self.store(input)?;
++            stored += 1;
++        }
++        Ok(stored)
++    }
++
++    pub(crate) fn mark_superseded(&self, old_id: u64, new_id: u64) {        let now = crate::core::now_nanos();
+         let marked_l2 = self.router.l2().update_metadata(old_id, |meta| {
+             meta.superseded_by = Some(new_id);
+             meta.superseded_at = now;
+@@ -462,7 +476,7 @@
+             },
+             ..Default::default()
+         });
+-        MemoryStore::new(l1, l2, l3, ConsolidationConfig::default())
++        MemoryStore::new(l1, Arc::new(l2), l3, ConsolidationConfig::default())
+     }
+ 
+     #[test]
+@@ -547,7 +561,7 @@
+         });
+         let store = MemoryStore::new(
+             l1,
+-            l2,
++            Arc::new(l2),
+             l3,
+             ConsolidationConfig {
+                 auto_dedup_on_store: false,
+@@ -587,14 +601,14 @@
+         });
+         let store = Arc::new(MemoryStore::new(
+             l1,
+-            L2Engine::new(L2Config {
++            Arc::new(L2Engine::new(L2Config {
+                 hnsw: HnswConfig {
+                     dimension: 16,
+                     ..Default::default()
+                 },
+                 dimension: 16,
+                 ..Default::default()
+-            }),
++            })),
+             l3,
+             ConsolidationConfig {
+                 align_on_write: true,
+@@ -720,7 +734,7 @@
+             },
+             ..Default::default()
+         });
+-        let store = MemoryStore::new(l1, l2, l3, ConsolidationConfig::default());
++        let store = MemoryStore::new(l1, Arc::new(l2), l3, ConsolidationConfig::default());
+         assert!(!store.has_orchestrator());
+ 
+         let old_id = store
+diff -ruN upstream/src/metrics.rs vendor/src/metrics.rs
+--- upstream/src/metrics.rs	2026-08-14 18:31:36
++++ vendor/src/metrics.rs	2026-08-14 18:31:36
+@@ -320,7 +320,7 @@
+             ..Default::default()
+         });
+         let store =
+-            crate::memory_store::MemoryStore::new(l1, l2, l3, ConsolidationConfig::default());
++            crate::memory_store::MemoryStore::new(l1, Arc::new(l2), l3, ConsolidationConfig::default());
+         MonitoredMemoryStore::new(store)
+     }
+ 
+diff -ruN upstream/src/orchestrator.rs vendor/src/orchestrator.rs
+--- upstream/src/orchestrator.rs	2026-08-14 18:31:36
++++ vendor/src/orchestrator.rs	2026-08-14 18:31:36
+@@ -20,7 +20,8 @@
+     conflict_resolver: Arc<ConflictResolver>,
+     quarantine: Arc<QuarantineManager>,
+     /// Phase2-5 idle-cycle wiring (P3.3); attached via [`Self::with_idle_cycle`].
+-    rambling: Option<RamblingEngine>,
++    /// `Arc` so the same engine is shared with the L0 ReflectionEngine.
++    rambling: Option<Arc<RamblingEngine>>,
+     reality_anchor: Option<RealityAnchor>,
+     observer: BehaviorObserver,
+     scheduler: Option<PriorityTaskScheduler>,
+@@ -71,7 +72,7 @@
+     /// `rambling` is built by the caller with its own `Arc<L2Engine>` and
+     /// `Arc<TimeGraph>` seeds; the reality anchor, observer and scheduler are
+     /// constructed internally from the orchestrator's existing components.
+-    pub fn with_idle_cycle(mut self, rambling: RamblingEngine) -> Self {
++    pub fn with_idle_cycle(mut self, rambling: Arc<RamblingEngine>) -> Self {
+         self.rambling = Some(rambling);
+         self.reality_anchor = Some(RealityAnchor::new());
+         self.scheduler = Some(PriorityTaskScheduler::new());
+@@ -304,14 +305,14 @@
+ 
+         let store = Arc::new(MemoryStore::new(
+             l1,
+-            L2Engine::new(L2Config {
++            Arc::new(L2Engine::new(L2Config {
+                 hnsw: HnswConfig {
+                     dimension: 16,
+                     ..Default::default()
+                 },
+                 dimension: 16,
+                 ..Default::default()
+-            }),
++            })),
+             l3,
+             ConsolidationConfig::default(),
+         ));
+@@ -370,7 +371,7 @@
+ 
+     /// Build a dense clique of high-abstraction memories so rambling reliably
+     /// produces interesting conjectures (SSS composite ≈ 1.0 for every pair).
+-    fn make_rambling_engine() -> RamblingEngine {
++    fn make_rambling_engine() -> Arc<RamblingEngine> {
+         let l2 = Arc::new(L2Engine::new(L2Config {
+             hnsw: HnswConfig {
+                 dimension: 16,
+@@ -398,7 +399,7 @@
+                 tg.add_edge(a, b, "related".into(), 1.0);
+             }
+         }
+-        RamblingEngine::new(RamblingConfig::default(), tg, l2)
++        Arc::new(RamblingEngine::new(RamblingConfig::default(), tg, l2))
+     }
+ 
+     #[test]
+@@ -500,12 +501,21 @@
+             .with_idle_cycle(make_rambling_engine());
+ 
+         let first = orch.run_idle_cycle();
+-        // Re-running the cycle must not re-promote already-admitted conjectures.
++        let first_promoted: HashSet<u64> = orch.promoted_conjectures.read().unwrap().clone();
++        // Re-running the cycle must not re-promote already-promoted conjecture
++        // ids: the promoted set only grows, and its growth equals the number
++        // of promotions in the second cycle (any overlap would shrink the diff).
+         let second = orch.run_idle_cycle();
++        let second_promoted: HashSet<u64> = orch.promoted_conjectures.read().unwrap().clone();
+         assert!(
+-            second.promoted <= first.rambled,
+-            "second cycle must not duplicate promotions"
++            first_promoted.is_subset(&second_promoted),
++            "promoted set must only grow across cycles"
+         );
++        assert_eq!(
++            second_promoted.len() - first_promoted.len(),
++            second.promoted,
++            "second cycle must only promote new conjecture ids"
++        );
+     }
+ 
+     #[test]
+@@ -582,6 +592,6 @@
+             },
+             ..Default::default()
+         });
+-        MemoryStore::new(l1, l2, l3, ConsolidationConfig::default())
++        MemoryStore::new(l1, Arc::new(l2), l3, ConsolidationConfig::default())
+     }
+ }
+diff -ruN upstream/src/router.rs vendor/src/router.rs
+--- upstream/src/router.rs	2026-08-14 18:31:36
++++ vendor/src/router.rs	2026-08-14 18:31:36
+@@ -5,6 +5,7 @@
+ use crate::l1::L1Cache;
+ use crate::l2::L2Engine;
+ use crate::l3::L3Engine;
++use std::sync::Arc;
+ 
+ /// Tuning parameters for fusing L2 semantic distances with L3 keyword
+ /// match scores in `search()`.
+@@ -40,13 +41,15 @@
+ 
+ pub struct MemoryRouter {
+     l1: L1Cache,
+-    l2: L2Engine,
++    /// L2 以 `Arc` 持有: Phase2 RamblingEngine 通过同一 `Arc<L2Engine>`
++    /// 读取 store 中的记忆做联想, 否则其独立 L2 是空的, 内循环空转。
++    l2: Arc<L2Engine>,
+     l3: L3Engine,
+     search_config: SearchConfig,
+ }
+ 
+ impl MemoryRouter {
+-    pub fn new(l1: L1Cache, l2: L2Engine, l3: L3Engine) -> Self {
++    pub fn new(l1: L1Cache, l2: Arc<L2Engine>, l3: L3Engine) -> Self {
+         Self {
+             l1,
+             l2,
+@@ -65,6 +68,12 @@
+     }
+ 
+     pub fn l2(&self) -> &L2Engine {
++        self.l2.as_ref()
++    }
++
++    /// Shared handle to the L2 engine, for components that need the same
++    /// `Arc` the router holds (e.g. Phase2 RamblingEngine).
++    pub fn l2_arc(&self) -> &Arc<L2Engine> {
+         &self.l2
+     }
+ 
+@@ -339,7 +348,7 @@
+             },
+             ..Default::default()
+         });
+-        MemoryRouter::new(l1, l2, l3)
++        MemoryRouter::new(l1, Arc::new(l2), l3)
+     }
+ 
+     #[test]
+@@ -507,7 +516,7 @@
+                 },
+                 ..Default::default()
+             });
+-            let r = MemoryRouter::new(l1, l2, l3);
++            let r = MemoryRouter::new(l1, Arc::new(l2), l3);
+             let input = MemoryInput::new(MemoryContent::Fact(Fact::new("persist", "test", "data")));
+             r.write(input).unwrap()
+         };
+@@ -531,7 +540,7 @@
+                 },
+                 ..Default::default()
+             });
+-            let r = MemoryRouter::new(l1, l2, l3);
++            let r = MemoryRouter::new(l1, Arc::new(l2), l3);
+             let query = Query::by_id(id);
+             let result = r.l3.read(&query).unwrap();
+             assert!(result.is_some(), "L3 data should survive restart");
