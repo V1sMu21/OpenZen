@@ -66,7 +66,7 @@ pub struct FileReadTool;
 #[async_trait]
 impl ToolHandler for FileReadTool {
     fn name(&self) -> String { "read".to_string() }
-    fn description(&self) -> String { "Read a file (txt, pdf, docx, pptx, xlsx) with optional line range.".to_string() }
+    fn description(&self) -> String { "Read a file (txt, pdf, docx, pptx, xlsx) with optional line range. Do NOT re-read files you just wrote/edited — failures report themselves and the harness tracks file state. Use start/count for long files.".to_string() }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -167,7 +167,7 @@ pub struct FileWriteTool;
 #[async_trait]
 impl ToolHandler for FileWriteTool {
     fn name(&self) -> String { "write".to_string() }
-    fn description(&self) -> String { "Write content to a file (creates parent dirs).".to_string() }
+    fn description(&self) -> String { "Write content to a file (creates parent dirs). No confirmation re-read after writing — failures report themselves.".to_string() }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -215,7 +215,7 @@ pub struct FilePatchTool;
 #[async_trait]
 impl ToolHandler for FilePatchTool {
     fn name(&self) -> String { "patch".to_string() }
-    fn description(&self) -> String { "Apply a search-and-replace edit to a file.".to_string() }
+    fn description(&self) -> String { "Apply a search-and-replace edit to a file. No confirmation re-read after editing — failures report themselves.".to_string() }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -345,7 +345,7 @@ pub struct GlobTool;
 #[async_trait]
 impl ToolHandler for GlobTool {
     fn name(&self) -> String { "glob".to_string() }
-    fn description(&self) -> String { "List files matching a glob pattern.".to_string() }
+    fn description(&self) -> String { "List files matching a glob pattern. Use this tool for search — do not write python scripts to read large directories.".to_string() }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -383,7 +383,7 @@ pub struct GrepTool;
 #[async_trait]
 impl ToolHandler for GrepTool {
     fn name(&self) -> String { "grep".to_string() }
-    fn description(&self) -> String { "Search file contents with a regex pattern.".to_string() }
+    fn description(&self) -> String { "Search file contents with a regex pattern. Use this tool for search — do not write python scripts to scan large files.".to_string() }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -463,7 +463,7 @@ pub struct LsTool;
 #[async_trait]
 impl ToolHandler for LsTool {
     fn name(&self) -> String { "ls".to_string() }
-    fn description(&self) -> String { "List directory contents.".to_string() }
+    fn description(&self) -> String { "List directory contents. Use this tool for directory exploration — not python scripts.".to_string() }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

@@ -63,8 +63,11 @@ pub struct CodeRunTool;
 impl ToolHandler for CodeRunTool {
     fn name(&self) -> String { "code_run".to_string() }
 
-    fn description(&self) -> String { "Execute shell commands or python code. Use 'type': 'bash' for shell, 'type': 'python' for python.".to_string() }
+    fn description(&self) -> String { "Execute shell commands or python code (type: bash|python). Contract: on failure do NOT blind-retry — change approach or ask_user. Independent read-only commands may run concurrently; writes last. Long-running tasks: launch with nohup in the background and poll.".to_string() }
 
+    fn description_zh(&self) -> String {
+        "执行 shell 命令或 python 代码（type: bash|python）。契约：失败勿盲目重试——换路径或 ask_user；无依赖的只读命令可并发执行，写操作放最后；长任务用 nohup 后台启动并轮询结果。".to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

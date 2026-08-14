@@ -46,7 +46,10 @@ pub struct ScheduleReminderTool;
 impl ToolHandler for ScheduleReminderTool {
     fn name(&self) -> String { "schedule_reminder".to_string() }
     fn description(&self) -> String {
-        "Schedule a reminder message after a delay. Supports repeating at intervals.".to_string()
+        "Schedule a reminder message after a delay. Supports repeating at intervals: repeat_count>0 means a periodic heartbeat task (each fire resumes the session and injects the message).".to_string()
+    }
+    fn description_zh(&self) -> String {
+        "在指定延迟后触发提醒消息。支持周期重复：repeat_count>0 表示周期心跳任务（每次触发都会恢复会话并注入消息）。".to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({

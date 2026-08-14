@@ -8,7 +8,10 @@ pub struct NoTool;
 #[async_trait]
 impl ToolHandler for NoTool {
     fn name(&self) -> String { "respond".to_string() }
-    fn description(&self) -> String { "Provide a final text response to the user. Use this when you have completed the task and want to reply.".to_string() }
+    fn description(&self) -> String { "Provide a final text response to the user. CALLING THIS TOOL IS A COMMITMENT THAT THE TASK IS COMPLETE: every checklist item is completed and every [verify] acceptance assertion in task_spec.md passes. If not there yet, keep executing — do not respond. Only call this when the original task is actually finished.".to_string() }
+    fn description_zh(&self) -> String {
+        "向用户输出最终回复。调用本工具即承诺任务已完成：任务清单全部 completed、task_spec.md 中每条 [verify] 验收断言均已通过。未达标请继续执行，不要 respond。仅在任务真正完成时使用。".to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

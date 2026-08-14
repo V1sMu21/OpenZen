@@ -18,9 +18,12 @@ impl ToolHandler for OpenSidePanelTool {
     }
 
     fn description(&self) -> String {
-        "Open a file in the right sidebar. Types: html, code, spreadsheet, pdf, terminal, diff, image, markdown, office.".to_string()
+        "Open a file in the right sidebar for the USER to preview. Returns only {status: OPENED} — it does NOT return file or image content to the model; use read to inspect file contents. Types: html, code, spreadsheet, pdf, terminal, diff, image, markdown, office.".to_string()
     }
 
+    fn description_zh(&self) -> String {
+        "在右侧边栏打开文件供【用户】预览。只返回 {status: OPENED}，不向模型返回文件/图像内容；需要检查文件内容请用 read。类型：html、code、spreadsheet、pdf、terminal、diff、image、markdown、office。".to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

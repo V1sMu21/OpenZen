@@ -317,6 +317,8 @@ where
     // One-shot spec hint: only injected once per run so the agent cannot
     // loop on it; the assertion/review fix budgets bound the extra rounds.
     let mut spec_hint_sent = false;
+    // P1: one-shot gentle plan nudge (non-blocking, ignore-able).
+    let mut plan_hint_sent = false;
     let mut assertion_rounds: u32 = 0;
     let mut assertions_exhausted_checked = false;
     let mut review_rounds: u32 = 0;
@@ -1498,6 +1500,43 @@ where
                             dirty = true;
                         }
                     }
+                } else if m.tool_name == "submit_plan" {
+                    // P1 plan state machine: goal → in_plan_mode marker, and
+                    // each step becomes a pending todo (gated by the
+                    // checklist before respond).
+                    let goal = m.args.get("goal").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let steps: Vec<String> = m.args.get("steps")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .filter(|s| !s.trim().is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !goal.is_empty() && !steps.is_empty() {
+                        if wm.in_plan_mode.is_none() {
+                            wm.in_plan_mode = Some(goal.clone());
+                        }
+                        for content in &steps {
+                            let normalized = content.trim().to_lowercase();
+                            let is_duplicate = wm.todos.iter().any(|t| {
+                                t.content.trim().to_lowercase() == normalized
+                            });
+                            if !is_duplicate {
+                                let id = format!("todo_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+                                wm.todos.push(oz_core_types::TodoItem {
+                                    id,
+                                    content: content.clone(),
+                                    status: "pending".into(),
+                                    priority: "medium".into(),
+                                    order: wm.todos.len(),
+                                    in_progress_since_turn: None,
+                                });
+                                dirty = true;
+                            }
+                        }
+                    }
                 } else if m.tool_name == "todoupdate" {
                     let id = m.args.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let status = m.args.get("status").and_then(|v| v.as_str()).unwrap_or("in_progress").to_string();
@@ -1857,6 +1896,33 @@ where
                 exit_reason = None;
                 transition_state(handler, AgentState::Thinking,
                     "spec anchor: writes without task_spec.md");
+            }
+
+            // ── Plan gentle reminder (P1): writes without a plan ──
+            // One-shot, NON-blocking (never clears exit_reason) — mirrors
+            // ZCode's "gentle reminder - ignore if not applicable" nudge.
+            // Fires only while the run continues (a finishing turn discards
+            // next_prompts), so simple tasks are never held up by it.
+            if !plan_hint_sent
+                && turn >= 2
+                && crate::quality::has_write_operations(&tool_sequence)
+                && handler.working().in_plan_mode.is_none()
+                && handler.working().todos.is_empty()
+            {
+                plan_hint_sent = true;
+                let hint = if config.lang == "zh" {
+                    "[PLAN] 你已进行文件写入，但尚未提交执行计划（submit_plan）也未建立待办清单。\
+                     复杂任务建议先 submit_plan(goal, steps) 建立可验证步骤再继续执行。\
+                     （温和提示——简单任务可直接忽略。）"
+                        .to_string()
+                } else {
+                    "[PLAN] You have written files but have not submitted an execution plan \
+                     (submit_plan) nor created todos. For complex tasks, consider \
+                     submit_plan(goal, steps) with verifiable steps first. \
+                     (Gentle reminder — ignore if not applicable for simple tasks.)"
+                        .to_string()
+                };
+                next_prompts.push(hint);
             }
 
             // ── Gate C (P2): unresolved-suspicion closure ──

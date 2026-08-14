@@ -25,6 +25,7 @@ pub mod skill_mcp_write;
 pub mod todowrite;
 pub mod todoupdate;
 pub mod schedule_reminder;
+pub mod plan;
 
 /// Tool handler signature (old-style, closure-based) — all tools return StepOutcome.
 pub type ToolHandler = Arc<dyn Fn(&str, &serde_json::Value, &ToolContext) -> StepOutcome + Send + Sync>;
@@ -74,6 +75,7 @@ impl LegacyRegistry {
         reg.register("respond", no_tool::definition(), no_tool::handler());
         reg.register("respond", no_tool::definition(), no_tool::handler());
         reg.register("schedule_reminder", schedule_reminder::definition(), schedule_reminder::handler());
+        reg.register("submit_plan", plan::definition(), plan::handler());
 
         reg
     }
