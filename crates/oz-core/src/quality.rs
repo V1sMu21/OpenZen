@@ -253,38 +253,85 @@ pub fn parse_review_response(raw: &str) -> ReviewVerdict {
 /// Load deliverable images (png/jpg/webp/gif) as base64 data-URL image refs
 /// so the independent review can actually SEE the deliverables — a text-only
 /// review cannot catch visual defects (wrong sprite facing, ghosting).
-/// Bounded: at most 6 images, each <= 8MB, ordered as listed.
+///
+/// Sources: (1) the listed deliverable paths, then (2) the most recently
+/// modified images anywhere in `working_dir` (assets produced via code_run /
+/// ComfyUI are not in write/edit file_path lists, so the review would
+/// otherwise never see them). Bounded: at most 6 images, each <= 8MB.
 pub fn load_image_refs(
     paths: &[String],
     working_dir: &str,
 ) -> Vec<oz_core_types::ImageRef> {
     use oz_core_types::ImageRef;
     use std::io::Read;
+    use std::time::SystemTime;
 
-    let mut out: Vec<ImageRef> = Vec::new();
+    const MAX_REFS: usize = 6;
+    const MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut candidates: Vec<(u64, std::path::PathBuf)> = Vec::new(); // (mtime, path)
+
+    // (1) explicitly listed deliverable paths (mtime 0 → listed first).
     for p in paths {
-        if out.len() >= 6 {
-            break;
-        }
         let full = if Path::new(p).is_absolute() {
             Path::new(p).to_path_buf()
         } else {
             Path::new(working_dir).join(p)
         };
-        let ext = full
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
+        if is_image_path(&full) {
+            candidates.push((0, full));
+        }
+    }
+
+    // (2) recent images under working_dir (depth 3, skip dep dirs).
+    let mut stack: Vec<(std::path::PathBuf, u32)> = vec![(Path::new(working_dir).to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 3 {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+                    if matches!(name.as_str(), "node_modules" | "target" | ".git" | "dist" | "build" | ".venv" | "venv" | "__pycache__") {
+                        continue;
+                    }
+                    stack.push((path, depth + 1));
+                } else if is_image_path(&path) {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        candidates.push((mtime, path));
+                    }
+                }
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0)); // newest first (listed paths keep 0 → last)
+
+    let mut out: Vec<ImageRef> = Vec::new();
+    for (_mtime, full) in candidates {
+        if out.len() >= MAX_REFS {
+            break;
+        }
+        let key = full.to_string_lossy().to_string();
+        if !seen.insert(key) {
+            continue;
+        }
+        let meta = match std::fs::metadata(&full) {
+            Ok(m) if m.len() <= MAX_BYTES => m,
+            _ => continue,
+        };
+        let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
         let mime = match ext.as_str() {
             "png" => "image/png",
             "jpg" | "jpeg" => "image/jpeg",
             "webp" => "image/webp",
             "gif" => "image/gif",
-            _ => continue,
-        };
-        let meta = match std::fs::metadata(&full) {
-            Ok(m) if m.len() <= 8 * 1024 * 1024 => m,
             _ => continue,
         };
         let mut data = Vec::with_capacity(meta.len() as usize);
@@ -301,6 +348,13 @@ pub fn load_image_refs(
         });
     }
     out
+}
+
+fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
+        Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("gif")
+    )
 }
 
 /// Run the independent review with one clean-context LLM call.
