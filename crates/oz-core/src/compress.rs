@@ -962,6 +962,7 @@ pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) 
     let mut task = String::new();
     let mut files: Vec<String> = Vec::new();
     let mut actions: Vec<String> = Vec::new();
+    let mut recent_errors: Vec<String> = Vec::new();
     let mut user_msgs: Vec<String> = Vec::new();
     let mut progress_items: Vec<String> = Vec::new();
     let mut seq = 0usize;
@@ -1041,6 +1042,15 @@ pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) 
                         .and_then(|c| c.get("text"))
                         .and_then(|t| t.as_str()))
                     .unwrap_or("");
+                // Reflexion: keep recent tool errors in the summary so a
+                // compressed long task does not forget what failed.
+                let lower = result_text.to_lowercase();
+                if !result_text.is_empty()
+                    && (lower.contains("error") || lower.contains("failed")
+                        || lower.contains("exception") || lower.contains("traceback"))
+                {
+                    recent_errors.push(truncate_safe(&result_text, 220));
+                }
                 if !result_text.is_empty() && result_text != "written" && result_text != "ok" {
                     // Only add non-trivial results to actions
                     if let Some(last) = actions.last_mut() {
@@ -1077,6 +1087,11 @@ pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) 
     if !progress_items.is_empty() {
         let items = if progress_items.len() > 10 { &progress_items[..10] } else { &progress_items };
         parts.push(format!("## Progress\n{}", items.join("\n")));
+    }
+
+    if !recent_errors.is_empty() {
+        let limited = if recent_errors.len() > 3 { &recent_errors[..3] } else { &recent_errors };
+        parts.push(format!("## Recent errors\n{}", limited.join("\n")));
     }
 
     if !user_msgs.is_empty() {

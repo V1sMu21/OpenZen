@@ -343,6 +343,102 @@ pub fn has_write_operations(tool_sequence: &[(String, serde_json::Value)]) -> bo
     })
 }
 
+// ── In-turn quick verification (P2-10) ───────────────────────────────────
+// "Environment as ground truth": after a write/edit turn, run a fast check
+// (cargo check for Rust workspaces) and feed failures back immediately —
+// instead of only verifying at exit time.
+
+/// Run a quick check after a write/edit turn. Returns a feedback prompt on
+/// failure (None when nothing to check or everything passes).
+pub async fn quick_verify_after_write(
+    tool_names: &[String],
+    working_dir: &str,
+    lang: &str,
+) -> Option<String> {
+    let has_write = tool_names.iter().any(|n| {
+        matches!(
+            n.as_str(),
+            "write" | "file_write" | "edit" | "file_edit" | "patch" | "file_patch"
+        )
+    });
+    if !has_write {
+        return None;
+    }
+
+    // Rust workspace → cargo check (quiet, bounded).
+    if Path::new(working_dir).join("Cargo.toml").is_file() {
+        let (passed, output) = run_quick_cmd("cargo check --quiet", working_dir, 45).await;
+        if !passed {
+            return Some(quick_check_feedback("cargo check --quiet", &output, lang));
+        }
+    }
+    None
+}
+
+async fn run_quick_cmd(cmd: &str, working_dir: &str, timeout_secs: u64) -> (bool, String) {
+    let dir = std::path::PathBuf::from(working_dir);
+    let cmd = cmd.to_string();
+    let fut = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(&dir)
+            .output()
+    });
+    let out = match tokio::time::timeout(Duration::from_secs(timeout_secs.max(1)), fut).await {
+        Ok(Ok(Ok(o))) => o,
+        _ => return (false, format!("<quick check timed out after {timeout_secs}s>")),
+    };
+    let (status, stdout, stderr) = (out.status, out.stdout, out.stderr);
+    let mut buf = stdout;
+    buf.extend_from_slice(&stderr);
+    let text = String::from_utf8_lossy(&buf).trim().to_string();
+    (status.success(), truncate(&text, 2000))
+}
+
+fn quick_check_feedback(cmd: &str, output: &str, lang: &str) -> String {
+    if lang == "zh" {
+        format!("[CHECK] 自动检查未通过：`{cmd}`\n{output}\n请根据报错修复后继续。")
+    } else {
+        format!(
+            "[CHECK] Automatic check failed: `{cmd}`\n{output}\nFix from the errors and continue."
+        )
+    }
+}
+
+// ── Failure reflection log (Reflexion-style, P2-10) ──────────────────────
+// Failures are written to {working_dir}/.openzen/reflections.jsonl so later
+// tasks can read prior mistakes instead of repeating them.
+
+/// Append a failure reflection entry (JSONL). Never fails the loop.
+pub fn log_reflection(working_dir: &str, failure_type: &str, summary: &str) {
+    let dir = Path::new(working_dir).join(".openzen");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let entry = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "type": failure_type,
+        "summary": truncate(summary, 600),
+    });
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("reflections.jsonl"))
+    {
+        let _ = writeln!(f, "{}", entry);
+    }
+}
+
+/// True when a prior reflection log exists (the reminder points to it).
+pub fn reflection_log_exists(working_dir: &str) -> bool {
+    Path::new(working_dir)
+        .join(".openzen")
+        .join("reflections.jsonl")
+        .is_file()
+}
+
 // ── Unresolved-suspicion closure (P2) ────────────────────────────────────
 // The OpenZen task-1 post-mortem found the agent noticed "ship may face
 // left" but never followed up (loop never enforced closure). This scan

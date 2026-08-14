@@ -226,6 +226,13 @@ fn build_system_reminder(working_dir: &str, session_id: &str) -> String {
     if !session_id.is_empty() {
         block.push_str(&format!("Session: {session_id}\n"));
     }
+    // Prior failure reflections (Reflexion): point the agent at them so it
+    // can avoid repeating past mistakes.
+    if crate::quality::reflection_log_exists(working_dir) {
+        block.push_str(
+            "Prior task failures: .openzen/reflections.jsonl (read with the `read` tool to avoid repeating past mistakes)\n",
+        );
+    }
     block.push_str("</system-reminder>");
     block
 }
@@ -1098,6 +1105,9 @@ where
         let mut tool_results: Vec<ToolResultItem> = Vec::new();
         let mut next_prompts: Vec<String> = Vec::new();
         let mut pending_ask_user: Option<PendingAskUser> = None;
+        // P1 plan approval: plan submitted by submit_plan, awaiting the
+        // user's approve/modify decision (consumed in the ask_user pause).
+        let mut pending_plan: Option<(String, Vec<String>)> = None;
 
         // ── Fast path: text-only response, skip parallel tool machinery ──
         let is_text_only = tool_calls_iter.iter().all(|tc| tc.name == "respond");
@@ -1501,9 +1511,10 @@ where
                         }
                     }
                 } else if m.tool_name == "submit_plan" {
-                    // P1 plan state machine: goal → in_plan_mode marker, and
-                    // each step becomes a pending todo (gated by the
-                    // checklist before respond).
+                    // P1 plan state machine with HUMAN APPROVAL: the plan is
+                    // staged and the user is asked to approve/modify it via
+                    // the ask_user dialog; todos are created only after
+                    // approval (in the ask_user pause section below).
                     let goal = m.args.get("goal").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let steps: Vec<String> = m.args.get("steps")
                         .and_then(|v| v.as_array())
@@ -1515,27 +1526,34 @@ where
                         })
                         .unwrap_or_default();
                     if !goal.is_empty() && !steps.is_empty() {
-                        if wm.in_plan_mode.is_none() {
-                            wm.in_plan_mode = Some(goal.clone());
-                        }
-                        for content in &steps {
-                            let normalized = content.trim().to_lowercase();
-                            let is_duplicate = wm.todos.iter().any(|t| {
-                                t.content.trim().to_lowercase() == normalized
-                            });
-                            if !is_duplicate {
-                                let id = format!("todo_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
-                                wm.todos.push(oz_core_types::TodoItem {
-                                    id,
-                                    content: content.clone(),
-                                    status: "pending".into(),
-                                    priority: "medium".into(),
-                                    order: wm.todos.len(),
-                                    in_progress_since_turn: None,
-                                });
-                                dirty = true;
-                            }
-                        }
+                        pending_plan = Some((goal.clone(), steps.clone()));
+                        pending_ask_user = Some(PendingAskUser {
+                            tool_use_id: m.tid.clone(),
+                            tool_call_id: m.tc_id.clone(),
+                            tool_name: "submit_plan".to_string(),
+                            payload: serde_json::json!({
+                                "data": {
+                                    "question": if ctx.lang == "zh" {
+                                        format!(
+                                            "Agent 提交了执行计划（{} 步）：{}。确认开始执行吗？",
+                                            steps.len(),
+                                            goal
+                                        )
+                                    } else {
+                                        format!(
+                                            "Agent submitted a plan ({} steps): {}. Approve to start?",
+                                            steps.len(),
+                                            goal
+                                        )
+                                    },
+                                    "candidates": if ctx.lang == "zh" {
+                                        ["确认，开始执行", "修改计划"]
+                                    } else {
+                                        ["Approve", "Modify plan"]
+                                    },
+                                }
+                            }),
+                        });
                     }
                 } else if m.tool_name == "todoupdate" {
                     let id = m.args.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -1700,6 +1718,24 @@ where
         }
         } // end else (non-fast-path: parallel tool execution)
 
+        // ── In-turn quick verification (P2-10) ──
+        // After a write/edit turn, run a fast check (cargo check for Rust
+        // workspaces) and feed failures back immediately — environment as
+        // ground truth, not just exit-time acceptance.
+        if config.quality_gates && next_prompts.is_empty() {
+            let tool_names: Vec<String> = tool_meta.iter().map(|m| m.tool_name.clone()).collect();
+            if let Some(check_fb) = crate::quality::quick_verify_after_write(
+                &tool_names, &config.working_dir, &config.lang,
+            ).await {
+                next_prompts.push(check_fb);
+                if exit_reason.is_some() {
+                    exit_reason = None;
+                    transition_state(handler, AgentState::Thinking,
+                        "quick check: write needs fix");
+                }
+            }
+        }
+
         // ── ask_user pause ──────────────────────────────────────
         // The user's reply is a tool_result for the same tool_use id,
         // not a brand-new user message — the LLM resumes the same run.
@@ -1773,6 +1809,62 @@ where
                 break;
             }
 
+            // submit_plan approval gate: approve → create todos + plan
+            // marker; modify → feed the user's feedback back for a re-plan.
+            // Empty reply (timeout / dismiss) counts as approval so the
+            // task is never blocked by a missing decision.
+            if pending.tool_name == "submit_plan" {
+                if let Some((goal, steps)) = pending_plan.take() {
+                    let approved = user_reply.trim().is_empty()
+                        || ["确认", "开始", "同意", "approve", "yes", "ok", "y", "执行"]
+                            .iter()
+                            .any(|k| user_reply.to_lowercase().contains(k));
+                    if approved {
+                        let wm = handler.working_mut();
+                        if wm.in_plan_mode.is_none() {
+                            wm.in_plan_mode = Some(goal.clone());
+                        }
+                        for content in &steps {
+                            let normalized = content.trim().to_lowercase();
+                            let is_duplicate = wm.todos.iter().any(|t| {
+                                t.content.trim().to_lowercase() == normalized
+                            });
+                            if !is_duplicate {
+                                let id = format!("todo_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+                                wm.todos.push(oz_core_types::TodoItem {
+                                    id,
+                                    content: content.clone(),
+                                    status: "pending".into(),
+                                    priority: "medium".into(),
+                                    order: wm.todos.len(),
+                                    in_progress_since_turn: None,
+                                });
+                            }
+                        }
+                        drop(wm);
+                        next_prompts.push(if ctx.lang == "zh" {
+                            "计划已确认。按步骤执行，每步用 todoupdate 标记状态，清单全 completed 后 respond。".to_string()
+                        } else {
+                            "Plan approved. Execute the steps, mark each with todoupdate, and respond only when ALL are completed.".to_string()
+                        });
+                    } else {
+                        next_prompts.push(if ctx.lang == "zh" {
+                            format!(
+                                "用户未批准计划，反馈：\"{}\"。请根据反馈修改计划（重新调用 submit_plan）或调整步骤后继续。",
+                                truncate_feedback(&user_reply)
+                            )
+                        } else {
+                            format!(
+                                "The user did not approve the plan. Feedback: \"{}\". Revise the plan (call submit_plan again) or adjust the steps and continue.",
+                                truncate_feedback(&user_reply)
+                            )
+                        });
+                    }
+                }
+                // submit_plan replies are consumed as plan feedback; no
+                // USER_REPLIED tool result is needed (the plan is not a
+                // tool the model's turn depends on).
+            } else {
             // Re-emit ToolOutputAvailable so the frontend flips the
             // AskUser card from "Running" to "Done" before the LLM
             // resumes streaming.
@@ -1805,6 +1897,7 @@ where
                  respond), make them now. Only call the `respond` tool (or output a plain text \
                  reply) when the original task is actually complete."
             ));
+            }
         }
 
         if exit_reason.is_some() {
@@ -1959,6 +2052,12 @@ where
                             next_prompts.push(crate::quality::format_assertion_feedback(
                                 &failures, &config.lang, assertion_rounds,
                             ));
+                            // Reflexion: record the failure for later tasks.
+                            crate::quality::log_reflection(
+                                &config.working_dir,
+                                "assertion_failed",
+                                &format!("{} failure(s): {}", failures.len(), failures[0].command),
+                            );
                             exit_reason = None;
                             transition_state(handler, AgentState::Thinking,
                                 "quality gate: verify assertion failed");
@@ -2010,6 +2109,11 @@ where
                     .await
                     {
                         Some(v) if !v.pass && review_rounds < 2 => {
+                            crate::quality::log_reflection(
+                                &config.working_dir,
+                                "review_failed",
+                                &format!("{} high issue(s)", v.issues.iter().filter(|i| i.severity == "high").count()),
+                            );
                             next_prompts.push(crate::quality::format_review_feedback(
                                 &v.issues, &config.lang,
                             ));
@@ -2356,6 +2460,18 @@ where
             "CURRENT_TASK_DONE".to_string()
         }
     });
+
+    // Reflexion: record abnormal exits so later tasks can avoid the mode.
+    if matches!(
+        final_reason.as_str(),
+        "llm_stuck" | "llm_error" | "llm_timeout" | "max_turns_exhausted"
+    ) {
+        crate::quality::log_reflection(
+            &config.working_dir,
+            &final_reason,
+            &format!("task ended abnormally after {} turn(s)", turn),
+        );
+    }
     if !tool_sequence.is_empty() && final_reason == "EXITED" {
         let safe_name: String = user_input.chars()
             .take(40)
@@ -2509,8 +2625,17 @@ where
     }
 }
 
-fn build_summary_from_response(response: &MockResponse, tool_calls: &[oz_core_types::MockToolCall]) -> String {
-    // Extract <summary> tag from content
+/// Bound user feedback text injected into next_prompts.
+fn truncate_feedback(s: &str) -> String {
+    const MAX: usize = 300;
+    if s.chars().count() <= MAX {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(MAX).collect::<String>())
+    }
+}
+
+fn build_summary_from_response(response: &MockResponse, tool_calls: &[oz_core_types::MockToolCall]) -> String {    // Extract <summary> tag from content
     if let Some(pos) = response.content.find("<summary>") {
         if let Some(end) = response.content[pos..].find("</summary>") {
             return response.content[pos+9..pos+end].trim().to_string();
