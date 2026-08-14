@@ -99,6 +99,7 @@ impl AgentBridge {
             script_dir: self.script_dir.clone(),
             lang: self.locale.lock().unwrap().clone(),
             skill_mcp_dir: self.skill_mcp_dir.clone(),
+            harness_dir: None,
             session_id: String::new(),
         };
 

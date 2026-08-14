@@ -177,6 +177,7 @@ mod tests {
             script_dir: "/tmp".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         }
     }
@@ -325,6 +326,7 @@ mod tests {
             script_dir: "/scripts".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         };
         let result = reg.dispatch("ctx_check", serde_json::json!({}), &tc).await.unwrap();

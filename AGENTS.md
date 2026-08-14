@@ -101,11 +101,12 @@ All runtime data lives in a **data root**, never in the source tree:
 - Override: `OPENZEN_DATA_DIR=/path/dev` — a dev build can run against an
   isolated data tree with zero pollution of the user's real data.
 - Layout under the data root: `workspace/` (agent working dir + `memory/` +
-  `openzen/` platform data + `facts/`), `memory_erme/`, `.skill_mcp/`,
-  `logs/`, `mykey.toml`, `projects.json`, `openzen/sessions.json`.
-- If `memory/ memory_erme/ checkpoints/ openzen/ facts/ .skill_mcp/` ever
-  reappear at the repo root → an old binary is writing back into the source
-  tree. **Block and fix** (see git-skill dimension 11).
+  `openzen/` platform data + `facts/`), `memory_erme/`, `harness/`
+  (harness ledger — `harness_state.json`), `.skill_mcp/`, `logs/`,
+  `mykey.toml`, `projects.json`, `openzen/sessions.json`.
+- If `memory/ memory_erme/ harness/ checkpoints/ openzen/ facts/ .skill_mcp/`
+  ever reappear at the repo root → an old binary is writing back into the
+  source tree. **Block and fix** (see git-skill dimension 11).
 - Dev-mode isolation: `OPENZEN_DATA_DIR=/tmp/openzen-dev cargo tauri dev`.
 
 ## ⚠️ Port 8000 is RESERVED for the oMLX model server

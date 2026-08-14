@@ -298,6 +298,7 @@ async fn main() -> anyhow::Result<()> {
                 script_dir: assets_dir.to_string_lossy().to_string(),
                 lang: std::env::var("OZ_LANG").unwrap_or_default(),
                 skill_mcp_dir: None,
+                harness_dir: None,
                 session_id: String::new(),
             };
             let registry = ToolRegistry::build_default();
@@ -537,6 +538,7 @@ async fn run_ask(
         script_dir: assets_dir.to_string_lossy().to_string(),
         lang: lang.clone(),
         skill_mcp_dir: skill_mcp_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+        harness_dir: None,
         session_id: String::new(),
     };
 

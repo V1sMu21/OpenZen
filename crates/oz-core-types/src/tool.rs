@@ -178,6 +178,10 @@ pub struct ToolContext {
     /// Path to the .skill_mcp/ directory (for skill/SOP search tools).
     /// If None, defaults to {working_dir}/.skill_mcp/.
     pub skill_mcp_dir: Option<String>,
+    /// Path to the harness ledger directory (hosts harness_state.json).
+    /// If None, tools fall back to {skill_mcp_dir}/harness.
+    #[serde(default)]
+    pub harness_dir: Option<String>,
     /// Session id of the agent run this context belongs to ("" when not in
     /// a session — e.g. tests, TUI, or bridge invocations). Tools that need
     /// per-session identity (like schedule_reminder) read this instead of a
@@ -194,6 +198,7 @@ impl ToolContext {
             script_dir: "/tmp".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         }
     }
@@ -375,6 +380,7 @@ mod tests {
             script_dir: "/scripts".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         };
         assert_eq!(ctx.resolve_path("/etc/passwd"), "/etc/passwd");
@@ -388,6 +394,7 @@ mod tests {
             script_dir: "/scripts".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         };
         assert_eq!(ctx.resolve_path("~/config"), "~/config");
@@ -401,6 +408,7 @@ mod tests {
             script_dir: "/scripts".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         };
         assert_eq!(ctx.resolve_path("src/main.rs"), "/home/user/project/src/main.rs");
@@ -414,6 +422,7 @@ mod tests {
             script_dir: "/scripts".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         };
         assert_eq!(ctx.resolve_path("a/b/c.txt"), "/workspace/a/b/c.txt");
@@ -427,6 +436,7 @@ mod tests {
             script_dir: "/scripts".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         };
         assert_eq!(ctx.resolve_path("foo.txt"), "/home/user/project/foo.txt");
@@ -440,6 +450,7 @@ mod tests {
             script_dir: "/scripts".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         };
         assert!(!ctx.resolve_path("foo.txt").contains("//"));
@@ -453,6 +464,7 @@ mod tests {
             script_dir: "/scripts".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         };
         assert_eq!(ctx.resolve_path(""), "/home/user/project/");
@@ -532,6 +544,7 @@ mod tests {
             script_dir: "/scripts".into(),
             lang: "en".into(),
             skill_mcp_dir: None,
+            harness_dir: None,
             session_id: String::new(),
         };
         let cloned = ctx.clone();

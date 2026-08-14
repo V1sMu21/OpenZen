@@ -699,6 +699,7 @@ async fn run_agent_for_session(
         script_dir: assets_dir.to_string(),
         lang: lang.clone(),
         skill_mcp_dir: None,
+        harness_dir: None,
         session_id: session_id.to_string(),
     };
 

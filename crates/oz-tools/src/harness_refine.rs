@@ -4,8 +4,12 @@ use oz_core_types::{ToolContext, ToolError, ToolOutput};
 
 use crate::registry::ToolHandler;
 
-/// Harness directory: sibling of the skill/MCP store, `{skill_mcp_dir}/harness`.
+/// Harness directory: explicit host-provided ledger dir first, then the
+/// sibling of the skill/MCP store, `{skill_mcp_dir}/harness`.
 fn harness_dir(ctx: &ToolContext) -> std::path::PathBuf {
+    if let Some(dir) = &ctx.harness_dir {
+        return std::path::PathBuf::from(dir);
+    }
     let base = ctx
         .skill_mcp_dir
         .as_deref()
@@ -96,6 +100,7 @@ mod tests {
             script_dir: String::new(),
             lang: "en".into(),
             skill_mcp_dir: Some(skill.to_string_lossy().to_string()),
+            harness_dir: None,
             session_id: String::new(),
         }
     }
@@ -152,5 +157,32 @@ mod tests {
             )
             .await;
         assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_explicit_harness_dir_wins() {
+        let explicit = tempfile::tempdir().unwrap();
+        let explicit_path = explicit.path().to_string_lossy().to_string();
+        let mut c = ctx();
+        c.harness_dir = Some(explicit_path.clone());
+        let r = HarnessRefineTool
+            .execute(
+                serde_json::json!({
+                    "kind": "memory",
+                    "content": "lesson for explicit dir",
+                    "evidence": "seen once"
+                }),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.data["status"], "ok");
+        // The ledger must land in the explicit dir, not under skill_mcp_dir.
+        let state = oz_core::harness::HarnessState::load(std::path::Path::new(&explicit_path));
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(state.entries[0].content, "lesson for explicit dir");
+        let old_location = std::path::PathBuf::from(c.skill_mcp_dir.unwrap()).join("harness");
+        let fallback = oz_core::harness::HarnessState::load(&old_location);
+        assert!(fallback.entries.is_empty(), "explicit dir must win over fallback");
     }
 }

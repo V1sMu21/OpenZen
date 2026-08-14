@@ -15,6 +15,7 @@ checkpoints/
 backups/
 memory/
 memory_erme/
+harness/
 temp/
 openzen/
 ~/

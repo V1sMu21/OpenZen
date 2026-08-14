@@ -215,6 +215,7 @@ mod tests {
             script_dir: String::new(),
             lang: "en".into(),
             skill_mcp_dir: Some(dir_path),
+            harness_dir: None,
             session_id: String::new(),
         }
     }
