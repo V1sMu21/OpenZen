@@ -22,7 +22,7 @@ impl ToolHandler for OpenSidePanelTool {
     }
 
     fn description_zh(&self) -> String {
-        "在右侧边栏打开文件供【用户】预览。只返回 {status: OPENED}，不向模型返回文件/图像内容；需要检查文件内容请用 read。类型：html、code、spreadsheet、pdf、terminal、diff、image、markdown、office。".to_string()
+        "在右侧边栏打开文件供【用户】预览。路径必须在工作目录内（截图/临时文件请保存到 work/ 或 assets/，不要用 /tmp）。只返回 {status: OPENED}，不向模型返回文件/图像内容；需要检查文件内容请用 read。类型：html、code、spreadsheet、pdf、terminal、diff、image、markdown、office。".to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({

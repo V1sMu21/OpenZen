@@ -197,7 +197,7 @@
   "message.role.you": "Master",
   "message.role.agent": "Xiuyan",
   "message.regenerateTitle": "Regenerate response",
-  "message.timeline": "Collapse Activity Timeline",
+  "message.timeline": "Worked",
   "message.tools": "Tools",
   "message.toolsTitle": "Tool time: sum of every tool step / longest single step",
   "message.totalTitle": "Total time the agent spent on this turn (thinking + tools + response)",

@@ -777,7 +777,9 @@ function createChatStore() {
                 type: ev.artifact_type,
                 path: ev.artifact_path,
                 label: ev.artifact_label,
-              }).catch(() => {});
+              }).catch((err) => {
+                console.warn("[sidepanel] open_artifact failed:", ev.artifact_path, err);
+              });
             }
           }
           if (RENDER_ONLY_EVENTS.has(protoEvent.type)) {
