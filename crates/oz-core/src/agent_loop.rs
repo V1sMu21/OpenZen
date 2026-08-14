@@ -1933,10 +1933,6 @@ where
                     let spec_for_review = spec_text.clone().unwrap_or_else(|| {
                         user_input.chars().take(1500).collect::<String>()
                     });
-                    // Attach deliverable images so the reviewer can SEE the
-                    // output (visual defects are invisible in text-only).
-                    let review_images =
-                        crate::quality::load_image_refs(&deliverables, &config.working_dir);
                     let reply_for_review = full_response.clone();
                     match crate::quality::run_independent_review(
                         client,
@@ -1944,7 +1940,6 @@ where
                         &deliverables,
                         &reply_for_review,
                         &config.lang,
-                        review_images,
                     )
                     .await
                     {
