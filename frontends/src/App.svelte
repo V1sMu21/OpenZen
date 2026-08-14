@@ -20,6 +20,7 @@
   import SidePanel from "./lib/components/SidePanel.svelte";
   import TodoProgress from "./lib/components/TodoProgress.svelte";
   import ReminderCard from "./lib/components/ReminderCard.svelte";
+  import SoulCard from "./lib/components/SoulCard.svelte";
   import { initLocale } from "./lib/i18n";
   import { t, locale } from "./lib/i18n";
   import { sidepanel } from "./lib/stores/sidepanel.svelte";
@@ -36,6 +37,7 @@
   let showThinkingTimer = $state(false);
   let messagesEnd: HTMLDivElement | undefined = $state();
   let isDragOver = $state(false);
+  let memoryCardVisible = $state(false);
 
   function attachFromPaths(paths: string[]) {
     for (let i = 0; i < paths.length; i++) {
@@ -680,7 +682,7 @@
             <div bind:this={messagesEnd}></div>
           </div>
 
-          {#if $chat.todos.length > 0 || $chat.reminders.length > 0}
+          {#if $chat.todos.length > 0 || $chat.reminders.length > 0 || memoryCardVisible}
             <div class="todo-rail">
               {#if $chat.todos.length > 0}
                 <TodoProgress items={$chat.todos} />
@@ -689,6 +691,8 @@
                 <!-- 定时/心跳任务卡片：位于待办事项卡片下方 -->
                 <ReminderCard items={$chat.reminders} />
               {/if}
+              <!-- 灵魂/记忆状态卡片：ERME 启用时显示 -->
+              <SoulCard onVisible={(v) => (memoryCardVisible = v)} />
             </div>
           {/if}
         </div>

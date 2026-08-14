@@ -143,6 +143,58 @@ pub fn get_dashboard_stats() -> serde_json::Value {
     serde_json::json!({ "status": "ok", "service": "openzen-tauri" })
 }
 
+/// Read-only memory status for the SoulCard UI: ERME soul state, semantic
+/// store counters and the harness ledger entry count. Never blocks on agent
+/// loops; `enabled: false` when the file backend is active.
+#[tauri::command]
+pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let harness_entry_count = oz_core::harness::HarnessState::load(
+        &crate::data_dir().join("harness"),
+    )
+    .entries
+    .len();
+    let Some(runtime) = &state.erme_store else {
+        return serde_json::json!({
+            "enabled": false,
+            "harness": { "entry_count": harness_entry_count },
+        });
+    };
+
+    let stats = runtime.store.stats();
+    let counters = runtime.store.counters().snapshot();
+    let soul = {
+        let handle = runtime.injector.soul();
+        let model = handle.read().unwrap_or_else(|e| e.into_inner());
+        serde_json::json!({
+            "identity": model.core.identity,
+            "mood": model.state.mood,
+            "confidence": model.state.confidence,
+            "portrait_facts": model.user_portrait.facts.len(),
+            "narrative_chapters": model.narrative.chapters.len(),
+            "version": model.version,
+        })
+    };
+
+    serde_json::json!({
+        "enabled": true,
+        "soul": soul,
+        "store": {
+            "total_entries": stats.total_entries,
+            "l1_entries": stats.l1_entries,
+            "l2_entries": stats.l2_entries,
+            "l3_entries": stats.l3_entries,
+            "l3_storage_bytes": stats.l3_storage_bytes,
+            "stores": counters.stores,
+            "recalls": counters.recalls,
+            "recall_hits": counters.recall_hits,
+            "recall_misses": counters.recall_misses,
+            "consolidations": counters.consolidations,
+            "recall_hit_rate": runtime.store.counters().recall_hit_rate(),
+        },
+        "harness": { "entry_count": harness_entry_count },
+    })
+}
+
 #[tauri::command]
 pub fn list_sessions(
     project_id: Option<String>,
