@@ -1,5 +1,6 @@
 # Top-level options:
-#   memory_backend = "file"   # "file" (legacy full-text) or "erme" (semantic memory engine)
+#   memory_backend = "erme"          # "erme" (semantic memory engine, default) or "file" (legacy full-text)
+#   erme_idle_interval_secs = 300    # seconds between ERME soul-reflection cycles (default 300)
 
 [sessions.default]
 session_type = "claude"

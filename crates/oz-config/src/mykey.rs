@@ -76,8 +76,12 @@ pub struct MyKeyConfig {
     pub default_session: Option<String>,
     /// Model to use for compression summaries. When set, overrides auto-detection.
     pub summary_model: Option<String>,
-    /// Memory backend: "file" (default, legacy full-text) or "erme" (semantic).
+    /// Memory backend: "file" (legacy full-text fallback) or "erme"
+    /// (semantic memory engine — the default).
     pub memory_backend: String,
+    /// Idle interval (seconds) between ERME soul-reflection cycles.
+    /// Default 300 (5 min). Only used when memory_backend = "erme".
+    pub erme_idle_interval_secs: Option<u64>,
     #[serde(default)]
     pub tui: TuiConfig,
     #[serde(default)]
@@ -147,11 +151,22 @@ impl MyKeyConfig {
         let summary_model = raw.get("summary_model")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let memory_backend = raw.get("memory_backend")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| s == "file" || s == "erme")
-            .unwrap_or_else(|| "file".to_string());
+        let memory_backend = match raw.get("memory_backend") {
+            Some(v) => v
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .filter(|s| s == "file" || s == "erme")
+                // Unknown value: safe fallback — never silently enable a
+                // mode the user did not ask for.
+                .unwrap_or_else(|| "file".to_string()),
+            // Missing key: the integrated semantic default.
+            None => "erme".to_string(),
+        };
+        let erme_idle_interval_secs = raw
+            .get("erme_idle_interval_secs")
+            .and_then(|v| v.as_integer())
+            .map(|i| i as u64)
+            .filter(|s| *s > 0);
         let mut sessions = HashMap::new();
 
         // Walk raw table to collect session entries. Dotted section names
@@ -193,6 +208,7 @@ impl MyKeyConfig {
             if key == "default_session" { continue; }
             if key == "summary_model" { continue; }
             if key == "memory_backend" { continue; }
+            if key == "erme_idle_interval_secs" { continue; }
             if key == "tui" { continue; }
             if key == "router" { continue; }
             if !value.is_table() { continue; }
@@ -214,6 +230,7 @@ impl MyKeyConfig {
             default_session,
             summary_model,
             memory_backend,
+            erme_idle_interval_secs,
             tui: TuiConfig::default(),
             router: RouterConfig::default(),
             sessions,
@@ -560,7 +577,8 @@ model = "mixin-llm"
             sessions: HashMap::new(),
             default_session: None,
             summary_model: None,
-            memory_backend: "file".to_string(),
+            memory_backend: "erme".to_string(),
+            erme_idle_interval_secs: None,
             tui: TuiConfig::default(),
             router: RouterConfig::default(),
         };
@@ -583,7 +601,8 @@ model = "mixin-llm"
             sessions,
             default_session: None,
             summary_model: None,
-            memory_backend: "file".to_string(),
+            memory_backend: "erme".to_string(),
+            erme_idle_interval_secs: None,
             tui: TuiConfig::default(),
             router: RouterConfig::default(),
         };
@@ -643,7 +662,7 @@ model = "mixin-llm"
     }
 
     #[test]
-    fn memory_backend_defaults_to_file() {
+    fn memory_backend_defaults_to_erme() {
         let path = write_config("oz_config_test_mb_default", r#"
 default_session = "gpt4"
 
@@ -653,7 +672,8 @@ apibase = "https://api.example.com/v1"
 model = "gpt-4"
 "#);
         let cfg = MyKeyConfig::from_file(&path).unwrap();
-        assert_eq!(cfg.memory_backend, "file");
+        assert_eq!(cfg.memory_backend, "erme");
+        assert_eq!(cfg.erme_idle_interval_secs, None);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -702,6 +722,38 @@ model = "gpt-4"
 "#);
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.memory_backend, "erme");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn erme_idle_interval_parses() {
+        let path = write_config("oz_config_test_erme_idle", r#"
+erme_idle_interval_secs = 60
+default_session = "gpt4"
+
+[gpt4]
+apikey = "sk-test"
+apibase = "https://api.example.com/v1"
+model = "gpt-4"
+"#);
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert_eq!(cfg.erme_idle_interval_secs, Some(60));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn erme_idle_interval_zero_is_ignored() {
+        let path = write_config("oz_config_test_erme_idle_zero", r#"
+erme_idle_interval_secs = 0
+default_session = "gpt4"
+
+[gpt4]
+apikey = "sk-test"
+apibase = "https://api.example.com/v1"
+model = "gpt-4"
+"#);
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert_eq!(cfg.erme_idle_interval_secs, None, "0 must fall back to default");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

@@ -53,25 +53,70 @@ impl McpMemoryDistiller {
 /// (M5). Runs inside the shared MemoryJobScheduler worker so distillation
 /// never blocks the agent loop; failures are retried with backoff by the
 /// scheduler instead of being lost.
+///
+/// Also ingests harness ledger entries so model-written, evidence-backed
+/// lessons become semantically recallable (the ledger itself stays the
+/// audit layer — this only mirrors Memory entries into the store).
 struct ErmeMemoryDistiller {
     store: std::sync::Arc<entropy_memory_engine::memory_store::MemoryStore>,
+    harness_dir: Option<std::path::PathBuf>,
 }
 
 impl ErmeMemoryDistiller {
-    fn new(store: std::sync::Arc<entropy_memory_engine::memory_store::MemoryStore>) -> Self {
-        ErmeMemoryDistiller { store }
+    fn new(
+        store: std::sync::Arc<entropy_memory_engine::memory_store::MemoryStore>,
+        harness_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        ErmeMemoryDistiller { store, harness_dir }
     }
+}
+
+/// Ingest `HarnessKind::Memory` entries from the ledger into the semantic
+/// store as high-importance summaries. Idempotent across sessions: a lesson
+/// already present at near-zero distance (identical hash embedding) is
+/// skipped, so re-running distillation never duplicates entries. Returns the
+/// number stored.
+fn ingest_harness_entries(
+    store: &entropy_memory_engine::memory_store::MemoryStore,
+    harness_dir: &std::path::Path,
+) -> usize {
+    use entropy_memory_engine::core::types::{MemoryContent, MemoryInput};
+    let state = oz_core::harness::HarnessState::load(harness_dir);
+    let mut stored = 0usize;
+    for entry in state.entries_of(oz_core::harness::HarnessKind::Memory) {
+        // recall returns distance (ascending, lower = closer); an identical
+        // lesson embeds to the same vector → distance ≈ 0.
+        let already_present = store
+            .recall_by_text(&entry.content, 1)
+            .ok()
+            .and_then(|r| r.into_iter().next())
+            .map(|(_, dist, _)| dist <= 0.05)
+            .unwrap_or(false);
+        if already_present {
+            continue;
+        }
+        let input =
+            MemoryInput::new(MemoryContent::Summary(entry.content.clone())).with_importance(0.8);
+        if store.store(input).is_ok() {
+            stored += 1;
+        }
+    }
+    stored
 }
 
 #[async_trait::async_trait]
 impl oz_core::memory_job::MemoryDistiller for ErmeMemoryDistiller {
     async fn distill(&self, session_id: &str, transcript: &str) -> Result<usize, String> {
         let store = std::sync::Arc::clone(&self.store);
+        let harness_dir = self.harness_dir.clone();
         let transcript = transcript.to_string();
         let result = tokio::task::spawn_blocking(move || -> Result<usize, String> {
-            let stored = store
+            let mut stored = store
                 .distill_and_store(&transcript)
                 .map_err(|e| e.to_string())?;
+            if let Some(dir) = &harness_dir {
+                stored += ingest_harness_entries(&store, dir);
+            }
             store.consolidate();
             Ok(stored)
         })
@@ -453,7 +498,9 @@ pub async fn run_agent_for_session(
                             }
                             _ => continue,
                         };
-                        buf.push_str(&format!("- [rel {score:.2}] {text}\n"));
+                        // recall returns distance (lower = closer); label it
+                        // honestly so the model reads it correctly.
+                        buf.push_str(&format!("- [dist {score:.2}] {text}\n"));
                     }
                     debug_log(&format!("ERME recall injected {} memories", recalls.len()));
                     buf
@@ -485,6 +532,19 @@ pub async fn run_agent_for_session(
             if !prefix.is_empty() {
                 system_prompt = format!("{prefix}{system_prompt}");
             }
+        }
+    }
+    // Harness ledger injection: surface model-written, evidence-backed
+    // lessons every turn (a write-only ledger would silently rot).
+    if let Some(harness_dir) = &ctx.harness_dir {
+        let harness_ctx = oz_core::harness::render_context(
+            std::path::Path::new(harness_dir),
+            oz_core::harness::HarnessKind::Memory,
+            8,
+        );
+        if !harness_ctx.is_empty() {
+            system_prompt.push_str("\n\n## Persistent Harness Lessons\n\n");
+            system_prompt.push_str(&harness_ctx);
         }
     }
     if !memory_context.is_empty() {
@@ -560,6 +620,7 @@ pub async fn run_agent_for_session(
             match &state.erme_store {
                 Some(runtime) => std::sync::Arc::new(ErmeMemoryDistiller::new(
                     std::sync::Arc::clone(&runtime.store),
+                    ctx.harness_dir.as_ref().map(std::path::PathBuf::from),
                 )),
                 None => {
                     debug_log("ERME store unavailable; using MCP distiller for memory jobs");
@@ -1109,4 +1170,91 @@ pub async fn run_agent_for_session(
     crate::notify_if_unfocused(app, "OpenZen", &summary);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal ERME store with the same configuration as the app
+    /// (align_on_write for conflict resolution).
+    fn test_store(dir: &std::path::Path) -> std::sync::Arc<entropy_memory_engine::memory_store::MemoryStore> {
+        use entropy_memory_engine::consolidation::ConsolidationConfig;
+        use entropy_memory_engine::l1::L1Cache;
+        use entropy_memory_engine::l2::{HnswConfig, L2Config, L2Engine};
+        use entropy_memory_engine::l3::{L3Config, L3Engine};
+        use entropy_memory_engine::memory_store::MemoryStore;
+        let l1 = L1Cache::builder().capacity(100).build();
+        let l2 = L2Engine::new(L2Config {
+            hnsw: HnswConfig {
+                dimension: 384,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let l3 = L3Engine::new(L3Config {
+            storage_path: dir.join("test.bin"),
+            ..Default::default()
+        });
+        std::sync::Arc::new(MemoryStore::new(
+            l1,
+            std::sync::Arc::new(l2),
+            l3,
+            ConsolidationConfig {
+                align_on_write: true,
+                ..Default::default()
+            },
+        ))
+    }
+
+    #[test]
+    fn test_ingest_harness_entries_stores_lessons() {
+        let dir = std::env::temp_dir().join(format!("oz-erme-ingest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let harness_dir = dir.join("harness");
+        oz_core::harness::refine(
+            &harness_dir,
+            oz_core::harness::HarnessKind::Memory,
+            "always use --locked for reproducible builds",
+            "seen two lockfile failures this session",
+            "test",
+            "upsert",
+        )
+        .unwrap();
+        let store = test_store(&dir);
+
+        let stored = ingest_harness_entries(&store, &harness_dir);
+        assert_eq!(stored, 1, "one ledger lesson must be ingested");
+
+        let recalls = store.recall_by_text("locked build", 5).unwrap_or_default();
+        assert!(!recalls.is_empty(), "ingested lesson must be recallable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ingest_harness_entries_idempotent() {
+        let dir = std::env::temp_dir().join(format!("oz-erme-ingest-idem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let harness_dir = dir.join("harness");
+        oz_core::harness::refine(
+            &harness_dir,
+            oz_core::harness::HarnessKind::Memory,
+            "deploy with `--no-verify` only after tests pass",
+            "deploy failed once when skipping tests",
+            "test",
+            "upsert",
+        )
+        .unwrap();
+        let store = test_store(&dir);
+
+        let first = ingest_harness_entries(&store, &harness_dir);
+        assert_eq!(first, 1);
+        let second = ingest_harness_entries(&store, &harness_dir);
+        assert_eq!(second, 0, "re-ingestion must skip already-present lessons");
+        let recalls = store.recall_by_text("deploy no-verify", 5).unwrap_or_default();
+        assert_eq!(recalls.len(), 1, "no duplicates in the store");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

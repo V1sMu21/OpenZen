@@ -63,6 +63,8 @@ pub struct ErmeRuntime {
     pub store: Arc<entropy_memory_engine::memory_store::MemoryStore>,
     pub reflection: Arc<entropy_memory_engine::l0::ReflectionEngine>,
     pub injector: entropy_memory_engine::l0::PromptInjector,
+    /// Handle to the idle introspection thread (kept for lifecycle control).
+    pub idle_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Build the long-lived ERME semantic memory store rooted at `base_dir`.
@@ -70,7 +72,10 @@ pub struct ErmeRuntime {
 /// Storage lands in `{base_dir}/memory_erme/erme_memory.bin` (sibling of the
 /// legacy `memory/` tree). Returns `None` on failure so the app degrades to
 /// the file backend instead of crashing at startup.
-fn init_erme_store(base_dir: &std::path::Path) -> Option<Arc<ErmeRuntime>> {
+fn init_erme_store(
+    base_dir: &std::path::Path,
+    idle_interval_secs: u64,
+) -> Option<Arc<ErmeRuntime>> {
     use entropy_memory_engine::consolidation::ConsolidationConfig;
     use entropy_memory_engine::l0::soul::{SoulHandle, SoulModel};
     use entropy_memory_engine::l0::{PromptInjector, ReflectionConfig, ReflectionEngine};
@@ -164,13 +169,15 @@ fn init_erme_store(base_dir: &std::path::Path) -> Option<Arc<ErmeRuntime>> {
     // L0 反思引擎：订阅 store 事件，共享 orchestrator 的行为观察日志与
     // 联想引擎；画像持久化到 soul.json（与加载路径一致，进程内升级可复用）。
     let observer = Arc::new(orchestrator.observer().clone());
+    let mut reflection_cfg = ReflectionConfig::default();
+    reflection_cfg.idle_interval_secs = idle_interval_secs;
     let reflection = Arc::new(
         ReflectionEngine::new(
             Arc::clone(&soul),
             Arc::clone(&store),
             observer,
             conflict_resolver,
-            ReflectionConfig::default(),
+            reflection_cfg,
         )
         .with_rambling(Arc::clone(&rambling))
         .with_persist_path(soul_path),
@@ -180,25 +187,40 @@ fn init_erme_store(base_dir: &std::path::Path) -> Option<Arc<ErmeRuntime>> {
     let injector = PromptInjector::new(Arc::clone(&soul));
 
     // 后台内省循环：idle 间隔驱动 L0 完整内省 + Phase2-5 idle 管道。
-    {
+    // Hardened: a panic inside a cycle is caught and logged so the thread
+    // never dies silently (the soul would stop evolving with no signal).
+    let idle_handle = {
         let reflection = Arc::clone(&reflection);
         let orchestrator = Arc::clone(&orchestrator);
-        let idle_secs = ReflectionConfig::default().idle_interval_secs;
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(idle_secs));
-            reflection.run_full_cycle();
-            orchestrator.run_idle_cycle();
-        });
-    }
+        std::thread::Builder::new()
+            .name("erme-idle-cycle".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(idle_interval_secs));
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    reflection.run_full_cycle();
+                    orchestrator.run_idle_cycle();
+                }));
+                if let Err(panic) = outcome {
+                    tracing::error!(
+                        "ERME idle cycle panicked (soul evolution paused): {:?}",
+                        panic
+                    );
+                }
+            })
+            .map_err(|e| tracing::error!("failed to spawn ERME idle thread: {e}"))
+            .ok()
+    };
 
     tracing::info!(
-        "ERME memory engine initialised at {}",
-        memory_erme_dir.display()
+        "ERME memory engine initialised at {} (idle cycle every {}s)",
+        memory_erme_dir.display(),
+        idle_interval_secs
     );
     Some(Arc::new(ErmeRuntime {
         store,
         reflection,
         injector,
+        idle_thread: idle_handle,
     }))
 }
 
@@ -278,12 +300,17 @@ pub(crate) fn tauri_ctx() -> ToolContext {
         .find(|p| p.is_dir())
         .map(|p| p.to_string_lossy().to_string());
 
+    // Harness ledger lives under the data root, never the source tree.
+    let harness_dir = data_dir().join("harness");
+    let _ = std::fs::create_dir_all(&harness_dir);
+
     ToolContext {
         working_dir,
         assets_dir: assets_dir.clone(),
         script_dir: assets_dir,
         lang: load_locale(),
         skill_mcp_dir,
+        harness_dir: Some(harness_dir.to_string_lossy().to_string()),
         session_id: String::new(),
     }
 }
@@ -370,6 +397,26 @@ impl AppState {
         }
 
         let state_path = data_root.join(SESSION_STATE_FILE);
+
+        // ERME semantic memory: build the long-lived runtime only when the
+        // memory backend is "erme" (the default). A "file" backend skips
+        // construction entirely — no HNSW resident memory, no idle thread.
+        let memory_cfg = oz_config::mykey::MyKeyConfig::from_file(&data_root.join("mykey.toml")).ok();
+        let memory_backend = memory_cfg
+            .as_ref()
+            .map(|c| c.memory_backend.clone())
+            .unwrap_or_else(|| "erme".to_string());
+        let erme_idle_secs = memory_cfg
+            .as_ref()
+            .and_then(|c| c.erme_idle_interval_secs)
+            .unwrap_or(300);
+        let erme_store = if memory_backend == "erme" {
+            init_erme_store(&data_root, erme_idle_secs)
+        } else {
+            tracing::info!("memory_backend = \"file\": ERME store not built (set memory_backend = \"erme\" to enable)");
+            None
+        };
+
         AppState {
             // Cap live sessions at 500; evicted ones are archived to
             // sessions_archive/ by the store, so nothing is silently lost
@@ -407,7 +454,7 @@ impl AppState {
             projects: Mutex::new(projects::store::load_projects()),
             crystallization_enabled: AtomicBool::new(false),
             full_access: Arc::new(AtomicBool::new(false)),
-            erme_store: init_erme_store(&data_root),
+            erme_store,
             intervention_queues: Mutex::new(HashMap::new()),
             session_windows: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -841,6 +888,7 @@ pub fn run() {
             commands::get_working_dir,
 commands::get_working_dir_for_session,
             commands::get_dashboard_stats,
+            commands::get_memory_status,
             commands::list_models,
             commands::list_sessions,
             commands::create_session,
