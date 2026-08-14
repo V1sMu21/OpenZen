@@ -250,7 +250,62 @@ pub fn parse_review_response(raw: &str) -> ReviewVerdict {
     }
 }
 
+/// Load deliverable images (png/jpg/webp/gif) as base64 data-URL image refs
+/// so the independent review can actually SEE the deliverables — a text-only
+/// review cannot catch visual defects (wrong sprite facing, ghosting).
+/// Bounded: at most 6 images, each <= 8MB, ordered as listed.
+pub fn load_image_refs(
+    paths: &[String],
+    working_dir: &str,
+) -> Vec<oz_core_types::ImageRef> {
+    use oz_core_types::ImageRef;
+    use std::io::Read;
+
+    let mut out: Vec<ImageRef> = Vec::new();
+    for p in paths {
+        if out.len() >= 6 {
+            break;
+        }
+        let full = if Path::new(p).is_absolute() {
+            Path::new(p).to_path_buf()
+        } else {
+            Path::new(working_dir).join(p)
+        };
+        let ext = full
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let mime = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            _ => continue,
+        };
+        let meta = match std::fs::metadata(&full) {
+            Ok(m) if m.len() <= 8 * 1024 * 1024 => m,
+            _ => continue,
+        };
+        let mut data = Vec::with_capacity(meta.len() as usize);
+        if std::fs::File::open(&full)
+            .and_then(|mut f| f.read_to_end(&mut data))
+            .is_err()
+        {
+            continue;
+        }
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+        out.push(ImageRef {
+            url: format!("data:{mime};base64,{b64}"),
+            media_type: mime.to_string(),
+        });
+    }
+    out
+}
+
 /// Run the independent review with one clean-context LLM call.
+/// `images` (if any) are attached as image blocks so the reviewer can
+/// inspect the actual deliverables, not just their file names.
 /// Returns None on transport failure (fail-open — caller proceeds).
 pub async fn run_independent_review<C: LlmClient>(
     client: &mut C,
@@ -258,9 +313,18 @@ pub async fn run_independent_review<C: LlmClient>(
     deliverables: &[String],
     final_reply: &str,
     lang: &str,
+    images: Vec<oz_core_types::ImageRef>,
 ) -> Option<ReviewVerdict> {
     let prompt = build_review_prompt(spec, deliverables, final_reply, lang);
-    let msg = oz_core_types::Message::user(prompt);
+    let mut user_blocks: Vec<oz_core_types::ContentBlock> =
+        vec![oz_core_types::ContentBlock::text(&prompt)];
+    for img in &images {
+        user_blocks.push(oz_core_types::ContentBlock::ImageUrl {
+            url: img.url.clone(),
+            media_type: Some(img.media_type.clone()),
+        });
+    }
+    let msg = oz_core_types::Message::user_with_blocks(user_blocks);
     match tokio::time::timeout(
         Duration::from_secs(REVIEW_TIMEOUT_SECS),
         client.chat(&[msg], &[]),
@@ -270,9 +334,10 @@ pub async fn run_independent_review<C: LlmClient>(
         Ok(Ok(resp)) => {
             let verdict = parse_review_response(&resp.content);
             tracing::info!(
-                "[quality] independent review: pass={} issues={}",
+                "[quality] independent review: pass={} issues={} images={}",
                 verdict.pass,
-                verdict.issues.len()
+                verdict.issues.len(),
+                images.len()
             );
             Some(verdict)
         }
@@ -720,5 +785,38 @@ mod tests {
         assert!(zh_prompt.contains("交叉一致性"));
         let en_prompt = build_review_prompt("spec", &["a.js".to_string()], "done", "en");
         assert!(en_prompt.contains("Cross-consistency"));
+    }
+
+    #[test]
+    fn test_load_image_refs_only_images_and_bounded() {
+        let dir = std::env::temp_dir().join(format!("oz_quality_img_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 1x1 PNG
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+            0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+            0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x62, 0x00, 0x01, 0x00, 0x00,
+            0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+            0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(dir.join("ship.png"), png).unwrap();
+        std::fs::write(dir.join("notes.txt"), "not an image").unwrap();
+
+        let paths = vec!["ship.png".to_string(), "notes.txt".to_string()];
+        let refs = load_image_refs(&paths, dir.to_str().unwrap());
+        assert_eq!(refs.len(), 1, "only the png should be loaded");
+        assert!(refs[0].url.starts_with("data:image/png;base64,"));
+        assert_eq!(refs[0].media_type, "image/png");
+
+        // Bound: 8 png paths → at most 6 refs.
+        let many: Vec<String> = (0..8).map(|i| format!("ship{i}.png")).collect();
+        for i in 0..8 {
+            std::fs::write(dir.join(format!("ship{i}.png")), png).unwrap();
+        }
+        let refs = load_image_refs(&many, dir.to_str().unwrap());
+        assert!(refs.len() <= 6, "image refs must be bounded");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

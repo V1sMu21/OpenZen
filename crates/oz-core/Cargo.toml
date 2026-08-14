@@ -23,6 +23,7 @@ futures.workspace = true
 memmap2.workspace = true
 regex.workspace = true
 uuid.workspace = true
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile.workspace = true

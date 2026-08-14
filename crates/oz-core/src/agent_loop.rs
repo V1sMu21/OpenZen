@@ -967,11 +967,13 @@ where
 
         let (clean_content, _model_summary) = strip_summary_tags(&response.content);
 
+        // full_response must hold ONLY the latest turn's visible text.
+        // Earlier turns' text is already streamed to the UI as its own
+        // text part at its own position in the timeline; accumulating
+        // every turn made the final bubble text contain all intermediate
+        // replies (duplicated next to the timeline parts).
         if !clean_content.is_empty() {
-            if !full_response.is_empty() {
-                full_response.push('\n');
-            }
-            full_response.push_str(&clean_content);
+            full_response = clean_content.clone();
         }
         meter::record_tokens(total_input_tokens, total_output_tokens);
 
@@ -1082,17 +1084,11 @@ where
                 }
             }
             if let Some(override_text) = respond_override {
-                if !full_response.is_empty() {
-                    if let Some(last_newline) = full_response.rfind('\n') {
-                        full_response.truncate(last_newline);
-                        if full_response.ends_with('\n') {
-                            full_response.pop();
-                        }
-                    } else {
-                        full_response.clear();
-                    }
-                }
-                full_response.push_str(&override_text);
+                // The respond tool's `response` argument is the canonical
+                // final text. full_response holds only the latest turn's
+                // streamed text (we no longer accumulate across turns), so
+                // replace it wholesale instead of trimming a last segment.
+                full_response = override_text;
             }
             tool_calls
         };
@@ -1937,6 +1933,10 @@ where
                     let spec_for_review = spec_text.clone().unwrap_or_else(|| {
                         user_input.chars().take(1500).collect::<String>()
                     });
+                    // Attach deliverable images so the reviewer can SEE the
+                    // output (visual defects are invisible in text-only).
+                    let review_images =
+                        crate::quality::load_image_refs(&deliverables, &config.working_dir);
                     let reply_for_review = full_response.clone();
                     match crate::quality::run_independent_review(
                         client,
@@ -1944,6 +1944,7 @@ where
                         &deliverables,
                         &reply_for_review,
                         &config.lang,
+                        review_images,
                     )
                     .await
                     {
