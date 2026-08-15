@@ -654,28 +654,48 @@ impl CompressionService {
         let lang = self.lang.clone();
 
         tokio::spawn(async move {
-            let summary = if full_prompt.len() > 12_000 {
-                progressive_merge_summary(
-                    &full_prompt,
-                    &template,
-                    &model_name,
-                    &apibase,
-                    &apikey,
-                    &lang,
-                )
-                .await
-            } else {
-                call_summary_llm(
-                    &full_prompt,
-                    &model_name,
-                    &apibase,
-                    &apikey,
-                    &template,
-                    &lang,
-                )
-                .await
+            // Bound concurrent summary work: local summary models share the
+            // GPU with the main agent, so unbounded parallel summaries from
+            // multiple sessions starve the real run.
+            static SUMMARY_SEM: std::sync::OnceLock<tokio::sync::Semaphore> =
+                std::sync::OnceLock::new();
+            let sem = SUMMARY_SEM.get_or_init(|| tokio::sync::Semaphore::new(2));
+            let Ok(_permit) = sem.acquire().await else {
+                return;
             };
-            let _ = tx.send(summary);
+            let summary_fut = async {
+                if full_prompt.len() > 12_000 {
+                    progressive_merge_summary(
+                        &full_prompt,
+                        &template,
+                        &model_name,
+                        &apibase,
+                        &apikey,
+                        &lang,
+                    )
+                    .await
+                } else {
+                    call_summary_llm(
+                        &full_prompt,
+                        &model_name,
+                        &apibase,
+                        &apikey,
+                        &template,
+                        &lang,
+                    )
+                    .await
+                }
+            };
+            tokio::pin!(summary_fut);
+            tokio::select! {
+                summary = &mut summary_fut => {
+                    let _ = tx.send(summary);
+                }
+                // The run finished without collecting the result: cancel
+                // the summary instead of burning LLM capacity on a result
+                // nobody will read.
+                _ = tx.closed() => {}
+            }
         });
 
         rx
