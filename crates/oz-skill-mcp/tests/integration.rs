@@ -4,7 +4,7 @@ mod e2e_tests {
     use oz_skill_mcp::{
         migration::{is_migrated, migrate_memory_to_skill_mcp},
         skill::Skill,
-        MatchConfig, Matcher, MetaStore, SkillMcpMemory, SkillMcpStore, StalenessChecker,
+        Matcher, MetaStore, SkillMcpMemory, SkillMcpStore, StalenessChecker,
     };
     use std::path::{Path, PathBuf};
     use std::time::Instant;

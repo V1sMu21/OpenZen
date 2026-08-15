@@ -119,7 +119,7 @@ mod tests {
     async fn test_dispatch_known_tool() {
         let mut reg = ToolRegistry::new();
         reg.register(PingTool);
-        let mut handler = ToolRegistryHandler::new(reg);
+        let handler = ToolRegistryHandler::new(reg);
         let resp = oz_core_types::MockResponse::new("");
         let result = handler
             .dispatch("ping", serde_json::json!({}), &resp, 0, &ctx())
@@ -131,7 +131,7 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_unknown_returns_error_prompt() {
         let reg = ToolRegistry::new();
-        let mut handler = ToolRegistryHandler::new(reg);
+        let handler = ToolRegistryHandler::new(reg);
         let resp = oz_core_types::MockResponse::new("");
         let result = handler
             .dispatch("nope", serde_json::json!({}), &resp, 0, &ctx())

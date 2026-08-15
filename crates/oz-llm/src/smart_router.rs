@@ -163,6 +163,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    #[allow(dead_code)]
     struct DummySession {
         name: String,
         history: Mutex<Vec<Message>>,

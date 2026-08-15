@@ -104,7 +104,7 @@ mod tests {
 
     fn ctx() -> ToolContext {
         let dir = tempfile::tempdir().unwrap();
-        let dir_path = dir.into_path();
+        let dir_path = dir.keep();
         let skill = dir_path.join(".skill_mcp");
         std::fs::create_dir_all(&skill).unwrap();
         ToolContext {

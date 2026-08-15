@@ -701,7 +701,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_assertion_pass_and_fail() {
-        let (p, out) = run_assertion("true", "/tmp").await;
+        let (p, _out) = run_assertion("true", "/tmp").await;
         assert!(p);
         let (p2, _) = run_assertion("false", "/tmp").await;
         assert!(!p2);

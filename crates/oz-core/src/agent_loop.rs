@@ -3425,6 +3425,7 @@ mod tests {
             self.tool_calls.lock().unwrap().clone()
         }
 
+        #[allow(dead_code)]
         fn get_turn_end_calls(&self) -> Vec<String> {
             self.turn_end_calls.lock().unwrap().clone()
         }

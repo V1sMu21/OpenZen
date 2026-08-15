@@ -314,12 +314,15 @@ fn load_locale() -> String {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        std::env::var("LANG")
+        if std::env::var("LANG")
             .unwrap_or_default()
             .to_lowercase()
             .contains("zh")
-            .then(|| "zh".to_string())
-            .unwrap_or_else(|| "en".to_string())
+        {
+            "zh".to_string()
+        } else {
+            "en".to_string()
+        }
     }
 }
 

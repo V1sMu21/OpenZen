@@ -94,6 +94,9 @@ pub fn spawn_terminal(
     unsafe {
         cmd.pre_exec(move || {
             let _ = nix::unistd::setsid();
+            // TIOCSCTTY's request type differs per platform: the .into()
+            // is required on macOS but useless (and clippy-flagged) on Linux.
+            #[allow(clippy::useless_conversion)]
             libc::ioctl(slave_raw, libc::TIOCSCTTY.into(), 0);
             let _ = nix::unistd::dup2(slave_raw, 0);
             let _ = nix::unistd::dup2(slave_raw, 1);

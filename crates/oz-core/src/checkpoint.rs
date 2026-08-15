@@ -592,7 +592,6 @@ pub fn apply_intervention(messages: &mut Vec<Message>, intervention: &Interventi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn loop_checkpoint_serialization_roundtrip() {

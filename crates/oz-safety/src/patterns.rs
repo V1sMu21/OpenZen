@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn test_code_run_single_word() {
-        let (t, p) = build_pattern("code_run", &serde_json::json!({"code": "ls"}));
+        let (_, p) = build_pattern("code_run", &serde_json::json!({"code": "ls"}));
         assert_eq!(p, "ls");
     }
 
@@ -87,13 +87,13 @@ mod tests {
 
     #[test]
     fn test_write_pattern_shallow() {
-        let (t, p) = build_pattern("write", &serde_json::json!({"file_path": "/tmp/test.txt"}));
+        let (_, p) = build_pattern("write", &serde_json::json!({"file_path": "/tmp/test.txt"}));
         assert_eq!(p, "tmp/test.txt");
     }
 
     #[test]
     fn test_web_scan_pattern() {
-        let (t, p) = build_pattern(
+        let (_, p) = build_pattern(
             "web_scan",
             &serde_json::json!({"url": "https://docs.rs/tokio/latest/tokio/"}),
         );

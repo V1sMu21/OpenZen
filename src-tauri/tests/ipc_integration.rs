@@ -32,6 +32,7 @@ mod ipc_tests {
     /// ========= TAU-IPC-03/04: create_session + list_sessions =========
     #[test]
     fn test_session_create_and_list() {
+        #[allow(dead_code)] // status/message_count asserted via other suites
         struct SessionInfo {
             id: String,
             name: String,
@@ -102,6 +103,7 @@ mod ipc_tests {
     /// ========= TAU-PROJ-02/03: add_project =========
     #[test]
     fn test_project_add_with_auto_name() {
+        #[allow(dead_code)]
         struct Project {
             id: String,
             name: String,
@@ -160,10 +162,9 @@ mod ipc_tests {
     /// ========= TAU-PROJ-08: rename =========
     #[test]
     fn test_project_rename() {
-        let mut name = "Old".to_string();
         let new_name = "New".to_string().trim().to_string();
         assert!(!new_name.is_empty());
-        name = new_name;
+        let name = new_name;
         assert_eq!(name, "New");
     }
 
@@ -200,9 +201,8 @@ mod ipc_tests {
     /// ========= TAU-PROJ-12: move_session_to_project =========
     #[test]
     fn test_move_session_between_projects() {
-        let mut session_project: Option<String> = None;
         // Move to project
-        session_project = Some("proj-target".into());
+        let session_project: Option<String> = Some("proj-target".into());
         assert_eq!(session_project, Some("proj-target".into()));
         // Move to same project (no-op)
         assert_eq!(session_project.as_deref(), Some("proj-target"));
