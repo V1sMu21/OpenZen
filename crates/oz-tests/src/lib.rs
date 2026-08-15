@@ -634,7 +634,10 @@ mod tests {
                 .join("workflows")
                 .join("ci.yml"),
         );
-        for job in &["check:", "test:", "build:", "build-macos:"] {
+        // CI runs on macOS only (the real host platform); the release
+        // build job doubles as the platform build, so build-macos no
+        // longer exists as a separate job.
+        for job in &["check:", "test:", "build:"] {
             assert!(ci_content.contains(job), "CI missing job: {job}");
         }
     }
