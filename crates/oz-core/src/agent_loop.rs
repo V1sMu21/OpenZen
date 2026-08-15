@@ -1486,7 +1486,36 @@ where
                                         let timeout = std::time::Duration::from_secs(
                                             cfg.approval_timeout_secs,
                                         );
-                                        match approval.request_approval(req, timeout).await {
+                                        // Race the approval wait against the user
+                                        // stop signal — a pending approval must not
+                                        // leave Stop dead for up to 300s.
+                                        let approval_fut = approval.request_approval(req, timeout);
+                                        tokio::pin!(approval_fut);
+                                        let stop_sig = stop_signal;
+                                        let stop_wait = async move {
+                                            loop {
+                                                if stop_sig.load(Ordering::Relaxed) {
+                                                    break;
+                                                }
+                                                tokio::time::sleep(Duration::from_millis(100))
+                                                    .await;
+                                            }
+                                        };
+                                        tokio::pin!(stop_wait);
+                                        let approval_result = tokio::select! {
+                                            d = &mut approval_fut => d,
+                                            _ = &mut stop_wait => {
+                                                tracing::info!(
+                                                    "[safety] stop signal during approval wait for {tool_name}"
+                                                );
+                                                return (
+                                                    ii,
+                                                    tool_name.clone(),
+                                                    Err(ToolError::Custom("stopped".into())),
+                                                );
+                                            }
+                                        };
+                                        match approval_result {
                                             Ok(oz_safety::ApprovalDecision::Allow) => {
                                                 tracing::debug!("[safety] approved {tool_name}");
                                             }
