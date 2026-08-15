@@ -11,6 +11,16 @@ use tokio::task::JoinHandle;
 
 use crate::{PlatformError, FILE_HINT};
 
+/// Poison-resistant mutex helper — a panic while a lock is held must
+/// degrade to a single failed operation, never take the whole IM channel
+/// down (matches the Tauri-side lock_poison_guard pattern).
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| {
+        tracing::error!("[platform] Recovered from poisoned mutex — state may be inconsistent");
+        poisoned.into_inner()
+    })
+}
+
 pub struct AgentBridge {
     pub sessions: Arc<Mutex<SessionStore>>,
     pub running_agents: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
@@ -34,7 +44,7 @@ impl AgentBridge {
         model_name: Option<&str>,
     ) -> Result<mpsc::UnboundedReceiver<StreamEvent>, PlatformError> {
         {
-            let mut store = self.sessions.lock().unwrap();
+            let mut store = lock(&self.sessions);
             if !store.has_session(session_id) {
                 let name = format!("[{}] {}", source, chrono::Local::now().format("%H:%M"));
                 store.create_with_id(session_id, &name);
@@ -52,10 +62,10 @@ impl AgentBridge {
         }
 
         {
-            let mut agents = self.running_agents.lock().unwrap();
+            let mut agents = lock(&self.running_agents);
             if let Some(handle) = agents.remove(session_id) {
                 if let Some(stop_signal) = {
-                    let signals = self.stop_signals.lock().unwrap();
+                    let signals = lock(&self.stop_signals);
                     signals.get(session_id).cloned()
                 } {
                     stop_signal.store(true, Ordering::Relaxed);
@@ -97,7 +107,7 @@ impl AgentBridge {
             working_dir: self.working_dir.clone(),
             assets_dir: self.assets_dir.clone(),
             script_dir: self.script_dir.clone(),
-            lang: self.locale.lock().unwrap().clone(),
+            lang: lock(&self.locale).clone(),
             skill_mcp_dir: self.skill_mcp_dir.clone(),
             harness_dir: None,
             session_id: String::new(),
@@ -149,14 +159,14 @@ impl AgentBridge {
         let trust_path = Path::new(&self.working_dir).join("openzen/trust.json");
         let trust_store = oz_safety::TrustStore::new(Some(trust_path));
         loop_config.safety_guard = Some(Arc::new(oz_safety::SafetyGuard::new(trust_store)));
-        loop_config.approval_handler = self.approval_handler.lock().unwrap().clone();
+        loop_config.approval_handler = lock(&self.approval_handler).clone();
 
         {
-            let mut ask_rxs = self.ask_user_rxs.lock().unwrap();
+            let mut ask_rxs = lock(&self.ask_user_rxs);
             let slot = ask_rxs
                 .entry(session_id.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(None)));
-            *slot.lock().unwrap() = None;
+            *lock(slot) = None;
             loop_config.ask_user_rx = Some(slot.clone());
         }
 
@@ -165,7 +175,7 @@ impl AgentBridge {
 
         let stop_signal = Arc::new(AtomicBool::new(false));
         {
-            let mut map = self.stop_signals.lock().unwrap();
+            let mut map = lock(&self.stop_signals);
             map.insert(session_id.to_string(), stop_signal.clone());
         }
 
@@ -200,9 +210,9 @@ impl AgentBridge {
                 });
             }
 
-            stop_signals_clone.lock().unwrap().remove(&session_id_owned);
+            lock(&stop_signals_clone).remove(&session_id_owned);
 
-            let mut store = sessions_clone.lock().unwrap();
+            let mut store = lock(&sessions_clone);
             if let Some(s) = store.get_mut(&session_id_owned) {
                 s.status = SessionStatus::Idle;
 
@@ -236,10 +246,10 @@ impl AgentBridge {
     }
 
     pub fn stop_session(&self, session_id: &str) {
-        if let Some(signal) = self.stop_signals.lock().unwrap().get(session_id) {
+        if let Some(signal) = lock(&self.stop_signals).get(session_id) {
             signal.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        let mut store = self.sessions.lock().unwrap();
+        let mut store = lock(&self.sessions);
         if let Some(entry) = store.get_mut(session_id) {
             entry.status = SessionStatus::Stopped;
         }
@@ -256,13 +266,13 @@ impl AgentBridge {
     }
 
     pub fn ask_user_response(&self, session_id: &str, response: &str) {
-        if let Some(slot) = self.ask_user_rxs.lock().unwrap().get(session_id) {
-            *slot.lock().unwrap() = Some(response.to_string());
+        if let Some(slot) = lock(&self.ask_user_rxs).get(session_id) {
+            *lock(slot) = Some(response.to_string());
         }
     }
 
     pub fn is_running(&self, session_id: &str) -> bool {
-        self.running_agents.lock().unwrap().contains_key(session_id)
+        lock(&self.running_agents).contains_key(session_id)
     }
 
     fn resolve_config_path(&self) -> String {
