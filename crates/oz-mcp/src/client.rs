@@ -231,7 +231,10 @@ impl McpClient {
     /// Stop the server process.
     pub async fn stop(&mut self) {
         if let Some(ref mut child) = self.child.take() {
+            // Kill AND reap — kill() alone leaves a zombie until the parent
+            // exits, which leaks a process slot per stop under 7x24.
             let _ = child.kill().await;
+            let _ = child.wait().await;
         }
         self.stdin = None;
         self.stdout = None;
@@ -241,8 +244,12 @@ impl McpClient {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
+        // Blocking wait on drop: MCP children are short-lived processes and
+        // this runs outside the async runtime's hot path, so reaping here
+        // prevents zombie accumulation when callers forget stop().
         if let Some(ref mut child) = self.child.take() {
-            let _ = child.start_kill();
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }

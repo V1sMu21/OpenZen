@@ -68,6 +68,10 @@ pub struct AppState {
     /// clicks "Stop" the corresponding AtomicBool is flipped to true and the
     /// loop checks it between tool calls / turns.
     pub stop_signals: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Process-level MCP manager pool: created once on first use and shared
+    /// by every request, so subprocesses are not leaked per chat. A failed
+    /// init leaves the cell empty and is retried on the next request.
+    pub mcp_manager: tokio::sync::OnceCell<Arc<tokio::sync::Mutex<oz_mcp::McpManager>>>,
     /// Per-session run-guard mutexes. Holding the mutex of session X
     /// guarantees no other task is currently running the agent loop on
     /// session X — preventing two concurrent runs from racing on the same
@@ -107,6 +111,7 @@ impl AppState {
             interventions: Mutex::new(HashMap::new()),
             ask_user_rxs: Mutex::new(HashMap::new()),
             stop_signals: Mutex::new(HashMap::new()),
+            mcp_manager: tokio::sync::OnceCell::new(),
             run_guards: Mutex::new(HashMap::new()),
             auth_token,
         }
@@ -788,23 +793,38 @@ async fn run_agent_for_session(
     let mut registry = ToolRegistry::build_default();
     let mcp_servers_path = std::path::Path::new(working_dir).join("servers.toml");
     if mcp_servers_path.exists() {
-        let mut discovery = oz_mcp::McpDiscovery::new(&mcp_servers_path);
-        if let Err(e) = discovery.load() {
-            tracing::warn!("[mcp] failed to load servers.toml: {e}");
-        } else {
-            let manager = std::sync::Arc::new(tokio::sync::Mutex::new(
-                oz_mcp::McpManager::from_discovery(&discovery),
-            ));
-            match manager.lock().await.start_all().await {
-                Ok(n) => tracing::info!("[mcp] started {n} MCP server(s)"),
-                Err(e) => tracing::warn!("[mcp] start_all failed: {e}"),
+        // Process-level pool: the manager (and its child processes) is
+        // created once and reused by every request. A per-request manager
+        // leaked its subprocesses for the lifetime of the process.
+        match state
+            .mcp_manager
+            .get_or_try_init(|| async {
+                let mut discovery = oz_mcp::McpDiscovery::new(&mcp_servers_path);
+                discovery
+                    .load()
+                    .map_err(|e| anyhow::anyhow!("failed to load servers.toml: {e}"))?;
+                let manager = Arc::new(tokio::sync::Mutex::new(
+                    oz_mcp::McpManager::from_discovery(&discovery),
+                ));
+                let n = manager
+                    .lock()
+                    .await
+                    .start_all()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("MCP start_all failed: {e}"))?;
+                tracing::info!("[mcp] started {n} MCP server(s)");
+                Ok::<_, anyhow::Error>(manager)
+            })
+            .await
+        {
+            Ok(manager) => {
+                let mcp_count =
+                    oz_tools::mcp_bridge::register_mcp_tools(&mut registry, manager).await;
+                tracing::info!("[mcp] registered {mcp_count} MCP tool(s)");
             }
-            let mcp_count = oz_tools::mcp_bridge::register_mcp_tools(&mut registry, &manager).await;
-            tracing::info!("[mcp] registered {mcp_count} MCP tool(s)");
-            // Keep the manager (and its subprocesses) alive past this
-            // scope — tool handlers hold an Arc, dropping this one keeps
-            // the child processes alive for the lifetime of the registry.
-            std::mem::forget(manager);
+            Err(e) => {
+                tracing::warn!("[mcp] skipped MCP tools this request: {e}");
+            }
         }
     }
     let definitions = registry.to_schema("en");
