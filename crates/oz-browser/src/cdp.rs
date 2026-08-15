@@ -80,6 +80,18 @@ impl CdpClient {
         let child = cmd
             .spawn()
             .map_err(|e| ToolError::Custom(format!("Failed to launch Chrome: {e}")))?;
+        // Kill the Chrome we just spawned if any step below fails —
+        // otherwise every failed launch orphans a browser process.
+        struct ChildGuard(Option<std::process::Child>);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if let Some(mut c) = self.0.take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+            }
+        }
+        let mut guard = ChildGuard(Some(child));
         let debug_port = if port == 0 {
             Self::find_debug_port().await?
         } else {
@@ -88,7 +100,7 @@ impl CdpClient {
         Self::wait_for_chrome(debug_port).await?;
         let ws_url = Self::get_websocket_url(debug_port).await?;
         let mut client = Self::connect_inner(&ws_url).await?;
-        client.chrome_process = Some(child);
+        client.chrome_process = Some(guard.0.take().expect("child present"));
         Ok(client)
     }
 

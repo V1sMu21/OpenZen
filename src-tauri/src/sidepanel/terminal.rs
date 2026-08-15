@@ -309,7 +309,18 @@ pub fn close_terminal(registry: TerminalRegistry, session_id: &str) -> Result<()
     let s = sessions
         .remove(session_id)
         .ok_or_else(|| format!("Terminal session not found: {session_id}"))?;
-    let _ = signal::kill(Pid::from_raw(s.pid as i32), Signal::SIGTERM);
+    let pid = s.pid as i32;
+    let _ = signal::kill(Pid::from_raw(pid), Signal::SIGTERM);
     drop(s);
+    // Escalate to SIGKILL if the shell ignores SIGTERM (e.g. children are
+    // running), then reap so the process never lingers as a zombie.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let _ = signal::kill(Pid::from_raw(pid), Signal::SIGKILL);
+        unsafe {
+            let mut status: i32 = 0;
+            libc::waitpid(pid, &mut status, libc::WNOHANG);
+        }
+    });
     Ok(())
 }

@@ -116,10 +116,14 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
         tracing::info!("PID {} written to {}", pid, pid_path.display());
 
         let pid_path_cleanup = pid_path.clone();
+        let cmd_tx_for_ctrlc = config.cmd_tx.clone();
         tokio::spawn(async move {
+            // Remove the pid file, then signal the supervisor loop to shut
+            // down gracefully. A raw process::exit(0) here raced the graceful
+            // stop path and could orphan the serve child process.
             signal::ctrl_c().await.ok();
             tokio::fs::remove_file(&pid_path_cleanup).await.ok();
-            std::process::exit(0);
+            let _ = cmd_tx_for_ctrlc.send(Some(DaemonCommand::Shutdown));
         });
     }
 

@@ -12,6 +12,11 @@ use tokio::task::JoinHandle;
 
 use crate::{PlatformError, FILE_HINT};
 
+/// Global cap on concurrent platform agent runs — mirrors the Tauri
+/// layer's max-3 and stops a burst of IM messages from spawning unbounded
+/// agent loops (each with LLM connections + tool concurrency).
+static BRIDGE_CONCURRENCY: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+
 /// Per-session slot the ask_user tool waits on for the user's reply.
 pub type AskUserSlot = Arc<Mutex<Option<String>>>;
 /// Session id → ask_user reply slot.
@@ -193,6 +198,10 @@ impl AgentBridge {
         let ask_user_rxs_clone = self.ask_user_rxs.clone();
 
         let handle = tokio::spawn(async move {
+            let sem = BRIDGE_CONCURRENCY.get_or_init(|| tokio::sync::Semaphore::new(3));
+            let Ok(_permit) = sem.acquire().await else {
+                return;
+            };
             // A panic inside the agent loop must not skip the cleanup
             // below — the platform session would stay "Running" forever.
             let outcome = std::panic::AssertUnwindSafe(oz_core::agent_loop::run_agent_loop(
