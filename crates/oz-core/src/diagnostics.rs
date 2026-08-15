@@ -13,7 +13,10 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+// Cold cargo invocations (CI runners, first check of a project) can
+// exceed 15s easily; a too-tight timeout silently returned an empty
+// diagnostics block instead of the actual compiler errors.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_DIAGNOSTICS: usize = 20;
 
 /// Collect diagnostics for `working_dir` and render them as a reminder block.
