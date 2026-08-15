@@ -91,10 +91,18 @@ pub struct WsClientConfig {
 
 impl FeishuClient {
     pub fn new(app_id: String, app_secret: String) -> Self {
+        // Timeouts are mandatory here: every call runs inside the serial
+        // message-processing loop, and reqwest's default "no timeout" means
+        // one half-open TCP connection freezes the entire Feishu channel.
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         FeishuClient {
             app_id,
             app_secret,
-            http: reqwest::Client::new(),
+            http,
             access_token: Mutex::new(None),
         }
     }
