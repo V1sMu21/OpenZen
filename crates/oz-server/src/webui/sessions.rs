@@ -89,25 +89,24 @@ impl PersistWriter {
         let worker_pending = Arc::clone(&pending);
         std::thread::Builder::new()
             .name("openzen-session-persist".into())
-            .spawn(move || loop {
+            .spawn(move || {
                 // Coalesce: write only the newest snapshot of the drained
                 // batch. The payload travels in the channel itself, so the
                 // pending counter always matches the number of in-flight
                 // payloads — the old slot+pending pair could drift out of
                 // sync and wedge reload() forever.
-                let mut latest = match rx.recv() {
-                    Ok(item) => Some(item),
-                    Err(_) => break,
-                };
-                while let Ok(item) = rx.try_recv() {
-                    latest = Some(item);
-                    worker_pending.fetch_sub(1, Ordering::SeqCst);
-                }
-                if let Some((path, sessions)) = latest {
-                    if let Ok(json) = serde_json::to_string(&sessions) {
-                        SessionStore::write_atomic(&path, &json);
+                while let Ok(item) = rx.recv() {
+                    let mut latest = Some(item);
+                    while let Ok(item) = rx.try_recv() {
+                        latest = Some(item);
+                        worker_pending.fetch_sub(1, Ordering::SeqCst);
                     }
-                    worker_pending.fetch_sub(1, Ordering::SeqCst);
+                    if let Some((path, sessions)) = latest {
+                        if let Ok(json) = serde_json::to_string(&sessions) {
+                            SessionStore::write_atomic(&path, &json);
+                        }
+                        worker_pending.fetch_sub(1, Ordering::SeqCst);
+                    }
                 }
             })
             .expect("failed to spawn session persist thread");

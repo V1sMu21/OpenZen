@@ -244,12 +244,17 @@ impl McpClient {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        // Blocking wait on drop: MCP children are short-lived processes and
-        // this runs outside the async runtime's hot path, so reaping here
-        // prevents zombie accumulation when callers forget stop().
+        // tokio's kill()/wait() are async and useless in a sync Drop, so go
+        // through libc — this reaps the child and prevents zombie
+        // accumulation when callers forget stop().
         if let Some(ref mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Some(pid) = child.id() {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                    let mut status: i32 = 0;
+                    libc::waitpid(pid as i32, &mut status, 0);
+                }
+            }
         }
     }
 }
