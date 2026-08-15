@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -72,11 +72,10 @@ pub struct SessionStore {
 /// collapses into a single disk write, and serialisation never blocks the
 /// IPC thread. Stores built with `SessionStore::new()` (no path, e.g. in
 /// tests) keep the old synchronous write path.
-type PersistSlot = (PathBuf, HashMap<String, SessionEntry>);
+type PersistPayload = (PathBuf, HashMap<String, SessionEntry>);
 
 struct PersistWriter {
-    wake: Sender<()>,
-    slot: Arc<Mutex<Option<PersistSlot>>>,
+    tx: Sender<PersistPayload>,
     /// Snapshots submitted but not yet written (or discarded). `reload()`
     /// must skip while this is non-zero: the on-disk file is older than
     /// memory in that window and reloading would clobber newer state.
@@ -85,34 +84,26 @@ struct PersistWriter {
 
 impl PersistWriter {
     fn spawn() -> Self {
-        let (wake, rx) = mpsc::channel::<()>();
-        let slot: Arc<Mutex<Option<PersistSlot>>> = Arc::new(Mutex::new(None));
+        let (tx, rx) = mpsc::channel::<PersistPayload>();
         let pending = Arc::new(AtomicU64::new(0));
-        let worker_slot = Arc::clone(&slot);
         let worker_pending = Arc::clone(&pending);
         std::thread::Builder::new()
             .name("openzen-session-persist".into())
             .spawn(move || loop {
-                if rx.recv().is_err() {
-                    break;
-                }
-                // Keep only the newest snapshot; every discarded snapshot
-                // must decrement the pending counter (it will never be
-                // written), otherwise reload() would block forever.
-                let snapshot = loop {
-                    let snap = worker_slot.lock().unwrap().take();
-                    match rx.try_recv() {
-                        Ok(()) => {
-                            if snap.is_some() {
-                                worker_pending.fetch_sub(1, Ordering::SeqCst);
-                            }
-                            continue;
-                        }
-                        Err(TryRecvError::Empty) => break snap,
-                        Err(TryRecvError::Disconnected) => break snap,
-                    }
+                // Coalesce: write only the newest snapshot of the drained
+                // batch. The payload travels in the channel itself, so the
+                // pending counter always matches the number of in-flight
+                // payloads — the old slot+pending pair could drift out of
+                // sync and wedge reload() forever.
+                let mut latest = match rx.recv() {
+                    Ok(item) => Some(item),
+                    Err(_) => break,
                 };
-                if let Some((path, sessions)) = snapshot {
+                while let Ok(item) = rx.try_recv() {
+                    latest = Some(item);
+                    worker_pending.fetch_sub(1, Ordering::SeqCst);
+                }
+                if let Some((path, sessions)) = latest {
                     if let Ok(json) = serde_json::to_string(&sessions) {
                         SessionStore::write_atomic(&path, &json);
                     }
@@ -120,17 +111,16 @@ impl PersistWriter {
                 }
             })
             .expect("failed to spawn session persist thread");
-        PersistWriter {
-            wake,
-            slot,
-            pending,
-        }
+        PersistWriter { tx, pending }
     }
 
     fn submit(&self, path: PathBuf, sessions: HashMap<String, SessionEntry>) {
-        *self.slot.lock().unwrap() = Some((path, sessions));
         self.pending.fetch_add(1, Ordering::SeqCst);
-        let _ = self.wake.send(());
+        if self.tx.send((path, sessions)).is_err() {
+            // Worker thread is gone; keep the counter honest so reload()
+            // can still proceed.
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
