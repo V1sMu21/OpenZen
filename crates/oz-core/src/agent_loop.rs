@@ -826,8 +826,15 @@ where
                     let stream_fut = client.stream_chat(&messages, tools, tx.clone(), Some(spec_tx));
                     tokio::pin!(stream_fut);
 
-                    let stream_timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
-                    tokio::pin!(stream_timeout);
+                    // Real stall detection lives inside the oz-llm parsers
+                    // (per-chunk timeout: 60s cloud / 300s local). This outer
+                    // bound is only a true-hang fallback — it must NOT fire
+                    // while a slow model keeps making progress, so it is 4x
+                    // the configured window with a 1h floor instead of a
+                    // fixed total duration.
+                    let hang_timeout_secs = timeout_secs.saturating_mul(4).max(3600);
+                    let stream_hang_timeout = tokio::time::sleep(Duration::from_secs(hang_timeout_secs));
+                    tokio::pin!(stream_hang_timeout);
 
                     let attempt_result = loop {
                         tokio::select! {
@@ -872,11 +879,11 @@ where
                                     }
                                 }
                             }
-                            _ = &mut stream_timeout => {
-                                tracing::warn!("LLM stream timed out after {}s", timeout_secs);
+                            _ = &mut stream_hang_timeout => {
+                                tracing::warn!("LLM stream produced no terminal event for {}s", hang_timeout_secs);
                                 save_stop_checkpoint(turn, "llm_timeout", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos);
                                 break Err(oz_core_types::LlmError::StreamError(format!(
-                                    "stream timed out after {timeout_secs}s"
+                                    "stream timed out after {hang_timeout_secs}s"
                                 )));
                             }
                             stream_result = &mut stream_fut => break stream_result,
