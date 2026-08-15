@@ -16,6 +16,7 @@ const ITEM_TEXT: i32 = 1;
 const STATE_FINISH: i32 = 2;
 const CDN_BASE: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 
+#[derive(Clone)]
 pub struct WxBotClient {
     pub token: Option<String>,
     pub bot_id: Option<String>,

@@ -2,11 +2,12 @@ mod client;
 mod crypto;
 
     use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use oz_core_types::StreamEvent;
 use oz_platform::{
-    PlatformAdapter, PlatformConfig, PlatformContext,
+    AgentBridge, PlatformAdapter, PlatformConfig, PlatformContext,
     PlatformError, PlatformHealth,
 };
 
@@ -53,8 +54,12 @@ impl PlatformAdapter for WechatAdapter {
 
         let counter_path = ctx.working_dir.join("openzen").join("wechat_counters.json");
         let mut seen_ids: HashSet<String> = HashSet::new();
-        let mut new_session_counter: HashMap<String, u32> =
-            oz_platform::load_platform_counters(&counter_path);
+        // Shared with spawned agent tasks: per-user counters and the
+        // per-user "task running" gate must be consistent across them.
+        let counters: Arc<tokio::sync::Mutex<HashMap<String, u32>>> =
+            Arc::new(tokio::sync::Mutex::new(oz_platform::load_platform_counters(&counter_path)));
+        let running: Arc<tokio::sync::Mutex<HashMap<String, bool>>> =
+            Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         loop {
             match bot.get_updates(30).await {
@@ -94,58 +99,57 @@ impl PlatformAdapter for WechatAdapter {
                         let preview: String = text.chars().take(80).collect();
                         tracing::info!("[wechat] message: {}", preview);
 
+                        // Commands are handled before the running-task gate so
+                        // /stop and /status stay usable while an agent runs.
                         if text.starts_with('/') {
-                            let new_sid = handle_wechat_command(
-                                uid,
-                                &text,
-                                &mut new_session_counter,
-                            );
-                            oz_platform::save_platform_counters(&counter_path, &new_session_counter);
-                            match new_sid {
-                                Some((reply, sid)) => {
-                                    let _ = bot.send_text(uid, &reply, ctx_token).await;
-                                    if text.to_lowercase().starts_with("/new") {
-                                        // /new just resets the session — don't run agent
-                                        continue;
-                                    }
-                                    // Other commands may want to run agent after reply
-                        let prompt = text.to_string();
-                                    match agent.send_message(&sid, &prompt, "wechat", default_model.as_deref()).await {
-                                        Ok(event_rx) => { stream_to_wechat(&bot, uid, ctx_token, event_rx).await; }
-                                        Err(e) => { let _ = bot.send_text(uid, &format!("❌ {e}"), ctx_token).await; }
-                                    }
-                                }
-                                None => continue,
+                            let result = {
+                                let mut c = counters.lock().await;
+                                let r = handle_wechat_command(uid, &text, &mut *c);
+                                oz_platform::save_platform_counters(&counter_path, &c);
+                                r
+                            };
+                            let Some((reply, sid)) = result else { continue };
+                            let _ = bot.send_text(uid, &reply, ctx_token).await;
+                            if text.to_lowercase().starts_with("/new") {
+                                // /new just resets the session — don't run agent
+                                continue;
                             }
+                            // Other commands may want to run agent after reply
+                            spawn_wechat_agent(
+                                &agent, bot.clone(), &running, uid, ctx_token,
+                                &sid, &text, &default_model,
+                            );
                             continue;
                         }
 
-                        let counter = new_session_counter.entry(uid.to_string()).or_insert(1);
-                        let session_id = if *counter > 1 {
-                            format!("wechat:{uid}:{counter}")
-                        } else {
-                            format!("wechat:{uid}")
+                        let sid = {
+                            let mut c = counters.lock().await;
+                            let counter = c.entry(uid.to_string()).or_insert(1);
+                            if *counter > 1 {
+                                format!("wechat:{uid}:{counter}")
+                            } else {
+                                format!("wechat:{uid}")
+                            }
                         };
-                        let prompt = text.to_string();
 
-                        match agent
-                            .send_message(
-                                &session_id,
-                                &prompt,
-                                "wechat",
-                                default_model.as_deref(),
-                            )
-                            .await
                         {
-                            Ok(event_rx) => {
-                                stream_to_wechat(&bot, uid, ctx_token, event_rx).await;
-                            }
-                            Err(e) => {
+                            let mut r = running.lock().await;
+                            if r.contains_key(uid) {
                                 let _ = bot
-                                    .send_text(uid, &format!("❌ {e}"), ctx_token)
+                                    .send_text(uid, "⏳ 上一个任务进行中，请稍候…", ctx_token)
                                     .await;
+                                continue;
                             }
+                            // Mark running so a second message from this user
+                            // during the run gets the busy reply instead of
+                            // queueing behind it.
+                            r.insert(uid.to_string(), true);
                         }
+
+                        spawn_wechat_agent(
+                            &agent, bot.clone(), &running, uid, ctx_token,
+                            &sid, &text, &default_model,
+                        );
                     }
                 }
                 Err(e) => {
@@ -165,6 +169,38 @@ impl PlatformAdapter for WechatAdapter {
     async fn health(&self) -> PlatformHealth {
         PlatformHealth::healthy()
     }
+}
+
+/// Spawn an agent run for one WeChat message and stream the result back.
+/// Returns immediately — the long-poll loop must never block on a full
+/// agent run, otherwise one user's long task stalls every other user.
+fn spawn_wechat_agent(
+    agent: &Arc<AgentBridge>,
+    bot: WxBotClient,
+    running: &Arc<tokio::sync::Mutex<HashMap<String, bool>>>,
+    uid: &str,
+    ctx_token: &str,
+    sid: &str,
+    prompt: &str,
+    default_model: &Option<String>,
+) {
+    let agent = agent.clone();
+    let running = running.clone();
+    let uid = uid.to_string();
+    let ctx_token = ctx_token.to_string();
+    let sid = sid.to_string();
+    let prompt = prompt.to_string();
+    let model = default_model.clone();
+
+    tokio::spawn(async move {
+        match agent.send_message(&sid, &prompt, "wechat", model.as_deref()).await {
+            Ok(event_rx) => stream_to_wechat(&bot, &uid, &ctx_token, event_rx).await,
+            Err(e) => {
+                let _ = bot.send_text(&uid, &format!("❌ {e}"), &ctx_token).await;
+            }
+        }
+        running.lock().await.remove(&uid);
+    });
 }
 
 fn handle_wechat_command(

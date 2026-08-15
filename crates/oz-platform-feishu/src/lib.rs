@@ -59,7 +59,7 @@ impl PlatformAdapter for FeishuAdapter {
     }
 
     async fn start(&self, ctx: PlatformContext) -> Result<(), PlatformError> {
-        let client = FeishuClient::new(self.app_id.clone(), self.app_secret.clone());
+        let client = Arc::new(FeishuClient::new(self.app_id.clone(), self.app_secret.clone()));
         let agent = ctx.agent.clone();
         let allowed = self.allowed_users.clone();
         let default_model = self.default_model.clone();
@@ -107,14 +107,14 @@ impl PlatformAdapter for FeishuAdapter {
 impl FeishuAdapter {
     async fn connect_websocket(
         agent: &Arc<AgentBridge>,
-        client: &FeishuClient,
+        client: &Arc<FeishuClient>,
         allowed: &Option<Vec<String>>,
         default_model: &Option<String>,
         running_tasks: &Arc<Mutex<std::collections::HashMap<String, bool>>>,
         instance_id: &str,
         working_dir: &std::path::Path,
     ) -> Result<(), String> {
-        use futures_util::StreamExt;
+        use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::connect_async;
 
         eprintln!("[feishu:{instance_id}] discovering WebSocket endpoint...");
@@ -129,7 +129,7 @@ impl FeishuAdapter {
             .await
             .map_err(|e| format!("WebSocket connect error: {e}"))?;
 
-        let (_, mut read) = ws_stream.split();
+        let (mut write, mut read) = ws_stream.split();
         eprintln!("[feishu:{instance_id}] WebSocket connected, waiting for events...");
 
         // Persistent dedup: survive restarts so old messages replayed
@@ -138,34 +138,45 @@ impl FeishuAdapter {
         let mut seen_msg_ids: std::collections::VecDeque<String> =
             oz_platform::load_seen_msg_ids(&dedup_path);
 
-        // Per-chat /new counters: persisted so restart doesn't lose session state.
+        // Per-chat /new counters: shared with spawned agent tasks, so they
+        // must live behind a lock now that message handling is concurrent.
         let counter_path = working_dir.join("openzen").join("feishu_counters.json");
-        let mut new_session_counter: std::collections::HashMap<String, u32> =
-            oz_platform::load_platform_counters(&counter_path);
+        let counters: Arc<Mutex<std::collections::HashMap<String, u32>>> = Arc::new(Mutex::new(
+            oz_platform::load_platform_counters(&counter_path),
+        ));
 
         while let Some(msg) = read.next().await {
             let msg = msg.map_err(|e| format!("WebSocket read error: {e}"))?;
-            if msg.is_ping() || msg.is_pong() {
-                continue;
-            }
             if msg.is_close() {
                 eprintln!("[feishu:{instance_id}] WebSocket closed by server");
                 return Ok(());
             }
 
-            let (event_type, event_json) = if msg.is_binary() {
+            if msg.is_binary() {
                 let frame = crate::frame::decode_frame(msg.into_data().as_slice())
                     .map_err(|e| format!("protobuf decode error: {e}"))?;
+                let hdr_type = frame.headers.get("type").map(|s| s.as_str()).unwrap_or("");
+                if hdr_type == "ping" || frame.payload_type == "ping" {
+                    // Answer the protocol-level ping with an ack, otherwise
+                    // the Feishu server considers the connection dead and
+                    // drops it mid-task.
+                    let ack = crate::frame::encode_ack_frame(frame.method);
+                    if let Err(e) = write
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(ack.into()))
+                        .await
+                    {
+                        return Err(format!("ping ack error: {e}"));
+                    }
+                    continue;
+                }
+                if hdr_type.to_lowercase() != "event" {
+                    eprintln!("[feishu:{instance_id}] non-event frame: type={hdr_type}, payload_type={}", frame.payload_type);
+                    continue;
+                }
                 let payload_bytes = frame.payload.as_deref().unwrap_or(&[]);
                 let event: serde_json::Value = serde_json::from_slice(payload_bytes)
                     .unwrap_or(serde_json::Value::Null);
-                let hdr_type = frame.headers.get("type").map(|s| s.as_str()).unwrap_or("");
-                let payload_type = frame.payload_type.as_str();
-                if hdr_type.to_lowercase() != "event" {
-                    eprintln!("[feishu:{instance_id}] non-event frame: type={hdr_type}, headers={:?}, payload_type={payload_type}", frame.headers);
-                    continue;
-                }
-                let event_type = payload_type.to_string();
+                let event_type = frame.payload_type.to_string();
                 let event_key = if event_type.is_empty() {
                     event.get("header").and_then(|h| h.get("event_type"))
                         .and_then(|v| v.as_str()).unwrap_or("").to_string()
@@ -173,7 +184,13 @@ impl FeishuAdapter {
                     event_type
                 };
                 eprintln!("[feishu:{instance_id}] decoded event: type={event_key}, payload_len={}", payload_bytes.len());
-                (event_key, event)
+                let (event_type, event_json) = (event_key, event);
+                self::process_event(
+                    instance_id, agent, client, allowed, default_model, running_tasks,
+                    &counters, &counter_path, &mut seen_msg_ids, &dedup_path,
+                    &bot_open_id, &event_type, &event_json,
+                )
+                .await;
             } else if msg.is_text() {
                 let text = msg.to_text().map_err(|e| format!("WebSocket text error: {e}"))?;
                 eprintln!("[feishu:{instance_id}] received text event: {}", &text[..text.len().min(200)]);
@@ -182,165 +199,191 @@ impl FeishuAdapter {
                 let event_type = event
                     .get("header").and_then(|h| h.get("event_type"))
                     .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                (event_type, event)
-            } else {
-                continue;
-            };
-
-            // Deduplicate: skip if we've already processed this event.
-            // Feishu may deliver the same message multiple times via WebSocket.
-            let msg_id = event_json.get("event")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.get("message_id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if !msg_id.is_empty() {
-                if seen_msg_ids.contains(&msg_id.to_string()) {
-                    eprintln!("[feishu:{instance_id}] skipping duplicate event: msg_id={msg_id}");
-                    continue;
-                }
-                seen_msg_ids.push_back(msg_id.to_string());
-                if seen_msg_ids.len() > 64 {
-                    seen_msg_ids.pop_front();
-                }
-                oz_platform::save_seen_msg_ids(&dedup_path, &seen_msg_ids);
-            }
-
-            let event_type_str = event_type.as_str();
-
-            if event_type_str.contains("message.receive") {
-                let sender_id = if event_json.is_null() { "" } else {
-                    event_json.get("event")
-                        .and_then(|e| e.get("sender"))
-                        .and_then(|s| s.get("sender_id"))
-                        .and_then(|s| s.get("open_id"))
-                        .and_then(|v| v.as_str()).unwrap_or("")
-                };
-                let sender_type = if event_json.is_null() { "" } else {
-                    event_json.get("event")
-                        .and_then(|e| e.get("sender"))
-                        .and_then(|s| s.get("sender_type"))
-                        .and_then(|v| v.as_str()).unwrap_or("")
-                };
-
-                if sender_type.is_empty() || sender_type != "user" {
-                    if !sender_type.is_empty() {
-                        eprintln!("[feishu:{instance_id}] skip non-user message: sender_type={sender_type}, sender_id={sender_id}");
-                        continue;
-                    }
-                }
-
-                if !bot_open_id.is_empty() && sender_id == bot_open_id {
-                    continue;
-                }
-
-                if let Some(ref allowed) = allowed {
-                    if !allowed.is_empty()
-                        && !allowed.contains(&"*".to_string())
-                        && !allowed.contains(&sender_id.to_string())
-                    {
-                        continue;
-                    }
-                }
-
-                let message = if event_json.is_null() { None } else { event_json.get("event").and_then(|e| e.get("message")) };
-                if let Some(message) = message {
-                    let msg_type = message
-                        .get("message_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let chat_id = message
-                        .get("chat_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(sender_id);
-                    let content = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
-
-                    if msg_type == "text" {
-                        let text = serde_json::from_str::<serde_json::Value>(content)
-                            .ok()
-                            .and_then(|c| c.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
-                            .unwrap_or_default();
-
-                        let receive_id = message
-                            .get("chat_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(sender_id);
-                        let rid_type = if message.get("chat_id").is_some() {
-                            "chat_id"
-                        } else {
-                            "open_id"
-                        };
-
-                        // Each chat_id gets its own OpenZen session.
-                        // /new increments a per-chat counter to start a fresh session.
-                        let base_sid = format!("feishu:{chat_id}");
-                        let sid: Option<String> = if text.starts_with('/') {
-                            let counter = new_session_counter
-                                .entry(chat_id.to_string())
-                                .or_insert(1);
-                            let cmd_sid = if *counter > 1 {
-                                format!("{base_sid}:{counter}")
-                            } else {
-                                base_sid.clone()
-                            };
-                            let result = handle_feishu_command(
-                                agent, client, chat_id, sender_id, &text, &cmd_sid, &mut *counter, &base_sid,
-                            )
-                            .await;
-                            oz_platform::save_platform_counters(&counter_path, &new_session_counter);
-                            result
-                        } else {
-                            // Regular message: use the current session for this chat.
-                            let counter = new_session_counter.entry(chat_id.to_string()).or_insert(1);
-                            if *counter > 1 {
-                                Some(format!("{base_sid}:{counter}"))
-                            } else {
-                                Some(base_sid.clone())
-                            }
-                        };
-                        // If command handler returned None, skip agent start.
-                        let sid = match sid {
-                            Some(s) => s,
-                            None => continue,
-                        };
-
-                        let prompt = text.to_string();
-                        let model = default_model.as_deref();
-
-                        eprintln!("[feishu:{instance_id}] starting agent for session={sid}, text_len={}", text.len());
-
-                        {
-                            let mut tasks = running_tasks.lock().await;
-                            tasks.insert(sender_id.to_string(), true);
-                        }
-
-                        match agent.send_message(&sid, &prompt, "feishu", model).await {
-                            Ok(event_rx) => {
-                                stream_to_feishu_card(
-                                    agent, client, event_rx,
-                                    receive_id, rid_type, sender_id,
-                                    running_tasks,
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                let _ = client
-                                    .send_text(receive_id, &format!("❌ {e}"), rid_type)
-                                    .await;
-                            }
-                        }
-
-                        {
-                            let mut tasks = running_tasks.lock().await;
-                            tasks.remove(sender_id);
-                        }
-                    }
-                }
+                self::process_event(
+                    instance_id, agent, client, allowed, default_model, running_tasks,
+                    &counters, &counter_path, &mut seen_msg_ids, &dedup_path,
+                    &bot_open_id, &event_type, &event,
+                )
+                .await;
             }
         }
 
         Ok(())
     }
+}
+
+/// Handle one decoded Feishu event. Only the receive path spawns work —
+/// everything here is fast (dedup/auth/command gating) so the WS read loop
+/// is never blocked by a long agent run.
+#[allow(clippy::too_many_arguments)]
+async fn process_event(
+    instance_id: &str,
+    agent: &Arc<AgentBridge>,
+    client: &Arc<FeishuClient>,
+    allowed: &Option<Vec<String>>,
+    default_model: &Option<String>,
+    running_tasks: &Arc<Mutex<std::collections::HashMap<String, bool>>>,
+    counters: &Arc<Mutex<std::collections::HashMap<String, u32>>>,
+    counter_path: &std::path::Path,
+    seen_msg_ids: &mut std::collections::VecDeque<String>,
+    dedup_path: &std::path::Path,
+    bot_open_id: &str,
+    event_type: &str,
+    event_json: &serde_json::Value,
+) {
+    // Deduplicate: skip if we've already processed this event.
+    // Feishu may deliver the same message multiple times via WebSocket.
+    let msg_id = event_json.get("event")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.get("message_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !msg_id.is_empty() {
+        if seen_msg_ids.contains(&msg_id.to_string()) {
+            eprintln!("[feishu:{instance_id}] skipping duplicate event: msg_id={msg_id}");
+            return;
+        }
+        seen_msg_ids.push_back(msg_id.to_string());
+        if seen_msg_ids.len() > 64 {
+            seen_msg_ids.pop_front();
+        }
+        oz_platform::save_seen_msg_ids(dedup_path, seen_msg_ids);
+    }
+
+    if !event_type.contains("message.receive") {
+        return;
+    }
+
+    let sender_id = if event_json.is_null() { "" } else {
+        event_json.get("event")
+            .and_then(|e| e.get("sender"))
+            .and_then(|s| s.get("sender_id"))
+            .and_then(|s| s.get("open_id"))
+            .and_then(|v| v.as_str()).unwrap_or("")
+    };
+    let sender_type = if event_json.is_null() { "" } else {
+        event_json.get("event")
+            .and_then(|e| e.get("sender"))
+            .and_then(|s| s.get("sender_type"))
+            .and_then(|v| v.as_str()).unwrap_or("")
+    };
+
+    if sender_type.is_empty() || sender_type != "user" {
+        if !sender_type.is_empty() {
+            eprintln!("[feishu:{instance_id}] skip non-user message: sender_type={sender_type}, sender_id={sender_id}");
+            return;
+        }
+    }
+
+    if !bot_open_id.is_empty() && sender_id == bot_open_id {
+        return;
+    }
+
+    if let Some(ref allowed) = allowed {
+        if !allowed.is_empty()
+            && !allowed.contains(&"*".to_string())
+            && !allowed.contains(&sender_id.to_string())
+        {
+            return;
+        }
+    }
+
+    let message = if event_json.is_null() { None } else { event_json.get("event").and_then(|e| e.get("message")) };
+    let Some(message) = message else { return };
+    let msg_type = message.get("message_type").and_then(|v| v.as_str()).unwrap_or("");
+    if msg_type != "text" {
+        return;
+    }
+    let chat_id = message.get("chat_id").and_then(|v| v.as_str()).unwrap_or(sender_id);
+    let content = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let text = serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|c| c.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    let receive_id = message
+        .get("chat_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or(sender_id);
+    let rid_type = if message.get("chat_id").is_some() {
+        "chat_id"
+    } else {
+        "open_id"
+    };
+
+    // Each chat_id gets its own OpenZen session.
+    // /new increments a per-chat counter to start a fresh session.
+    let base_sid = format!("feishu:{chat_id}");
+
+    // Commands are handled before the running-task gate so /stop and
+    // /status stay usable while an agent run is in flight.
+    let result: Option<String> = if text.starts_with('/') {
+        let mut c = counters.lock().await;
+        let counter = c.entry(chat_id.to_string()).or_insert(1);
+        let cmd_sid = if *counter > 1 {
+            format!("{base_sid}:{counter}")
+        } else {
+            base_sid.clone()
+        };
+        let r = handle_feishu_command(
+            agent, client, chat_id, sender_id, &text, &cmd_sid, &mut *counter, &base_sid,
+        )
+        .await;
+        oz_platform::save_platform_counters(counter_path, &c);
+        r
+    } else {
+        let counter = {
+            let mut c = counters.lock().await;
+            *c.entry(chat_id.to_string()).or_insert(1)
+        };
+        if counter > 1 {
+            Some(format!("{base_sid}:{counter}"))
+        } else {
+            Some(base_sid.clone())
+        }
+    };
+    // If a command handler returned None, skip agent start.
+    let Some(sid) = result else { return };
+
+    {
+        let mut tasks = running_tasks.lock().await;
+        if tasks.contains_key(chat_id) {
+            let _ = client.send_text(receive_id, "⏳ 上一个任务进行中，请稍候…", rid_type).await;
+            return;
+        }
+        // Mark running so a second message from this chat during the run
+        // gets the busy reply instead of queueing behind it.
+        tasks.insert(chat_id.to_string(), true);
+    }
+
+    let prompt = text.to_string();
+    let model = default_model.clone();
+
+    eprintln!("[feishu:{instance_id}] starting agent for session={sid}, text_len={}", prompt.len());
+
+    let agent2 = agent.clone();
+    let client2 = client.clone();
+    let sid2 = sid.clone();
+    let running2 = running_tasks.clone();
+    let rid = receive_id.to_string();
+    let rtype = rid_type.to_string();
+    let chat_id2 = chat_id.to_string();
+
+    tokio::spawn(async move {
+        match agent2.send_message(&sid2, &prompt, "feishu", model.as_deref()).await {
+            Ok(event_rx) => {
+                stream_to_feishu_card(
+                    &agent2, client2.as_ref(), event_rx,
+                    &rid, &rtype, &chat_id2, &running2,
+                )
+                .await;
+            }
+            Err(e) => {
+                let _ = client2.send_text(&rid, &format!("❌ {e}"), &rtype).await;
+            }
+        }
+        running2.lock().await.remove(&chat_id2);
+    });
 }
 
 async fn stream_to_feishu_card(
