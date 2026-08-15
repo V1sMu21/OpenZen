@@ -21,7 +21,7 @@ use crate::AppState;
 
 /// Register the `ozfile` URI scheme handler on the app builder.
 pub fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
-    builder.register_uri_scheme_protocol("ozfile", |ctx, request| handle_request(ctx, request))
+    builder.register_uri_scheme_protocol("ozfile", handle_request)
 }
 
 fn handle_request(
