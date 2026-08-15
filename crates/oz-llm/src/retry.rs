@@ -40,7 +40,9 @@ where
     Err(LlmError::MaxRetriesExceeded("All retry attempts failed".into()))
 }
 
-fn compute_delay(attempt: usize, timeout: Option<u64>) -> f64 {
+/// Backoff delay for retry `attempt` (0-based): 1.5s × 2^attempt, capped at
+/// 30s (or the configured request timeout, whichever is lower).
+pub fn compute_delay(attempt: usize, timeout: Option<u64>) -> f64 {
     let delay = 1.5 * (2u64.pow(attempt as u32) as f64);
     // Cap backoff at the configured request timeout (default 30s) so a
     // retry never waits longer than a full request may take.

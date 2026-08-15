@@ -23,6 +23,21 @@ fn next_block_id(prefix: &str) -> String {
     format!("{prefix}{n}")
 }
 
+/// Sleep for the exponential backoff delay of a failed LLM attempt,
+/// aborting early when the stop signal fires (stop must stay responsive).
+/// `consecutive` is the 1-based consecutive-error count.
+async fn backoff_or_stop(stop_signal: &AtomicBool, consecutive: u32) {
+    let delay = oz_llm::retry::compute_delay(consecutive.saturating_sub(1) as usize, None);
+    let mut waited = 0.0_f64;
+    while waited < delay {
+        if stop_signal.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waited += 0.1;
+    }
+}
+
 /// Transition the agent FSM state and log the change.
 fn transition_state(handler: &mut dyn Handler, to: AgentState, reason: &str) {
     let from = handler.working_mut().current_state.clone();
@@ -860,22 +875,6 @@ where
                             _ = &mut stream_timeout => {
                                 tracing::warn!("LLM stream timed out after {}s", timeout_secs);
                                 save_stop_checkpoint(turn, "llm_timeout", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos);
-                                consecutive_llm_errors += 1;
-                                if consecutive_llm_errors > max_llm_error_retries {
-                                    transition_state(handler, AgentState::Done("llm_timeout".into()), "LLM stream timeout");
-                                    return LoopOutcome {
-                                        turn,
-                                        exit_reason: "llm_timeout".into(),
-                                        data: Some(serde_json::json!({
-                                            "full_response": full_response.clone(),
-                                            "input_tokens_est": total_input_tokens,
-                                            "output_tokens_est": total_output_tokens,
-                                            "context_tokens_est": last_turn_input_tokens,
-                                            "error": format!("LLM stream timed out after {}s ({} consecutive)", timeout_secs, consecutive_llm_errors),
-                                        })),
-                                    };
-                                }
-                                agent_log(&format!("LLM stream timeout (attempt {consecutive_llm_errors}/{max_llm_error_retries}), retrying turn {turn}"));
                                 break Err(oz_core_types::LlmError::StreamError(format!(
                                     "stream timed out after {timeout_secs}s"
                                 )));
@@ -884,21 +883,35 @@ where
                         }
                     };
                     match attempt_result {
-                        Ok(resp) => break Ok(resp),
+                        Ok(resp) => {
+                            // Transport recovered — reset so one bad stretch
+                            // mid-task can't kill a long 7x24 run later.
+                            consecutive_llm_errors = 0;
+                            break Ok(resp);
+                        }
                         Err(e) => {
                             tracing::error!("LLM stream chat error: {e}");
                             consecutive_llm_errors += 1;
+                            let is_timeout = matches!(
+                                &e,
+                                oz_core_types::LlmError::StreamError(m) if m.contains("timed out")
+                            );
                             if consecutive_llm_errors > max_llm_error_retries {
-                                transition_state(handler, AgentState::Done("llm_error".into()), "LLM stream error");
+                                let exit_reason = if is_timeout { "llm_timeout" } else { "llm_error" };
+                                transition_state(handler, AgentState::Done(exit_reason.into()), "LLM stream error");
                                 return LoopOutcome {
                                     turn,
-                                    exit_reason: "llm_error".into(),
+                                    exit_reason: exit_reason.into(),
                                     data: Some(serde_json::json!({
                                         "error": format!("{e} ({} consecutive)", consecutive_llm_errors),
                                     })),
                                 };
                             }
-                            agent_log(&format!("LLM stream error (attempt {consecutive_llm_errors}/{max_llm_error_retries}), retrying turn {turn}: {e}"));
+                            agent_log(&format!(
+                                "LLM stream {} (attempt {consecutive_llm_errors}/{max_llm_error_retries}), retrying turn {turn}: {e}",
+                                if is_timeout { "timeout" } else { "error" }
+                            ));
+                            backoff_or_stop(stop_signal, consecutive_llm_errors).await;
                         }
                     }
                 };
