@@ -784,6 +784,8 @@ impl Drop for AgentSessionGuard {
         }
         lock_poison_guard(&self.state.detached_agents).remove(&self.session_id);
         lock_poison_guard(&self.state.intervention_queues).remove(&self.session_id);
+        lock_poison_guard(&self.state.stop_signals).remove(&self.session_id);
+        lock_poison_guard(&self.state.ask_user_rxs).remove(&self.session_id);
     }
 }
 
@@ -947,25 +949,29 @@ pub async fn regenerate(
     let sid = session_id.clone();
 
     let handle = tokio::spawn(async move {
+        // RAII cleanup — runs even if run_agent_for_session panics.
+        let _cleanup = AgentSessionGuard {
+            state: state_clone.clone(),
+            session_id: sid.clone(),
+        };
         if let Err(e) =
             runner::run_agent_for_session(&app_clone, &state_clone, &sid, None, false).await
         {
             debug_log(&format!("regenerate agent error: {e}"));
+            {
+                let mut store = lock_poison_guard(&state_clone.sessions);
+                if let Some(s) = store.get_mut(&sid) {
+                    if s.status == SessionStatus::Running {
+                        s.status = SessionStatus::Idle;
+                    }
+                }
+                store.save();
+            }
             let _ = app_clone.emit(
                 "sse_event",
                 serde_json::to_value(SseEvent::error(&sid, &e.to_string())).unwrap_or_default(),
             );
         }
-        let my_id = tokio::task::try_id();
-        {
-            let mut agents = lock_poison_guard(&state_clone.running_agents);
-            if let Some(h) = agents.get(&sid) {
-                if Some(h.id()) == my_id {
-                    agents.remove(&sid);
-                }
-            }
-        }
-        lock_poison_guard(&state_clone.detached_agents).remove(&sid);
     });
 
     lock_poison_guard(&state.running_agents).insert(session_id, handle);
@@ -1033,6 +1039,11 @@ pub async fn resume_session(
     let sid = session_id.clone();
 
     let handle = tokio::spawn(async move {
+        // RAII cleanup — runs even if run_agent_for_session panics.
+        let _cleanup = AgentSessionGuard {
+            state: state_clone.clone(),
+            session_id: sid.clone(),
+        };
         if let Err(e) = runner::run_agent_for_session(
             &app_clone,
             &state_clone,
@@ -1043,21 +1054,20 @@ pub async fn resume_session(
         .await
         {
             debug_log(&format!("resume_agent error: {e}"));
+            {
+                let mut store = lock_poison_guard(&state_clone.sessions);
+                if let Some(s) = store.get_mut(&sid) {
+                    if s.status == SessionStatus::Running {
+                        s.status = SessionStatus::Idle;
+                    }
+                }
+                store.save();
+            }
             let _ = app_clone.emit(
                 "sse_event",
                 serde_json::to_value(SseEvent::error(&sid, &e.to_string())).unwrap_or_default(),
             );
         }
-        let my_id = tokio::task::try_id();
-        {
-            let mut agents = lock_poison_guard(&state_clone.running_agents);
-            if let Some(h) = agents.get(&sid) {
-                if Some(h.id()) == my_id {
-                    agents.remove(&sid);
-                }
-            }
-        }
-        lock_poison_guard(&state_clone.detached_agents).remove(&sid);
     });
 
     lock_poison_guard(&state.running_agents).insert(session_id.clone(), handle);

@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use oz_core::handler::LoopConfig;
+use futures::FutureExt;
+use oz_core::handler::{LoopConfig, LoopOutcome};
 use oz_core_types::StreamEvent;
 use oz_server::webui::sessions::{SessionStatus, SessionStore};
 use tokio::sync::mpsc;
@@ -189,9 +190,12 @@ impl AgentBridge {
         let message_owned = message.to_string();
         let stop_signals_clone = self.stop_signals.clone();
         let sessions_clone = self.sessions.clone();
+        let ask_user_rxs_clone = self.ask_user_rxs.clone();
 
         let handle = tokio::spawn(async move {
-            let outcome = oz_core::agent_loop::run_agent_loop(
+            // A panic inside the agent loop must not skip the cleanup
+            // below — the platform session would stay "Running" forever.
+            let outcome = std::panic::AssertUnwindSafe(oz_core::agent_loop::run_agent_loop(
                 &mut client,
                 system_prompt,
                 message_owned,
@@ -201,8 +205,17 @@ impl AgentBridge {
                 &ctx,
                 &loop_config,
                 &stop_signal,
-            )
-            .await;
+            ))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                eprintln!("[platform] agent loop panicked for session {session_id_owned}");
+                LoopOutcome {
+                    turn: 0,
+                    exit_reason: "agent_loop_panicked".into(),
+                    data: None,
+                }
+            });
 
             eprintln!(
                 "[platform] agent loop finished: exit_reason={}, turn={}",
@@ -220,6 +233,7 @@ impl AgentBridge {
             }
 
             lock(&stop_signals_clone).remove(&session_id_owned);
+            lock(&ask_user_rxs_clone).remove(&session_id_owned);
 
             let mut store = lock(&sessions_clone);
             if let Some(s) = store.get_mut(&session_id_owned) {
