@@ -86,9 +86,7 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
                         ContentBlock::Text { text, .. } => {
                             text_parts.push(serde_json::json!({"type": "text", "text": text}));
                         }
-                        ContentBlock::ImageUrl {
-                            url, media_type: _, ..
-                        } => {
+                        ContentBlock::ImageUrl { url, .. } => {
                             text_parts.push(serde_json::json!({
                                 "type": "image_url",
                                 "image_url": {"url": url, "detail": "auto"}

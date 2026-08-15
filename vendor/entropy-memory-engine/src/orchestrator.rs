@@ -500,7 +500,7 @@ mod tests {
         let orch = MemoryOrchestrator::new(store_arc, resolver, quarantine)
             .with_idle_cycle(make_rambling_engine());
 
-        let first = orch.run_idle_cycle();
+        let _ = orch.run_idle_cycle();
         let first_promoted: HashSet<u64> = orch.promoted_conjectures.read().unwrap().clone();
         // Re-running the cycle must not re-promote already-promoted conjecture
         // ids: the promoted set only grows, and its growth equals the number
