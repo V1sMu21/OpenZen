@@ -687,14 +687,32 @@ impl CompressionService {
                 }
             };
             tokio::pin!(summary_fut);
+            // The Sender is shared through a mutex so the closed-watcher
+            // below can poll is_closed() without conflicting with the
+            // by-value send in the other select branch.
+            let tx_shared = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+            let tx_watch = std::sync::Arc::clone(&tx_shared);
             tokio::select! {
                 summary = &mut summary_fut => {
-                    let _ = tx.send(summary);
+                    if let Some(tx) = lock_sender_tx(&tx_shared).take() {
+                        let _ = tx.send(summary);
+                    }
                 }
                 // The run finished without collecting the result: cancel
                 // the summary instead of burning LLM capacity on a result
                 // nobody will read.
-                _ = tx.closed() => {}
+                _ = async move {
+                    loop {
+                        let closed = lock_sender_tx(&tx_watch)
+                            .as_ref()
+                            .map(|t| t.is_closed())
+                            .unwrap_or(true);
+                        if closed {
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                } => {}
             }
         });
 
@@ -738,6 +756,12 @@ fn split_into_chunks(text: &str, max_chunk: usize) -> Vec<String> {
         chunks.push(current);
     }
     chunks
+}
+
+fn lock_sender_tx(
+    m: &std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>,
+) -> std::sync::MutexGuard<'_, Option<tokio::sync::oneshot::Sender<String>>> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// Single LLM call: summarize `content` into a concise markdown summary.
