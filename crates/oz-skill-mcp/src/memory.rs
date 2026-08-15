@@ -33,9 +33,7 @@ impl SkillMcpMemory {
             .join(SkillMcpType::Fact.as_dir())
             .join("global_mem.txt");
         let sessions_dir = base_dir.join("sessions");
-        let auto_insight_dir = base_dir
-            .join(SkillMcpType::Insight.as_dir())
-            .join("auto");
+        let auto_insight_dir = base_dir.join(SkillMcpType::Insight.as_dir()).join("auto");
 
         // P2-7: attach the FTS5 index (fail-open — memory still works without it).
         let fts = oz_memory::MemoryFts::open(&base_dir.join("memory_fts.sqlite")).ok();
@@ -103,7 +101,11 @@ impl SkillMcpMemory {
         if line.is_empty() {
             return Ok(());
         }
-        let topic_prefix = line.split(']').next().map(|s| s.to_string()).unwrap_or_default();
+        let topic_prefix = line
+            .split(']')
+            .next()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         let week = chrono::Utc::now().format("%Y-W%V");
         let path = self.auto_insight_dir.join(format!("{week}.md"));
         let mut current = if path.exists() {
@@ -116,9 +118,7 @@ impl SkillMcpMemory {
         } else {
             topic_prefix
         };
-        let exists = current
-            .lines()
-            .any(|l| l.contains(&dedup_key));
+        let exists = current.lines().any(|l| l.contains(&dedup_key));
         if exists {
             return Ok(());
         }
@@ -244,7 +244,11 @@ impl SkillMcpMemory {
     }
 
     /// Distill discovered memory into the appropriate level.
-    pub async fn distill(&self, content: &str, category: &SkillMcpType) -> Result<(), SkillMcpError> {
+    pub async fn distill(
+        &self,
+        content: &str,
+        category: &SkillMcpType,
+    ) -> Result<(), SkillMcpError> {
         match category {
             SkillMcpType::Fact => self.append_fact(content).await,
             SkillMcpType::Insight => self.append_insight(content).await,
@@ -254,11 +258,9 @@ impl SkillMcpMemory {
                     "Use SopManager for SOPs; distill only handles Fact/Insight".into(),
                 ))
             }
-            SkillMcpType::Skill => {
-                Err(SkillMcpError::InvalidFormat(
-                    "Use SkillManager for Skills; distill only handles Fact/Insight".into(),
-                ))
-            }
+            SkillMcpType::Skill => Err(SkillMcpError::InvalidFormat(
+                "Use SkillManager for Skills; distill only handles Fact/Insight".into(),
+            )),
         }
     }
 }
@@ -350,7 +352,10 @@ mod tests {
         mem.append_fact("user_name = Erya").await.unwrap();
         mem.write_insight("key insight").await.unwrap();
 
-        let prompt = mem.build_memory_prompt(Path::new("/tmp/proj")).await.unwrap();
+        let prompt = mem
+            .build_memory_prompt(Path::new("/tmp/proj"))
+            .await
+            .unwrap();
         assert!(prompt.contains("user_name = Erya"));
         assert!(prompt.contains("key insight"));
     }
@@ -359,7 +364,9 @@ mod tests {
     async fn test_distill_fact() {
         let dir = tmp_dir();
         let mem = SkillMcpMemory::new(dir.path());
-        mem.distill("hello world", &SkillMcpType::Fact).await.unwrap();
+        mem.distill("hello world", &SkillMcpType::Fact)
+            .await
+            .unwrap();
         let facts = mem.read_facts().await.unwrap();
         assert!(facts.contains("hello world"));
     }
@@ -376,9 +383,15 @@ mod tests {
     async fn test_append_auto_insight_dedup() {
         let dir = tmp_dir();
         let mem = SkillMcpMemory::new(dir.path());
-        mem.append_auto_insight("retry with backoff on 429").await.unwrap();
-        mem.append_auto_insight("retry with backoff on 429").await.unwrap();
-        mem.append_auto_insight("use CGEvent for WKWebView typing").await.unwrap();
+        mem.append_auto_insight("retry with backoff on 429")
+            .await
+            .unwrap();
+        mem.append_auto_insight("retry with backoff on 429")
+            .await
+            .unwrap();
+        mem.append_auto_insight("use CGEvent for WKWebView typing")
+            .await
+            .unwrap();
 
         let recent = mem.read_recent_auto_insights(7).await.unwrap();
         assert_eq!(recent.matches("retry with backoff on 429").count(), 1);

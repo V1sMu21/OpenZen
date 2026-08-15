@@ -145,8 +145,7 @@ impl AutoFetchModule {
             .clone()
             .unwrap_or_else(|| format!("{}.txt", source.name));
         let output_path = self.output_dir.join(&filename);
-        std::fs::write(&output_path, &body)
-            .map_err(|e| format!("Write error: {e}"))?;
+        std::fs::write(&output_path, &body).map_err(|e| format!("Write error: {e}"))?;
 
         let bytes = body.len();
         let summary = format!(

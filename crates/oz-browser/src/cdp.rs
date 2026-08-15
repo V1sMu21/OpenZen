@@ -8,8 +8,8 @@ use oz_core_types::ToolError;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WriteHalf = futures_util::stream::SplitSink<WsStream, Message>;
@@ -66,16 +66,25 @@ impl CdpClient {
     pub async fn launch(chrome_path: &str, port: u16) -> Result<Self, ToolError> {
         let actual_port = if port == 0 { 0 } else { port };
         let mut cmd = Command::new(chrome_path);
-        cmd
-            .arg(format!("--remote-debugging-port={}", actual_port))
-            .arg("--headless").arg("--no-first-run")
-            .arg("--no-default-browser-check").arg("--disable-gpu")
-            .arg("--disable-extensions").arg("--mute-audio")
-            .arg("--disable-sync").arg("--disable-translate")
-            .stdout(Stdio::null()).stderr(Stdio::null());
-        let child = cmd.spawn()
+        cmd.arg(format!("--remote-debugging-port={}", actual_port))
+            .arg("--headless")
+            .arg("--no-first-run")
+            .arg("--no-default-browser-check")
+            .arg("--disable-gpu")
+            .arg("--disable-extensions")
+            .arg("--mute-audio")
+            .arg("--disable-sync")
+            .arg("--disable-translate")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = cmd
+            .spawn()
             .map_err(|e| ToolError::Custom(format!("Failed to launch Chrome: {e}")))?;
-        let debug_port = if port == 0 { Self::find_debug_port().await? } else { port };
+        let debug_port = if port == 0 {
+            Self::find_debug_port().await?
+        } else {
+            port
+        };
         Self::wait_for_chrome(debug_port).await?;
         let ws_url = Self::get_websocket_url(debug_port).await?;
         let mut client = Self::connect_inner(&ws_url).await?;
@@ -95,7 +104,9 @@ impl CdpClient {
         let (write, mut read) = ws_stream.split();
         let write = Arc::new(Mutex::new(write));
         let inner = Arc::new(Mutex::new(CdpInner {
-            pending: HashMap::new(), next_id: 1, closed: false,
+            pending: HashMap::new(),
+            next_id: 1,
+            closed: false,
         }));
 
         let inner_clone = inner.clone();
@@ -121,10 +132,15 @@ impl CdpClient {
             }
         });
 
-        let targets = Self::send_raw(&write, &inner, None,
-            "Target.getTargets", serde_json::json!({})).await?;
-        let target_list: Vec<TargetInfo> =
-            serde_json::from_value(targets["targetInfos"].clone())
+        let targets = Self::send_raw(
+            &write,
+            &inner,
+            None,
+            "Target.getTargets",
+            serde_json::json!({}),
+        )
+        .await?;
+        let target_list: Vec<TargetInfo> = serde_json::from_value(targets["targetInfos"].clone())
             .or_else(|_| serde_json::from_value(targets.clone()))
             .unwrap_or_default();
 
@@ -132,30 +148,66 @@ impl CdpClient {
 
         let (target_id, session_id) = match page_target {
             Some(ref t) => {
-                let sess = Self::send_raw(&write, &inner, None,
-                    "Target.attachToTarget", serde_json::json!({
+                let sess = Self::send_raw(
+                    &write,
+                    &inner,
+                    None,
+                    "Target.attachToTarget",
+                    serde_json::json!({
                         "targetId": &t.id, "flatten": true
-                    })).await?;
-                (t.id.clone(), sess.get("sessionId").and_then(|v| v.as_str()).map(String::from))
+                    }),
+                )
+                .await?;
+                (
+                    t.id.clone(),
+                    sess.get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                )
             }
             None => {
-                let created = Self::send_raw(&write, &inner, None,
-                    "Target.createTarget", serde_json::json!({"url": "about:blank"})).await?;
+                let created = Self::send_raw(
+                    &write,
+                    &inner,
+                    None,
+                    "Target.createTarget",
+                    serde_json::json!({"url": "about:blank"}),
+                )
+                .await?;
                 let tid = created["targetId"].as_str().unwrap_or("").to_string();
-                let sess = Self::send_raw(&write, &inner, None,
-                    "Target.attachToTarget", serde_json::json!({
+                let sess = Self::send_raw(
+                    &write,
+                    &inner,
+                    None,
+                    "Target.attachToTarget",
+                    serde_json::json!({
                         "targetId": &tid, "flatten": true
-                    })).await?;
-                (tid, sess.get("sessionId").and_then(|v| v.as_str()).map(String::from))
+                    }),
+                )
+                .await?;
+                (
+                    tid,
+                    sess.get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                )
             }
         };
 
-        Ok(CdpClient { write, inner, chrome_process: None, target_id, session_id })
+        Ok(CdpClient {
+            write,
+            inner,
+            chrome_process: None,
+            target_id,
+            session_id,
+        })
     }
 
     pub async fn navigate(&self, url: &str) -> Result<String, ToolError> {
         self.cmd("Page.enable", serde_json::json!({})).await?;
-        let result = self.cmd("Page.navigate", serde_json::json!({"url": url})).await?;
+        let result = self
+            .cmd("Page.navigate", serde_json::json!({"url": url}))
+            .await?;
         if let Some(err) = result.get("errorText").and_then(|v| v.as_str()) {
             return Err(ToolError::Custom(format!("Navigation error: {err}")));
         }
@@ -164,21 +216,37 @@ impl CdpClient {
     }
 
     pub async fn evaluate_js(&self, expression: &str) -> Result<serde_json::Value, ToolError> {
-        let result = self.cmd("Runtime.evaluate", serde_json::json!({
-            "expression": expression, "returnByValue": true, "awaitPromise": true,
-        })).await?;
+        let result = self
+            .cmd(
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": expression, "returnByValue": true, "awaitPromise": true,
+                }),
+            )
+            .await?;
         if let Some(exception) = result.get("exceptionDetails") {
-            return Err(ToolError::Custom(format!("JS error: {}",
-                exception["text"].as_str().unwrap_or("unknown"))));
+            return Err(ToolError::Custom(format!(
+                "JS error: {}",
+                exception["text"].as_str().unwrap_or("unknown")
+            )));
         }
-        Ok(result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(serde_json::Value::Null))
+        Ok(result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     pub async fn get_outer_html(&self) -> Result<String, ToolError> {
-        let doc = self.cmd("DOM.getDocument", serde_json::json!({"depth": -1})).await?;
-        let root_id = doc["root"]["nodeId"].as_i64()
+        let doc = self
+            .cmd("DOM.getDocument", serde_json::json!({"depth": -1}))
+            .await?;
+        let root_id = doc["root"]["nodeId"]
+            .as_i64()
             .ok_or_else(|| ToolError::Custom("No root nodeId".into()))?;
-        let result = self.cmd("DOM.getOuterHTML", serde_json::json!({"nodeId": root_id})).await?;
+        let result = self
+            .cmd("DOM.getOuterHTML", serde_json::json!({"nodeId": root_id}))
+            .await?;
         Ok(result["outerHTML"].as_str().unwrap_or("").to_string())
     }
 
@@ -189,16 +257,31 @@ impl CdpClient {
 
     pub async fn capture_screenshot(&self) -> Result<String, ToolError> {
         let _ = self.cmd("Page.enable", serde_json::json!({})).await;
-        let result = self.cmd("Page.captureScreenshot", serde_json::json!({"format": "png"})).await?;
+        let result = self
+            .cmd(
+                "Page.captureScreenshot",
+                serde_json::json!({"format": "png"}),
+            )
+            .await?;
         Ok(result["data"].as_str().unwrap_or("").to_string())
     }
 
     pub async fn get_title(&self) -> Result<String, ToolError> {
-        Ok(self.evaluate_js("document.title").await?.as_str().unwrap_or("").to_string())
+        Ok(self
+            .evaluate_js("document.title")
+            .await?
+            .as_str()
+            .unwrap_or("")
+            .to_string())
     }
 
     pub async fn get_url(&self) -> Result<String, ToolError> {
-        Ok(self.evaluate_js("window.location.href").await?.as_str().unwrap_or("").to_string())
+        Ok(self
+            .evaluate_js("window.location.href")
+            .await?
+            .as_str()
+            .unwrap_or("")
+            .to_string())
     }
 
     pub async fn close(&mut self) -> Result<(), ToolError> {
@@ -213,8 +296,19 @@ impl CdpClient {
         Ok(())
     }
 
-    async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-        Self::send_raw(&self.write, &self.inner, self.session_id.as_deref(), method, params).await
+    async fn cmd(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolError> {
+        Self::send_raw(
+            &self.write,
+            &self.inner,
+            self.session_id.as_deref(),
+            method,
+            params,
+        )
+        .await
     }
 
     async fn send_raw(
@@ -248,7 +342,8 @@ impl CdpClient {
                 .await
                 .map_err(|e| ToolError::Custom(format!("CDP send error: {e}")))?;
         }
-        let result = rx.await
+        let result = rx
+            .await
             .map_err(|_| ToolError::Custom("CDP response channel closed".into()))?
             .map_err(ToolError::Custom)?;
         Ok(result)
@@ -276,7 +371,10 @@ impl CdpClient {
     async fn find_debug_port() -> Result<u16, ToolError> {
         tokio::time::sleep(Duration::from_secs(1)).await;
         for port in [9222, 9223, 9224, 9225, 9229, 9230] {
-            if TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok() {
+            if TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .is_ok()
+            {
                 return Ok(port);
             }
         }
@@ -285,12 +383,17 @@ impl CdpClient {
 
     async fn wait_for_chrome(port: u16) -> Result<(), ToolError> {
         for _ in 0..30 {
-            if TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok() {
+            if TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .is_ok()
+            {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        Err(ToolError::Custom(format!("Chrome did not start on port {port}")))
+        Err(ToolError::Custom(format!(
+            "Chrome did not start on port {port}"
+        )))
     }
 
     async fn get_websocket_url(port: u16) -> Result<String, ToolError> {
@@ -298,9 +401,12 @@ impl CdpClient {
         let resp = reqwest::get(&url_str)
             .await
             .map_err(|e| ToolError::Custom(format!("Chrome version req failed: {e}")))?;
-        let data: serde_json::Value = resp.json().await
+        let data: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| ToolError::Custom(format!("Chrome version parse failed: {e}")))?;
-        data["webSocketDebuggerUrl"].as_str()
+        data["webSocketDebuggerUrl"]
+            .as_str()
             .map(String::from)
             .ok_or_else(|| ToolError::Custom("No webSocketDebuggerUrl".into()))
     }

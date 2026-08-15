@@ -50,8 +50,8 @@ fn detect_artifact_type(path: &std::path::Path) -> String {
         "html" | "htm" => "html",
         "pdf" => "pdf",
         "xlsx" | "xls" | "csv" | "tsv" => "spreadsheet",
-        "py" | "rs" | "ts" | "js" | "go" | "svelte" | "json" | "yaml" | "yml"
-        | "toml" | "sql" | "sh" | "css" | "scss" | "txt" | "sty" | "cls" | "bib" => "code",
+        "py" | "rs" | "ts" | "js" | "go" | "svelte" | "json" | "yaml" | "yml" | "toml" | "sql"
+        | "sh" | "css" | "scss" | "txt" | "sty" | "cls" | "bib" => "code",
         "md" | "rtf" => "markdown",
         "tex" | "lt" => "latex",
         "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" => "image",
@@ -185,7 +185,10 @@ pub fn open_artifact_dialog(
         .file()
         .add_filter(
             "Documents",
-            &["md", "html", "htm", "pdf", "doc", "docx", "txt", "rtf", "ppt", "pptx", "xls", "tex"],
+            &[
+                "md", "html", "htm", "pdf", "doc", "docx", "txt", "rtf", "ppt", "pptx", "xls",
+                "tex",
+            ],
         )
         .add_filter(
             "Images",
@@ -194,7 +197,9 @@ pub fn open_artifact_dialog(
         .add_filter("Spreadsheets", &["xlsx", "xls", "csv", "tsv"])
         .add_filter(
             "Code",
-            &["py", "rs", "ts", "js", "go", "sh", "css", "scss", "sql", "txt", "svelte"],
+            &[
+                "py", "rs", "ts", "js", "go", "sh", "css", "scss", "sql", "txt", "svelte",
+            ],
         )
         .add_filter("Data", &["json", "yaml", "toml"])
         .add_filter("All files", &["*"])
@@ -205,8 +210,7 @@ pub fn open_artifact_dialog(
     let path = picked
         .into_path()
         .map_err(|e| format!("Invalid picked path: {e}"))?;
-    let canonical =
-        std::fs::canonicalize(&path).map_err(|e| format!("Cannot open file: {e}"))?;
+    let canonical = std::fs::canonicalize(&path).map_err(|e| format!("Cannot open file: {e}"))?;
     let artifact_type = detect_artifact_type(&canonical);
     let label = canonical
         .file_name()
@@ -387,11 +391,9 @@ fn is_artifact_allowed(state: &AppState, canonical: &std::path::Path) -> bool {
 /// tricks can't escape them).
 fn is_within_allowed_roots(state: &AppState, canonical: &std::path::Path) -> bool {
     let mut roots = Vec::new();
-    let mut push_root = |s: &str| {
-        match std::fs::canonicalize(s) {
-            Ok(c) => roots.push(c),
-            Err(_) => roots.push(std::path::PathBuf::from(s)),
-        }
+    let mut push_root = |s: &str| match std::fs::canonicalize(s) {
+        Ok(c) => roots.push(c),
+        Err(_) => roots.push(std::path::PathBuf::from(s)),
     };
     push_root(&state.working_dir);
     let projects = lock_poison_guard(&state.projects);
@@ -416,7 +418,9 @@ fn open_whitelisted(path: &str, state: &AppState, max_bytes: u64) -> Result<std:
         return Err("Access denied: only files opened in the side panel can be read".into());
     }
     let file = std::fs::File::open(&resolved).map_err(|e| format!("Cannot open file: {e}"))?;
-    let meta = file.metadata().map_err(|e| format!("Cannot stat file: {e}"))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("Cannot stat file: {e}"))?;
     if meta.len() > max_bytes {
         return Err(format!(
             "File too large to preview (max {} bytes)",

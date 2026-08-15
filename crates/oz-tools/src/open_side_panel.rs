@@ -57,18 +57,26 @@ impl ToolHandler for OpenSidePanelTool {
 
         if artifact_type.is_empty() || artifact_path.is_empty() {
             return Ok(ToolOutput::bad_json(
-                "open_side_panel: missing artifact_type or artifact_path"
+                "open_side_panel: missing artifact_type or artifact_path",
             ));
         }
 
         let valid_types = [
-            "html", "code", "spreadsheet", "pdf",
-            "terminal", "diff", "image", "markdown", "office",
+            "html",
+            "code",
+            "spreadsheet",
+            "pdf",
+            "terminal",
+            "diff",
+            "image",
+            "markdown",
+            "office",
         ];
         if !valid_types.contains(&artifact_type) {
             return Ok(ToolOutput::bad_json(format!(
                 "open_side_panel: unsupported artifact_type '{}'. Supported: {}",
-                artifact_type, valid_types.join(", ")
+                artifact_type,
+                valid_types.join(", ")
             )));
         }
 
@@ -91,14 +99,12 @@ impl ToolHandler for OpenSidePanelTool {
             }
         }
 
-        let label = artifact_label
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                Path::new(&resolved)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "unnamed".into())
-            });
+        let label = artifact_label.map(|s| s.to_string()).unwrap_or_else(|| {
+            Path::new(&resolved)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unnamed".into())
+        });
 
         Ok(ToolOutput {
             data: serde_json::json!({

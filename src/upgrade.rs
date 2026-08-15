@@ -96,7 +96,12 @@ fn guess_binary_path(project_dir: &Path, profile: &str) -> PathBuf {
 }
 
 /// Run a health check against a running openzen serve instance.
-pub async fn health_check(port: u16, timeout: Duration, interval: Duration, max_retries: u32) -> Result<()> {
+pub async fn health_check(
+    port: u16,
+    timeout: Duration,
+    interval: Duration,
+    max_retries: u32,
+) -> Result<()> {
     let start = tokio::time::Instant::now();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -123,7 +128,12 @@ pub async fn health_check(port: u16, timeout: Duration, interval: Duration, max_
                 tracing::warn!("Health check returned status {}", resp.status());
             }
             Err(e) => {
-                tracing::debug!("Health check attempt {}/{}: {}", attempt + 1, max_retries, e);
+                tracing::debug!(
+                    "Health check attempt {}/{}: {}",
+                    attempt + 1,
+                    max_retries,
+                    e
+                );
             }
         }
 
@@ -145,24 +155,24 @@ pub fn atomic_swap(new_binary: &Path, current_exe: &Path) -> Result<()> {
 
     // Remove any stale .prev
     if prev_path.exists() {
-        std::fs::remove_file(&prev_path)
-            .context(format!("Failed to remove stale previous binary at {:?}", prev_path))?;
+        std::fs::remove_file(&prev_path).context(format!(
+            "Failed to remove stale previous binary at {:?}",
+            prev_path
+        ))?;
     }
 
     // Rename current → .prev
-    std::fs::rename(current_exe, &prev_path)
-        .context(format!(
-            "Failed to rename current binary {:?} -> {:?}",
-            current_exe, prev_path
-        ))?;
+    std::fs::rename(current_exe, &prev_path).context(format!(
+        "Failed to rename current binary {:?} -> {:?}",
+        current_exe, prev_path
+    ))?;
 
     // Copy (or rename) new → current
     // Use copy to keep the new binary in its original location too (for reattempts)
-    std::fs::copy(new_binary, current_exe)
-        .context(format!(
-            "Failed to copy new binary {:?} -> {:?}",
-            new_binary, current_exe
-        ))?;
+    std::fs::copy(new_binary, current_exe).context(format!(
+        "Failed to copy new binary {:?} -> {:?}",
+        new_binary, current_exe
+    ))?;
 
     // Make sure current exe is executable
     #[cfg(unix)]
@@ -173,7 +183,11 @@ pub fn atomic_swap(new_binary: &Path, current_exe: &Path) -> Result<()> {
             .context("Failed to set executable permissions on new binary")?;
     }
 
-    tracing::info!("Atomic swap complete: {:?} -> {:?}", new_binary, current_exe);
+    tracing::info!(
+        "Atomic swap complete: {:?} -> {:?}",
+        new_binary,
+        current_exe
+    );
     Ok(())
 }
 
@@ -188,7 +202,10 @@ pub fn rollback(current_exe: &Path) -> Result<()> {
     };
 
     if !prev_path.exists() {
-        anyhow::bail!("No previous binary found at {:?} to roll back to", prev_path);
+        anyhow::bail!(
+            "No previous binary found at {:?} to roll back to",
+            prev_path
+        );
     }
 
     // Remove current (broken) binary
@@ -198,11 +215,10 @@ pub fn rollback(current_exe: &Path) -> Result<()> {
     }
 
     // Restore previous
-    std::fs::rename(&prev_path, current_exe)
-        .context(format!(
-            "Failed to restore previous binary {:?} -> {:?}",
-            prev_path, current_exe
-        ))?;
+    std::fs::rename(&prev_path, current_exe).context(format!(
+        "Failed to restore previous binary {:?} -> {:?}",
+        prev_path, current_exe
+    ))?;
 
     #[cfg(unix)]
     {
@@ -260,16 +276,13 @@ pub async fn perform_upgrade(config: &UpgradeConfig) -> UpgradeResult {
 
     // Step 2: Start a temporary server with the new binary on a test port
     // We use the same config as the current instance but on a different port
-    let test_port = pick_available_port(config.health_check_port).unwrap_or(config.health_check_port + 1);
+    let test_port =
+        pick_available_port(config.health_check_port).unwrap_or(config.health_check_port + 1);
 
     tracing::info!("Starting health check on port {test_port} with new binary");
 
     let mut child = match Command::new(&new_binary)
-        .args([
-            "serve",
-            "--port",
-            &test_port.to_string(),
-        ])
+        .args(["serve", "--port", &test_port.to_string()])
         .spawn()
     {
         Ok(c) => c,

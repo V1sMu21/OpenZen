@@ -11,7 +11,9 @@ pub struct SkillMcpScan {
 
 impl Default for SkillMcpScan {
     fn default() -> Self {
-        SkillMcpScan { interval_secs: 21600 } // 6 hours
+        SkillMcpScan {
+            interval_secs: 21600,
+        } // 6 hours
     }
 }
 
@@ -48,7 +50,8 @@ impl ScheduledTask for SkillMcpScan {
                 stale += 1;
                 tracing::debug!(
                     "[scheduler] low-quality skill detected: {} (quality={:.2})",
-                    skill.name, skill.quality
+                    skill.name,
+                    skill.quality
                 );
             }
         }
@@ -62,7 +65,8 @@ impl ScheduledTask for SkillMcpScan {
         if sop_count > 0 {
             let sops = store.sops.all();
             for sop in sops {
-                let updated_dt = chrono::DateTime::parse_from_rfc3339(&sop.metadata.updated_at).ok()
+                let updated_dt = chrono::DateTime::parse_from_rfc3339(&sop.metadata.updated_at)
+                    .ok()
                     .map(|d| d.with_timezone(&chrono::Utc));
                 if let Some(updated) = updated_dt {
                     if updated < threshold {

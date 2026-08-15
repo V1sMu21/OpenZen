@@ -1,12 +1,14 @@
+use crate::registry::ToolHandler;
 use async_trait::async_trait;
 use oz_core_types::{ToolContext, ToolError, ToolOutput};
-use crate::registry::ToolHandler;
 
 pub struct WebSearchTool;
 
 #[async_trait]
 impl ToolHandler for WebSearchTool {
-    fn name(&self) -> String { "web_search".to_string() }
+    fn name(&self) -> String {
+        "web_search".to_string()
+    }
     fn description(&self) -> String {
         "Search the web via Bocha (primary engine, works from mainland China, covers both domestic and international sources) with automatic Exa fallback. Returns result titles, URLs, and snippets."
             .to_string()
@@ -39,17 +41,24 @@ impl ToolHandler for WebSearchTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let query = args.get("query")
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let query = args
+            .get("query")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::Custom("missing 'query' parameter".into()))?;
 
-        let num_results = args.get("num_results")
+        let num_results = args
+            .get("num_results")
             .and_then(|v| v.as_u64())
             .unwrap_or(5)
             .min(10) as usize;
 
-        let engine = args.get("engine")
+        let engine = args
+            .get("engine")
             .and_then(|v| v.as_str())
             .unwrap_or("auto");
 
@@ -69,28 +78,26 @@ impl ToolHandler for WebSearchTool {
                     .map_err(|e| ToolError::Custom(format!("Exa search failed: {}", e)))?;
                 (r, "exa")
             }
-            _ => {
-                match read_bocha_api_key(&ctx.working_dir) {
-                    Some(key) => match search_bocha(query, num_results, &key).await {
-                        Ok(r) => (r, "bocha"),
-                        Err(bocha_err) => match search_exa(query, num_results, &ctx.working_dir) {
-                            Ok(r) => (r, "exa"),
-                            Err(exa_err) => {
-                                return Err(ToolError::Custom(format!(
-                                    "all engines failed: bocha: {}; exa: {}",
-                                    bocha_err, exa_err
-                                )))
-                            }
-                        },
+            _ => match read_bocha_api_key(&ctx.working_dir) {
+                Some(key) => match search_bocha(query, num_results, &key).await {
+                    Ok(r) => (r, "bocha"),
+                    Err(bocha_err) => match search_exa(query, num_results, &ctx.working_dir) {
+                        Ok(r) => (r, "exa"),
+                        Err(exa_err) => {
+                            return Err(ToolError::Custom(format!(
+                                "all engines failed: bocha: {}; exa: {}",
+                                bocha_err, exa_err
+                            )))
+                        }
                     },
-                    None => {
-                        let r = search_exa(query, num_results, &ctx.working_dir)
-                            .map_err(|e| ToolError::Custom(format!(
-                                "Bocha key not configured and Exa failed: {}", e)))?;
-                        (r, "exa")
-                    }
+                },
+                None => {
+                    let r = search_exa(query, num_results, &ctx.working_dir).map_err(|e| {
+                        ToolError::Custom(format!("Bocha key not configured and Exa failed: {}", e))
+                    })?;
+                    (r, "exa")
                 }
-            }
+            },
         };
 
         Ok(ToolOutput::success(serde_json::json!({
@@ -110,10 +117,7 @@ fn find_mcporter(working_dir: &str) -> Result<String, String> {
         }
     }
     // Check known install locations
-    for candidate in &[
-        "/opt/homebrew/bin/mcporter",
-        "/usr/local/bin/mcporter",
-    ] {
+    for candidate in &["/opt/homebrew/bin/mcporter", "/usr/local/bin/mcporter"] {
         if std::path::Path::new(candidate).exists() {
             return Ok(candidate.to_string());
         }
@@ -123,24 +127,32 @@ fn find_mcporter(working_dir: &str) -> Result<String, String> {
     if from_wd.exists() {
         return Ok(from_wd.to_string_lossy().to_string());
     }
-    Err("mcporter not found. Install via: brew install mcporter, or set MCPORTER_PATH env var".to_string())
+    Err(
+        "mcporter not found. Install via: brew install mcporter, or set MCPORTER_PATH env var"
+            .to_string(),
+    )
 }
 
-fn search_exa(query: &str, num_results: usize, working_dir: &str) -> Result<Vec<serde_json::Value>, String> {
+fn search_exa(
+    query: &str,
+    num_results: usize,
+    working_dir: &str,
+) -> Result<Vec<serde_json::Value>, String> {
     let mcporter = find_mcporter(working_dir)?;
 
-    let config = std::env::var("MCPORTER_CONFIG")
-        .unwrap_or_else(|_| {
-            // Try relative to working_dir first, then fall back to CWD-relative
-            let wd_config = std::path::Path::new(working_dir).join("config").join("mcporter.json");
-            if wd_config.exists() {
-                return wd_config.to_string_lossy().to_string();
-            }
-            std::env::current_dir()
-                .map(|d| d.join("config").join("mcporter.json"))
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "config/mcporter.json".to_string())
-        });
+    let config = std::env::var("MCPORTER_CONFIG").unwrap_or_else(|_| {
+        // Try relative to working_dir first, then fall back to CWD-relative
+        let wd_config = std::path::Path::new(working_dir)
+            .join("config")
+            .join("mcporter.json");
+        if wd_config.exists() {
+            return wd_config.to_string_lossy().to_string();
+        }
+        std::env::current_dir()
+            .map(|d| d.join("config").join("mcporter.json"))
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "config/mcporter.json".to_string())
+    });
 
     let expr = format!(
         "exa.web_search_exa(query: {:?}, numResults: {})",
@@ -172,7 +184,9 @@ fn search_exa(query: &str, num_results: usize, working_dir: &str) -> Result<Vec<
             results.push(serde_json::json!({"title": title, "url": url, "snippet": ""}));
             title.clear();
             url.clear();
-            if results.len() >= num_results { break; }
+            if results.len() >= num_results {
+                break;
+            }
         }
     }
     if !title.is_empty() && !url.is_empty() {
@@ -212,8 +226,14 @@ async fn search_bocha(
 
     let code = body.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
     if code != 200 {
-        let msg = body.get("msg").and_then(|m| m.as_str()).unwrap_or("unknown error");
-        return Err(format!("Bocha API error (code {}): {} (HTTP {})", code, msg, status));
+        let msg = body
+            .get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!(
+            "Bocha API error (code {}): {} (HTTP {})",
+            code, msg, status
+        ));
     }
 
     let pages = body
@@ -223,13 +243,17 @@ async fn search_bocha(
         .and_then(|v| v.as_array())
         .ok_or_else(|| "Bocha: no data.webPages.value in response".to_string())?;
 
-    let results: Vec<serde_json::Value> = pages.iter().take(num_results).map(|p| {
-        serde_json::json!({
-            "title": p.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-            "url": p.get("url").and_then(|v| v.as_str()).unwrap_or(""),
-            "snippet": p.get("snippet").and_then(|v| v.as_str()).unwrap_or(""),
+    let results: Vec<serde_json::Value> = pages
+        .iter()
+        .take(num_results)
+        .map(|p| {
+            serde_json::json!({
+                "title": p.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "url": p.get("url").and_then(|v| v.as_str()).unwrap_or(""),
+                "snippet": p.get("snippet").and_then(|v| v.as_str()).unwrap_or(""),
+            })
         })
-    }).collect();
+        .collect();
 
     if results.is_empty() {
         Err("no results parsed from Bocha output".into())
@@ -248,9 +272,13 @@ fn read_bocha_api_key(working_dir: &str) -> Option<String> {
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let candidates = [
-        std::path::PathBuf::from(&home).join(".openzen").join("mykey.toml"),
+        std::path::PathBuf::from(&home)
+            .join(".openzen")
+            .join("mykey.toml"),
         std::path::PathBuf::from(&home).join("mykey.toml"),
-        std::path::PathBuf::from(working_dir).join("config").join("mykey.toml"),
+        std::path::PathBuf::from(working_dir)
+            .join("config")
+            .join("mykey.toml"),
         std::path::PathBuf::from(working_dir).join("mykey.toml"),
     ];
 
@@ -285,7 +313,11 @@ fn extract_toml_value(content: &str, section: &str, key: &str) -> Option<String>
         }
         let v = line[eq + 1..].trim();
         if v.starts_with('"') && v.len() >= 2 && v.ends_with('"') {
-            return Some(v[1..v.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\"));
+            return Some(
+                v[1..v.len() - 1]
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\"),
+            );
         }
         if v.starts_with('\'') && v.len() >= 2 && v.ends_with('\'') {
             return Some(v[1..v.len() - 1].to_string());

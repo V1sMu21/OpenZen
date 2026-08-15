@@ -5,8 +5,8 @@
 //! 2. Builtin blocklist → always deny (handled at tool level)
 //! 3. Trust store → check (tool, pattern) → Allowed / Blocked / NeedsApproval
 
-use crate::permissions::{match_string, Decision, Permissions};
 use crate::patterns::build_pattern;
+use crate::permissions::{match_string, Decision, Permissions};
 use crate::trust::{TrustDecision, TrustStore};
 use crate::trust_level::ProjectTrustLevel;
 
@@ -82,7 +82,10 @@ impl SafetyGuard {
         // so a permissions.toml `allow` can never bypass a restricted/readonly
         // project. Deny wins over everything below.
         if self.project_trust.denied_tools().contains(&tool) {
-            return TrustDecision::Blocked(format!("blocked by project trust level ({:?})", self.project_trust));
+            return TrustDecision::Blocked(format!(
+                "blocked by project trust level ({:?})",
+                self.project_trust
+            ));
         }
 
         match self.permissions.check(tool, &match_string(tool, args)) {
@@ -105,7 +108,8 @@ impl SafetyGuard {
             TrustDecision::NeedsApproval(i) => i,
             _ => return,
         };
-        self.trust_store.record_approval(&pattern.0, &pattern.1, &info);
+        self.trust_store
+            .record_approval(&pattern.0, &pattern.1, &info);
     }
 
     pub fn record_denial(&self, tool: &str, args: &serde_json::Value) {
@@ -178,7 +182,8 @@ decision = "deny"
         );
         let guard = SafetyGuard::new(TrustStore::in_memory()).with_permissions(perms);
         let decision = guard.check("code_run", &serde_json::json!({"code": "rm -rf /tmp/x"}));
-        assert!(matches!(decision, TrustDecision::Blocked(_)));    }
+        assert!(matches!(decision, TrustDecision::Blocked(_)));
+    }
 
     #[test]
     fn test_permission_allow_skips_trust_store() {

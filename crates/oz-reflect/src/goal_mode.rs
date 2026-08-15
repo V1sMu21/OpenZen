@@ -116,7 +116,7 @@ impl ReflectModule for GoalModeModule {
 #[cfg(test)]
 mod tests {
     use super::*;
-        #[test]
+    #[test]
     fn test_goal_state_new() {
         let state = GoalState::new("test goal".into(), 60.0);
         assert_eq!(state.status, "running");

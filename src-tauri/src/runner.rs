@@ -816,7 +816,10 @@ pub async fn run_agent_for_session(
                     let (title, body) = if lang_for_collector == "zh" {
                         ("OpenZen 需要你的回答", format!("等待你的回答：{question}"))
                     } else {
-                        ("OpenZen needs you", format!("Waiting for your reply: {question}"))
+                        (
+                            "OpenZen needs you",
+                            format!("Waiting for your reply: {question}"),
+                        )
                     };
                     crate::notify_if_unfocused(&app_for_collector, title, &body);
                 }
@@ -1173,7 +1176,9 @@ mod tests {
 
     /// Minimal ERME store with the same configuration as the app
     /// (align_on_write for conflict resolution).
-    fn test_store(dir: &std::path::Path) -> std::sync::Arc<entropy_memory_engine::memory_store::MemoryStore> {
+    fn test_store(
+        dir: &std::path::Path,
+    ) -> std::sync::Arc<entropy_memory_engine::memory_store::MemoryStore> {
         use entropy_memory_engine::consolidation::ConsolidationConfig;
         use entropy_memory_engine::l1::L1Cache;
         use entropy_memory_engine::l2::{HnswConfig, L2Config, L2Engine};
@@ -1248,7 +1253,9 @@ mod tests {
         assert_eq!(first, 1);
         let second = ingest_harness_entries(&store, &harness_dir);
         assert_eq!(second, 0, "re-ingestion must skip already-present lessons");
-        let recalls = store.recall_by_text("deploy no-verify", 5).unwrap_or_default();
+        let recalls = store
+            .recall_by_text("deploy no-verify", 5)
+            .unwrap_or_default();
         assert_eq!(recalls.len(), 1, "no duplicates in the store");
         let _ = std::fs::remove_dir_all(&dir);
     }

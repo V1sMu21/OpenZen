@@ -6,12 +6,12 @@
 //! - `/api/sessions` — CRUD for chat sessions
 //! - `/` — Static file serving for the frontend
 
+pub mod approval;
 pub mod sessions;
 pub mod sse_bus;
-pub mod approval;
 
+pub use sessions::{SessionInfo, SessionStore};
 pub use sse_bus::SseBus;
-pub use sessions::{SessionStore, SessionInfo};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicBool;
@@ -21,7 +21,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use axum::{
-    Router,
     extract::State,
     http::StatusCode,
     response::{
@@ -29,6 +28,7 @@ use axum::{
         IntoResponse, Json,
     },
     routing::{get, post},
+    Router,
 };
 use futures::future::{ready, FutureExt};
 use futures::stream::Stream;
@@ -42,8 +42,8 @@ use oz_config::mykey::{MyKeyConfig, SessionType};
 use oz_core::checkpoint::InterventionEvent;
 use oz_core::checkpoint::InterventionKind;
 use oz_core::handler::LoopConfig;
-use oz_core_types::{ContentBlock, Message, Role, ToolContext};
 use oz_core_types::LlmClient;
+use oz_core_types::{ContentBlock, Message, Role, ToolContext};
 use oz_memory::MemorySystem;
 use oz_tools::handler::ToolRegistryHandler;
 use oz_tools::registry::ToolRegistry;
@@ -89,7 +89,12 @@ impl AppState {
         Self::with_auth(config_path, assets_dir, working_dir, "".into())
     }
 
-    pub fn with_auth(config_path: String, assets_dir: String, working_dir: String, auth_token: String) -> Self {
+    pub fn with_auth(
+        config_path: String,
+        assets_dir: String,
+        working_dir: String,
+        auth_token: String,
+    ) -> Self {
         let sessions_path = std::path::Path::new(&working_dir).join("openzen/sessions.json");
         let sse = SseBus::new(10_000);
         AppState {
@@ -148,7 +153,12 @@ pub async fn serve_webui(
     if !was_provided {
         tracing::info!("Generated random auth token: {}", token);
     }
-    let state = Arc::new(AppState::with_auth(config_path, assets_dir, working_dir, token));
+    let state = Arc::new(AppState::with_auth(
+        config_path,
+        assets_dir,
+        working_dir,
+        token,
+    ));
 
     // Determine where to find frontend static files
     let static_dir = match frontend_dir {
@@ -167,21 +177,38 @@ pub async fn serve_webui(
         .route("/api/chat", post(handle_chat))
         .route("/api/events", get(handle_sse))
         .route("/api/sessions", get(list_sessions).post(create_session))
-        .route("/api/sessions/:id", get(get_session).delete(delete_session).patch(rename_session))
+        .route(
+            "/api/sessions/:id",
+            get(get_session)
+                .delete(delete_session)
+                .patch(rename_session),
+        )
         .route("/api/sessions/:id/stop", post(stop_session))
-.route("/api/sessions/:id/regenerate", post(handle_regenerate))
-.route("/api/sessions/:id/compress", post(handle_compress))
-.route("/api/sessions/:id/intervene", post(handle_intervene))
-        .route("/api/sessions/:id/ask_user_response", post(handle_ask_user_response))
-        .route("/api/sessions/:id/checkpoints", get(list_session_checkpoints_handler))
+        .route("/api/sessions/:id/regenerate", post(handle_regenerate))
+        .route("/api/sessions/:id/compress", post(handle_compress))
+        .route("/api/sessions/:id/intervene", post(handle_intervene))
+        .route(
+            "/api/sessions/:id/ask_user_response",
+            post(handle_ask_user_response),
+        )
+        .route(
+            "/api/sessions/:id/checkpoints",
+            get(list_session_checkpoints_handler),
+        )
         .route("/api/sessions/:id/resume", post(resume_session_handler))
-        .route("/api/sessions/:id/approve", post(crate::webui::approval::handle_approve))
+        .route(
+            "/api/sessions/:id/approve",
+            post(crate::webui::approval::handle_approve),
+        )
         .route("/api/checkpoints", get(list_all_checkpoints_handler))
         .route("/api/upgrade", post(handle_upgrade))
         .route("/api/models", get(list_models))
         .route("/api/agents", get(list_agents))
         .route("/api/health", get(health_check))
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         // Static file serving for frontend — NOT behind auth
         .nest_service("/", ServeDir::new(&static_dir))
         .with_state(state);
@@ -192,9 +219,7 @@ pub async fn serve_webui(
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .context(format!("Failed to bind to {addr}"))?;
-    axum::serve(listener, app)
-        .tcp_nodelay(true)
-        .await?;
+    axum::serve(listener, app).tcp_nodelay(true).await?;
 
     Ok(())
 }
@@ -251,16 +276,14 @@ fn default_session_id() -> String {
 /// (Bug #1). With a summary, the LLM knows the previous task is
 /// complete but isn't given the tool_use ↔ tool_result structure that
 /// would re-trigger execution.
-fn reconstruct_assistant_turn(
-    json_msg: &serde_json::Value,
-    summary_only: bool,
-) -> Vec<Message> {
+fn reconstruct_assistant_turn(json_msg: &serde_json::Value, summary_only: bool) -> Vec<Message> {
     let Some(events) = json_msg.get("streamEvents").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
 
     let mut text_acc: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut reasoning_acc: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut reasoning_acc: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut tool_use: std::collections::HashMap<String, (String, serde_json::Value)> =
         std::collections::HashMap::new();
     let mut tool_use_emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -319,7 +342,11 @@ fn reconstruct_assistant_turn(
             }
             "tool_input_start" => {
                 if let Some(tc_id) = ev.get("tool_call_id").and_then(|v| v.as_str()) {
-                    let name = ev.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = ev
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     tool_use
                         .entry(tc_id.to_string())
                         .or_insert_with(|| (name.clone(), serde_json::Value::Null));
@@ -331,9 +358,9 @@ fn reconstruct_assistant_turn(
             "tool_input_delta" => {
                 if let Some(tc_id) = ev.get("tool_call_id").and_then(|v| v.as_str()) {
                     let delta = ev.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-                    let entry = tool_use
-                        .entry(tc_id.to_string())
-                        .or_insert_with(|| (String::new(), serde_json::Value::String(String::new())));
+                    let entry = tool_use.entry(tc_id.to_string()).or_insert_with(|| {
+                        (String::new(), serde_json::Value::String(String::new()))
+                    });
                     if entry.1.is_string() {
                         if let Some(s) = entry.1.as_str() {
                             entry.1 = serde_json::Value::String(format!("{s}{delta}"));
@@ -343,11 +370,12 @@ fn reconstruct_assistant_turn(
             }
             "tool_input_available" => {
                 if let Some(tc_id) = ev.get("tool_call_id").and_then(|v| v.as_str()) {
-                    let name = ev.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let raw_args = ev
-                        .get("args")
+                    let name = ev
+                        .get("name")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                        .unwrap_or("")
+                        .to_string();
+                    let raw_args = ev.get("args").and_then(|v| v.as_str()).unwrap_or("");
                     let args_value: serde_json::Value = serde_json::from_str(raw_args)
                         .unwrap_or_else(|_| serde_json::Value::String(raw_args.to_string()));
                     tool_use.insert(tc_id.to_string(), (name, args_value));
@@ -410,11 +438,7 @@ fn reconstruct_assistant_turn(
             if summary_only {
                 continue;
             }
-            assistant_blocks.push(ContentBlock::tool_use(
-                tc_id,
-                name.clone(),
-                args.clone(),
-            ));
+            assistant_blocks.push(ContentBlock::tool_use(tc_id, name.clone(), args.clone()));
         }
     }
 
@@ -650,7 +674,9 @@ async fn handle_chat(
         // Outer Result: panic caught by `catch_unwind`
         Err(panic_err) => {
             tracing::error!("Agent loop for session {session_id} panicked: {panic_err}");
-            let _ = state.sse_bus.send(SseEvent::error(&session_id, &panic_err.to_string()));
+            let _ = state
+                .sse_bus
+                .send(SseEvent::error(&session_id, &panic_err.to_string()));
             Ok(Json(ChatResponse {
                 session_id,
                 status: "error".to_string(),
@@ -667,7 +693,9 @@ async fn handle_chat(
         })),
         Ok(Err(e)) => {
             tracing::error!("Agent loop for session {session_id} failed: {e}");
-            let _ = state.sse_bus.send(SseEvent::error(&session_id, &e.to_string()));
+            let _ = state
+                .sse_bus
+                .send(SseEvent::error(&session_id, &e.to_string()));
             Ok(Json(ChatResponse {
                 session_id,
                 status: "error".to_string(),
@@ -692,7 +720,11 @@ async fn run_agent_for_session(
     model_name: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     let lang = std::env::var("OZ_LANG").unwrap_or_default();
-    let sys_prompt_filename = if lang == "en" { "sys_prompt_en.txt" } else { "sys_prompt.txt" };
+    let sys_prompt_filename = if lang == "en" {
+        "sys_prompt_en.txt"
+    } else {
+        "sys_prompt.txt"
+    };
 
     let ctx = ToolContext {
         working_dir: working_dir.to_string(),
@@ -706,14 +738,15 @@ async fn run_agent_for_session(
 
     // Load config
     let cfg_path = std::path::PathBuf::from(config_path);
-    let cfg = MyKeyConfig::from_file(&cfg_path)
-        .map_err(|e| anyhow::anyhow!("Config error: {e}"))?;
+    let cfg =
+        MyKeyConfig::from_file(&cfg_path).map_err(|e| anyhow::anyhow!("Config error: {e}"))?;
 
     // Use default session, or the one specified by model_name
     let session_name = model_name
         .or(cfg.default_session.as_deref())
         .unwrap_or("claude_sonnet");
-    let sess_config = cfg.get(session_name)
+    let sess_config = cfg
+        .get(session_name)
         .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found in config"))?;
     let sess_type = cfg.session_type(session_name);
 
@@ -736,7 +769,9 @@ async fn run_agent_for_session(
     let backend: Box<dyn oz_llm::Session> = match sess_type {
         SessionType::Claude => Box::new(oz_llm::ClaudeSession::new(sess_config.clone())),
         SessionType::Oai => Box::new(oz_llm::OaiSession::new(sess_config.clone())),
-        SessionType::NativeClaude => Box::new(oz_llm::NativeClaudeSession::new(sess_config.clone())),
+        SessionType::NativeClaude => {
+            Box::new(oz_llm::NativeClaudeSession::new(sess_config.clone()))
+        }
         SessionType::NativeOai => Box::new(oz_llm::NativeOAISession::new(sess_config.clone())),
         SessionType::Mixin => {
             anyhow::bail!("Mixin session not supported in WebUI");
@@ -757,7 +792,9 @@ async fn run_agent_for_session(
         if let Err(e) = discovery.load() {
             tracing::warn!("[mcp] failed to load servers.toml: {e}");
         } else {
-            let manager = std::sync::Arc::new(tokio::sync::Mutex::new(oz_mcp::McpManager::from_discovery(&discovery)));
+            let manager = std::sync::Arc::new(tokio::sync::Mutex::new(
+                oz_mcp::McpManager::from_discovery(&discovery),
+            ));
             match manager.lock().await.start_all().await {
                 Ok(n) => tracing::info!("[mcp] started {n} MCP server(s)"),
                 Err(e) => tracing::warn!("[mcp] start_all failed: {e}"),
@@ -825,10 +862,13 @@ async fn run_agent_for_session(
     let trust_store = oz_safety::TrustStore::new(Some(trust_path));
     let safety_guard = std::sync::Arc::new(oz_safety::SafetyGuard::new(trust_store));
     loop_config.safety_guard = Some(safety_guard.clone());
-    loop_config.approval_handler = Some(std::sync::Arc::new(state.approval_handler.clone()) as std::sync::Arc<dyn oz_safety::ApprovalHandler>);
+    loop_config.approval_handler = Some(std::sync::Arc::new(state.approval_handler.clone())
+        as std::sync::Arc<dyn oz_safety::ApprovalHandler>);
 
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<oz_core_types::StreamEvent>();
-    let collected_events: Arc<Mutex<Vec<oz_core_types::StreamEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<oz_core_types::StreamEvent>();
+    let collected_events: Arc<Mutex<Vec<oz_core_types::StreamEvent>>> =
+        Arc::new(Mutex::new(Vec::new()));
     let event_arrival_ms: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
     let start_ms: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
 
@@ -876,7 +916,8 @@ async fn run_agent_for_session(
     // Wire intervention channel for this session
     {
         let mut interventions = state.interventions.lock().unwrap();
-        let queue = interventions.entry(session_id.to_string())
+        let queue = interventions
+            .entry(session_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())));
         loop_config.intervention_rx = Some(queue.clone());
     }
@@ -886,7 +927,8 @@ async fn run_agent_for_session(
     // satisfy the next ask_user.
     {
         let mut ask_rxs = state.ask_user_rxs.lock().unwrap();
-        let slot = ask_rxs.entry(session_id.to_string())
+        let slot = ask_rxs
+            .entry(session_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(None)));
         *slot.lock().unwrap() = None;
         loop_config.ask_user_rx = Some(slot.clone());
@@ -916,12 +958,19 @@ async fn run_agent_for_session(
             // tool_result blocks. Tool_result MUST live in a user
             // message — that's the protocol both Anthropic and OpenAI
             // require, and was the root cause of the re-execution bug.
-            let history = if msg_count > 1 { &s.messages[..msg_count - 1] } else { &[] };
+            let history = if msg_count > 1 {
+                &s.messages[..msg_count - 1]
+            } else {
+                &[]
+            };
             for json_msg in history {
                 let role_str = json_msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 match role_str {
                     "user" => {
-                        let content = json_msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        let content = json_msg
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         msgs.push(Message {
                             role: Role::User,
                             content: vec![ContentBlock::text(content)],
@@ -938,9 +987,15 @@ async fn run_agent_for_session(
                             // instead of emitting the tool_use / tool_result
                             // pairs, to avoid the re-execution bug.
                             let mut tool_names: Vec<String> = Vec::new();
-                            if let Some(tool_calls) = json_msg.get("toolCalls").and_then(|v| v.as_array()) {
+                            if let Some(tool_calls) =
+                                json_msg.get("toolCalls").and_then(|v| v.as_array())
+                            {
                                 for tc in tool_calls {
-                                    let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let name = tc
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
                                     if !tool_names.contains(&name) {
                                         tool_names.push(name);
                                     }
@@ -990,7 +1045,9 @@ async fn run_agent_for_session(
         if let Some(sess) = sessions.get(session_id) {
             let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             for m in &sess.messages {
-                if m.get("role").and_then(|v| v.as_str()) != Some("assistant") { continue; }
+                if m.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+                    continue;
+                }
                 // Walk both the saved streamEvents and the legacy toolCalls
                 // list so the rule applies even for sessions saved before
                 // streamEvents existed.
@@ -998,7 +1055,9 @@ async fn run_agent_for_session(
                     for ev in events {
                         if ev.get("type").and_then(|v| v.as_str()) == Some("tool_input_available") {
                             if let Some(n) = ev.get("name").and_then(|v| v.as_str()) {
-                                if n != "respond" { used.insert(n.to_string()); }
+                                if n != "respond" {
+                                    used.insert(n.to_string());
+                                }
                             }
                         }
                     }
@@ -1006,7 +1065,9 @@ async fn run_agent_for_session(
                 if let Some(tcs) = m.get("toolCalls").and_then(|v| v.as_array()) {
                     for tc in tcs {
                         if let Some(n) = tc.get("name").and_then(|v| v.as_str()) {
-                            if n != "respond" { used.insert(n.to_string()); }
+                            if n != "respond" {
+                                used.insert(n.to_string());
+                            }
                         }
                     }
                 }
@@ -1048,11 +1109,15 @@ async fn run_agent_for_session(
 
     loop_config.event_tx = None;
 
-    if let Some(ref err_msg) = outcome.data.as_ref()
+    if let Some(ref err_msg) = outcome
+        .data
+        .as_ref()
         .and_then(|d| d.get("error"))
         .and_then(|v| v.as_str())
     {
-        let _ = event_tx_for_after.send(oz_core_types::StreamEvent::Error { message: err_msg.to_string() });
+        let _ = event_tx_for_after.send(oz_core_types::StreamEvent::Error {
+            message: err_msg.to_string(),
+        });
     } else {
         let _ = event_tx_for_after.send(oz_core_types::StreamEvent::FinishMessage {
             stop_reason: outcome.exit_reason.clone(),
@@ -1063,20 +1128,28 @@ async fn run_agent_for_session(
 
     let _ = collector_handle.await;
 
-    let full_response = outcome.data.as_ref()
+    let full_response = outcome
+        .data
+        .as_ref()
         .and_then(|d| d.get("full_response"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let tokens_in: usize = outcome.data.as_ref()
+    let tokens_in: usize = outcome
+        .data
+        .as_ref()
         .and_then(|d| d.get("input_tokens_est"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
-    let tokens_out: usize = outcome.data.as_ref()
+    let tokens_out: usize = outcome
+        .data
+        .as_ref()
         .and_then(|d| d.get("output_tokens_est"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
-    let context_tokens: usize = outcome.data.as_ref()
+    let context_tokens: usize = outcome
+        .data
+        .as_ref()
         .and_then(|d| d.get("context_tokens_est"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
@@ -1100,12 +1173,10 @@ async fn run_agent_for_session(
                 sessions.get(session_id).and_then(|s| {
                     s.messages.last().and_then(|m| {
                         m.get("timestamp").and_then(|v| v.as_str()).and_then(|ts| {
-                            chrono::DateTime::parse_from_rfc3339(ts)
-                                .ok()
-                                .map(|dt| {
-                                    let dur = now.signed_duration_since(dt.with_timezone(&chrono::Utc));
-                                    dur.num_milliseconds().max(0) as u64
-                                })
+                            chrono::DateTime::parse_from_rfc3339(ts).ok().map(|dt| {
+                                let dur = now.signed_duration_since(dt.with_timezone(&chrono::Utc));
+                                dur.num_milliseconds().max(0) as u64
+                            })
                         })
                     })
                 })
@@ -1198,7 +1269,11 @@ async fn run_agent_for_session(
                         if ev.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
                             if let Some(result) = ev.get("result").and_then(|v| v.as_str()) {
                                 if result.len() > MAX_TOOL_RESULT_BYTES {
-                                    let truncated = format!("{}... [truncated {} bytes]", &result[..MAX_TOOL_RESULT_BYTES], result.len() - MAX_TOOL_RESULT_BYTES);
+                                    let truncated = format!(
+                                        "{}... [truncated {} bytes]",
+                                        &result[..MAX_TOOL_RESULT_BYTES],
+                                        result.len() - MAX_TOOL_RESULT_BYTES
+                                    );
                                     ev["result"] = serde_json::Value::String(truncated);
                                 }
                             }
@@ -1207,7 +1282,11 @@ async fn run_agent_for_session(
                 }
                 if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
                     if content.len() > MAX_CONTENT_BYTES {
-                        let truncated = format!("{}... [truncated {} bytes]", &content[..MAX_CONTENT_BYTES], content.len() - MAX_CONTENT_BYTES);
+                        let truncated = format!(
+                            "{}... [truncated {} bytes]",
+                            &content[..MAX_CONTENT_BYTES],
+                            content.len() - MAX_CONTENT_BYTES
+                        );
                         msg["content"] = serde_json::Value::String(truncated);
                     }
                 }
@@ -1225,9 +1304,7 @@ async fn run_agent_for_session(
             if !full_response_str.is_empty() {
                 let transcript = format!(
                     "# Session Transcript\n\n**Turns:** {}\n\n**Exit:** {}\n\n---\n\n{}",
-                    outcome.turn,
-                    outcome.exit_reason,
-                    full_response_str
+                    outcome.turn, outcome.exit_reason, full_response_str
                 );
                 match memory.archive_session(&transcript).await {
                     Ok(path) => tracing::info!("Session archived to {:?}", path),
@@ -1251,33 +1328,29 @@ async fn handle_sse(
     State(state): State<SharedState>,
 ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let rx = state.sse_bus.subscribe();
-    let stream = BroadcastStream::new(rx)
-        .filter_map(|result| {
-            ready(match result {
-                Ok(event) => {
-                    let data = serde_json::to_string(&event).unwrap_or_default();
-                    Some(Ok(Event::default().data(data)))
-                }
-                Err(e) => {
-                    tracing::warn!("SSE broadcast lagged, dropped {} events", e);
-                    None
-                }
-            })
-        });
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        ready(match result {
+            Ok(event) => {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                Some(Ok(Event::default().data(data)))
+            }
+            Err(e) => {
+                tracing::warn!("SSE broadcast lagged, dropped {} events", e);
+                None
+            }
+        })
+    });
 
-    Sse::new(stream)
-        .keep_alive(
-            KeepAlive::new()
-                .interval(Duration::from_secs(15))
-                .text("ka"),
-        )
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ka"),
+    )
 }
 
 // ── Session CRUD handlers ──
 
-async fn list_sessions(
-    State(state): State<SharedState>,
-) -> Json<SessionListResponse> {
+async fn list_sessions(State(state): State<SharedState>) -> Json<SessionListResponse> {
     let sessions = state.sessions.read().await;
     let list: Vec<SessionInfo> = sessions.list();
     Json(SessionListResponse { sessions: list })
@@ -1307,23 +1380,24 @@ pub struct ModelEntry {
     pub context_win: usize,
 }
 
-async fn list_models(
-    State(state): State<SharedState>,
-) -> Json<Vec<ModelEntry>> {
+async fn list_models(State(state): State<SharedState>) -> Json<Vec<ModelEntry>> {
     let cfg_path = std::path::PathBuf::from(&state.config_path);
     let models = if let Ok(cfg) = MyKeyConfig::from_file(&cfg_path) {
-        cfg.sessions.iter().map(|(name, sess)| {
-            let provider = match cfg.session_type(name) {
-                SessionType::Claude | SessionType::NativeClaude => "claude",
-                SessionType::Oai | SessionType::NativeOai | SessionType::Mixin => "openai",
-            };
-            ModelEntry {
-                name: name.clone(),
-                model: sess.model.clone(),
-                provider: provider.to_string(),
-                context_win: sess.context_win,
-            }
-        }).collect()
+        cfg.sessions
+            .iter()
+            .map(|(name, sess)| {
+                let provider = match cfg.session_type(name) {
+                    SessionType::Claude | SessionType::NativeClaude => "claude",
+                    SessionType::Oai | SessionType::NativeOai | SessionType::Mixin => "openai",
+                };
+                ModelEntry {
+                    name: name.clone(),
+                    model: sess.model.clone(),
+                    provider: provider.to_string(),
+                    context_win: sess.context_win,
+                }
+            })
+            .collect()
     } else {
         vec![]
     };
@@ -1403,7 +1477,9 @@ async fn rename_session(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mut sessions = state.sessions.write().await;
     if sessions.rename(&id, &req.name) {
-        Ok(Json(serde_json::json!({ "status": "renamed", "name": req.name })))
+        Ok(Json(
+            serde_json::json!({ "status": "renamed", "name": req.name }),
+        ))
     } else {
         Err((StatusCode::NOT_FOUND, format!("Session {id} not found")))
     }
@@ -1412,9 +1488,7 @@ async fn rename_session(
 /// Simple health check endpoint for daemon monitoring.
 /// Also returns the server's current auth token so the frontend can
 /// auto-discover it (the endpoint is exempt from auth middleware).
-async fn health_check(
-    State(state): State<SharedState>,
-) -> axum::Json<serde_json::Value> {
+async fn health_check(State(state): State<SharedState>) -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({
         "status": "ok",
         "service": "openzen",
@@ -1459,17 +1533,41 @@ async fn handle_compress(
     State(state): State<SharedState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (before_chars, after_chars, saved_chars, saved_pct, messages_removed, before_count, after_count,
-         metrics_str, summary, _llm_summary): (usize, usize, usize, f64, usize, usize, usize, String, String, Option<String>) = {
+    let (
+        before_chars,
+        after_chars,
+        saved_chars,
+        saved_pct,
+        messages_removed,
+        before_count,
+        after_count,
+        metrics_str,
+        summary,
+        _llm_summary,
+    ): (
+        usize,
+        usize,
+        usize,
+        f64,
+        usize,
+        usize,
+        usize,
+        String,
+        String,
+        Option<String>,
+    ) = {
         let mut sessions = state.sessions.write().await;
-        let session = sessions.get_mut(&id)
+        let session = sessions
+            .get_mut(&id)
             .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Session {id} not found")))?;
 
-        let mut messages: Vec<Message> = session.messages
+        let mut messages: Vec<Message> = session
+            .messages
             .iter()
             .filter_map(|v| {
                 let role = v.get("role")?.as_str()?;
-                let content = v.get("content")
+                let content = v
+                    .get("content")
                     .and_then(|c| c.as_str())
                     .unwrap_or("")
                     .to_string();
@@ -1501,17 +1599,35 @@ async fn handle_compress(
         let messages_removed = before_count.saturating_sub(after_count);
 
         let original_msgs = session.messages.clone();
-        session.messages = oz_core::compress::match_messages_to_originals(&messages, &session.messages);
+        session.messages =
+            oz_core::compress::match_messages_to_originals(&messages, &session.messages);
 
-        let metrics = oz_core::compress::CompressionMetrics::compute(before_chars, after_chars, before_count, after_count);
+        let metrics = oz_core::compress::CompressionMetrics::compute(
+            before_chars,
+            after_chars,
+            before_count,
+            after_count,
+        );
         let removed_json = {
-            let surviving_ids: std::collections::HashSet<String> = session.messages.iter()
-                .filter_map(|v| Some(format!("{}_{}", v.get("role")?.as_str()?, v.get("content")?.as_str()?)))
+            let surviving_ids: std::collections::HashSet<String> = session
+                .messages
+                .iter()
+                .filter_map(|v| {
+                    Some(format!(
+                        "{}_{}",
+                        v.get("role")?.as_str()?,
+                        v.get("content")?.as_str()?
+                    ))
+                })
                 .collect();
-            original_msgs.into_iter()
+            original_msgs
+                .into_iter()
                 .filter(|v| {
-                    let id = format!("{}_{}", v.get("role").and_then(|r| r.as_str()).unwrap_or(""),
-                        v.get("content").and_then(|c| c.as_str()).unwrap_or(""));
+                    let id = format!(
+                        "{}_{}",
+                        v.get("role").and_then(|r| r.as_str()).unwrap_or(""),
+                        v.get("content").and_then(|c| c.as_str()).unwrap_or("")
+                    );
                     !surviving_ids.contains(&id)
                 })
                 .collect::<Vec<_>>()
@@ -1520,37 +1636,62 @@ async fn handle_compress(
 
         sessions.save();
 
-        (before_chars, after_chars, saved_chars, saved_pct, messages_removed, before_count, after_count,
-         metrics.summary(), summary, None::<String>)
+        (
+            before_chars,
+            after_chars,
+            saved_chars,
+            saved_pct,
+            messages_removed,
+            before_count,
+            after_count,
+            metrics.summary(),
+            summary,
+            None::<String>,
+        )
     };
 
     // Generate LLM summary for /compact when enough messages were removed
     let llm_summary = if messages_removed >= 4 {
         let cfg = MyKeyConfig::from_file(&state.config_path).ok();
         // Use the same summary model as the agent loop's auto-compression.
-        let sess_pair: Option<(String, oz_config::mykey::SessionConfig)> = cfg.as_ref().and_then(|c| {
-            if let Some(ref name) = c.summary_model {
-                c.get(name).cloned().map(|s| (name.clone(), s)).or_else(|| {
-                    c.sessions.iter().find(|(_, s)| s.model == *name).map(|(n, s)| (n.clone(), s.clone()))
-                })
-            } else {
-                let name = c.default_session.as_deref().unwrap_or("claude_sonnet");
-                c.get(name).cloned().map(|s| (name.to_string(), s))
-            }
-        });
-        let sess_name = sess_pair.as_ref().map(|(n, _)| n.as_str()).unwrap_or("claude_sonnet").to_string();
+        let sess_pair: Option<(String, oz_config::mykey::SessionConfig)> =
+            cfg.as_ref().and_then(|c| {
+                if let Some(ref name) = c.summary_model {
+                    c.get(name).cloned().map(|s| (name.clone(), s)).or_else(|| {
+                        c.sessions
+                            .iter()
+                            .find(|(_, s)| s.model == *name)
+                            .map(|(n, s)| (n.clone(), s.clone()))
+                    })
+                } else {
+                    let name = c.default_session.as_deref().unwrap_or("claude_sonnet");
+                    c.get(name).cloned().map(|s| (name.to_string(), s))
+                }
+            });
+        let sess_name = sess_pair
+            .as_ref()
+            .map(|(n, _)| n.as_str())
+            .unwrap_or("claude_sonnet")
+            .to_string();
         let sess_config = sess_pair.map(|(_, s)| s);
-        let sess_type = cfg.as_ref()
+        let sess_type = cfg
+            .as_ref()
             .map(|c| c.session_type(&sess_name))
             .unwrap_or(SessionType::Oai);
 
         let mut llm_summary: Option<String> = None;
         if let Some(sess_config) = sess_config {
             let backend: Option<Box<dyn oz_llm::Session>> = match sess_type {
-                SessionType::Claude => Some(Box::new(oz_llm::ClaudeSession::new(sess_config.clone()))),
+                SessionType::Claude => {
+                    Some(Box::new(oz_llm::ClaudeSession::new(sess_config.clone())))
+                }
                 SessionType::Oai => Some(Box::new(oz_llm::OaiSession::new(sess_config.clone()))),
-                SessionType::NativeClaude => Some(Box::new(oz_llm::NativeClaudeSession::new(sess_config.clone()))),
-                SessionType::NativeOai => Some(Box::new(oz_llm::NativeOAISession::new(sess_config.clone()))),
+                SessionType::NativeClaude => Some(Box::new(oz_llm::NativeClaudeSession::new(
+                    sess_config.clone(),
+                ))),
+                SessionType::NativeOai => {
+                    Some(Box::new(oz_llm::NativeOAISession::new(sess_config.clone())))
+                }
                 _ => None,
             };
             if let Some(backend) = backend {
@@ -1561,10 +1702,9 @@ async fn handle_compress(
                      continue the conversation.\n\n{summary}"
                 ));
                 let msgs = [prompt];
-                if let Ok(Ok(resp)) = tokio::time::timeout(
-                    Duration::from_secs(10),
-                    client.chat(&msgs, &[]),
-                ).await {
+                if let Ok(Ok(resp)) =
+                    tokio::time::timeout(Duration::from_secs(10), client.chat(&msgs, &[])).await
+                {
                     if !resp.content.is_empty() {
                         llm_summary = Some(resp.content);
                     }
@@ -1580,11 +1720,14 @@ async fn handle_compress(
     if let Some(ref ls) = llm_summary {
         let mut sessions = state.sessions.write().await;
         if let Some(session) = sessions.get_mut(&id) {
-            session.messages.insert(0, serde_json::json!({
-                "role": "system",
-                "content": format!("[Compression summary]: {ls}"),
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            }));
+            session.messages.insert(
+                0,
+                serde_json::json!({
+                    "role": "system",
+                    "content": format!("[Compression summary]: {ls}"),
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
             sessions.save();
         }
     }
@@ -1616,22 +1759,32 @@ async fn handle_regenerate(
     // Extract the last user message, then remove the last assistant+user pair.
     let last_user_msg: Option<String> = {
         let mut sessions = state.sessions.write().await;
-        let session = sessions.get_mut(&id)
+        let session = sessions
+            .get_mut(&id)
             .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Session {id} not found")))?;
         let msgs = &mut session.messages;
         // Pop last assistant message
-        while msgs.last().is_some_and(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant")) {
+        while msgs
+            .last()
+            .is_some_and(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+        {
             msgs.pop();
         }
         // Pop last user message and save it
-        let user_msg = msgs.pop()
-            .and_then(|m| m.get("content").and_then(|v| v.as_str()).map(|s| s.to_string()));
+        let user_msg = msgs.pop().and_then(|m| {
+            m.get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
         sessions.save();
         user_msg
     };
 
     let user_message = last_user_msg.ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "No user message found to regenerate".to_string())
+        (
+            StatusCode::BAD_REQUEST,
+            "No user message found to regenerate".to_string(),
+        )
     })?;
 
     // Set session status to running
@@ -1675,14 +1828,12 @@ async fn handle_regenerate(
     }
 
     match agent_result {
-        Ok(response) => {
-            Ok(Json(ChatResponse {
-                session_id: id,
-                status: "completed".to_string(),
-                response,
-                exit_reason: None,
-            }))
-        }
+        Ok(response) => Ok(Json(ChatResponse {
+            session_id: id,
+            status: "completed".to_string(),
+            response,
+            exit_reason: None,
+        })),
         Err(e) => {
             tracing::error!("Regenerate for session {id} failed: {e}");
             let _ = state.sse_bus.send(SseEvent::error(&id, &e.to_string()));
@@ -1731,7 +1882,8 @@ async fn handle_intervene(
     // Push to the session's intervention queue
     {
         let mut interventions = state.interventions.lock().unwrap();
-        let queue = interventions.entry(id.clone())
+        let queue = interventions
+            .entry(id.clone())
             .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())));
         queue.lock().unwrap().push_back(intervention.clone());
     }
@@ -1739,7 +1891,11 @@ async fn handle_intervene(
     // Broadcast to SSE
     let _ = state.sse_bus.send(SseEvent::system(
         &id,
-        &format!("Intervention received: {} — {}", intervention.kind, &req.content[..req.content.len().min(100)]),
+        &format!(
+            "Intervention received: {} — {}",
+            intervention.kind,
+            &req.content[..req.content.len().min(100)]
+        ),
     ));
 
     Ok(Json(InterveneResponse {
@@ -1838,13 +1994,17 @@ async fn resume_session_handler(
             // Restore messages to session store
             let mut sessions = state.sessions.write().await;
             if let Some(session) = sessions.get_mut(&id) {
-                session.messages = cp.messages.iter().map(|m| {
-                    serde_json::json!({
-                        "role": m.role,
-                        "content": m.content,
-                        "turn": cp.turn,
+                session.messages = cp
+                    .messages
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "role": m.role,
+                            "content": m.content,
+                            "turn": cp.turn,
+                        })
                     })
-                }).collect();
+                    .collect();
                 session.status = SessionStatus::Idle;
             }
             drop(sessions);
@@ -1855,9 +2015,10 @@ async fn resume_session_handler(
                     "[RESUMED FROM CHECKPOINT turn {}]\n\nPrevious state was paused with exit: {:?}\n\nNew instruction: {}",
                     cp.turn, cp.exit_reason, msg
                 );
-                let _ = state.sse_bus.send(SseEvent::system(&id, &format!(
-                    "Resumed from turn {} with new instruction", cp.turn
-                )));
+                let _ = state.sse_bus.send(SseEvent::system(
+                    &id,
+                    &format!("Resumed from turn {} with new instruction", cp.turn),
+                ));
                 // Return info so the frontend can re-send the chat request with the resume prompt
                 Ok(Json(serde_json::json!({
                     "status": "resumed",
@@ -1962,7 +2123,9 @@ mod tests {
 
         let entry = store.get_mut("sess-1").unwrap();
         entry.messages.push(serde_json::json!({"role": "user"}));
-        entry.messages.push(serde_json::json!({"role": "assistant"}));
+        entry
+            .messages
+            .push(serde_json::json!({"role": "assistant"}));
 
         assert_eq!(store.get("sess-1").unwrap().messages.len(), 2);
     }
@@ -2040,7 +2203,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("session_id").is_some());
         assert_eq!(json["name"], "test-session");
@@ -2067,7 +2232,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let sessions = json["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 2);
@@ -2080,7 +2247,9 @@ mod tests {
             let mut sessions = state.sessions.write().await;
             sessions.create_with_id("test-1", "my session");
             let entry = sessions.get_mut("test-1").unwrap();
-            entry.messages.push(serde_json::json!({"role": "user", "content": "hello"}));
+            entry
+                .messages
+                .push(serde_json::json!({"role": "user", "content": "hello"}));
         }
 
         let app = Router::new()
@@ -2095,7 +2264,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["name"], "my session");
         assert_eq!(json["messages"].as_array().unwrap().len(), 1);
@@ -2233,7 +2404,8 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let content_type = resp.headers()
+        let content_type = resp
+            .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");

@@ -22,15 +22,15 @@
 //!
 //! The bridge to `ga-tools::ToolRegistry` is in `ga-tools/src/mcp_bridge.rs`.
 
-pub mod types;
-pub mod config;
 pub mod client;
+pub mod config;
 pub mod discovery;
+pub mod types;
 
-pub use types::*;
-pub use config::*;
 pub use client::*;
+pub use config::*;
 pub use discovery::*;
+pub use types::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {

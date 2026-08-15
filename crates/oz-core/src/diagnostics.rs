@@ -43,14 +43,18 @@ pub async fn collect_diagnostics_block(working_dir: &str) -> String {
     }
     let errors = diagnostics.iter().filter(|d| d.severity == "error").count();
     let warnings = diagnostics.len() - errors;
-    let mut block = format!(
-        "<diagnostics>\n{errors} error(s), {warnings} warning(s):\n"
-    );
+    let mut block = format!("<diagnostics>\n{errors} error(s), {warnings} warning(s):\n");
     for d in diagnostics.iter().take(MAX_DIAGNOSTICS) {
-        block.push_str(&format!("- {}:{}:{} [{}] {}\n", d.file, d.line, d.col, d.severity, d.message));
+        block.push_str(&format!(
+            "- {}:{}:{} [{}] {}\n",
+            d.file, d.line, d.col, d.severity, d.message
+        ));
     }
     if diagnostics.len() > MAX_DIAGNOSTICS {
-        block.push_str(&format!("… and {} more\n", diagnostics.len() - MAX_DIAGNOSTICS));
+        block.push_str(&format!(
+            "… and {} more\n",
+            diagnostics.len() - MAX_DIAGNOSTICS
+        ));
     }
     block.push_str("</diagnostics>");
     block
@@ -80,7 +84,12 @@ fn parse_diagnostics(text: &str) -> Vec<Diagnostic> {
             continue;
         }
         let sev_raw = severity.trim();
-        let sev = sev_raw.split('[').next().unwrap_or(sev_raw).trim().to_string();
+        let sev = sev_raw
+            .split('[')
+            .next()
+            .unwrap_or(sev_raw)
+            .trim()
+            .to_string();
         if sev != "error" && sev != "warning" {
             continue;
         }
@@ -169,7 +178,11 @@ warning: `oz-mcp` (lib) generated 1 warning
             "[package]\nname = \"diag-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .unwrap();
-        std::fs::write(dir.join("src/main.rs"), "fn main() { let x: i32 = \"oops\"; }\n").unwrap();
+        std::fs::write(
+            dir.join("src/main.rs"),
+            "fn main() { let x: i32 = \"oops\"; }\n",
+        )
+        .unwrap();
         let block = collect_diagnostics_block(dir.to_str().unwrap()).await;
         assert!(block.starts_with("<diagnostics>"), "got: {block}");
         assert!(block.contains("error"), "got: {block}");

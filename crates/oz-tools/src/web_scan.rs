@@ -51,7 +51,9 @@ pub struct WebScanTool {
 
 impl WebScanTool {
     pub fn new() -> Self {
-        WebScanTool { browser: Mutex::new(None) }
+        WebScanTool {
+            browser: Mutex::new(None),
+        }
     }
 
     fn get_browser(&self) -> BrowserClient {
@@ -64,13 +66,20 @@ impl WebScanTool {
 }
 
 impl Default for WebScanTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
 impl ToolHandler for WebScanTool {
-    fn name(&self) -> String { "web_scan".to_string() }
-    fn description(&self) -> String { "Open a URL in the browser, get simplified HTML content. Use for reading web pages.".to_string() }
+    fn name(&self) -> String {
+        "web_scan".to_string()
+    }
+    fn description(&self) -> String {
+        "Open a URL in the browser, get simplified HTML content. Use for reading web pages."
+            .to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -89,14 +98,23 @@ impl ToolHandler for WebScanTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let url = args["url"].as_str().ok_or_else(|| ToolError::Custom("missing url".into()))?;
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let url = args["url"]
+            .as_str()
+            .ok_or_else(|| ToolError::Custom("missing url".into()))?;
         if !is_url_safe(url) {
-            return Ok(ToolOutput::bad_json(
-                format!("web_scan: URL `{url}` targets a blocked address for security reasons.")
-            ));
+            return Ok(ToolOutput::bad_json(format!(
+                "web_scan: URL `{url}` targets a blocked address for security reasons."
+            )));
         }
-        let max_chars = args.get("max_chars").and_then(|v| v.as_u64()).unwrap_or(5000) as usize;
+        let max_chars = args
+            .get("max_chars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5000) as usize;
 
         let mut browser = self.get_browser();
         let title = browser.navigate(url).await?;
@@ -118,17 +136,21 @@ mod tests {
     #[tokio::test]
     async fn test_web_scan_missing_url() {
         let tool = WebScanTool::new();
-        let result = tool.execute(serde_json::json!({}), &ToolContext::default()).await;
+        let result = tool
+            .execute(serde_json::json!({}), &ToolContext::default())
+            .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_web_scan_connect_error() {
         let tool = WebScanTool::new();
-        let result = tool.execute(
-            serde_json::json!({"url": "http://localhost:1", "max_chars": 100}),
-            &ToolContext::default(),
-        ).await;
+        let result = tool
+            .execute(
+                serde_json::json!({"url": "http://localhost:1", "max_chars": 100}),
+                &ToolContext::default(),
+            )
+            .await;
         // localhost is blocked by SSRF protection
         assert!(result.is_ok());
         let output = result.unwrap();

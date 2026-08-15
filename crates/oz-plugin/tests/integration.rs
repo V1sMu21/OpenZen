@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use oz_tools::registry::ToolHandler;
+use std::path::PathBuf;
 
 #[test]
 fn test_load_plugin_from_file() {
@@ -14,7 +14,9 @@ fn test_load_plugin_from_file() {
     assert_eq!(plugin.description, "A WASM test tool");
 
     let mut plugin = plugin;
-    let result = plugin.execute(serde_json::json!({"input": "world"})).unwrap();
+    let result = plugin
+        .execute(serde_json::json!({"input": "world"}))
+        .unwrap();
     assert_eq!(result.data, serde_json::json!("plugin ran"));
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -26,18 +28,20 @@ fn test_handler_integration() {
     let handler = oz_plugin::WasmPluginHandler::new(plugin);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(async {
-        let ctx = oz_core_types::ToolContext {
-            working_dir: ".".into(),
-            assets_dir: ".".into(),
-            script_dir: ".".into(),
-            lang: "en".into(),
-            skill_mcp_dir: None,
-            harness_dir: None,
-            session_id: String::new(),
-        };
-        handler.execute(serde_json::json!({"x": 1}), &ctx).await
-    }).unwrap();
+    let result = rt
+        .block_on(async {
+            let ctx = oz_core_types::ToolContext {
+                working_dir: ".".into(),
+                assets_dir: ".".into(),
+                script_dir: ".".into(),
+                lang: "en".into(),
+                skill_mcp_dir: None,
+                harness_dir: None,
+                session_id: String::new(),
+            };
+            handler.execute(serde_json::json!({"x": 1}), &ctx).await
+        })
+        .unwrap();
     assert_eq!(result.data, serde_json::json!("plugin ran"));
     assert!(!result.should_exit);
 }
@@ -80,9 +84,7 @@ fn test_invalid_wat_fails() {
 
 #[test]
 fn test_nonexistent_file_fails() {
-    let result = oz_plugin::WasmPlugin::from_file(
-        PathBuf::from("/nonexistent/plugin.wasm")
-    );
+    let result = oz_plugin::WasmPlugin::from_file(PathBuf::from("/nonexistent/plugin.wasm"));
     assert!(result.is_err());
 }
 

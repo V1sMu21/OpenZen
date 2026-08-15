@@ -27,8 +27,9 @@ pub struct Agent {
 impl Agent {
     pub fn load(name: &str, agents_dir: &Path) -> anyhow::Result<Self> {
         let path = agents_dir.join(name).join("config.yaml");
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("Failed to read agent config at {}: {}", path.display(), e))?;
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            anyhow::anyhow!("Failed to read agent config at {}: {}", path.display(), e)
+        })?;
         let config: AgentConfig = serde_yaml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
         Ok(Agent {
@@ -57,11 +58,7 @@ impl Agent {
     }
 
     pub fn interpolate_instructions(&self, user_input: &str) -> String {
-        let mut text = self
-            .config
-            .instructions
-            .clone()
-            .unwrap_or_default();
+        let mut text = self.config.instructions.clone().unwrap_or_default();
         text = text.replace("__INPUT__", user_input);
         for (k, v) in &self.config.variables {
             text = text.replace(&format!("__{}__", k.to_uppercase()), v);
@@ -73,7 +70,12 @@ impl Agent {
         self.config
             .use_tools
             .as_ref()
-            .map(|s| s.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(|t| t.trim())
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }

@@ -1,22 +1,22 @@
 use std::path::Path;
 
-pub fn load_tools_schema(assets_dir: &Path) -> Result<serde_json::Value, oz_core_types::ConfigError> {
+pub fn load_tools_schema(
+    assets_dir: &Path,
+) -> Result<serde_json::Value, oz_core_types::ConfigError> {
     let path = assets_dir.join("tools_schema.json");
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| oz_core_types::ConfigError::LoadFailed(
-            format!("Failed to read {}: {e}", path.display())
-        ))?;
-    serde_json::from_str(&content)
-        .map_err(|e| oz_core_types::ConfigError::LoadFailed(
-            format!("Failed to parse tools_schema.json: {e}")
-        ))
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        oz_core_types::ConfigError::LoadFailed(format!("Failed to read {}: {e}", path.display()))
+    })?;
+    serde_json::from_str(&content).map_err(|e| {
+        oz_core_types::ConfigError::LoadFailed(format!("Failed to parse tools_schema.json: {e}"))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::env;
+    use std::fs;
 
     #[test]
     fn load_tools_schema_nonexistent_dir() {

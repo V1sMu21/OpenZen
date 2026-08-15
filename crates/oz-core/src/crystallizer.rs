@@ -7,8 +7,8 @@
 //! to understand intent and surface reusable patterns.
 
 use oz_core_types::{LlmClient, LlmError, Message, MockResponse};
-use oz_skill_mcp::SkillMcpStore;
 use oz_skill_mcp::skill::Skill;
+use oz_skill_mcp::SkillMcpStore;
 
 /// Result of a crystallization attempt.
 #[derive(Debug, Clone)]
@@ -60,13 +60,17 @@ impl Crystallizer {
 
         let response: MockResponse = client.chat(&analysis_messages, &[]).await?;
 
-        let results = Self::parse_crystallize_response(&response.content, store, tool_sequence, session_id);
+        let results =
+            Self::parse_crystallize_response(&response.content, store, tool_sequence, session_id);
 
         Ok(results)
     }
 
     /// Build the LLM prompt for crystallization analysis.
-    fn build_crystallize_prompt(user_input: &str, tool_sequence: &[(String, serde_json::Value)]) -> String {
+    fn build_crystallize_prompt(
+        user_input: &str,
+        tool_sequence: &[(String, serde_json::Value)],
+    ) -> String {
         let mut prompt = String::new();
         prompt.push_str("Analyze this agent session and identify reusable knowledge.\n\n");
 
@@ -79,7 +83,9 @@ impl Crystallizer {
         }
 
         prompt.push_str("\n**Instructions:**\n");
-        prompt.push_str("1. If this session represents a **reusable capability**, write a SKILL definition.\n");
+        prompt.push_str(
+            "1. If this session represents a **reusable capability**, write a SKILL definition.\n",
+        );
         prompt.push_str("2. If it's a **specific procedure**, write a SOP.\n");
         prompt.push_str("3. If there's a **notable fact**, extract it.\n");
         prompt.push_str("4. If nothing is reusable, return empty.\n\n");
@@ -108,13 +114,27 @@ impl Crystallizer {
             // Process skills
             if let Some(skills) = parsed.get("skills").and_then(|v| v.as_array()) {
                 for skill_json in skills {
-                    let name = skill_json.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
-                    let description = skill_json.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                    let tags: Vec<String> = skill_json.get("tags")
+                    let name = skill_json
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unnamed");
+                    let description = skill_json
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let tags: Vec<String> = skill_json
+                        .get("tags")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|t| t.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default();
-                    let procedure = skill_json.get("procedure").and_then(|v| v.as_str()).unwrap_or("");
+                    let procedure = skill_json
+                        .get("procedure")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
 
                     let content = format!("# {} — {}\n\n{}\n", name, description, procedure);
 
@@ -132,7 +152,9 @@ impl Crystallizer {
                     if let Err(e) = store.skills.register(skill) {
                         tracing::warn!("Failed to register crystallized skill '{}': {}", name, e);
                     } else {
-                        results.push(CrystallizeResult::SkillCreated { name: name.to_string() });
+                        results.push(CrystallizeResult::SkillCreated {
+                            name: name.to_string(),
+                        });
                     }
                 }
             }
@@ -140,11 +162,20 @@ impl Crystallizer {
             // Process SOPs
             if let Some(sops) = parsed.get("sops").and_then(|v| v.as_array()) {
                 for sop_json in sops {
-                    let name = sop_json.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
-                    let description = sop_json.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = sop_json
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unnamed");
+                    let description = sop_json
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
 
-                    let _ = store.crystallise_sop(name, description, tool_sequence, session_id.clone());
-                    results.push(CrystallizeResult::SopCreated { name: name.to_string() });
+                    let _ =
+                        store.crystallise_sop(name, description, tool_sequence, session_id.clone());
+                    results.push(CrystallizeResult::SopCreated {
+                        name: name.to_string(),
+                    });
                 }
             }
 
@@ -152,7 +183,9 @@ impl Crystallizer {
             if let Some(facts) = parsed.get("facts").and_then(|v| v.as_array()) {
                 for fact in facts {
                     if let Some(fact_str) = fact.as_str() {
-                        results.push(CrystallizeResult::FactAdded { content: fact_str.to_string() });
+                        results.push(CrystallizeResult::FactAdded {
+                            content: fact_str.to_string(),
+                        });
                     }
                 }
             }

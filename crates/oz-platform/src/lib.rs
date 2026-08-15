@@ -16,17 +16,17 @@
 //! ```
 
 pub mod bridge;
-pub mod registry;
 pub mod config;
+pub mod registry;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 
 pub use bridge::AgentBridge;
-pub use registry::PlatformRegistry;
 pub use config::PlatformConfig;
+pub use registry::PlatformRegistry;
 
 // ── Core trait ──
 
@@ -205,7 +205,8 @@ pub fn split_text(text: &str, max_len: usize) -> Vec<String> {
     let mut parts = Vec::new();
     let mut remaining = text;
     while remaining.len() > max_len {
-        let cut = remaining[..max_len].rfind('\n')
+        let cut = remaining[..max_len]
+            .rfind('\n')
             .filter(|&pos| pos > max_len * 60 / 100)
             .unwrap_or(max_len);
         parts.push(remaining[..cut].trim_end().to_string());
@@ -222,7 +223,8 @@ pub fn split_text(text: &str, max_len: usize) -> Vec<String> {
 
 /// FILE_HINT injected into user messages so the agent knows it can
 /// reference generated files with [FILE:path] markers.
-pub const FILE_HINT: &str = "If you need to show files to user, use [FILE:filepath] in your response.";
+pub const FILE_HINT: &str =
+    "If you need to show files to user, use [FILE:filepath] in your response.";
 
 // ── Platform session counter persistence ──
 
@@ -306,9 +308,6 @@ mod tests {
         // split_text keeps newlines inside each part (cuts at newline
         // boundaries to preserve paragraph structure); only the cut-point
         // newline is trimmed. Content (minus newlines) must be preserved.
-        assert_eq!(
-            parts.join("").replace('\n', ""),
-            input.replace('\n', "")
-        );
+        assert_eq!(parts.join("").replace('\n', ""), input.replace('\n', ""));
     }
 }

@@ -55,8 +55,12 @@ pub struct MemoryMigrationReport {
 impl MemoryMigrationReport {
     pub fn total_migrated(&self) -> usize {
         let mut count = 0;
-        if self.facts_migrated { count += 1; }
-        if self.insights_migrated { count += 1; }
+        if self.facts_migrated {
+            count += 1;
+        }
+        if self.insights_migrated {
+            count += 1;
+        }
         count + self.sops_migrated + self.sessions_migrated
     }
 
@@ -65,7 +69,9 @@ impl MemoryMigrationReport {
     }
 }
 
-pub fn migrate_memory_to_skill_mcp(working_dir: &Path) -> Result<MemoryMigrationReport, SkillMcpError> {
+pub fn migrate_memory_to_skill_mcp(
+    working_dir: &Path,
+) -> Result<MemoryMigrationReport, SkillMcpError> {
     let memory_dir = working_dir.join(LEGACY_MEMORY_DIR);
     let skill_mcp_dir = working_dir.join(SKILL_MCP_DIR);
     let mut report = MemoryMigrationReport {
@@ -96,7 +102,9 @@ pub fn migrate_memory_to_skill_mcp(working_dir: &Path) -> Result<MemoryMigration
 
     let old_insights = memory_dir.join("global_mem_insight.txt");
     if old_insights.exists() {
-        let new_insights = skill_mcp_dir.join("insights").join("global_mem_insight.txt");
+        let new_insights = skill_mcp_dir
+            .join("insights")
+            .join("global_mem_insight.txt");
         if !new_insights.exists() {
             std::fs::create_dir_all(new_insights.parent().unwrap()).ok();
             match std::fs::copy(&old_insights, &new_insights) {
@@ -141,7 +149,10 @@ pub fn migrate_memory_to_skill_mcp(working_dir: &Path) -> Result<MemoryMigration
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() {
-                    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+                    let fname = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
                     let dest = new_sessions.join(fname);
                     if !dest.exists() {
                         match std::fs::copy(&path, &dest) {

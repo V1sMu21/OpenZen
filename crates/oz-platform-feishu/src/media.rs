@@ -2,7 +2,9 @@ use std::path::Path;
 
 use crate::client::FeishuClient;
 
-const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tiff", "tif"];
+const IMAGE_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tiff", "tif",
+];
 
 pub async fn send_local_file(
     client: &FeishuClient,
@@ -37,4 +39,3 @@ pub async fn send_local_file(
             .map(|_| ())
     }
 }
-

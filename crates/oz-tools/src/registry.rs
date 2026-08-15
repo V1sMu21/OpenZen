@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use oz_core_types::{ToolContext, ToolDefinition, ToolFunction, ToolOutput};
 use linkme::distributed_slice;
+use oz_core_types::{ToolContext, ToolDefinition, ToolFunction, ToolOutput};
 
 #[distributed_slice]
 pub static TOOL_FACTORIES: [fn(&mut ToolRegistry)] = [..];
@@ -13,7 +13,9 @@ pub trait ToolHandler: Send + Sync {
     fn name(&self) -> String;
     fn description(&self) -> String;
     /// Fallback description for non-English locales. Default: same as description().
-    fn description_zh(&self) -> String { self.description() }
+    fn description_zh(&self) -> String {
+        self.description()
+    }
     fn parameters(&self) -> serde_json::Value;
 
     async fn execute(
@@ -31,11 +33,14 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        ToolRegistry { handlers: HashMap::new() }
+        ToolRegistry {
+            handlers: HashMap::new(),
+        }
     }
 
     pub fn register<T: ToolHandler + 'static>(&mut self, tool: T) {
-        self.handlers.insert(tool.name().to_string(), Box::new(tool));
+        self.handlers
+            .insert(tool.name().to_string(), Box::new(tool));
     }
 
     /// Register a tool with an explicit name (for dynamic/MCP tools).
@@ -76,7 +81,11 @@ impl ToolRegistry {
                 type_: "function".into(),
                 function: ToolFunction {
                     name: name.clone(),
-                    description: if is_zh { t.description_zh() } else { t.description() },
+                    description: if is_zh {
+                        t.description_zh()
+                    } else {
+                        t.description()
+                    },
                     parameters: t.parameters(),
                 },
             })
@@ -160,12 +169,20 @@ mod tests {
 
     #[async_trait]
     impl ToolHandler for DummyTool {
-        fn name(&self) -> String { "dummy".to_string() }
-        fn description(&self) -> String { "A test tool".to_string() }
+        fn name(&self) -> String {
+            "dummy".to_string()
+        }
+        fn description(&self) -> String {
+            "A test tool".to_string()
+        }
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
-        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::success(serde_json::json!({"done": true})))
         }
     }
@@ -228,10 +245,24 @@ mod tests {
         let reg = ToolRegistry::build_default();
         let names = reg.names();
         for &expected in &[
-            "code_run", "read", "write", "patch", "glob", "grep", "ls", "respond",
-            "working_mem", "ask_user", "web_scan", "web_js", "long_term",
+            "code_run",
+            "read",
+            "write",
+            "patch",
+            "glob",
+            "grep",
+            "ls",
+            "respond",
+            "working_mem",
+            "ask_user",
+            "web_scan",
+            "web_js",
+            "long_term",
         ] {
-            assert!(names.iter().any(|n| n == expected), "missing tool: {expected}");
+            assert!(
+                names.iter().any(|n| n == expected),
+                "missing tool: {expected}"
+            );
         }
     }
 
@@ -246,10 +277,20 @@ mod tests {
         struct OverrideTool;
         #[async_trait]
         impl ToolHandler for OverrideTool {
-            fn name(&self) -> String { "dummy".to_string() }
-            fn description(&self) -> String { "overridden".to_string() }
-            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
-            async fn execute(&self, _a: serde_json::Value, _c: &ToolContext) -> Result<ToolOutput, ToolError> {
+            fn name(&self) -> String {
+                "dummy".to_string()
+            }
+            fn description(&self) -> String {
+                "overridden".to_string()
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _a: serde_json::Value,
+                _c: &ToolContext,
+            ) -> Result<ToolOutput, ToolError> {
                 Ok(ToolOutput::success(serde_json::json!({"overridden": true})))
             }
         }
@@ -258,7 +299,10 @@ mod tests {
         reg.register(DummyTool);
         reg.register(OverrideTool);
 
-        let result = reg.dispatch("dummy", serde_json::json!({}), &ctx()).await.unwrap();
+        let result = reg
+            .dispatch("dummy", serde_json::json!({}), &ctx())
+            .await
+            .unwrap();
         assert_eq!(result.data["overridden"], true);
         assert_eq!(reg.names().len(), 1);
     }
@@ -266,28 +310,56 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_propagates_unknown_tool_name_in_message() {
         let reg = ToolRegistry::new();
-        let result = reg.dispatch("bogus_name_42", serde_json::json!({}), &ctx()).await.unwrap();
+        let result = reg
+            .dispatch("bogus_name_42", serde_json::json!({}), &ctx())
+            .await
+            .unwrap();
         let msg = result.next_prompt.unwrap_or_default();
-        assert!(msg.contains("bogus_name_42"), "unknown tool name should appear in error: {msg}");
+        assert!(
+            msg.contains("bogus_name_42"),
+            "unknown tool name should appear in error: {msg}"
+        );
     }
 
     #[tokio::test]
     async fn test_to_schema_contains_all_registered_tools() {
         struct ToolA;
         struct ToolB;
-        #[async_trait] impl ToolHandler for ToolA {
-            fn name(&self) -> String { "a".to_string() }
-            fn description(&self) -> String { "".to_string() }
-            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
-            async fn execute(&self, _a: serde_json::Value, _c: &ToolContext) -> Result<ToolOutput, ToolError> {
+        #[async_trait]
+        impl ToolHandler for ToolA {
+            fn name(&self) -> String {
+                "a".to_string()
+            }
+            fn description(&self) -> String {
+                "".to_string()
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _a: serde_json::Value,
+                _c: &ToolContext,
+            ) -> Result<ToolOutput, ToolError> {
                 Ok(ToolOutput::success(serde_json::json!({})))
             }
         }
-        #[async_trait] impl ToolHandler for ToolB {
-            fn name(&self) -> String { "b".to_string() }
-            fn description(&self) -> String { "".to_string() }
-            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
-            async fn execute(&self, _a: serde_json::Value, _c: &ToolContext) -> Result<ToolOutput, ToolError> {
+        #[async_trait]
+        impl ToolHandler for ToolB {
+            fn name(&self) -> String {
+                "b".to_string()
+            }
+            fn description(&self) -> String {
+                "".to_string()
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _a: serde_json::Value,
+                _c: &ToolContext,
+            ) -> Result<ToolOutput, ToolError> {
                 Ok(ToolOutput::success(serde_json::json!({})))
             }
         }
@@ -297,7 +369,8 @@ mod tests {
         reg.register(ToolA);
         let schema = reg.to_schema("en");
         assert_eq!(schema.len(), 2);
-        let names: std::collections::BTreeSet<&str> = schema.iter().map(|d| d.function.name.as_str()).collect();
+        let names: std::collections::BTreeSet<&str> =
+            schema.iter().map(|d| d.function.name.as_str()).collect();
         assert!(names.contains("a"));
         assert!(names.contains("b"));
     }
@@ -307,10 +380,20 @@ mod tests {
         struct CtxCheckTool;
         #[async_trait]
         impl ToolHandler for CtxCheckTool {
-            fn name(&self) -> String { "ctx_check".to_string() }
-            fn description(&self) -> String { "".to_string() }
-            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
-            async fn execute(&self, _a: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+            fn name(&self) -> String {
+                "ctx_check".to_string()
+            }
+            fn description(&self) -> String {
+                "".to_string()
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _a: serde_json::Value,
+                ctx: &ToolContext,
+            ) -> Result<ToolOutput, ToolError> {
                 Ok(ToolOutput::success(serde_json::json!({
                     "wd": ctx.working_dir,
                     "lang": ctx.lang,
@@ -329,7 +412,10 @@ mod tests {
             harness_dir: None,
             session_id: String::new(),
         };
-        let result = reg.dispatch("ctx_check", serde_json::json!({}), &tc).await.unwrap();
+        let result = reg
+            .dispatch("ctx_check", serde_json::json!({}), &tc)
+            .await
+            .unwrap();
         assert_eq!(result.data["wd"], "/my/proj");
         assert_eq!(result.data["lang"], "en");
     }
@@ -347,14 +433,22 @@ mod tests {
         assert!(names.iter().any(|n| n == "ls"));
         assert!(names.iter().any(|n| n == "respond"));
         assert!(names.iter().any(|n| n == "web_search"));
-        assert!(names.len() >= 14, "expected at least 14 tools, got {}", names.len());
+        assert!(
+            names.len() >= 14,
+            "expected at least 14 tools, got {}",
+            names.len()
+        );
     }
 
     #[tokio::test]
     async fn test_build_default_schema_is_valid() {
         let reg = ToolRegistry::build_default();
         let schema = reg.to_schema("en");
-        assert!(schema.len() >= 14, "expected at least 14 tools, got {}", schema.len());
+        assert!(
+            schema.len() >= 14,
+            "expected at least 14 tools, got {}",
+            schema.len()
+        );
         for def in &schema {
             assert_eq!(def.type_, "function");
             assert!(!def.function.name.is_empty());

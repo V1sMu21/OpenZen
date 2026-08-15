@@ -1,6 +1,6 @@
 use oz_core_types::{
-    ContentBlock, ContentContainer, LlmClient, LlmError, Message,
-    MockResponse, MockToolCall, Role, StreamEvent, ToolDefinition,
+    ContentBlock, ContentContainer, LlmClient, LlmError, Message, MockResponse, MockToolCall, Role,
+    StreamEvent, ToolDefinition,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -24,7 +24,11 @@ impl NativeToolClient {
 
 #[async_trait::async_trait]
 impl LlmClient for NativeToolClient {
-    async fn chat(&mut self, messages: &[Message], tools: &[ToolDefinition]) -> Result<MockResponse, LlmError> {
+    async fn chat(
+        &mut self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<MockResponse, LlmError> {
         // Mirror stream_chat: the non-streaming path must also hand the tool
         // schemas to the backend, otherwise OaiSession sends the request
         // without a "tools" payload and tool-capable models (e.g. DeepSeek
@@ -36,7 +40,8 @@ impl LlmClient for NativeToolClient {
         // Fold ALL system messages (main prompt + any injected compression
         // summaries) into the backend system prompt. The last system message
         // must NOT clobber the earlier ones.
-        let system_parts: Vec<String> = messages.iter()
+        let system_parts: Vec<String> = messages
+            .iter()
             .filter(|m| m.role == Role::System)
             .map(|m| m.content_text())
             .filter(|t| !t.is_empty())
@@ -61,7 +66,11 @@ impl LlmClient for NativeToolClient {
         }
 
         let raw = serde_json::to_string(&blocks).unwrap_or_default();
-        let stop = if tool_calls.is_empty() { "end_turn".into() } else { "tool_use".into() };
+        let stop = if tool_calls.is_empty() {
+            "end_turn".into()
+        } else {
+            "tool_use".into()
+        };
         Ok(MockResponse {
             thinking,
             content,
@@ -83,7 +92,8 @@ impl LlmClient for NativeToolClient {
             self.backend.set_tools(tools.to_vec());
         }
 
-        let system_parts: Vec<String> = messages.iter()
+        let system_parts: Vec<String> = messages
+            .iter()
             .filter(|m| m.role == Role::System)
             .map(|m| m.content_text())
             .filter(|t| !t.is_empty())
@@ -94,7 +104,10 @@ impl LlmClient for NativeToolClient {
 
         let raw_messages = build_request_messages(messages);
 
-        let (blocks, usage) = self.backend.raw_ask_streaming(&raw_messages, event_tx, _speculative_tx).await?;
+        let (blocks, usage) = self
+            .backend
+            .raw_ask_streaming(&raw_messages, event_tx, _speculative_tx)
+            .await?;
         let (thinking, content, mut tool_calls) = blocks_to_response(&blocks);
 
         if tool_calls.is_empty() {
@@ -103,7 +116,11 @@ impl LlmClient for NativeToolClient {
         }
 
         let raw = serde_json::to_string(&blocks).unwrap_or_default();
-        let stop = if tool_calls.is_empty() { "end_turn".into() } else { "tool_use".into() };
+        let stop = if tool_calls.is_empty() {
+            "end_turn".into()
+        } else {
+            "tool_use".into()
+        };
         Ok(MockResponse {
             thinking,
             content,
@@ -118,7 +135,11 @@ impl LlmClient for NativeToolClient {
 impl NativeToolClient {
     fn set_system_with_thinking(&mut self, extra_system: &str) {
         let lang = std::env::var("OZ_LANG").unwrap_or_default();
-        let thinking = if lang == "en" { self.thinking_prompt_en } else { self.thinking_prompt_zh };
+        let thinking = if lang == "en" {
+            self.thinking_prompt_en
+        } else {
+            self.thinking_prompt_zh
+        };
         let combined = if extra_system.is_empty() {
             thinking.to_string()
         } else {
@@ -151,7 +172,11 @@ fn build_request_messages(messages: &[Message]) -> Vec<Message> {
                 }
             }
         }
-        out.push(Message { role: m.role, content, tool_results: None });
+        out.push(Message {
+            role: m.role,
+            content,
+            tool_results: None,
+        });
     }
     out
 }
@@ -169,7 +194,11 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
                         if item["type"] == "tool_use" {
                             let name = item["name"].as_str().unwrap_or("").to_string();
                             let input = item.get("input").cloned().unwrap_or_default();
-                            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let id = item
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             tcs.push(MockToolCall::with_id(name, input, id));
                         }
                     }
@@ -182,20 +211,34 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
 
     // NOTE: the regex crate does not support look-around, so nested-tag
     // exclusion is approximated with a lazy `[\s\S]{15,}?` match.
-    if let Ok(re) = regex::Regex::new(r#"<(tool_use|tool_call)>([\s\S]{15,}?)</(?:tool_use|tool_call)>"#) {
+    if let Ok(re) =
+        regex::Regex::new(r#"<(tool_use|tool_call)>([\s\S]{15,}?)</(?:tool_use|tool_call)>"#)
+    {
         let mut new_remaining = remaining.clone();
         for cap in re.captures_iter(&remaining) {
             let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
             if let Ok(d) = serde_json::from_str::<serde_json::Value>(inner) {
-                let name = d.get("name").or_else(|| d.get("function")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let input = d.get("arguments").or_else(|| d.get("args")).or_else(|| d.get("input")).cloned().unwrap_or_default();
+                let name = d
+                    .get("name")
+                    .or_else(|| d.get("function"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input = d
+                    .get("arguments")
+                    .or_else(|| d.get("args"))
+                    .or_else(|| d.get("input"))
+                    .cloned()
+                    .unwrap_or_default();
                 if !name.is_empty() {
                     tcs.push(MockToolCall::new(name, input));
                 }
             }
         }
         if !tcs.is_empty() {
-            if let Ok(re2) = regex::Regex::new(r#"<(?:tool_use|tool_call)>.*?</(?:tool_use|tool_call)>"#) {
+            if let Ok(re2) =
+                regex::Regex::new(r#"<(?:tool_use|tool_call)>.*?</(?:tool_use|tool_call)>"#)
+            {
                 new_remaining = re2.replace_all(&remaining, "").to_string();
             }
             remaining = new_remaining.trim().to_string();
@@ -206,17 +249,22 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
     // Inner content is either a JSON object or a series of <parameter name="key">value</parameter>.
     let param_re = regex::Regex::new(
         r#"<parameter(?:\s+name="([^"]+)"|=([^>\s]+))?\s*>([\s\S]*?)</parameter>"#,
-    ).ok();
+    )
+    .ok();
     if let Ok(fn_re) = regex::Regex::new(
         r#"<(function|invoke)(?:\s+name="([^"]+)"|=([^>\s]+))?\s*>([\s\S]*?)</(function|invoke)>"#,
     ) {
         for cap in fn_re.captures_iter(&remaining) {
-            let name = cap.get(2).or_else(|| cap.get(3))
+            let name = cap
+                .get(2)
+                .or_else(|| cap.get(3))
                 .map(|m| m.as_str().trim().to_string())
                 .unwrap_or_default();
             let inner = cap.get(4).map(|m| m.as_str()).unwrap_or("").trim();
 
-            if name.is_empty() { continue; }
+            if name.is_empty() {
+                continue;
+            }
 
             let input = if let Ok(d) = serde_json::from_str::<serde_json::Value>(inner) {
                 d
@@ -224,7 +272,9 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
                 let mut args = serde_json::Map::new();
                 if let Some(ref param_re) = param_re {
                     for pcap in param_re.captures_iter(inner) {
-                        let key = pcap.get(1).or_else(|| pcap.get(2))
+                        let key = pcap
+                            .get(1)
+                            .or_else(|| pcap.get(2))
                             .map(|m| m.as_str().trim().to_string())
                             .unwrap_or_default();
                         let val = pcap.get(3).map(|m| m.as_str().trim()).unwrap_or("");
@@ -237,7 +287,10 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
                     // Fallback: treat the raw inner content as a `response` argument
                     let mut fallback = serde_json::Map::new();
                     if !inner.is_empty() {
-                        fallback.insert("response".into(), serde_json::Value::String(inner.to_string()));
+                        fallback.insert(
+                            "response".into(),
+                            serde_json::Value::String(inner.to_string()),
+                        );
                     }
                     serde_json::Value::Object(fallback)
                 } else {
@@ -252,7 +305,11 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
             let strip_re = regex::Regex::new(
                 r#"<(function|invoke)(?:\s+[^>]*)?\s*>[\s\S]*?</(function|invoke)>|<parameter(?:\s+[^>]*)?\s*>[\s\S]*?</parameter>"#,
             ).unwrap();
-            remaining = strip_re.replace_all(&remaining, "").to_string().trim().to_string();
+            remaining = strip_re
+                .replace_all(&remaining, "")
+                .to_string()
+                .trim()
+                .to_string();
         }
     }
 
@@ -264,27 +321,36 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
     // Best-effort: regex only handles shallow nesting. Complex nested
     // args rely on the native function-calling path (tool_choice: required).
     if tcs.is_empty() {
-        if let Ok(re) = regex::Regex::new(
-            r"(?s)```(?:json)?\s*\n?(\{(?:[^{}]|\{[^{}]*\})*\})\s*\n?```"
-        ) {
+        if let Ok(re) =
+            regex::Regex::new(r"(?s)```(?:json)?\s*\n?(\{(?:[^{}]|\{[^{}]*\})*\})\s*\n?```")
+        {
             for cap in re.captures_iter(&remaining) {
                 let json_str = cap.get(1).map(|m| m.as_str()).unwrap_or("");
                 if let Ok(d) = serde_json::from_str::<serde_json::Value>(json_str) {
-                    let name = d.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = d
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if !name.is_empty() {
-                        let args = d.get("arguments")
+                        let args = d
+                            .get("arguments")
                             .or_else(|| d.get("args"))
                             .or_else(|| d.get("parameters"))
-                            .cloned().unwrap_or_default();
+                            .cloned()
+                            .unwrap_or_default();
                         tcs.push(MockToolCall::new(name, args));
                     }
                 }
             }
             if !tcs.is_empty() {
-                let strip_re = regex::Regex::new(
-                    r"```(?:json)?\s*\n?\{[^`]*\}\s*\n?```",
-                ).unwrap_or_else(|_| regex::Regex::new(r"").unwrap());
-                remaining = strip_re.replace_all(&remaining, "").to_string().trim().to_string();
+                let strip_re = regex::Regex::new(r"```(?:json)?\s*\n?\{[^`]*\}\s*\n?```")
+                    .unwrap_or_else(|_| regex::Regex::new(r"").unwrap());
+                remaining = strip_re
+                    .replace_all(&remaining, "")
+                    .to_string()
+                    .trim()
+                    .to_string();
             }
         }
     }
@@ -294,7 +360,7 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
     // directly in prose without any markup wrapper.
     if tcs.is_empty() {
         if let Ok(re) = regex::Regex::new(
-            r#""name"\s*:\s*"([^"]+)"\s*,\s*"(?:arguments|args|parameters)"\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})"#
+            r#""name"\s*:\s*"([^"]+)"\s*,\s*"(?:arguments|args|parameters)"\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})"#,
         ) {
             if let Some(cap) = re.captures(&remaining) {
                 let name = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();

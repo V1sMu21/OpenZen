@@ -1,4 +1,4 @@
-use oz_core_types::{ContentBlock, Message, Role, LlmClient};
+use oz_core_types::{ContentBlock, LlmClient, Message, Role};
 use serde_json::Value;
 
 /// Configuration for context compression. All budgets are in TOKENS.
@@ -55,9 +55,9 @@ impl Default for CompressionConfig {
         CompressionConfig {
             min_messages: 8,
             trigger_pct: 80,
-            tool_result_budget: 3000,     // ~12K chars — enough for file contents
-            old_assistant_budget: 2000,   // ~8K chars — preserve planning context
-            old_user_budget: 5000,        // ~20K chars — never truncate task descriptions
+            tool_result_budget: 3000, // ~12K chars — enough for file contents
+            old_assistant_budget: 2000, // ~8K chars — preserve planning context
+            old_user_budget: 5000,    // ~20K chars — never truncate task descriptions
             enable_summarization: true,
             // 170K = 256K window − 64K max output headroom. Old 35K/40K ceilings
             // fired at 16% of window, thrashing every turn and breaking the
@@ -156,10 +156,7 @@ fn content_block_len(block: &ContentBlock) -> usize {
         }
         ContentBlock::ToolResult { content, .. } => match content {
             oz_core_types::ContentContainer::Text(t) => t.len(),
-            oz_core_types::ContentContainer::Blocks(bs) => bs
-                .iter()
-                .map(content_block_len)
-                .sum(),
+            oz_core_types::ContentContainer::Blocks(bs) => bs.iter().map(content_block_len).sum(),
         },
         _ => 0,
     }
@@ -178,31 +175,39 @@ fn repair_orphaned_tool_results(messages: &mut [Message]) {
             continue;
         }
         // Collect tool_use_ids from the preceding assistant message
-        let valid_ids: std::collections::HashSet<String> = if i > 0
-            && messages[i - 1].role == Role::Assistant
-        {
-            messages[i - 1].content.iter()
-                .filter_map(|b| match b {
-                    ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-                    _ => None,
-                })
-                .collect()
-        } else {
-            std::collections::HashSet::new()
-        };
+        let valid_ids: std::collections::HashSet<String> =
+            if i > 0 && messages[i - 1].role == Role::Assistant {
+                messages[i - 1]
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
         // Repair: convert orphaned ToolResult blocks to text
         let mut repaired = false;
         for block in messages[i].content.iter_mut() {
-            if let ContentBlock::ToolResult { tool_use_id, content, .. } = block {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = block
+            {
                 if !valid_ids.contains(tool_use_id.as_str()) {
                     let text = match content {
                         oz_core_types::ContentContainer::Text(t) => std::mem::take(t),
-                        oz_core_types::ContentContainer::Blocks(bs) => {
-                            bs.iter().filter_map(|b| match b {
+                        oz_core_types::ContentContainer::Blocks(bs) => bs
+                            .iter()
+                            .filter_map(|b| match b {
                                 ContentBlock::Text { text, .. } => Some(text.clone()),
                                 _ => None,
-                            }).collect::<Vec<_>>().join("\n")
-                        }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                     };
                     *block = ContentBlock::text(format!("[compressed tool output]: {text}"));
                     repaired = true;
@@ -257,7 +262,9 @@ pub fn compress_messages(
     // Target must sit strictly below the trigger line (emergency mode
     // passes context_win=1 → trigger=0 → target=1, deleting down to the
     // min_messages floor, same as before).
-    let target_tokens = config.target_tokens.min(trigger_tokens.saturating_sub(1).max(1));
+    let target_tokens = config
+        .target_tokens
+        .min(trigger_tokens.saturating_sub(1).max(1));
 
     let raw_stats = measure_usage(messages);
     // Auto-calibrate chars→tokens ratio from LLM's exact token count.
@@ -282,7 +289,10 @@ pub fn compress_messages(
     // Phase 2: Trim old messages. Keep the most recent pairs untouched
     // (recency is the best indicator of relevance).
     let keep_recent = 2;
-    let sys_offset = messages.iter().take_while(|m| m.role == Role::System).count();
+    let sys_offset = messages
+        .iter()
+        .take_while(|m| m.role == Role::System)
+        .count();
     let trim_end = messages.len().saturating_sub(keep_recent);
     for msg in &mut messages[sys_offset..trim_end] {
         saved += trim_message_content(msg, config, &stats);
@@ -295,7 +305,9 @@ pub fn compress_messages(
     // below the trigger line) so one compression buys a long stable
     // period instead of shaving 4K and re-triggering next turn.
     let tail_turns = 2;
-    let user_positions: Vec<usize> = messages.iter().enumerate()
+    let user_positions: Vec<usize> = messages
+        .iter()
+        .enumerate()
         .filter(|(_, m)| m.role == Role::User)
         .map(|(i, _)| i)
         .collect();
@@ -342,7 +354,11 @@ pub fn compress_messages(
 
 /// Trim a single message's content to keep only the most relevant portion.
 /// Uses auto-calibrated ratio for accurate token→chars budget conversion.
-fn trim_message_content(msg: &mut Message, config: &CompressionConfig, stats: &UsageStats) -> usize {
+fn trim_message_content(
+    msg: &mut Message,
+    config: &CompressionConfig,
+    stats: &UsageStats,
+) -> usize {
     let token_budget = match msg.role {
         Role::Assistant => config.old_assistant_budget,
         Role::User => config.old_user_budget,
@@ -362,7 +378,11 @@ fn trim_message_content(msg: &mut Message, config: &CompressionConfig, stats: &U
         if used + block_len <= char_budget {
             used += block_len;
             new_blocks.push(block);
-        } else if let ContentBlock::Text { text, cache_control } = block {
+        } else if let ContentBlock::Text {
+            text,
+            cache_control,
+        } = block
+        {
             let remaining = char_budget.saturating_sub(used);
             if remaining > 0 {
                 let mut t = text;
@@ -372,7 +392,10 @@ fn trim_message_content(msg: &mut Message, config: &CompressionConfig, stats: &U
                 // (e.g. Chinese, 3 bytes/char) panics with
                 // "assertion failed: self.is_char_boundary(new_len)".
                 t.truncate(t.floor_char_boundary(remaining));
-                new_blocks.push(ContentBlock::Text { text: t, cache_control });
+                new_blocks.push(ContentBlock::Text {
+                    text: t,
+                    cache_control,
+                });
             }
             break;
         }
@@ -398,19 +421,17 @@ fn compress_tool_results(messages: &mut [Message], budget: usize) -> usize {
             if let ContentBlock::ToolResult { content, .. } = block {
                 let original_len = match content {
                     oz_core_types::ContentContainer::Text(t) => t.len(),
-                    oz_core_types::ContentContainer::Blocks(bs) => bs
-                        .iter()
-                        .map(content_block_len)
-                        .sum(),
+                    oz_core_types::ContentContainer::Blocks(bs) => {
+                        bs.iter().map(content_block_len).sum()
+                    }
                 };
 
                 let truncated = truncate_content(content, budget.saturating_sub(accumulated));
                 let new_len = match &truncated {
                     oz_core_types::ContentContainer::Text(t) => t.len(),
-                    oz_core_types::ContentContainer::Blocks(bs) => bs
-                        .iter()
-                        .map(content_block_len)
-                        .sum(),
+                    oz_core_types::ContentContainer::Blocks(bs) => {
+                        bs.iter().map(content_block_len).sum()
+                    }
                 };
 
                 accumulated += original_len;
@@ -559,16 +580,19 @@ pub fn emergency_compress(
     let mut template = build_compression_summary(summary_json, "");
     let previous = extract_compression_summaries(messages);
     if !previous.is_empty() {
-        template = format!("[Prior context (merge into summary below)]:\n{previous}\n\n---\n\n{template}");
+        template =
+            format!("[Prior context (merge into summary below)]:\n{previous}\n\n---\n\n{template}");
     }
 
     if !template.is_empty() {
-        let inject_at = messages.iter().position(|m| {
-            m.role == Role::User || m.role == Role::Assistant
-        }).unwrap_or(0);
-        messages.insert(inject_at, Message::system(format!(
-            "[Compression summary (emergency)]: {template}"
-        )));
+        let inject_at = messages
+            .iter()
+            .position(|m| m.role == Role::User || m.role == Role::Assistant)
+            .unwrap_or(0);
+        messages.insert(
+            inject_at,
+            Message::system(format!("[Compression summary (emergency)]: {template}")),
+        );
     }
 
     (saved, template)
@@ -632,12 +656,24 @@ impl CompressionService {
         tokio::spawn(async move {
             let summary = if full_prompt.len() > 12_000 {
                 progressive_merge_summary(
-                    &full_prompt, &template, &model_name, &apibase, &apikey, &lang,
-                ).await
+                    &full_prompt,
+                    &template,
+                    &model_name,
+                    &apibase,
+                    &apikey,
+                    &lang,
+                )
+                .await
             } else {
                 call_summary_llm(
-                    &full_prompt, &model_name, &apibase, &apikey, &template, &lang,
-                ).await
+                    &full_prompt,
+                    &model_name,
+                    &apibase,
+                    &apikey,
+                    &template,
+                    &lang,
+                )
+                .await
             };
             let _ = tx.send(summary);
         });
@@ -712,8 +748,7 @@ async fn call_summary_llm(
         base_delay: None,
         spring_back: None,
     };
-    let backend: Box<dyn oz_llm::Session> =
-        Box::new(oz_llm::NativeOAISession::new(config));
+    let backend: Box<dyn oz_llm::Session> = Box::new(oz_llm::NativeOAISession::new(config));
     let instruction = if lang == "zh" {
         "用简体中文将下面的对话总结为一份简洁的 markdown 记录。\
          保留所有关键信息。\n\n\
@@ -740,7 +775,9 @@ async fn call_summary_llm(
     match tokio::time::timeout(
         std::time::Duration::from_secs(secs),
         sc.chat(&[prompt], &[]),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok(resp)) if !resp.content.is_empty() => resp.content,
         _ => fallback.to_string(),
     }
@@ -787,7 +824,10 @@ async fn progressive_merge_summary(
         merged = next;
     }
 
-    merged.into_iter().next().unwrap_or_else(|| template.to_string())
+    merged
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| template.to_string())
 }
 
 /// Schema B: Match surviving compressed messages back to original JSON entries.
@@ -795,10 +835,7 @@ async fn progressive_merge_summary(
 /// `compress_messages` removes from the front (after system prompts), so
 /// survivors are at the tail. We iterate both lists from the back, matching
 /// by role + content prefix (Phase 1 truncation shortens text, never extends).
-pub fn match_messages_to_originals(
-    compressed: &[Message],
-    originals: &[Value],
-) -> Vec<Value> {
+pub fn match_messages_to_originals(compressed: &[Message], originals: &[Value]) -> Vec<Value> {
     if compressed.len() == originals.len() {
         return originals.to_vec();
     }
@@ -891,7 +928,8 @@ pub fn build_compression_prompt(removed_messages: &[Value]) -> String {
         };
 
         for block in blocks {
-            if let Some(text) = block.get("text")
+            if let Some(text) = block
+                .get("text")
                 .and_then(|t| t.get("text"))
                 .and_then(|t| t.as_str())
             {
@@ -903,7 +941,8 @@ pub fn build_compression_prompt(removed_messages: &[Value]) -> String {
 
             if let Some(tool_use) = block.get("tool_use") {
                 let name = tool_use.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                let input = tool_use.get("input")
+                let input = tool_use
+                    .get("input")
                     .map(|v| serde_json::to_string(v).unwrap_or_default())
                     .unwrap_or_default();
                 // Truncate tool input to keep prompt manageable.
@@ -912,7 +951,8 @@ pub fn build_compression_prompt(removed_messages: &[Value]) -> String {
                 // causing a panic that poisons the mutex and leaves the
                 // session permanently "Running".
                 let input_short = if input.len() > 200 {
-                    let end = input.char_indices()
+                    let end = input
+                        .char_indices()
                         .nth(200)
                         .map(|(i, _)| i)
                         .unwrap_or(input.len());
@@ -924,10 +964,12 @@ pub fn build_compression_prompt(removed_messages: &[Value]) -> String {
             }
 
             if let Some(tool_result) = block.get("tool_result") {
-                let result_text = tool_result.get("content")
+                let result_text = tool_result
+                    .get("content")
                     .and_then(|c| c.as_str())
                     .or_else(|| {
-                        tool_result.get("content")
+                        tool_result
+                            .get("content")
                             .and_then(|c| c.get("text"))
                             .and_then(|t| t.as_str())
                     })
@@ -996,7 +1038,10 @@ pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) 
             for block in blocks {
                 if let Some(text) = extract_text(block) {
                     let t = text.trim().to_string();
-                    if !t.is_empty() && !t.starts_with("[Compression summary]") && !t.starts_with("<tool_") {
+                    if !t.is_empty()
+                        && !t.starts_with("[Compression summary]")
+                        && !t.starts_with("<tool_")
+                    {
                         user_msgs.push(truncate_safe(&t, 120));
                     }
                 }
@@ -1038,18 +1083,24 @@ pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) 
 
             // Extract tool result previews
             if let Some(tool_result) = block.get("tool_result") {
-                let result_text = tool_result.get("content")
+                let result_text = tool_result
+                    .get("content")
                     .and_then(|c| c.as_str())
-                    .or_else(|| tool_result.get("content")
-                        .and_then(|c| c.get("text"))
-                        .and_then(|t| t.as_str()))
+                    .or_else(|| {
+                        tool_result
+                            .get("content")
+                            .and_then(|c| c.get("text"))
+                            .and_then(|t| t.as_str())
+                    })
                     .unwrap_or("");
                 // Reflexion: keep recent tool errors in the summary so a
                 // compressed long task does not forget what failed.
                 let lower = result_text.to_lowercase();
                 if !result_text.is_empty()
-                    && (lower.contains("error") || lower.contains("failed")
-                        || lower.contains("exception") || lower.contains("traceback"))
+                    && (lower.contains("error")
+                        || lower.contains("failed")
+                        || lower.contains("exception")
+                        || lower.contains("traceback"))
                 {
                     recent_errors.push(truncate_safe(result_text, 220));
                 }
@@ -1067,7 +1118,10 @@ pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) 
     }
 
     let mut parts: Vec<String> = Vec::new();
-    parts.push(format!("[Compressed: {} messages removed]", removed_messages.len()));
+    parts.push(format!(
+        "[Compressed: {} messages removed]",
+        removed_messages.len()
+    ));
 
     if !task.is_empty() {
         parts.push(format!("## Task\n{}", task));
@@ -1077,22 +1131,45 @@ pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) 
         // Dedup and limit
         let mut seen = std::collections::HashSet::new();
         let unique: Vec<&String> = files.iter().filter(|f| seen.insert(*f)).collect();
-        let limited = if unique.len() > 30 { &unique[..30] } else { &unique };
-        parts.push(format!("## Files\n{}", limited.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")));
+        let limited = if unique.len() > 30 {
+            &unique[..30]
+        } else {
+            &unique
+        };
+        parts.push(format!(
+            "## Files\n{}",
+            limited
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
     }
 
     if !actions.is_empty() {
-        let limited = if actions.len() > 20 { &actions[..20] } else { &actions };
+        let limited = if actions.len() > 20 {
+            &actions[..20]
+        } else {
+            &actions
+        };
         parts.push(format!("## Actions\n{}", limited.join("\n")));
     }
 
     if !progress_items.is_empty() {
-        let items = if progress_items.len() > 10 { &progress_items[..10] } else { &progress_items };
+        let items = if progress_items.len() > 10 {
+            &progress_items[..10]
+        } else {
+            &progress_items
+        };
         parts.push(format!("## Progress\n{}", items.join("\n")));
     }
 
     if !recent_errors.is_empty() {
-        let limited = if recent_errors.len() > 3 { &recent_errors[..3] } else { &recent_errors };
+        let limited = if recent_errors.len() > 3 {
+            &recent_errors[..3]
+        } else {
+            &recent_errors
+        };
         parts.push(format!("## Recent errors\n{}", limited.join("\n")));
     }
 
@@ -1118,7 +1195,8 @@ pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) 
 
 /// Extract text from a text-type content block.
 fn extract_text(block: &Value) -> Option<&str> {
-    block.get("text")
+    block
+        .get("text")
         .and_then(|t| t.get("text"))
         .and_then(|t| t.as_str())
 }
@@ -1178,7 +1256,14 @@ fn input_desc(input: Option<&Value>) -> String {
         None => return String::new(),
     };
     // Try common description fields
-    for key in &["query", "command", "prompt", "message", "expression", "pattern"] {
+    for key in &[
+        "query",
+        "command",
+        "prompt",
+        "message",
+        "expression",
+        "pattern",
+    ] {
         if let Some(v) = input.get(key).and_then(|v| v.as_str()) {
             return truncate_safe(v, 60);
         }
@@ -1281,7 +1366,14 @@ impl CompressionMetrics {
         } else {
             0.0
         };
-        CompressionMetrics { delta, balance_ratio, before: msg_before, after: msg_after, chars_before, chars_after }
+        CompressionMetrics {
+            delta,
+            balance_ratio,
+            before: msg_before,
+            after: msg_after,
+            chars_before,
+            chars_after,
+        }
     }
 
     pub fn summary(&self) -> String {
@@ -1361,20 +1453,32 @@ mod tests {
         let saved = compress_messages(&mut msgs, 100, &config, None);
         assert!(saved > 0, "compression should save at least 0 chars");
         // Verify the tool result was truncated
-        let total_after: usize = msgs.iter().map(|m| {
-            m.content.iter().map(|b| match b {
-                ContentBlock::Text { text, .. } => text.len(),
-                ContentBlock::ToolResult { content, .. } => match content {
-                    oz_core_types::ContentContainer::Text(t) => t.len(),
-                    oz_core_types::ContentContainer::Blocks(bs) => bs.iter().map(|b| match b {
+        let total_after: usize = msgs
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .map(|b| match b {
                         ContentBlock::Text { text, .. } => text.len(),
+                        ContentBlock::ToolResult { content, .. } => match content {
+                            oz_core_types::ContentContainer::Text(t) => t.len(),
+                            oz_core_types::ContentContainer::Blocks(bs) => bs
+                                .iter()
+                                .map(|b| match b {
+                                    ContentBlock::Text { text, .. } => text.len(),
+                                    _ => 0,
+                                })
+                                .sum(),
+                        },
                         _ => 0,
-                    }).sum(),
-                },
-                _ => 0,
-            }).sum::<usize>()
-        }).sum::<usize>();
-        assert!(total_after < 10_000, "content should be smaller after compression");
+                    })
+                    .sum::<usize>()
+            })
+            .sum::<usize>();
+        assert!(
+            total_after < 10_000,
+            "content should be smaller after compression"
+        );
     }
 
     #[test]
@@ -1419,10 +1523,20 @@ mod tests {
         // Compressed to the TARGET (8K), far below the trigger (32K) —
         // this is the fix for the 170K → 166K shallow thrash.
         let after = measure_usage(&msgs).total_tokens();
-        assert!(after <= 8_000, "after compression {after} should be ≤ target 8K");
-        assert!(after < 32_000, "after compression {after} should be < trigger 32K");
+        assert!(
+            after <= 8_000,
+            "after compression {after} should be ≤ target 8K"
+        );
+        assert!(
+            after < 32_000,
+            "after compression {after} should be < trigger 32K"
+        );
         // Tail turns survive.
-        assert!(msgs.len() >= 4, "expected at least the tail 2 turns, got {}", msgs.len());
+        assert!(
+            msgs.len() >= 4,
+            "expected at least the tail 2 turns, got {}",
+            msgs.len()
+        );
     }
 
     #[test]
@@ -1461,10 +1575,12 @@ mod tests {
         let mut msgs = vec![Message::system("you are openzen")];
         for i in 0..30 {
             msgs.push(Message::user(&format!(
-                "user message {i} {}", "x".repeat(3000)
+                "user message {i} {}",
+                "x".repeat(3000)
             )));
             msgs.push(Message::assistant(&format!(
-                "assistant response {i} {}", "y".repeat(3000)
+                "assistant response {i} {}",
+                "y".repeat(3000)
             )));
         }
 
@@ -1490,14 +1606,26 @@ mod tests {
 
         // The window starts at the first removed message (past system) —
         // "user message 0" — and must NOT contain the system prompt.
-        let first_role = summary_json[0].get("role").and_then(|r| r.as_str()).unwrap_or("");
-        assert_eq!(first_role, "user", "summary window must start past system prompts");
+        let first_role = summary_json[0]
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            first_role, "user",
+            "summary window must start past system prompts"
+        );
         assert!(!summary_json[0].to_string().contains("you are openzen"));
 
         // Template summary built from the removed window reflects real content.
         let template = build_compression_summary(summary_json, "");
-        assert!(template.contains("user message 0"), "template should cover removed window, got: {template}");
-        assert!(!template.contains("you are openzen"), "system prompt must not leak into summary");
+        assert!(
+            template.contains("user message 0"),
+            "template should cover removed window, got: {template}"
+        );
+        assert!(
+            !template.contains("you are openzen"),
+            "system prompt must not leak into summary"
+        );
     }
 
     #[test]
@@ -1523,10 +1651,7 @@ mod tests {
         if let oz_core_types::ContentContainer::Blocks(bs) = &truncated {
             let total: usize = bs.iter().map(|b| content_block_len(b)).sum();
             // Should be at or under budget (with some overhead for truncation markers)
-            assert!(
-                total <= 1500,
-                "truncated content too long: {total} > 1500"
-            );
+            assert!(total <= 1500, "truncated content too long: {total} > 1500");
             assert!(bs.len() <= 3, "expected at most 3 blocks, got {}", bs.len());
         } else {
             panic!("expected Blocks variant");
@@ -1558,28 +1683,36 @@ mod tests {
         ];
         let summary = build_compression_summary(&removed, "");
         // Should NOT use system prompt as preview
-        assert!(!summary.contains("You are a helpful assistant"),
-            "should skip system message preview, got: {summary}");
+        assert!(
+            !summary.contains("You are a helpful assistant"),
+            "should skip system message preview, got: {summary}"
+        );
         // Should use user message as preview
-        assert!(summary.contains("chess engine"),
-            "should show user message preview, got: {summary}");
+        assert!(
+            summary.contains("chess engine"),
+            "should show user message preview, got: {summary}"
+        );
     }
 
     #[test]
     fn test_build_summary_counts_tools_from_tool_use_blocks() {
-        let removed = vec![
-            serde_json::json!({
-                "role": "assistant",
-                "content": [
-                    {"text": {"text": "I'll read the file"}},
-                    {"tool_use": {"id": "call_1", "name": "read", "input": {"file_path": "/tmp/x"}}},
-                    {"tool_use": {"id": "call_2", "name": "write", "input": {"file_path": "/tmp/y"}}},
-                ]
-            }),
-        ];
+        let removed = vec![serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"text": {"text": "I'll read the file"}},
+                {"tool_use": {"id": "call_1", "name": "read", "input": {"file_path": "/tmp/x"}}},
+                {"tool_use": {"id": "call_2", "name": "write", "input": {"file_path": "/tmp/y"}}},
+            ]
+        })];
         let summary = build_compression_summary(&removed, "");
-        assert!(summary.contains("read"), "should list read tool, got: {summary}");
-        assert!(summary.contains("write"), "should list write tool, got: {summary}");
+        assert!(
+            summary.contains("read"),
+            "should list read tool, got: {summary}"
+        );
+        assert!(
+            summary.contains("write"),
+            "should list write tool, got: {summary}"
+        );
     }
 
     #[test]
@@ -1595,25 +1728,30 @@ mod tests {
             }),
         ];
         let summary = build_compression_summary(&removed, "");
-        assert!(!summary.contains("[Compression summary]"),
-            "should skip compression summary text, got: {summary}");
+        assert!(
+            !summary.contains("[Compression summary]"),
+            "should skip compression summary text, got: {summary}"
+        );
         // System role should not contribute to user/assistant counts
-        assert!(!summary.contains("0 user"), "system != user; preview should be user msg");
+        assert!(
+            !summary.contains("0 user"),
+            "system != user; preview should be user msg"
+        );
     }
 
     #[test]
     fn test_build_summary_handles_cjk_safe_truncation() {
         let chinese = "你好世界".repeat(40);
-        let removed = vec![
-            serde_json::json!({
-                "role": "user",
-                "content": [{"text": {"text": chinese}}]
-            }),
-        ];
+        let removed = vec![serde_json::json!({
+            "role": "user",
+            "content": [{"text": {"text": chinese}}]
+        })];
         let summary = build_compression_summary(&removed, "");
         // New format uses "Compressed:" prefix
-        assert!(summary.contains("Compressed: 1 messages removed"),
-            "unexpected format: {summary}");
+        assert!(
+            summary.contains("Compressed: 1 messages removed"),
+            "unexpected format: {summary}"
+        );
         // Task should be CJK-text truncated safely
         assert!(summary.contains("## Task"), "should have Task section");
         // Should not panic on CJK boundary
@@ -1635,7 +1773,10 @@ mod tests {
         for block in &msg.content {
             if let ContentBlock::Text { text, .. } = block {
                 assert!(text.len() < 36_000, "content should shrink");
-                assert!(text.is_char_boundary(text.len()), "must end on char boundary");
+                assert!(
+                    text.is_char_boundary(text.len()),
+                    "must end on char boundary"
+                );
                 let _ = text.chars().count(); // iterates fine only if valid UTF-8
             }
         }
@@ -1647,9 +1788,9 @@ mod tests {
     fn test_full_compression_pipeline_extracts_correct_removed_msgs() {
         // 23 messages with decent content to exceed token trigger
         let filler = "x".repeat(80); // pad messages to exceed small trigger
-        let mut msgs: Vec<Message> = vec![
-            Message::system(&format!("# Role: Assistant\nChinese system prompt text here...\n{filler}")),
-        ];
+        let mut msgs: Vec<Message> = vec![Message::system(&format!(
+            "# Role: Assistant\nChinese system prompt text here...\n{filler}"
+        ))];
         for i in 0..11 {
             msgs.push(Message::user(&format!("task step {} - {filler}", i)));
             msgs.push(Message::assistant_with_blocks(vec![
@@ -1673,22 +1814,38 @@ mod tests {
         let saved = compress_messages(&mut msgs, 50, &config, None);
         let removed_count = before_count.saturating_sub(msgs.len());
 
-        assert!(saved > 0 || removed_count > 0,
+        assert!(
+            saved > 0 || removed_count > 0,
             "compression failed: before={before_count}, after={}, saved={saved}",
-            msgs.len());
+            msgs.len()
+        );
 
         if removed_count > 0 {
             let removed_json: Vec<serde_json::Value> =
                 snapshot.into_iter().take(removed_count).collect();
             let summary = build_compression_summary(&removed_json, "");
 
-            assert!(!summary.contains("# Role:"),
-                "system prompt leaked into compression summary: {summary}");
+            assert!(
+                !summary.contains("# Role:"),
+                "system prompt leaked into compression summary: {summary}"
+            );
             // New format has structured sections
-            assert!(summary.contains("Compressed:"), "should have compressed header: {summary}");
-            assert!(summary.contains("## Task"), "should have Task section: {summary}");
-            assert!(summary.contains("## Files"), "should have Files section: {summary}");
-            assert!(summary.contains("## Actions"), "should have Actions section: {summary}");
+            assert!(
+                summary.contains("Compressed:"),
+                "should have compressed header: {summary}"
+            );
+            assert!(
+                summary.contains("## Task"),
+                "should have Task section: {summary}"
+            );
+            assert!(
+                summary.contains("## Files"),
+                "should have Files section: {summary}"
+            );
+            assert!(
+                summary.contains("## Actions"),
+                "should have Actions section: {summary}"
+            );
         }
     }
 
@@ -1696,9 +1853,7 @@ mod tests {
     fn test_phase3_remeasures_after_trimming() {
         // 31 messages with padding to exceed token trigger
         let filler = "x".repeat(80);
-        let mut msgs: Vec<Message> = vec![
-            Message::system(&format!("short sys {filler}")),
-        ];
+        let mut msgs: Vec<Message> = vec![Message::system(&format!("short sys {filler}"))];
         for i in 0..15 {
             msgs.push(Message::user(&format!("task step {} - {filler}", i)));
             msgs.push(Message::assistant(&format!("response {} - {filler}", i)));
@@ -1710,11 +1865,15 @@ mod tests {
         let saved = compress_messages(&mut msgs, 50, &config, None);
         let after = msgs.len();
 
-        assert!(after < before,
-            "should remove messages: {before} -> {after} (saved {saved} chars)");
-        assert!(after >= config.min_messages,
+        assert!(
+            after < before,
+            "should remove messages: {before} -> {after} (saved {saved} chars)"
+        );
+        assert!(
+            after >= config.min_messages,
             "should not drop below min_messages: {after} < {min}",
-            min = config.min_messages);
+            min = config.min_messages
+        );
     }
 
     // ── build_compression_prompt tests ──
@@ -1759,12 +1918,10 @@ mod tests {
 
     #[test]
     fn test_build_prompt_includes_tool_results() {
-        let removed = vec![
-            serde_json::json!({
-                "role": "user",
-                "content": [{"tool_result": {"tool_use_id": "c1", "content": "file written successfully"}}]
-            }),
-        ];
+        let removed = vec![serde_json::json!({
+            "role": "user",
+            "content": [{"tool_result": {"tool_use_id": "c1", "content": "file written successfully"}}]
+        })];
         let prompt = build_compression_prompt(&removed);
         assert!(prompt.contains("[tool_result]: file written successfully"));
     }
@@ -1772,17 +1929,19 @@ mod tests {
     #[test]
     fn test_build_prompt_truncates_long_tool_input() {
         let long_input = serde_json::json!({"content": "x".repeat(5000)});
-        let removed = vec![
-            serde_json::json!({
-                "role": "assistant",
-                "content": [
-                    {"tool_use": {"id": "c1", "name": "write", "input": long_input}},
-                ]
-            }),
-        ];
+        let removed = vec![serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"tool_use": {"id": "c1", "name": "write", "input": long_input}},
+            ]
+        })];
         let prompt = build_compression_prompt(&removed);
         // Tool input should be truncated, not 5000 chars in prompt
         let after_tool_use = prompt.split("<tool_use:write>").nth(1).unwrap_or("");
-        assert!(after_tool_use.len() < 500, "tool input not truncated: {} chars", after_tool_use.len());
+        assert!(
+            after_tool_use.len() < 500,
+            "tool input not truncated: {} chars",
+            after_tool_use.len()
+        );
     }
 }

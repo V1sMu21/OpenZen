@@ -53,7 +53,10 @@ pub struct ReviewVerdict {
 
 impl Default for ReviewVerdict {
     fn default() -> Self {
-        ReviewVerdict { pass: true, issues: Vec::new() }
+        ReviewVerdict {
+            pass: true,
+            issues: Vec::new(),
+        }
     }
 }
 
@@ -117,10 +120,7 @@ pub async fn run_assertion(command: &str, working_dir: &str) -> (bool, String) {
 
 /// Run all assertions parsed from `spec_text`. Returns the list of failures
 /// (empty = all passed or no assertions present).
-pub async fn run_assertion_gate(
-    spec_text: &str,
-    working_dir: &str,
-) -> Vec<AssertionFailure> {
+pub async fn run_assertion_gate(spec_text: &str, working_dir: &str) -> Vec<AssertionFailure> {
     let assertions = load_assertions(spec_text);
     if assertions.is_empty() {
         return Vec::new();
@@ -132,9 +132,17 @@ pub async fn run_assertion_gate(
             run_assertion(cmd, working_dir),
         )
         .await
-        .unwrap_or_else(|_| (false, format!("<verify timed out after {ASSERTION_TIMEOUT_SECS}s>")));
+        .unwrap_or_else(|_| {
+            (
+                false,
+                format!("<verify timed out after {ASSERTION_TIMEOUT_SECS}s>"),
+            )
+        });
         if !passed {
-            failures.push(AssertionFailure { command: cmd.clone(), output });
+            failures.push(AssertionFailure {
+                command: cmd.clone(),
+                output,
+            });
         }
     }
     failures
@@ -222,7 +230,11 @@ pub fn parse_review_response(raw: &str) -> ReviewVerdict {
                                 .and_then(|s| s.as_str())
                                 .unwrap_or("low")
                                 .to_string();
-                            let item = it.get("item").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                            let item = it
+                                .get("item")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             if item.is_empty() {
                                 None
                             } else {
@@ -387,7 +399,12 @@ async fn run_quick_cmd(cmd: &str, working_dir: &str, timeout_secs: u64) -> (bool
     });
     let out = match tokio::time::timeout(Duration::from_secs(timeout_secs.max(1)), fut).await {
         Ok(Ok(Ok(o))) => o,
-        _ => return (false, format!("<quick check timed out after {timeout_secs}s>")),
+        _ => {
+            return (
+                false,
+                format!("<quick check timed out after {timeout_secs}s>"),
+            )
+        }
     };
     let (status, stdout, stderr) = (out.status, out.stdout, out.stderr);
     let mut buf = stdout;
@@ -448,16 +465,40 @@ pub fn reflection_log_exists(working_dir: &str) -> bool {
 /// Only suspicions from the last N assistant messages count (recency filter).
 const SUSPICION_RECENT_LIMIT: usize = 3;
 /// Fix/verify tools that count as "dealing with" a suspicion.
-const FIX_TOOLS: [&str; 7] =
-    ["write", "file_write", "edit", "file_edit", "patch", "file_patch", "code_run"];
+const FIX_TOOLS: [&str; 7] = [
+    "write",
+    "file_write",
+    "edit",
+    "file_edit",
+    "patch",
+    "file_patch",
+    "code_run",
+];
 
 const SUSPICION_ZH: [&str; 11] = [
-    "可能", "疑似", "似乎", "好像", "看起来", "怀疑", "不确定",
-    "待检查", "待验证", "之后再", "回头再",
+    "可能",
+    "疑似",
+    "似乎",
+    "好像",
+    "看起来",
+    "怀疑",
+    "不确定",
+    "待检查",
+    "待验证",
+    "之后再",
+    "回头再",
 ];
 const SUSPICION_EN: [&str; 10] = [
-    "maybe", "might", "possibly", "seems", "appears", "suspect",
-    "uncertain", "not sure", "looks off", "check later",
+    "maybe",
+    "might",
+    "possibly",
+    "seems",
+    "appears",
+    "suspect",
+    "uncertain",
+    "not sure",
+    "looks off",
+    "check later",
 ];
 
 /// Detect an unresolved suspicion in the most recent assistant messages.
@@ -491,7 +532,11 @@ pub fn find_unresolved_suspicion(
             }
         })
         .collect();
-    let recent: Vec<&String> = assistant.iter().rev().take(SUSPICION_RECENT_LIMIT).collect();
+    let recent: Vec<&String> = assistant
+        .iter()
+        .rev()
+        .take(SUSPICION_RECENT_LIMIT)
+        .collect();
     if recent.is_empty() {
         return None;
     }
@@ -508,7 +553,11 @@ pub fn find_unresolved_suspicion(
         return None;
     }
 
-    let keys: &[&str] = if lang == "zh" { &SUSPICION_ZH } else { &SUSPICION_EN };
+    let keys: &[&str] = if lang == "zh" {
+        &SUSPICION_ZH
+    } else {
+        &SUSPICION_EN
+    };
     for msg in recent {
         for sentence in split_sentences(msg) {
             let lower = sentence.to_lowercase();
@@ -579,7 +628,11 @@ pub fn format_review_feedback(issues: &[ReviewIssue], lang: &str) -> String {
         "[REVIEW] Independent review found issues that must be fixed:\n"
     });
     for issue in issues.iter().filter(|i| i.severity == "high") {
-        out.push_str(&format!("- [{}] {}\n", issue.severity, truncate(&issue.item, 500)));
+        out.push_str(&format!(
+            "- [{}] {}\n",
+            issue.severity,
+            truncate(&issue.item, 500)
+        ));
     }
     out.push_str(if lang == "zh" {
         "修复后再次调用 respond 退出。"
@@ -591,10 +644,14 @@ pub fn format_review_feedback(issues: &[ReviewIssue], lang: &str) -> String {
 
 fn strip_markdown_fence(s: &str) -> &str {
     let s = s.trim();
-    s.strip_prefix("```json").unwrap_or(s)
-        .strip_prefix("```JSON").unwrap_or(s)
-        .strip_prefix("```").unwrap_or(s)
-        .strip_suffix("```").unwrap_or(s)
+    s.strip_prefix("```json")
+        .unwrap_or(s)
+        .strip_prefix("```JSON")
+        .unwrap_or(s)
+        .strip_prefix("```")
+        .unwrap_or(s)
+        .strip_suffix("```")
+        .unwrap_or(s)
         .trim()
 }
 
@@ -702,13 +759,25 @@ mod tests {
     #[test]
     fn test_collect_deliverables() {
         let seq: Vec<(String, serde_json::Value)> = vec![
-            ("write".into(), serde_json::json!({"file_path": "src/main.rs"})),
-            ("edit".into(), serde_json::json!({"file_path": "src/main.rs"})),
+            (
+                "write".into(),
+                serde_json::json!({"file_path": "src/main.rs"}),
+            ),
+            (
+                "edit".into(),
+                serde_json::json!({"file_path": "src/main.rs"}),
+            ),
             ("code_run".into(), serde_json::json!({"code": "ls"})),
-            ("file_write".into(), serde_json::json!({"file_path": "assets/logo.png"})),
+            (
+                "file_write".into(),
+                serde_json::json!({"file_path": "assets/logo.png"}),
+            ),
         ];
         let dels = collect_deliverables(&seq);
-        assert_eq!(dels, vec!["src/main.rs".to_string(), "assets/logo.png".to_string()]);
+        assert_eq!(
+            dels,
+            vec!["src/main.rs".to_string(), "assets/logo.png".to_string()]
+        );
         assert!(has_write_operations(&seq));
     }
 
@@ -748,18 +817,18 @@ mod tests {
             ("grep".into(), serde_json::json!({})),
         ];
         let hint = find_unresolved_suspicion(&messages, &seq, "zh");
-        assert!(hint.is_some(), "suspicion without fix activity must be flagged");
+        assert!(
+            hint.is_some(),
+            "suspicion without fix activity must be flagged"
+        );
         assert!(hint.unwrap().contains("朝向可能有问题"));
     }
 
     #[test]
     fn test_suspicion_suppressed_when_recent_fix() {
-        let messages = vec![
-            msg("assistant", "飞船的朝向可能有问题，我重新生成素材。"),
-        ];
-        let seq: Vec<(String, serde_json::Value)> = vec![
-            ("write".into(), serde_json::json!({"file_path": "ship.png"})),
-        ];
+        let messages = vec![msg("assistant", "飞船的朝向可能有问题，我重新生成素材。")];
+        let seq: Vec<(String, serde_json::Value)> =
+            vec![("write".into(), serde_json::json!({"file_path": "ship.png"}))];
         assert!(
             find_unresolved_suspicion(&messages, &seq, "zh").is_none(),
             "recent write action means the suspicion is being handled"
@@ -768,9 +837,7 @@ mod tests {
 
     #[test]
     fn test_suspicion_ignored_when_no_keywords() {
-        let messages = vec![
-            msg("assistant", "游戏已完成，所有功能测试通过。"),
-        ];
+        let messages = vec![msg("assistant", "游戏已完成，所有功能测试通过。")];
         let seq: Vec<(String, serde_json::Value)> = vec![];
         assert!(find_unresolved_suspicion(&messages, &seq, "zh").is_none());
     }
@@ -785,9 +852,7 @@ mod tests {
             msg("assistant", "修复了暂停逻辑。"),
             msg("assistant", "修复了碰撞检测。"),
         ];
-        let seq: Vec<(String, serde_json::Value)> = vec![
-            ("read".into(), serde_json::json!({})),
-        ];
+        let seq: Vec<(String, serde_json::Value)> = vec![("read".into(), serde_json::json!({}))];
         assert!(
             find_unresolved_suspicion(&messages, &seq, "zh").is_none(),
             "suspicion older than the recency window must not be flagged"
@@ -817,5 +882,4 @@ mod tests {
         let en_prompt = build_review_prompt("spec", &["a.js".to_string()], "done", "en");
         assert!(en_prompt.contains("Cross-consistency"));
     }
-
 }

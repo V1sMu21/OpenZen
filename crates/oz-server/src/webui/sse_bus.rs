@@ -43,7 +43,13 @@ impl SseEvent {
     }
 
     /// Model info event — broadcast session model configuration at start.
-    pub fn model_info(session_id: &str, model: &str, provider: &str, context_window: usize, is_local: bool) -> Self {
+    pub fn model_info(
+        session_id: &str,
+        model: &str,
+        provider: &str,
+        context_window: usize,
+        is_local: bool,
+    ) -> Self {
         // serde_json instead of hand-built format! — a model name containing
         // a quote previously produced broken JSON that the frontend silently
         // dropped.
@@ -61,7 +67,14 @@ impl SseEvent {
     }
 
     /// Done event — agent loop has completed.
-    pub fn done(session_id: &str, response: Option<&str>, tokens_in: usize, tokens_out: usize, context_tokens: usize, exit_reason: Option<&str>) -> Self {
+    pub fn done(
+        session_id: &str,
+        response: Option<&str>,
+        tokens_in: usize,
+        tokens_out: usize,
+        context_tokens: usize,
+        exit_reason: Option<&str>,
+    ) -> Self {
         let data = serde_json::json!({
             "exit_reason": exit_reason,
             "data": {

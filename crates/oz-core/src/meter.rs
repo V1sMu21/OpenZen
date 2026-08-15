@@ -35,11 +35,13 @@ pub fn record_session() {
 pub fn snapshot(memory_dir: Option<&std::path::Path>) -> MeterSnapshot {
     let uptime = START.elapsed().as_secs_f64();
     let calls = TOOL_CALLS.load(Ordering::Relaxed);
-    let cpm = if uptime > 0.0 { calls as f64 / uptime * 60.0 } else { 0.0 };
+    let cpm = if uptime > 0.0 {
+        calls as f64 / uptime * 60.0
+    } else {
+        0.0
+    };
 
-    let mem_size = memory_dir
-        .map(compute_dir_size)
-        .unwrap_or(0);
+    let mem_size = memory_dir.map(compute_dir_size).unwrap_or(0);
 
     MeterSnapshot {
         uptime_secs: uptime,

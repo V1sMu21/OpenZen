@@ -1,9 +1,9 @@
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
-use oz_core_types::{ContentBlock, LlmError, Message, TokenUsage, ToolDefinition};
-use oz_config::SessionConfig;
 use oz_config::mykey::RouterConfig;
+use oz_config::SessionConfig;
+use oz_core_types::{ContentBlock, LlmError, Message, TokenUsage, ToolDefinition};
 
 use crate::session::Session;
 
@@ -76,7 +76,11 @@ impl SmartRouterSession {
         let lower = prompt.to_lowercase();
         for (pattern, session) in &self.route_rules {
             if lower.contains(&pattern.to_lowercase()) {
-                tracing::info!("[SmartRouter] route rule match '{}' -> {}", pattern, session.model());
+                tracing::info!(
+                    "[SmartRouter] route rule match '{}' -> {}",
+                    pattern,
+                    session.model()
+                );
                 return &**session;
             }
         }
@@ -121,7 +125,10 @@ impl Session for SmartRouterSession {
         self.flagship.set_tools(tools);
     }
 
-    async fn raw_ask(&self, messages: &[Message]) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
+    async fn raw_ask(
+        &self,
+        messages: &[Message],
+    ) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
         let prompt = messages
             .iter()
             .flat_map(|m| m.content.iter())
@@ -183,7 +190,10 @@ mod tests {
         }
         fn set_system(&mut self, _system: String) {}
         fn set_tools(&mut self, _tools: Vec<ToolDefinition>) {}
-        async fn raw_ask(&self, _messages: &[Message]) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
+        async fn raw_ask(
+            &self,
+            _messages: &[Message],
+        ) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
             Ok((vec![ContentBlock::text("mock")], None))
         }
         async fn ask(&self, _prompt: &str) -> Result<Vec<ContentBlock>, LlmError> {
@@ -196,18 +206,30 @@ mod tests {
 
     #[test]
     fn test_simple_text_is_simple() {
-        assert_eq!(estimate_complexity("What is the capital of France?", &[]), Complexity::Simple);
+        assert_eq!(
+            estimate_complexity("What is the capital of France?", &[]),
+            Complexity::Simple
+        );
     }
 
     #[test]
     fn test_code_is_complex() {
-        assert_eq!(estimate_complexity("fn main() {}", &[]), Complexity::Complex);
+        assert_eq!(
+            estimate_complexity("fn main() {}", &[]),
+            Complexity::Complex
+        );
     }
 
     #[test]
     fn test_keyword_is_complex() {
-        assert_eq!(estimate_complexity("Analyze this algorithm", &[]), Complexity::Complex);
-        assert_eq!(estimate_complexity("Refactor this code", &[]), Complexity::Complex);
+        assert_eq!(
+            estimate_complexity("Analyze this algorithm", &[]),
+            Complexity::Complex
+        );
+        assert_eq!(
+            estimate_complexity("Refactor this code", &[]),
+            Complexity::Complex
+        );
     }
 
     #[test]

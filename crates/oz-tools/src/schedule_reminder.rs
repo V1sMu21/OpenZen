@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use oz_core_types::{ToolContext, ToolError, ToolOutput, Reminder, REMINDER_TX, ToolDefinition, ToolFunction};
+use oz_core_types::{
+    Reminder, ToolContext, ToolDefinition, ToolError, ToolFunction, ToolOutput, REMINDER_TX,
+};
 
 use crate::registry::ToolHandler;
 
@@ -44,7 +46,9 @@ pub struct ScheduleReminderTool;
 
 #[async_trait]
 impl ToolHandler for ScheduleReminderTool {
-    fn name(&self) -> String { "schedule_reminder".to_string() }
+    fn name(&self) -> String {
+        "schedule_reminder".to_string()
+    }
     fn description(&self) -> String {
         "Schedule a reminder message after a delay. Supports repeating at intervals: repeat_count>0 means a periodic heartbeat task (each fire resumes the session and injects the message).".to_string()
     }
@@ -76,14 +80,23 @@ impl ToolHandler for ScheduleReminderTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let delay_secs = args["delay_seconds"].as_u64().unwrap_or(60).clamp(5, 3600);
         let message = args["message"].as_str().unwrap_or("").to_string();
         let repeat_count = args["repeat_count"].as_u64().unwrap_or(0).min(10) as u32;
-        let repeat_interval = args["repeat_interval_seconds"].as_u64().unwrap_or(delay_secs).clamp(5, 3600);
+        let repeat_interval = args["repeat_interval_seconds"]
+            .as_u64()
+            .unwrap_or(delay_secs)
+            .clamp(5, 3600);
 
         if message.is_empty() {
-            return Err(ToolError::Custom("schedule_reminder requires a non-empty message".into()));
+            return Err(ToolError::Custom(
+                "schedule_reminder requires a non-empty message".into(),
+            ));
         }
 
         let now_ms = std::time::SystemTime::now()
@@ -95,7 +108,6 @@ impl ToolHandler for ScheduleReminderTool {
         // Session identity travels on ToolContext (per-run) instead of a
         // process-global that concurrent sessions overwrote.
         let session_id = ctx.session_id.clone();
-
 
         let reminder = Reminder {
             session_id,
@@ -116,7 +128,10 @@ impl ToolHandler for ScheduleReminderTool {
 
         if sent {
             let status_msg = if repeat_count > 0 {
-                format!("scheduled in {}s, repeating {} more times every {}s", delay_secs, repeat_count, repeat_interval)
+                format!(
+                    "scheduled in {}s, repeating {} more times every {}s",
+                    delay_secs, repeat_count, repeat_interval
+                )
             } else {
                 format!("scheduled in {}s", delay_secs)
             };
@@ -132,7 +147,10 @@ impl ToolHandler for ScheduleReminderTool {
                 format!("\n[schedule_reminder] {status_msg}"),
             ))
         } else {
-            Err(ToolError::Custom("schedule_reminder is not available in this environment (no reminder channel)".into()))
+            Err(ToolError::Custom(
+                "schedule_reminder is not available in this environment (no reminder channel)"
+                    .into(),
+            ))
         }
     }
 }

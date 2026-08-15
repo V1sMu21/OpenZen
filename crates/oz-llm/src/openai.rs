@@ -1,14 +1,14 @@
 use std::sync::Mutex;
 
+use oz_config::{ApiMode, SessionConfig};
 use oz_core_types::{ContentBlock, LlmError, Message, StreamEvent, TokenUsage, ToolDefinition};
 use tokio::sync::mpsc::UnboundedSender;
-use oz_config::{ApiMode, SessionConfig};
 
+use crate::is_local_apibase;
 use crate::message_format::{msgs_claude2oai, stamp_oai_cache_markers};
 use crate::retry::retry_with_backoff;
 use crate::session::Session;
 use crate::stream::parse_openai_sse;
-use crate::is_local_apibase;
 
 pub struct OaiSession {
     config: SessionConfig,
@@ -32,10 +32,8 @@ fn http_timeout(apibase: &str) -> std::time::Duration {
 
 impl OaiSession {
     pub fn new(config: SessionConfig) -> Self {
-        let http_client = crate::build_http_client(
-            &config.apibase,
-            http_timeout(&config.apibase).as_secs(),
-        );
+        let http_client =
+            crate::build_http_client(&config.apibase, http_timeout(&config.apibase).as_secs());
         OaiSession {
             config,
             history: Mutex::new(Vec::new()),
@@ -48,13 +46,26 @@ impl OaiSession {
 
 #[async_trait::async_trait]
 impl Session for OaiSession {
-    fn config(&self) -> &SessionConfig { &self.config }
-    fn history(&self) -> &Mutex<Vec<Message>> { &self.history }
-    fn history_mut(&self) -> &Mutex<Vec<Message>> { &self.history }
-    fn set_system(&mut self, system: String) { self.system = Some(system); }
-    fn set_tools(&mut self, tools: Vec<ToolDefinition>) { self.tools = Some(tools); }
+    fn config(&self) -> &SessionConfig {
+        &self.config
+    }
+    fn history(&self) -> &Mutex<Vec<Message>> {
+        &self.history
+    }
+    fn history_mut(&self) -> &Mutex<Vec<Message>> {
+        &self.history
+    }
+    fn set_system(&mut self, system: String) {
+        self.system = Some(system);
+    }
+    fn set_tools(&mut self, tools: Vec<ToolDefinition>) {
+        self.tools = Some(tools);
+    }
 
-    async fn raw_ask(&self, messages: &[Message]) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
+    async fn raw_ask(
+        &self,
+        messages: &[Message],
+    ) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
         let cfg = self.config.clone();
         let tools = self.tools.clone();
         let system = self.system.clone();
@@ -81,10 +92,12 @@ impl Session for OaiSession {
                         if let Some(ref tw) = tools {
                             payload["tools"] = serde_json::to_value(tw).unwrap_or_default();
                         }
-                        let resp = http_client.post(&url)
+                        let resp = http_client
+                            .post(&url)
                             .bearer_auth(&cfg.apikey)
                             .json(&payload)
-                            .send().await
+                            .send()
+                            .await
                             .map_err(LlmError::RequestFailed)?;
                         let status = resp.status().as_u16();
                         if status >= 400 {
@@ -95,9 +108,13 @@ impl Session for OaiSession {
                     })
                 },
                 &cfg_responses,
-            ).await
+            )
+            .await
         } else {
-            let url = format!("{}/chat/completions", cfg_responses.apibase.trim_end_matches('/'));
+            let url = format!(
+                "{}/chat/completions",
+                cfg_responses.apibase.trim_end_matches('/')
+            );
             let model_lower = cfg_responses.model.to_lowercase();
             let cfg_chat = cfg_responses.clone();
             let cfg_for_chat = cfg_chat.clone();
@@ -114,7 +131,8 @@ impl Session for OaiSession {
                     let http_client = http_client.clone();
                     Box::pin(async move {
                         if let Some(ref sys) = system {
-                            oai_msgs.insert(0, serde_json::json!({"role": "system", "content": sys}));
+                            oai_msgs
+                                .insert(0, serde_json::json!({"role": "system", "content": sys}));
                         }
                         stamp_oai_cache_markers(&mut oai_msgs, &cfg.model);
                         let mut payload = serde_json::json!({
@@ -129,8 +147,10 @@ impl Session for OaiSession {
                             }
                         }
                         if let Some(maxt) = cfg.max_tokens {
-                            if model_lower.starts_with("gpt-5") || model_lower.starts_with("o1")
-                                || model_lower.starts_with("o2") || model_lower.starts_with("o3")
+                            if model_lower.starts_with("gpt-5")
+                                || model_lower.starts_with("o1")
+                                || model_lower.starts_with("o2")
+                                || model_lower.starts_with("o3")
                                 || model_lower.starts_with("o4")
                             {
                                 payload["max_completion_tokens"] = serde_json::json!(maxt);
@@ -142,10 +162,12 @@ impl Session for OaiSession {
                             payload["tools"] = serde_json::to_value(tw).unwrap_or_default();
                             payload["tool_choice"] = serde_json::json!("required");
                         }
-                        let resp = http_client.post(&url)
+                        let resp = http_client
+                            .post(&url)
                             .bearer_auth(&cfg.apikey)
                             .json(&payload)
-                            .send().await
+                            .send()
+                            .await
                             .map_err(LlmError::RequestFailed)?;
                         let status = resp.status().as_u16();
                         if status >= 400 {
@@ -156,7 +178,8 @@ impl Session for OaiSession {
                     })
                 },
                 &cfg_chat,
-            ).await
+            )
+            .await
         }
     }
 
@@ -199,19 +222,28 @@ impl Session for OaiSession {
                         // after connect succeeds (wedged server). Without it,
                         // send() blocks for http_timeout (1h local) and the
                         // agent looks frozen — fail fast, retry instead.
-                        let header_timeout = if is_local_apibase(&cfg.apibase) { 180 } else { 60 };
+                        let header_timeout = if is_local_apibase(&cfg.apibase) {
+                            180
+                        } else {
+                            60
+                        };
                         let resp = match tokio::time::timeout(
                             std::time::Duration::from_secs(header_timeout),
-                            http_client.post(&url)
+                            http_client
+                                .post(&url)
                                 .bearer_auth(&cfg.apikey)
                                 .json(&payload)
                                 .send(),
-                        ).await {
+                        )
+                        .await
+                        {
                             Ok(Ok(r)) => r,
                             Ok(Err(e)) => return Err(LlmError::RequestFailed(e)),
-                            Err(_) => return Err(LlmError::StreamError(format!(
-                                "no response headers within {header_timeout}s"
-                            ))),
+                            Err(_) => {
+                                return Err(LlmError::StreamError(format!(
+                                    "no response headers within {header_timeout}s"
+                                )))
+                            }
                         };
                         let status = resp.status().as_u16();
                         if status >= 400 {
@@ -222,10 +254,21 @@ impl Session for OaiSession {
                     })
                 },
                 &cfg_responses,
-            ).await?;
-            parse_openai_sse(resp, "responses", Some(event_tx), speculative_tx, &cfg_responses.apibase).await
+            )
+            .await?;
+            parse_openai_sse(
+                resp,
+                "responses",
+                Some(event_tx),
+                speculative_tx,
+                &cfg_responses.apibase,
+            )
+            .await
         } else {
-            let url = format!("{}/chat/completions", cfg_responses.apibase.trim_end_matches('/'));
+            let url = format!(
+                "{}/chat/completions",
+                cfg_responses.apibase.trim_end_matches('/')
+            );
             let model_lower = cfg_responses.model.to_lowercase();
             let cfg_chat = cfg_responses.clone();
             let cfg_for_chat = cfg_chat.clone();
@@ -244,7 +287,8 @@ impl Session for OaiSession {
                     let http_client = http_client.clone();
                     Box::pin(async move {
                         if let Some(ref sys) = system {
-                            oai_msgs.insert(0, serde_json::json!({"role": "system", "content": sys}));
+                            oai_msgs
+                                .insert(0, serde_json::json!({"role": "system", "content": sys}));
                         }
                         stamp_oai_cache_markers(&mut oai_msgs, &cfg.model);
                         let mut payload = serde_json::json!({
@@ -259,8 +303,10 @@ impl Session for OaiSession {
                             }
                         }
                         if let Some(maxt) = cfg.max_tokens {
-                            if model_lower.starts_with("gpt-5") || model_lower.starts_with("o1")
-                                || model_lower.starts_with("o2") || model_lower.starts_with("o3")
+                            if model_lower.starts_with("gpt-5")
+                                || model_lower.starts_with("o1")
+                                || model_lower.starts_with("o2")
+                                || model_lower.starts_with("o3")
                                 || model_lower.starts_with("o4")
                             {
                                 payload["max_completion_tokens"] = serde_json::json!(maxt);
@@ -273,19 +319,28 @@ impl Session for OaiSession {
                             payload["tool_choice"] = serde_json::json!("required");
                         }
                         // Send-phase timeout (see responses branch).
-                        let header_timeout = if is_local_apibase(&cfg.apibase) { 180 } else { 60 };
+                        let header_timeout = if is_local_apibase(&cfg.apibase) {
+                            180
+                        } else {
+                            60
+                        };
                         let resp = match tokio::time::timeout(
                             std::time::Duration::from_secs(header_timeout),
-                            http_client.post(&url)
+                            http_client
+                                .post(&url)
                                 .bearer_auth(&cfg.apikey)
                                 .json(&payload)
                                 .send(),
-                        ).await {
+                        )
+                        .await
+                        {
                             Ok(Ok(r)) => r,
                             Ok(Err(e)) => return Err(LlmError::RequestFailed(e)),
-                            Err(_) => return Err(LlmError::StreamError(format!(
-                                "no response headers within {header_timeout}s"
-                            ))),
+                            Err(_) => {
+                                return Err(LlmError::StreamError(format!(
+                                    "no response headers within {header_timeout}s"
+                                )))
+                            }
                         };
                         let status = resp.status().as_u16();
                         if status >= 400 {
@@ -296,32 +351,52 @@ impl Session for OaiSession {
                     })
                 },
                 &cfg_chat,
-            ).await?;
-            parse_openai_sse(resp, "chat_completions", Some(event_tx), speculative_tx, &cfg_chat.apibase).await
+            )
+            .await?;
+            parse_openai_sse(
+                resp,
+                "chat_completions",
+                Some(event_tx),
+                speculative_tx,
+                &cfg_chat.apibase,
+            )
+            .await
         }
     }
 
     async fn ask(&self, prompt: &str) -> Result<Vec<ContentBlock>, LlmError> {
         let raw_messages = {
-            let mut history = self.history.lock().map_err(|e| LlmError::Custom(e.to_string()))?;
+            let mut history = self
+                .history
+                .lock()
+                .map_err(|e| LlmError::Custom(e.to_string()))?;
             history.push(Message::user(prompt));
             if history.len() > 5 {
                 crate::retry::trim_history(&mut history, self.config.context_win);
             }
-            history.iter().map(|m| Message {
-                role: m.role,
-                content: m.content.clone(),
-                tool_results: None,
-            }).collect::<Vec<_>>()
+            history
+                .iter()
+                .map(|m| Message {
+                    role: m.role,
+                    content: m.content.clone(),
+                    tool_results: None,
+                })
+                .collect::<Vec<_>>()
         };
         let (blocks, _usage) = self.raw_ask(&raw_messages).await?;
         if !blocks.is_empty() {
-            let has_error = blocks.first().map(|b| match b {
-                ContentBlock::Text { text, .. } => text.starts_with("!!!Error:"),
-                _ => false,
-            }).unwrap_or(false);
+            let has_error = blocks
+                .first()
+                .map(|b| match b {
+                    ContentBlock::Text { text, .. } => text.starts_with("!!!Error:"),
+                    _ => false,
+                })
+                .unwrap_or(false);
             if !has_error {
-                let mut history = self.history.lock().map_err(|e| LlmError::Custom(e.to_string()))?;
+                let mut history = self
+                    .history
+                    .lock()
+                    .map_err(|e| LlmError::Custom(e.to_string()))?;
                 history.push(Message::assistant_with_blocks(blocks.clone()));
             }
         }

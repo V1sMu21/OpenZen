@@ -92,8 +92,7 @@ impl Fact {
 }
 
 /// Tracks the origin of a piece of knowledge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum KnowledgeSource {
     /// User-provided or external interaction.
     #[default]
@@ -105,7 +104,6 @@ pub enum KnowledgeSource {
     /// Inferred by reasoning.
     Inferred,
 }
-
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryMeta {

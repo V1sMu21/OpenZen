@@ -28,13 +28,9 @@ impl ProjectTrustLevel {
         match self {
             ProjectTrustLevel::Full => &[],
             ProjectTrustLevel::Restricted => &["code_run", "web_execute_js"],
-            ProjectTrustLevel::Readonly => &[
-                "code_run",
-                "web_execute_js",
-                "write",
-                "edit",
-                "patch",
-            ],
+            ProjectTrustLevel::Readonly => {
+                &["code_run", "web_execute_js", "write", "edit", "patch"]
+            }
         }
     }
 }
@@ -80,12 +76,23 @@ pub fn save_trust(dir: &Path, file: &TrustFile) -> Result<(), String> {
 }
 
 /// Set the trust level for a project root (upsert).
-pub fn set_project_trust(dir: &Path, root_path: &str, level: ProjectTrustLevel) -> Result<(), String> {
+pub fn set_project_trust(
+    dir: &Path,
+    root_path: &str,
+    level: ProjectTrustLevel,
+) -> Result<(), String> {
     let mut file = load_trust(dir);
     let root = normalize(root_path);
-    match file.projects.iter_mut().find(|e| normalize(&e.root_path) == root) {
+    match file
+        .projects
+        .iter_mut()
+        .find(|e| normalize(&e.root_path) == root)
+    {
         Some(entry) => entry.level = level,
-        None => file.projects.push(TrustEntry { root_path: root, level }),
+        None => file.projects.push(TrustEntry {
+            root_path: root,
+            level,
+        }),
     }
     save_trust(dir, &file)
 }
@@ -132,7 +139,10 @@ mod tests {
     fn test_set_and_read_roundtrip() {
         let dir = tmp_dir("roundtrip");
         set_project_trust(&dir, "/tmp/proj", ProjectTrustLevel::Restricted).unwrap();
-        assert_eq!(project_trust(&dir, "/tmp/proj"), ProjectTrustLevel::Restricted);
+        assert_eq!(
+            project_trust(&dir, "/tmp/proj"),
+            ProjectTrustLevel::Restricted
+        );
         // Reload from disk.
         let file = load_trust(&dir);
         assert_eq!(file.projects.len(), 1);
@@ -144,13 +154,19 @@ mod tests {
         let dir = tmp_dir("overwrite");
         set_project_trust(&dir, "/tmp/proj", ProjectTrustLevel::Restricted).unwrap();
         set_project_trust(&dir, "/tmp/proj", ProjectTrustLevel::Readonly).unwrap();
-        assert_eq!(project_trust(&dir, "/tmp/proj"), ProjectTrustLevel::Readonly);
+        assert_eq!(
+            project_trust(&dir, "/tmp/proj"),
+            ProjectTrustLevel::Readonly
+        );
         assert_eq!(load_trust(&dir).projects.len(), 1);
     }
 
     #[test]
     fn test_denied_tools_by_level() {
-        assert_eq!(ProjectTrustLevel::Restricted.denied_tools(), &["code_run", "web_execute_js"]);
+        assert_eq!(
+            ProjectTrustLevel::Restricted.denied_tools(),
+            &["code_run", "web_execute_js"]
+        );
         let ro = ProjectTrustLevel::Readonly.denied_tools();
         assert!(ro.contains(&"write"));
         assert!(ro.contains(&"code_run"));

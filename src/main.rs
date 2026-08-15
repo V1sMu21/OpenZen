@@ -9,13 +9,13 @@ mod daemon;
 mod platform_setup;
 mod upgrade;
 
+use oz_agent::Agent;
 use oz_config::mykey::{MyKeyConfig, SessionConfig, SessionType};
 use oz_core::handler::LoopConfig;
 use oz_core_types::ToolContext;
 use oz_memory::MemorySystem;
 use oz_tools::handler::ToolRegistryHandler;
 use oz_tools::registry::ToolRegistry;
-use oz_agent::Agent;
 
 #[derive(Parser)]
 #[command(name = "openzen", version, about = "OpenZen — Rust rewrite")]
@@ -174,8 +174,8 @@ enum PluginAction {
 }
 
 fn init_tracing(json: bool) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info".into());
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     if json {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
@@ -184,9 +184,7 @@ fn init_tracing(json: bool) {
             .with_span_list(true)
             .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 }
 
@@ -227,22 +225,48 @@ async fn main() -> anyhow::Result<()> {
     let assets_dir = resolve_assets_dir(&cli.assets, &cli.dir);
 
     let result = match &cli.command {
-        Commands::Ask { prompt, session, turns, smart } => {
+        Commands::Ask {
+            prompt,
+            session,
+            turns,
+            smart,
+        } => {
             let config_path = cli.config.as_path();
-            let cfg = MyKeyConfig::from_file(config_path)
-                .map_err(|e| anyhow::anyhow!("Failed to load config from {}: {}", config_path.display(), e))?;
+            let cfg = MyKeyConfig::from_file(config_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to load config from {}: {}",
+                    config_path.display(),
+                    e
+                )
+            })?;
 
-            let sess_config = cfg.get(session)
+            let sess_config = cfg
+                .get(session)
                 .ok_or_else(|| anyhow::anyhow!("Session '{}' not found in config", session))?;
             let sess_type = cfg.session_type(session);
 
-            run_ask(prompt, sess_config, sess_type, *turns, &assets_dir, &cli.dir, &cli.config, cli.sop_dir.clone(), cli.plugin_dir.clone(), cli.skill_mcp_dir.clone(), *smart).await
+            run_ask(
+                prompt,
+                sess_config,
+                sess_type,
+                *turns,
+                &assets_dir,
+                &cli.dir,
+                &cli.config,
+                cli.sop_dir.clone(),
+                cli.plugin_dir.clone(),
+                cli.skill_mcp_dir.clone(),
+                *smart,
+            )
+            .await
         }
         Commands::Serve { port, frontend_dir } => {
             let config_path = resolve_path(&cli.config, &cli.dir);
             let assets_str = assets_dir.to_string_lossy().to_string();
             let dir_str = cli.dir.to_string_lossy().to_string();
-            let frontend_str = frontend_dir.as_ref().map(|p| p.to_string_lossy().to_string());
+            let frontend_str = frontend_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
 
             let sessions = Arc::new(Mutex::new(
                 oz_server::webui::sessions::SessionStore::persisted(
@@ -252,7 +276,8 @@ async fn main() -> anyhow::Result<()> {
             let running_agents = Arc::new(Mutex::new(HashMap::new()));
             let stop_signals = Arc::new(Mutex::new(HashMap::new()));
             let ask_user_rxs = Arc::new(Mutex::new(HashMap::new()));
-            let approval_handler = Arc::new(Mutex::new(None::<Arc<dyn oz_safety::ApprovalHandler>>));
+            let approval_handler =
+                Arc::new(Mutex::new(None::<Arc<dyn oz_safety::ApprovalHandler>>));
             let locale = Arc::new(Mutex::new(
                 std::env::var("OZ_LANG").unwrap_or_else(|_| "zh".into()),
             ));
@@ -288,9 +313,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Reflect { goal, budget, autonomous } => {
-            run_reflect(goal.clone(), *budget, *autonomous, &cli.dir).await
-        }
+        Commands::Reflect {
+            goal,
+            budget,
+            autonomous,
+        } => run_reflect(goal.clone(), *budget, *autonomous, &cli.dir).await,
         Commands::Mcp { port } => {
             let ctx = ToolContext {
                 working_dir: cli.dir.to_string_lossy().to_string(),
@@ -302,9 +329,9 @@ async fn main() -> anyhow::Result<()> {
                 session_id: String::new(),
             };
             let registry = ToolRegistry::build_default();
-            let state = Arc::new(tokio::sync::Mutex::new(
-                oz_server::McpState::new(registry, ctx)
-            ));
+            let state = Arc::new(tokio::sync::Mutex::new(oz_server::McpState::new(
+                registry, ctx,
+            )));
             tracing::info!("Starting MCP server on port {port}");
             oz_server::sse::serve(state, *port).await
         }
@@ -312,25 +339,34 @@ async fn main() -> anyhow::Result<()> {
             let config_path = cli.config.as_path();
             let cfg = MyKeyConfig::from_file(config_path)
                 .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
-            let sess_config = cfg.get(session)
+            let sess_config = cfg
+                .get(session)
                 .ok_or_else(|| anyhow::anyhow!("Session '{}' not found", session))?;
             let sess_type = cfg.session_type(session);
             let assets_str = assets_dir.to_string_lossy().to_string();
             let dir_str = cli.dir.to_string_lossy().to_string();
-            oz_tui::run_tui(sess_config.clone(), sess_type, &assets_str, &dir_str, config_path.to_str().unwrap_or_default()).await
+            oz_tui::run_tui(
+                sess_config.clone(),
+                sess_type,
+                &assets_str,
+                &dir_str,
+                config_path.to_str().unwrap_or_default(),
+            )
+            .await
         }
-        Commands::Plugin { action } => {
-            run_plugin(action).await
-        }
-        Commands::Upgrade { binary, health_port, force } => {
+        Commands::Plugin { action } => run_plugin(action).await,
+        Commands::Upgrade {
+            binary,
+            health_port,
+            force,
+        } => {
             // Check if there's a daemon running by trying the watch channel
             // In standalone mode, just perform the upgrade
             if *force {
                 tracing::info!("Forcing upgrade (standalone mode)");
 
                 let upgrade_cfg = upgrade::UpgradeConfig {
-                    current_exe: std::env::current_exe()
-                        .unwrap_or_else(|_| PathBuf::from("ga")),
+                    current_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ga")),
                     project_dir: cli.dir.clone(),
                     health_check_port: *health_port,
                     provided_binary: binary.clone(),
@@ -339,9 +375,7 @@ async fn main() -> anyhow::Result<()> {
 
                 let result = upgrade::perform_upgrade(&upgrade_cfg).await;
                 if result.success {
-                    tracing::info!(
-                        "Upgrade successful! Restart the server to use the new binary."
-                    );
+                    tracing::info!("Upgrade successful! Restart the server to use the new binary.");
                     Ok(())
                 } else {
                     anyhow::bail!("Upgrade failed: {:?}", result.error);
@@ -354,7 +388,8 @@ async fn main() -> anyhow::Result<()> {
                 // Try to find the daemon PID and signal it via file
                 let pid_file = cli.dir.join("ga-daemon.pid");
                 if pid_file.exists() {
-                    let pid_str = tokio::fs::read_to_string(&pid_file).await
+                    let pid_str = tokio::fs::read_to_string(&pid_file)
+                        .await
                         .unwrap_or_default();
                     let pid: u32 = pid_str.trim().parse().unwrap_or(0);
                     if pid > 0 {
@@ -367,8 +402,7 @@ async fn main() -> anyhow::Result<()> {
 
                 // Perform standalone upgrade anyway
                 let upgrade_cfg = upgrade::UpgradeConfig {
-                    current_exe: std::env::current_exe()
-                        .unwrap_or_else(|_| PathBuf::from("ga")),
+                    current_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ga")),
                     project_dir: cli.dir.clone(),
                     health_check_port: *health_port,
                     provided_binary: binary.clone(),
@@ -384,7 +418,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Daemon { port, frontend_dir, max_restarts, pid_file } => {
+        Commands::Daemon {
+            port,
+            frontend_dir,
+            max_restarts,
+            pid_file,
+        } => {
             let (cmd_tx, cmd_rx) = daemon::DaemonConfig::new_command_channel();
             let config = daemon::DaemonConfig {
                 port: *port,
@@ -393,9 +432,9 @@ async fn main() -> anyhow::Result<()> {
                 dir: cli.dir.clone(),
                 frontend_dir: frontend_dir.clone(),
                 max_restarts: *max_restarts,
-                pid_file: pid_file.clone().or_else(|| {
-                    Some(cli.dir.join("ga-daemon.pid"))
-                }),
+                pid_file: pid_file
+                    .clone()
+                    .or_else(|| Some(cli.dir.join("ga-daemon.pid"))),
                 health_check_interval_secs: 10,
                 cmd_rx,
                 cmd_tx,
@@ -410,7 +449,10 @@ async fn main() -> anyhow::Result<()> {
             if *list {
                 match Agent::list(&agents_dir) {
                     Ok(names) if names.is_empty() => {
-                        println!("No agents found. Create one at {}/<name>/config.yaml", agents_dir.display());
+                        println!(
+                            "No agents found. Create one at {}/<name>/config.yaml",
+                            agents_dir.display()
+                        );
                         Ok(())
                     }
                     Ok(names) => {
@@ -418,8 +460,18 @@ async fn main() -> anyhow::Result<()> {
                         for (i, n) in names.iter().enumerate() {
                             if let Ok(a) = Agent::load(n, &agents_dir) {
                                 let tools = a.config.use_tools.as_deref().unwrap_or("all");
-                                let model = if a.config.model.is_empty() { "default" } else { &a.config.model };
-                                println!("  {}. {:<30} model: {:<20} tools: {}", i + 1, n, model, tools);
+                                let model = if a.config.model.is_empty() {
+                                    "default"
+                                } else {
+                                    &a.config.model
+                                };
+                                println!(
+                                    "  {}. {:<30} model: {:<20} tools: {}",
+                                    i + 1,
+                                    n,
+                                    model,
+                                    tools
+                                );
                             } else {
                                 println!("  {}. {:<30} [config error]", i + 1, n);
                             }
@@ -435,9 +487,18 @@ async fn main() -> anyhow::Result<()> {
                 let agent = Agent::load(agent_name, &agents_dir)?;
                 let instructions = agent.interpolate_instructions("");
                 let tools = agent.config.use_tools.as_deref().unwrap_or("all");
-                let model = if agent.config.model.is_empty() { "default" } else { &agent.config.model };
-                println!("Agent: {}\ntools: {}\nmodel: {}\n\n{}",
-                    agent_name, tools, model, instructions.trim());
+                let model = if agent.config.model.is_empty() {
+                    "default"
+                } else {
+                    &agent.config.model
+                };
+                println!(
+                    "Agent: {}\ntools: {}\nmodel: {}\n\n{}",
+                    agent_name,
+                    tools,
+                    model,
+                    instructions.trim()
+                );
                 Ok(())
             } else {
                 eprintln!("Usage: ga agent <name>   or   ga agent --list");
@@ -472,7 +533,9 @@ fn build_session(
         SessionType::NativeOai => Ok(Box::new(oz_llm::NativeOAISession::new(config.clone()))),
         SessionType::Mixin => {
             let full_cfg = cfg.ok_or_else(|| anyhow::anyhow!("Mixin requires full config"))?;
-            let mut session_list: Vec<(String, &SessionConfig)> = full_cfg.sessions.iter()
+            let mut session_list: Vec<(String, &SessionConfig)> = full_cfg
+                .sessions
+                .iter()
                 .filter(|(name, _)| !name.to_lowercase().contains("mixin"))
                 .map(|(k, v)| (k.clone(), v))
                 .collect();
@@ -486,21 +549,33 @@ fn build_session(
             };
 
             if indices.is_empty() {
-                anyhow::bail!("Mixin session '{}' has no referenced sessions", session_name.unwrap_or("?"));
+                anyhow::bail!(
+                    "Mixin session '{}' has no referenced sessions",
+                    session_name.unwrap_or("?")
+                );
             }
 
             let mut sessions: Vec<Box<dyn oz_llm::Session>> = Vec::new();
             for &idx in &indices {
                 if idx >= session_list.len() {
-                    anyhow::bail!("Mixin index {idx} out of range (max {})", session_list.len() - 1);
+                    anyhow::bail!(
+                        "Mixin index {idx} out of range (max {})",
+                        session_list.len() - 1
+                    );
                 }
                 let (name, sess_cfg) = &session_list[idx];
                 let st = SessionType::from_key_name(name);
                 let session: Box<dyn oz_llm::Session> = match st {
-                    SessionType::Claude => Box::new(oz_llm::ClaudeSession::new((*sess_cfg).clone())),
+                    SessionType::Claude => {
+                        Box::new(oz_llm::ClaudeSession::new((*sess_cfg).clone()))
+                    }
                     SessionType::Oai => Box::new(oz_llm::OaiSession::new((*sess_cfg).clone())),
-                    SessionType::NativeClaude => Box::new(oz_llm::NativeClaudeSession::new((*sess_cfg).clone())),
-                    SessionType::NativeOai => Box::new(oz_llm::NativeOAISession::new((*sess_cfg).clone())),
+                    SessionType::NativeClaude => {
+                        Box::new(oz_llm::NativeClaudeSession::new((*sess_cfg).clone()))
+                    }
+                    SessionType::NativeOai => {
+                        Box::new(oz_llm::NativeOAISession::new((*sess_cfg).clone()))
+                    }
                     _ => anyhow::bail!("Mixin cannot reference another mixin session '{name}'"),
                 };
                 sessions.push(session);
@@ -511,7 +586,11 @@ fn build_session(
             let spring_back = config.spring_back;
 
             Ok(Box::new(oz_llm::MixinSession::new(
-                sessions, None, max_retries, base_delay, spring_back,
+                sessions,
+                None,
+                max_retries,
+                base_delay,
+                spring_back,
             )))
         }
     }
@@ -532,13 +611,19 @@ async fn run_ask(
     smart: bool,
 ) -> anyhow::Result<()> {
     let lang = std::env::var("OZ_LANG").unwrap_or_default();
-    let sys_prompt_path = if lang == "en" { "sys_prompt_en.txt" } else { "sys_prompt.txt" };
+    let sys_prompt_path = if lang == "en" {
+        "sys_prompt_en.txt"
+    } else {
+        "sys_prompt.txt"
+    };
     let ctx = ToolContext {
         working_dir: working_dir.to_string_lossy().to_string(),
         assets_dir: assets_dir.to_string_lossy().to_string(),
         script_dir: assets_dir.to_string_lossy().to_string(),
         lang: lang.clone(),
-        skill_mcp_dir: skill_mcp_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+        skill_mcp_dir: skill_mcp_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
         harness_dir: None,
         session_id: String::new(),
     };
@@ -561,7 +646,9 @@ async fn run_ask(
                                 registry.register_with_name(&name, handler);
                                 tracing::info!("Loaded WASM plugin: {name}");
                             }
-                            Err(e) => tracing::warn!("Failed to load WASM plugin {}: {e}", path.display()),
+                            Err(e) => {
+                                tracing::warn!("Failed to load WASM plugin {}: {e}", path.display())
+                            }
                         }
                     }
                 }
@@ -575,9 +662,8 @@ async fn run_ask(
     // Load full config for Mixin session resolution
     let full_cfg = MyKeyConfig::from_file(config_path)
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
-    let backend: Box<dyn oz_llm::Session> = build_session(
-        sess_type, sess_config, Some(&full_cfg), Some("ask")
-    )?;
+    let backend: Box<dyn oz_llm::Session> =
+        build_session(sess_type, sess_config, Some(&full_cfg), Some("ask"))?;
 
     let backend: Box<dyn oz_llm::Session> = if smart {
         // Try to find a "cheap" session for smart routing
@@ -591,7 +677,9 @@ async fn run_ask(
         match cheap_session {
             Some(cheap) => {
                 tracing::info!("Smart routing enabled: cheap + flagship");
-                Box::new(oz_llm::smart_router::SmartRouterSession::new(cheap, backend))
+                Box::new(oz_llm::smart_router::SmartRouterSession::new(
+                    cheap, backend,
+                ))
             }
             None => {
                 tracing::warn!("--smart flag used but no 'cheap' session found in config. Using single session.");
@@ -714,16 +802,20 @@ async fn run_plugin(action: &PluginAction) -> anyhow::Result<()> {
             let canonical = if path.is_absolute() {
                 path.clone()
             } else {
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .join(path)
+                std::env::current_dir().unwrap_or_default().join(path)
             };
             tracing::info!("Loading WASM plugin from: {}", canonical.display());
             let plugin = oz_plugin::WasmPlugin::from_file(&canonical)
                 .map_err(|e| anyhow::anyhow!("Failed to load plugin: {e}"))?;
             let def = plugin.to_definition();
-            println!("Loaded plugin: {} ({})", def.function.name, def.function.description);
-            println!("  Parameters schema: {}", serde_json::to_string_pretty(&def.function.parameters)?);
+            println!(
+                "Loaded plugin: {} ({})",
+                def.function.name, def.function.description
+            );
+            println!(
+                "  Parameters schema: {}",
+                serde_json::to_string_pretty(&def.function.parameters)?
+            );
             Ok(())
         }
         PluginAction::List => {

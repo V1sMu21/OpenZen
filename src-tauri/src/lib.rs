@@ -257,9 +257,11 @@ fn load_locale() -> String {
     // rather than hardcoding "zh" which confuses non-Chinese users.
     #[cfg(target_os = "macos")]
     {
-        if std::env::var("LANG")
-            .unwrap_or_default()
-            .starts_with("zh") { "zh".to_string() } else { "en".to_string() }
+        if std::env::var("LANG").unwrap_or_default().starts_with("zh") {
+            "zh".to_string()
+        } else {
+            "en".to_string()
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -415,7 +417,10 @@ impl AppState {
         // {data_root}/.skill_mcp/harness — move it to {data_root}/harness so
         // the unified ledger dir does not orphan historical lessons.
         {
-            let old = data_root.join(SKILL_MCP_DIR).join("harness").join("harness_state.json");
+            let old = data_root
+                .join(SKILL_MCP_DIR)
+                .join("harness")
+                .join("harness_state.json");
             let new_dir = harness_dir();
             let new = new_dir.join("harness_state.json");
             if old.exists() && !new.exists() {
@@ -438,9 +443,7 @@ impl AppState {
         let memory_cfg = match oz_config::mykey::MyKeyConfig::from_file(&config_path) {
             Ok(cfg) => Some(cfg),
             Err(e) => {
-                tracing::warn!(
-                    "mykey.toml unreadable ({e}); memory backend defaults to \"erme\""
-                );
+                tracing::warn!("mykey.toml unreadable ({e}); memory backend defaults to \"erme\"");
                 None
             }
         };

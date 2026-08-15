@@ -8,9 +8,18 @@ const SENSITIVE_PATTERNS: &[(&str, &str)] = &[
     ("AKIA", "[REDACTED-AWS-KEY]"),
     ("eyJ", "[REDACTED-JWT-TOKEN]"),
     ("hf_", "[REDACTED-HF-TOKEN]"),
-    ("-----BEGIN RSA PRIVATE KEY-----", "[REDACTED-PRIVATE-KEY-BLOCK]"),
-    ("-----BEGIN OPENSSH PRIVATE KEY-----", "[REDACTED-SSH-KEY-BLOCK]"),
-    ("-----BEGIN PGP PRIVATE KEY BLOCK-----", "[REDACTED-PGP-KEY-BLOCK]"),
+    (
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "[REDACTED-PRIVATE-KEY-BLOCK]",
+    ),
+    (
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "[REDACTED-SSH-KEY-BLOCK]",
+    ),
+    (
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+        "[REDACTED-PGP-KEY-BLOCK]",
+    ),
     ("-----END RSA PRIVATE KEY-----", "[REDACTED]"),
     ("-----END OPENSSH PRIVATE KEY-----", "[REDACTED]"),
     ("-----END PGP PRIVATE KEY BLOCK-----", "[REDACTED]"),
@@ -37,7 +46,11 @@ pub fn sanitize(content: &str) -> String {
                 i += pat_bytes.len();
                 // Skip rest of the token until whitespace/line-end
                 while i < bytes.len() && !is_boundary(bytes[i]) {
-                    result.push(if bytes[i] == b'\n' || bytes[i] == b'\r' { bytes[i] as char } else { '*' });
+                    result.push(if bytes[i] == b'\n' || bytes[i] == b'\r' {
+                        bytes[i] as char
+                    } else {
+                        '*'
+                    });
                     i += 1;
                 }
                 matched = true;
@@ -54,7 +67,10 @@ pub fn sanitize(content: &str) -> String {
 }
 
 fn is_boundary(b: u8) -> bool {
-    matches!(b, b' ' | b'\n' | b'\r' | b'\t' | b',' | b';' | b'"' | b'\'' | b')')
+    matches!(
+        b,
+        b' ' | b'\n' | b'\r' | b'\t' | b',' | b';' | b'"' | b'\'' | b')'
+    )
 }
 
 #[cfg(test)]
@@ -79,9 +95,13 @@ mod tests {
 
     #[test]
     fn test_redact_private_key() {
-        let input = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
+        let input =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
         let output = sanitize(input);
-        assert!(!output.contains("PRIVATE KEY"), "expected PRIVATE KEY to be redacted: {output}");
+        assert!(
+            !output.contains("PRIVATE KEY"),
+            "expected PRIVATE KEY to be redacted: {output}"
+        );
     }
 
     #[test]

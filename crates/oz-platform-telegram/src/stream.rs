@@ -94,7 +94,10 @@ impl StreamSession {
     pub async fn error(&mut self, message: &str) {
         if let Some(msg_id) = self.live_msg_id {
             let text = format!("❌ {message}");
-            let _ = self.bot.edit_message_text(self.msg.chat.id, msg_id, text).await;
+            let _ = self
+                .bot
+                .edit_message_text(self.msg.chat.id, msg_id, text)
+                .await;
             self.live_msg_id = None;
         } else {
             let _ = self

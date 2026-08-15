@@ -52,7 +52,10 @@ impl PlatformConfig {
     }
 
     pub fn qq_sandbox(&self) -> bool {
-        self.extra.get("sandbox").and_then(|v| v.as_bool()).unwrap_or(true)
+        self.extra
+            .get("sandbox")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
     }
 }
 

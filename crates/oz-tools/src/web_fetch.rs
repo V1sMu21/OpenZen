@@ -9,7 +9,9 @@ pub struct WebFetchTool;
 
 #[async_trait]
 impl ToolHandler for WebFetchTool {
-    fn name(&self) -> String { "web_fetch".to_string() }
+    fn name(&self) -> String {
+        "web_fetch".to_string()
+    }
     fn description(&self) -> String {
         "Fetch a web page by URL and return its readable text content (strips HTML). \
          Use after web_search to read full page content. Default 3000 chars."
@@ -33,16 +35,25 @@ impl ToolHandler for WebFetchTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let url = args["url"].as_str().ok_or_else(|| ToolError::Custom("missing 'url' parameter".into()))?;
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let url = args["url"]
+            .as_str()
+            .ok_or_else(|| ToolError::Custom("missing 'url' parameter".into()))?;
 
         if !super::web_scan::is_url_safe(url) {
-            return Ok(ToolOutput::bad_json(
-                format!("web_fetch: URL `{url}` targets a blocked address for security reasons.")
-            ));
+            return Ok(ToolOutput::bad_json(format!(
+                "web_fetch: URL `{url}` targets a blocked address for security reasons."
+            )));
         }
 
-        let max_chars = args.get("max_chars").and_then(|v| v.as_u64()).unwrap_or(3000) as usize;
+        let max_chars = args
+            .get("max_chars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3000) as usize;
 
         match fetch_and_extract(url, max_chars).await {
             Ok(result) => Ok(ToolOutput::success(serde_json::json!({
@@ -68,14 +79,19 @@ async fn fetch_and_extract(url: &str, max_chars: usize) -> Result<PageContent, S
         .build()
         .map_err(|e| format!("client build failed: {e}"))?;
 
-    let resp = client.get(url).send().await
+    let resp = client
+        .get(url)
+        .send()
+        .await
         .map_err(|e| format!("request failed: {e}"))?;
 
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
     }
 
-    let html = resp.text().await
+    let html = resp
+        .text()
+        .await
         .map_err(|e| format!("read body failed: {e}"))?;
 
     let title = extract_title(&html);

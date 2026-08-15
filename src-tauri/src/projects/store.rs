@@ -23,17 +23,18 @@ pub fn load_projects() -> Vec<ProjectRecord> {
         return Vec::new();
     }
     match std::fs::read_to_string(&path) {
-        Ok(data) => {
-            match serde_json::from_str::<Vec<ProjectRecord>>(&data) {
-                Ok(records) => records,
-                Err(e) => {
-                    debug_log(&format!("load_projects: JSON parse error: {e}"));
-                    Vec::new()
-                }
+        Ok(data) => match serde_json::from_str::<Vec<ProjectRecord>>(&data) {
+            Ok(records) => records,
+            Err(e) => {
+                debug_log(&format!("load_projects: JSON parse error: {e}"));
+                Vec::new()
             }
-        }
+        },
         Err(e) => {
-            debug_log(&format!("load_projects: read error for {}: {e}", path.display()));
+            debug_log(&format!(
+                "load_projects: read error for {}: {e}",
+                path.display()
+            ));
             Vec::new()
         }
     }
@@ -60,10 +61,7 @@ pub fn save_projects(projects: &[ProjectRecord]) -> Result<(), String> {
 }
 
 #[allow(dead_code)]
-pub fn find_by_session(
-    projects: &[ProjectRecord],
-    project_id: &str,
-) -> Option<ProjectRecord> {
+pub fn find_by_session(projects: &[ProjectRecord], project_id: &str) -> Option<ProjectRecord> {
     projects.iter().find(|p| p.id == project_id).cloned()
 }
 
@@ -136,10 +134,7 @@ mod tests {
 
     #[test]
     fn test_find_by_session_found() {
-        let records = vec![
-            make_record("p1", "a", "/a"),
-            make_record("p2", "b", "/b"),
-        ];
+        let records = vec![make_record("p1", "a", "/a"), make_record("p2", "b", "/b")];
         let found = find_by_session(&records, "p2");
         assert!(found.is_some());
         assert_eq!(found.unwrap().name, "b");
@@ -160,14 +155,16 @@ mod tests {
     #[test]
     fn test_name_collision_resolution() {
         let records = vec![make_record("1", "test", "/a")];
-        let result = crate::projects::commands::tests::resolve_name_collision_for_test(&records, "test");
+        let result =
+            crate::projects::commands::tests::resolve_name_collision_for_test(&records, "test");
         assert_eq!(result, "test (2)");
     }
 
     #[test]
     fn test_name_collision_no_conflict() {
         let records = vec![make_record("1", "other", "/a")];
-        let result = crate::projects::commands::tests::resolve_name_collision_for_test(&records, "test");
+        let result =
+            crate::projects::commands::tests::resolve_name_collision_for_test(&records, "test");
         assert_eq!(result, "test");
     }
 }

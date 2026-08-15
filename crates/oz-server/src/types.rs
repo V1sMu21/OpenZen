@@ -43,7 +43,11 @@ impl JsonRpcMessage {
             method: None,
             params: None,
             result: None,
-            error: Some(JsonRpcError { code, message, data: None }),
+            error: Some(JsonRpcError {
+                code,
+                message,
+                data: None,
+            }),
         }
     }
 

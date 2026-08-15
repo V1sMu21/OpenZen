@@ -72,7 +72,10 @@ impl MemoryJobScheduler {
     /// Enqueue a session for distillation. Returns immediately.
     pub async fn submit(&self, session_id: String, transcript: String) {
         let mut queue = self.queue.lock().await;
-        if queue.iter().any(|j| j.session_id == session_id && j.status != MemoryJobStatus::Done) {
+        if queue
+            .iter()
+            .any(|j| j.session_id == session_id && j.status != MemoryJobStatus::Done)
+        {
             return; // already queued or running
         }
         queue.push(MemoryJob::new(session_id, transcript, self.max_retries));
@@ -81,7 +84,10 @@ impl MemoryJobScheduler {
     /// Number of jobs not yet completed.
     pub async fn pending_count(&self) -> usize {
         let queue = self.queue.lock().await;
-        queue.iter().filter(|j| j.status != MemoryJobStatus::Done).count()
+        queue
+            .iter()
+            .filter(|j| j.status != MemoryJobStatus::Done)
+            .count()
     }
 
     /// Drive one queue pass: pick a queued job, run it under a lease,
@@ -94,14 +100,8 @@ impl MemoryJobScheduler {
         let now = Instant::now();
         let idx = queue.iter().position(|j| match j.status {
             MemoryJobStatus::Queued => true,
-            MemoryJobStatus::Failed => j
-                .lease_until
-                .map(|t| t <= now)
-                .unwrap_or(false),
-            MemoryJobStatus::Running => j
-                .lease_until
-                .map(|t| t <= now)
-                .unwrap_or(false),
+            MemoryJobStatus::Failed => j.lease_until.map(|t| t <= now).unwrap_or(false),
+            MemoryJobStatus::Running => j.lease_until.map(|t| t <= now).unwrap_or(false),
             _ => false,
         });
 
@@ -114,7 +114,10 @@ impl MemoryJobScheduler {
         job.lease_until = Some(Instant::now() + Duration::from_secs(self.lease_secs));
         drop(queue); // release the lock while distilling
 
-        let result = self.distiller.distill(&job.session_id, &job.transcript).await;
+        let result = self
+            .distiller
+            .distill(&job.session_id, &job.transcript)
+            .await;
 
         let mut queue = self.queue.lock().await;
         match result {
@@ -130,7 +133,11 @@ impl MemoryJobScheduler {
                 let backoff = 15u64 * (self.max_retries - job.retry_remaining) as u64;
                 job.lease_until = Some(Instant::now() + Duration::from_secs(backoff));
                 job.last_error = Some(e.clone());
-                tracing::warn!("memory job '{}' failed ({} retries left): {e}", job.session_id, job.retry_remaining);
+                tracing::warn!(
+                    "memory job '{}' failed ({} retries left): {e}",
+                    job.session_id,
+                    job.retry_remaining
+                );
             }
             Err(e) => {
                 job.status = MemoryJobStatus::Failed;

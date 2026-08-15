@@ -2,9 +2,9 @@
 mod e2e_tests {
     use oz_core_types::{SkillMcpMetadata, SkillMcpType};
     use oz_skill_mcp::{
-        SkillMcpMemory, SkillMcpStore, MetaStore, Matcher,
-        StalenessChecker, MatchConfig,
-        skill::Skill, migration::{migrate_memory_to_skill_mcp, is_migrated},
+        migration::{is_migrated, migrate_memory_to_skill_mcp},
+        skill::Skill,
+        MatchConfig, Matcher, MetaStore, SkillMcpMemory, SkillMcpStore, StalenessChecker,
     };
     use std::path::{Path, PathBuf};
     use std::time::Instant;
@@ -13,8 +13,10 @@ mod e2e_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = SkillMcpStore::new(dir.path(), None);
         let s = Skill {
-            name: "web_search".into(), description: "Search the web".into(),
-            tags: vec!["web".into()], required_tools: vec![],
+            name: "web_search".into(),
+            description: "Search the web".into(),
+            tags: vec!["web".into()],
+            required_tools: vec![],
             content: "# web_search — Search the web\n\n## Procedure\n1. Search\n".into(),
             source_path: PathBuf::new(),
             metadata: SkillMcpMetadata::new("web_search", "desc", vec![]),
@@ -22,8 +24,10 @@ mod e2e_tests {
         };
         store.skills.register(s).unwrap();
         let s2 = Skill {
-            name: "file_reader".into(), description: "Read files".into(),
-            tags: vec!["file".into()], required_tools: vec![],
+            name: "file_reader".into(),
+            description: "Read files".into(),
+            tags: vec!["file".into()],
+            required_tools: vec![],
             content: "# file_reader — Read files\n\n## Procedure\n1. Read\n".into(),
             source_path: PathBuf::new(),
             metadata: SkillMcpMetadata::new("file_reader", "desc", vec![]),
@@ -46,7 +50,15 @@ mod e2e_tests {
         assert_eq!(skill.metadata.success_count, 3);
 
         store.record_skill_failure("web_search").unwrap();
-        assert_eq!(store.skills.get("web_search").unwrap().metadata.failure_count, 1);
+        assert_eq!(
+            store
+                .skills
+                .get("web_search")
+                .unwrap()
+                .metadata
+                .failure_count,
+            1
+        );
 
         let seq = vec![("read".to_string(), serde_json::json!({"path": "/tmp"}))];
         store.crystallise_sop("check", "Check", &seq, None).unwrap();
@@ -61,7 +73,9 @@ mod e2e_tests {
     fn test_e2e_build_context() {
         let (_dir, mut store) = setup_store();
         let seq = vec![("grep".to_string(), serde_json::json!({"pattern": "t"}))];
-        store.crystallise_sop("grep_test", "Run grep", &seq, None).unwrap();
+        store
+            .crystallise_sop("grep_test", "Run grep", &seq, None)
+            .unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = rt.block_on(store.build_context("search", Path::new("/tmp"), None));
@@ -77,8 +91,10 @@ mod e2e_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = SkillMcpStore::new(dir.path(), None);
         let s = Skill {
-            name: "persistent".into(), description: "".into(),
-            tags: vec![], required_tools: vec![],
+            name: "persistent".into(),
+            description: "".into(),
+            tags: vec![],
+            required_tools: vec![],
             content: "# persistent\n\nSteps.\n".into(),
             source_path: PathBuf::new(),
             metadata: SkillMcpMetadata::new("persistent", "", vec![]),
@@ -122,8 +138,10 @@ mod e2e_tests {
         for i in 0..50 {
             let name = format!("skill_{:02}", i);
             let s = Skill {
-                name: name.clone(), description: format!("s{}", i),
-                tags: vec![format!("t{}", i % 5)], required_tools: vec![],
+                name: name.clone(),
+                description: format!("s{}", i),
+                tags: vec![format!("t{}", i % 5)],
+                required_tools: vec![],
                 content: format!("# {}\n\nDo.\n", name),
                 source_path: PathBuf::new(),
                 metadata: SkillMcpMetadata::new(&name, "", vec![]),
@@ -145,9 +163,12 @@ mod e2e_tests {
         let mut store = SkillMcpStore::new(dir.path(), None);
 
         let bad = Skill {
-            name: "bad".into(), description: "".into(),
-            tags: vec![], required_tools: vec![],
-            content: "# bad\n\nX.\n".into(), source_path: PathBuf::new(),
+            name: "bad".into(),
+            description: "".into(),
+            tags: vec![],
+            required_tools: vec![],
+            content: "# bad\n\nX.\n".into(),
+            source_path: PathBuf::new(),
             metadata: SkillMcpMetadata::new("bad", "", vec![]),
             quality: 0.5,
         };
@@ -160,9 +181,12 @@ mod e2e_tests {
         }
 
         let good = Skill {
-            name: "good".into(), description: "".into(),
-            tags: vec![], required_tools: vec![],
-            content: "# good\n\nY.\n".into(), source_path: PathBuf::new(),
+            name: "good".into(),
+            description: "".into(),
+            tags: vec![],
+            required_tools: vec![],
+            content: "# good\n\nY.\n".into(),
+            source_path: PathBuf::new(),
             metadata: SkillMcpMetadata::new("good", "", vec![]),
             quality: 0.9,
         };
@@ -190,8 +214,10 @@ mod e2e_tests {
     fn test_meta_cross_category() {
         let dir = tempfile::tempdir().unwrap();
         let meta = MetaStore::new(dir.path());
-        meta.save("skills", "a", &SkillMcpMetadata::new("a", "", vec![])).unwrap();
-        meta.save("sops", "b", &SkillMcpMetadata::new("b", "", vec![])).unwrap();
+        meta.save("skills", "a", &SkillMcpMetadata::new("a", "", vec![]))
+            .unwrap();
+        meta.save("sops", "b", &SkillMcpMetadata::new("b", "", vec![]))
+            .unwrap();
         assert_eq!(meta.list_category("skills").unwrap().len(), 1);
         assert_eq!(meta.list_category("sops").unwrap().len(), 1);
     }

@@ -7,8 +7,8 @@
 
 #[cfg(test)]
 mod ipc_tests {
-    use std::collections::HashMap;
     use serde_json::json;
+    use std::collections::HashMap;
 
     /// ========= TAU-IPC-01: ping =========
     #[test]
@@ -150,7 +150,10 @@ mod ipc_tests {
         }
 
         assert_eq!(resolve_name_collision(&["test"], "test"), "test (2)");
-        assert_eq!(resolve_name_collision(&["test", "test (2)"], "test"), "test (3)");
+        assert_eq!(
+            resolve_name_collision(&["test", "test (2)"], "test"),
+            "test (3)"
+        );
         assert_eq!(resolve_name_collision(&["other"], "unique"), "unique");
     }
 
@@ -215,13 +218,24 @@ mod ipc_tests {
     /// ========= TAU-PROJ-15: list_sessions filtered =========
     #[test]
     fn test_list_sessions_by_project() {
-        struct Session { project_id: Option<String> }
+        struct Session {
+            project_id: Option<String>,
+        }
         let sessions = vec![
-            Session { project_id: Some("proj-A".into()) },
-            Session { project_id: Some("proj-A".into()) },
-            Session { project_id: Some("proj-B".into()) },
+            Session {
+                project_id: Some("proj-A".into()),
+            },
+            Session {
+                project_id: Some("proj-A".into()),
+            },
+            Session {
+                project_id: Some("proj-B".into()),
+            },
         ];
-        let count_a = sessions.iter().filter(|s| s.project_id.as_deref() == Some("proj-A")).count();
+        let count_a = sessions
+            .iter()
+            .filter(|s| s.project_id.as_deref() == Some("proj-A"))
+            .count();
         assert_eq!(count_a, 2);
     }
 
@@ -236,9 +250,7 @@ mod ipc_tests {
     /// ========= TAU-AGENT-07: same-session mutex =========
     #[test]
     fn test_same_session_mutex() {
-        let running_sessions: HashMap<String, bool> = [
-            ("ses-1".into(), true),
-        ].into();
+        let running_sessions: HashMap<String, bool> = [("ses-1".into(), true)].into();
         assert!(running_sessions.contains_key("ses-1"), "already running");
     }
 

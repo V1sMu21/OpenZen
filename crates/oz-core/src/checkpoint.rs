@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 use oz_core_types::Message;
 
@@ -64,14 +64,19 @@ impl MmapWal {
             (map, cursor, cap)
         };
 
-        Ok(MmapWal { file, map, cursor, capacity, path })
+        Ok(MmapWal {
+            file,
+            map,
+            cursor,
+            capacity,
+            path,
+        })
     }
 
     /// Append a checkpoint to the WAL.
     pub fn append(&mut self, cp: &LoopCheckpoint) -> std::io::Result<()> {
-        let json = serde_json::to_vec(cp).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let json = serde_json::to_vec(cp)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let record_len = 4 + json.len(); // length prefix + data
 
         // Grow if needed
@@ -307,7 +312,12 @@ pub fn plan_from_todos(todos: &[oz_core_types::TodoItem]) -> CheckpointPlan {
             _ => pending.push(t.content.clone()),
         }
     }
-    CheckpointPlan { completed, in_progress, pending, ..Default::default() }
+    CheckpointPlan {
+        completed,
+        in_progress,
+        pending,
+        ..Default::default()
+    }
 }
 
 /// Save a full loop checkpoint that can be used for resume.
@@ -405,7 +415,8 @@ pub fn list_session_checkpoints(dir: &Path, session_id: &str) -> Vec<CheckpointM
     for path in &paths {
         if let Ok(data) = std::fs::read_to_string(path) {
             if let Ok(cp) = serde_json::from_str::<LoopCheckpoint>(&data) {
-                let filename = path.file_name()
+                let filename = path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("")
                     .to_string();
@@ -433,7 +444,8 @@ pub fn list_all_checkpoints(dir: &Path) -> Vec<CheckpointMeta> {
     for path in &paths {
         if let Ok(data) = std::fs::read_to_string(path) {
             if let Ok(cp) = serde_json::from_str::<LoopCheckpoint>(&data) {
-                let filename = path.file_name()
+                let filename = path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("")
                     .to_string();
@@ -454,8 +466,15 @@ pub fn list_all_checkpoints(dir: &Path) -> Vec<CheckpointMeta> {
 }
 
 fn sanitize_session_id(session_id: &str) -> String {
-    session_id.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+    session_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -472,9 +491,7 @@ fn collect_checkpoints(dir: &Path, prefix: Option<&str>) -> Vec<PathBuf> {
                             .map(|n| n.starts_with(pref) && n.ends_with(".json"))
                             .unwrap_or(false)
                     } else {
-                        p.extension()
-                            .map(|ext| ext == "json")
-                            .unwrap_or(false)
+                        p.extension().map(|ext| ext == "json").unwrap_or(false)
                     }
                 })
                 .collect();
@@ -495,7 +512,6 @@ fn cleanup_session_checkpoints(dir: &Path, safe_session: &str, keep: usize) {
     }
 }
 
-
 /// Create an InterventionEvent from user input.
 pub fn make_intervention(kind: InterventionKind, content: &str) -> InterventionEvent {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -515,8 +531,12 @@ pub fn make_intervention(kind: InterventionKind, content: &str) -> InterventionE
 fn rand_simple_id() -> u64 {
     // Simple random-ish ID without external crate dependency
     use std::time::{SystemTime, UNIX_EPOCH};
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    (d.as_nanos() as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    (d.as_nanos() as u64)
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407)
 }
 
 /// Apply an intervention to the agent's message list.
@@ -525,15 +545,14 @@ fn rand_simple_id() -> u64 {
 pub fn apply_intervention(messages: &mut Vec<Message>, intervention: &InterventionEvent) {
     let intervention_msg = format!(
         "[USER INTERVENTION - {}]\n{}",
-        intervention.kind,
-        intervention.content
+        intervention.kind, intervention.content
     );
     // Inject as user message so the LLM sees it naturally in context
     messages.push(Message::user(&intervention_msg));
     tracing::info!(
         "Applied intervention '{}': {}",
         intervention.kind,
-                &intervention.content[..intervention.content.len().min(100)]
+        &intervention.content[..intervention.content.len().min(100)]
     );
 }
 
@@ -547,10 +566,7 @@ mod tests {
         let cp = LoopCheckpoint {
             turn: 3,
             timestamp: 1234.0,
-            messages: vec![
-                Message::user("hello"),
-                Message::assistant("hi there"),
-            ],
+            messages: vec![Message::user("hello"), Message::assistant("hi there")],
             history_info: vec!["step 1".into()],
             full_response: "hi there".into(),
             exit_reason: Some("done".into()),
@@ -579,7 +595,10 @@ mod tests {
         let json = serde_json::to_string_pretty(&evt).unwrap();
         assert!(json.contains("new_strategy"));
         let deserialized: InterventionEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.content, "Let's try a different approach: use vector search first.");
+        assert_eq!(
+            deserialized.content,
+            "Let's try a different approach: use vector search first."
+        );
     }
 
     #[test]
@@ -602,10 +621,7 @@ mod tests {
 
     #[test]
     fn test_intervention_applies_correctly() {
-        let mut messages = vec![
-            Message::user("hello"),
-            Message::assistant("hi there"),
-        ];
+        let mut messages = vec![Message::user("hello"), Message::assistant("hi there")];
         let intervention = make_intervention(
             InterventionKind::InjectInfo,
             "The database contains 1M records.",
@@ -669,16 +685,20 @@ mod tests {
                 messages: vec![Message::user(format!("message {}", i))],
                 history_info: vec![],
                 full_response: format!("response {}", i),
-                exit_reason: if i < 3 { None } else { Some("completed".into()) },
+                exit_reason: if i < 3 {
+                    None
+                } else {
+                    Some("completed".into())
+                },
                 session_id: Some(session_id.into()),
                 plan: CheckpointPlan::default(),
 
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
+                git_sha: None,
+                git_branch: None,
+                git_origin_url: None,
             };
             save_loop_checkpoint(dir.path(), session_id, &cp);
         }
@@ -757,9 +777,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
+                git_sha: None,
+                git_branch: None,
+                git_origin_url: None,
             };
             save_loop_checkpoint(dir.path(), sid, &cp);
         }
@@ -791,9 +811,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
+                git_sha: None,
+                git_branch: None,
+                git_origin_url: None,
             };
             save_loop_checkpoint(dir.path(), session_id, &cp);
         }
@@ -894,7 +914,6 @@ mod tests {
 
         for i in 1..=5 {
             let cp = LoopCheckpoint {
-
                 turn: i,
                 timestamp: 1000.0 + i as f64,
                 messages: vec![Message::user(format!("turn {}", i))],
@@ -906,9 +925,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
+                git_sha: None,
+                git_branch: None,
+                git_origin_url: None,
             };
             wal.append(&cp).unwrap();
         }
@@ -944,9 +963,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
+                git_sha: None,
+                git_branch: None,
+                git_origin_url: None,
             };
             wal.append(&cp).unwrap();
             wal.flush().unwrap();
@@ -988,9 +1007,9 @@ mod tests {
                 todos: vec![],
                 interventions: vec![],
                 full_thinking: None,
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
+                git_sha: None,
+                git_branch: None,
+                git_origin_url: None,
             };
             wal.append(&cp).unwrap();
         }
@@ -1001,6 +1020,10 @@ mod tests {
         assert_eq!(all.len(), 20);
         assert_eq!(all[19].turn, 19);
         // Cursor advanced past header
-        assert!(wal.cursor > WAL_HEADER_SIZE, "WAL cursor should have advanced past header, cursor={}", wal.cursor);
+        assert!(
+            wal.cursor > WAL_HEADER_SIZE,
+            "WAL cursor should have advanced past header, cursor={}",
+            wal.cursor
+        );
     }
 }

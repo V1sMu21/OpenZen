@@ -126,11 +126,19 @@ impl WxBotClient {
             eprintln!("[WeChat] Opening QR code in browser...");
             // Open the QR code URL in the default browser so the user can scan it.
             #[cfg(target_os = "macos")]
-            { let _ = std::process::Command::new("open").arg(&qr_url).spawn(); }
+            {
+                let _ = std::process::Command::new("open").arg(&qr_url).spawn();
+            }
             #[cfg(target_os = "linux")]
-            { let _ = std::process::Command::new("xdg-open").arg(&qr_url).spawn(); }
+            {
+                let _ = std::process::Command::new("xdg-open").arg(&qr_url).spawn();
+            }
             #[cfg(target_os = "windows")]
-            { let _ = std::process::Command::new("cmd").args(["/c", "start", &qr_url]).spawn(); }
+            {
+                let _ = std::process::Command::new("cmd")
+                    .args(["/c", "start", &qr_url])
+                    .spawn();
+            }
         }
         eprintln!("[WeChat] QR ID: {qr_id}");
 
@@ -255,7 +263,6 @@ impl WxBotClient {
         Ok(())
     }
 
-
     pub async fn send_image(
         &self,
         to_user_id: &str,
@@ -284,8 +291,7 @@ impl WxBotClient {
         item_key: &str,
         context_token: &str,
     ) -> Result<(), String> {
-        let raw = std::fs::read(file_path)
-            .map_err(|e| format!("read file error: {e}"))?;
+        let raw = std::fs::read(file_path).map_err(|e| format!("read file error: {e}"))?;
 
         let filekey = Uuid::new_v4().to_string().replace('-', "");
         let aes_key = crate::crypto::random_key();
@@ -304,11 +310,9 @@ impl WxBotClient {
             "base_info": { "channel_version": "2.1.10" },
         });
 
-        let data = self
-            .post("ilink/bot/getuploadurl", &body, Some(15))
-            .await?;
-        let upload_resp: GetUploadUrlResponse = serde_json::from_value(data)
-            .map_err(|e| format!("getuploadurl parse error: {e}"))?;
+        let data = self.post("ilink/bot/getuploadurl", &body, Some(15)).await?;
+        let upload_resp: GetUploadUrlResponse =
+            serde_json::from_value(data).map_err(|e| format!("getuploadurl parse error: {e}"))?;
 
         let upload_param = upload_resp.upload_param.unwrap_or_default();
         let upload_url = upload_resp.upload_full_url.unwrap_or_default();
@@ -365,7 +369,11 @@ impl WxBotClient {
         let mut item = serde_json::json!({ "media": media });
         if item_key == "file_item" {
             item["file_name"] = serde_json::Value::String(
-                file_path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                file_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
             );
             item["len"] = serde_json::Value::String(raw.len().to_string());
         }
@@ -429,11 +437,15 @@ impl WxBotClient {
             "AuthorizationType",
             HeaderValue::from_static("ilink_bot_token"),
         );
-        headers.insert("X-WECHAT-UIN", HeaderValue::from_str(&Self::make_uin()).unwrap_or(HeaderValue::from_static("0")));
+        headers.insert(
+            "X-WECHAT-UIN",
+            HeaderValue::from_str(&Self::make_uin()).unwrap_or(HeaderValue::from_static("0")),
+        );
         headers.insert("iLink-App-Id", HeaderValue::from_static(ILINK_APP_ID));
         headers.insert(
             "iLink-App-ClientVersion",
-            HeaderValue::from_str(&ILINK_CLIENT_VERSION.to_string()).unwrap_or(HeaderValue::from_static("0")),
+            HeaderValue::from_str(&ILINK_CLIENT_VERSION.to_string())
+                .unwrap_or(HeaderValue::from_static("0")),
         );
         headers.insert(USER_AGENT, HeaderValue::from_static(UA));
         if let Some(ref token) = self.token {

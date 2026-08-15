@@ -11,9 +11,7 @@ pub fn to_telegram_markdown_v2(text: &str) -> String {
                 let lang_end = find_line_end_or(&chars, i + fence_len, '\n');
                 let lang = chars[i + fence_len..lang_end].iter().collect::<String>();
                 if let Some(close) = find_closing_fence(&chars, lang_end, fence_len) {
-                    let code = &chars[lang_end..close]
-                        .iter()
-                        .collect::<String>();
+                    let code = &chars[lang_end..close].iter().collect::<String>();
                     let code_escaped = escape_pre(code);
                     if lang.trim().is_empty() {
                         result.push_str(&format!("```\n{code_escaped}\n```"));
@@ -150,7 +148,23 @@ fn escape_link_target(text: &str) -> String {
 fn is_special_char(c: char) -> bool {
     matches!(
         c,
-        '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '=' | '|' | '{' | '}' | '.' | '!'
+        '_' | '*'
+            | '['
+            | ']'
+            | '('
+            | ')'
+            | '~'
+            | '`'
+            | '>'
+            | '#'
+            | '+'
+            | '-'
+            | '='
+            | '|'
+            | '{'
+            | '}'
+            | '.'
+            | '!'
     )
 }
 
@@ -196,9 +210,7 @@ fn find_subsequence(chars: &[char], start: usize, pattern: &[char]) -> usize {
 fn find_closing_fence(chars: &[char], start: usize, fence_len: usize) -> Option<usize> {
     let mut i = start;
     while i + fence_len <= chars.len() {
-        if chars[i] == '`'
-            && count_consecutive(chars, i, '`') >= fence_len
-        {
+        if chars[i] == '`' && count_consecutive(chars, i, '`') >= fence_len {
             return Some(i);
         }
         i += 1;

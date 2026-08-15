@@ -2,9 +2,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use oz_core_types::{ToolContext, ToolDefinition, ToolFunction, ToolOutput, ToolError};
+use oz_core_types::{ToolContext, ToolDefinition, ToolError, ToolFunction, ToolOutput};
 use oz_tools::registry::ToolHandler;
-use wasmtime::{Engine, Module, Store, Instance, Memory, TypedFunc};
+use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 
 const WASM_PAGE_SIZE: u64 = 65536;
 const SCRATCH_OFFSET: usize = 65536;
@@ -56,25 +56,36 @@ fn read_wasm_string(memory: &Memory, store: &Store<()>, ptr: i32) -> Result<Stri
     String::from_utf8(result).map_err(|e| PluginError::StringRead(e.to_string()))
 }
 
-fn ensure_memory_size(memory: &mut Memory, store: &mut Store<()>, needed: u64) -> Result<(), PluginError> {
+fn ensure_memory_size(
+    memory: &mut Memory,
+    store: &mut Store<()>,
+    needed: u64,
+) -> Result<(), PluginError> {
     let current_size = memory.size(&*store) * WASM_PAGE_SIZE;
     if needed > current_size {
         let pages_needed = needed.div_ceil(WASM_PAGE_SIZE);
         let grow_by = pages_needed - memory.size(&*store);
-        memory.grow(&mut *store, grow_by).map_err(|e| {
-            PluginError::Runtime(format!("Failed to grow memory: {e}"))
-        })?;
+        memory
+            .grow(&mut *store, grow_by)
+            .map_err(|e| PluginError::Runtime(format!("Failed to grow memory: {e}")))?;
     }
     Ok(())
 }
 
-fn write_to_memory(memory: &mut Memory, store: &mut Store<()>, addr: usize, data: &[u8]) -> Result<(), PluginError> {
+fn write_to_memory(
+    memory: &mut Memory,
+    store: &mut Store<()>,
+    addr: usize,
+    data: &[u8],
+) -> Result<(), PluginError> {
     ensure_memory_size(memory, store, (addr + data.len() + 1) as u64)?;
-    memory.write(&mut *store, addr, data)
+    memory
+        .write(&mut *store, addr, data)
         .map_err(|e| PluginError::StringRead(e.to_string()))?;
 
     let end_byte = [0u8; 1];
-    memory.write(&mut *store, addr + data.len(), &end_byte)
+    memory
+        .write(&mut *store, addr + data.len(), &end_byte)
         .map_err(|e| PluginError::StringRead(e.to_string()))?;
     Ok(())
 }
@@ -156,14 +167,23 @@ impl WasmPlugin {
     }
 
     pub fn execute(&mut self, args: serde_json::Value) -> Result<ToolOutput, PluginError> {
-        let args_str = serde_json::to_string(&args)
-            .map_err(|e| PluginError::InvalidJson(e.to_string()))?;
+        let args_str =
+            serde_json::to_string(&args).map_err(|e| PluginError::InvalidJson(e.to_string()))?;
         let args_bytes = args_str.as_bytes();
 
-        write_to_memory(&mut self.memory, &mut self.store, SCRATCH_OFFSET, args_bytes)?;
+        write_to_memory(
+            &mut self.memory,
+            &mut self.store,
+            SCRATCH_OFFSET,
+            args_bytes,
+        )?;
 
-        let result_ptr = self.execute_fn
-            .call(&mut self.store, (SCRATCH_OFFSET as i32, args_bytes.len() as i32))
+        let result_ptr = self
+            .execute_fn
+            .call(
+                &mut self.store,
+                (SCRATCH_OFFSET as i32, args_bytes.len() as i32),
+            )
             .map_err(|e| PluginError::FunctionCall("execute", e.to_string()))?;
 
         let result_str = read_wasm_string(&self.memory, &self.store, result_ptr)?;
@@ -171,7 +191,10 @@ impl WasmPlugin {
         let result_value: serde_json::Value = serde_json::from_str(&result_str)
             .map_err(|e| PluginError::InvalidJson(format!("{e}: {result_str}")))?;
 
-        let data = result_value.get("data").cloned().unwrap_or(serde_json::Value::Null);
+        let data = result_value
+            .get("data")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let next_prompt = result_value
             .get("next_prompt")
             .and_then(|v| v.as_str())
@@ -181,7 +204,12 @@ impl WasmPlugin {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        Ok(ToolOutput { data, next_prompt, should_exit, images: vec![] })
+        Ok(ToolOutput {
+            data,
+            next_prompt,
+            should_exit,
+            images: vec![],
+        })
     }
 
     pub fn to_definition(&self) -> ToolDefinition {
@@ -219,9 +247,13 @@ impl WasmPluginHandler {
 
 #[async_trait]
 impl ToolHandler for WasmPluginHandler {
-    fn name(&self) -> String { self.name.clone() }
+    fn name(&self) -> String {
+        self.name.clone()
+    }
 
-    fn description(&self) -> String { self.description.clone() }
+    fn description(&self) -> String {
+        self.description.clone()
+    }
 
     fn parameters(&self) -> serde_json::Value {
         self.parameters.clone()
@@ -232,12 +264,13 @@ impl ToolHandler for WasmPluginHandler {
         args: serde_json::Value,
         _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let mut plugin = self.plugin.lock().map_err(|e| {
-            ToolError::Custom(format!("Plugin lock poisoned: {e}"))
-        })?;
-        plugin.execute(args).map_err(|e| {
-            ToolError::Custom(format!("Plugin execution failed: {e}"))
-        })
+        let mut plugin = self
+            .plugin
+            .lock()
+            .map_err(|e| ToolError::Custom(format!("Plugin lock poisoned: {e}")))?;
+        plugin
+            .execute(args)
+            .map_err(|e| ToolError::Custom(format!("Plugin execution failed: {e}")))
     }
 }
 
@@ -311,7 +344,9 @@ mod tests {
     fn test_handler_execute() {
         let handler = WasmPluginHandler::new(test_plugin());
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let r = rt.block_on(handler.execute(serde_json::json!({"x": 1}), &test_context())).unwrap();
+        let r = rt
+            .block_on(handler.execute(serde_json::json!({"x": 1}), &test_context()))
+            .unwrap();
         assert_eq!(r.data, serde_json::json!("plugin ran"));
     }
 

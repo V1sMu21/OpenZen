@@ -25,8 +25,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::event::{
-    self as ctm_event, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
-    MouseEventKind,
+    self as ctm_event, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -112,7 +111,9 @@ pub async fn run_tui(
         if let Some(raw) = cfg.tui.right_prompt {
             app.right_prompt = Some(crate::template::PromptTemplate::new(raw));
         }
-        if let Some("light") = cfg.tui.theme.as_deref() { app.theme = crate::theme::Theme::light() }
+        if let Some("light") = cfg.tui.theme.as_deref() {
+            app.theme = crate::theme::Theme::light()
+        }
         let cfg_ref = crate::theme::ThemeConfig {
             user_fg: cfg.tui.theme_overrides.user_fg,
             agent_fg: cfg.tui.theme_overrides.agent_fg,
@@ -195,8 +196,7 @@ pub async fn run_tui(
                                     if app.follow_tail {
                                         // already at bottom; no-op
                                     } else {
-                                        app.chat_scroll =
-                                            app.chat_scroll.saturating_sub(3);
+                                        app.chat_scroll = app.chat_scroll.saturating_sub(3);
                                         if app.chat_scroll == 0 {
                                             app.follow_tail = true;
                                         }
@@ -305,7 +305,10 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let status_text = if app.confirm_quit {
         Span::styled(" Quit? (y/N)", status_style)
     } else if app.confirm_delete {
-        Span::styled(" Delete current session? (Y/n)", Style::default().fg(Color::Red))
+        Span::styled(
+            " Delete current session? (Y/n)",
+            Style::default().fg(Color::Red),
+        )
     } else {
         Span::styled(format!(" {}", app.status), status_style)
     };
@@ -316,10 +319,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         } else {
             format!(" · {}", app.model_name)
         };
-        vec![
-            Span::styled("  ", MUTED_FG),
-            Span::styled(info, MUTED_FG),
-        ]
+        vec![Span::styled("  ", MUTED_FG), Span::styled(info, MUTED_FG)]
     } else {
         vec![]
     };
@@ -342,7 +342,9 @@ fn draw_cmd_popup(f: &mut Frame, area: Rect, app: &App) {
             let sel = i == app.cmd_selected;
             let prefix = if sel { "▸ " } else { "  " };
             let style = if sel {
-                Style::default().fg(HIGHLIGHT_FG).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(HIGHLIGHT_FG)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(MUTED_FG)
             };

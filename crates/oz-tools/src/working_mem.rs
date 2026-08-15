@@ -8,8 +8,13 @@ pub struct WorkingMemTool;
 
 #[async_trait]
 impl ToolHandler for WorkingMemTool {
-    fn name(&self) -> String { "working_mem".to_string() }
-    fn description(&self) -> String { "Update the working memory checkpoint with current progress, key info, or plan summary.".to_string() }
+    fn name(&self) -> String {
+        "working_mem".to_string()
+    }
+    fn description(&self) -> String {
+        "Update the working memory checkpoint with current progress, key info, or plan summary."
+            .to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -31,7 +36,11 @@ impl ToolHandler for WorkingMemTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let key_info = args.get("key_info").and_then(|v| v.as_str());
         let _related_sop = args.get("related_sop").and_then(|v| v.as_str());
 
@@ -53,13 +62,24 @@ mod tests {
     use oz_core_types::ToolContext as TC;
 
     fn ctx() -> TC {
-        TC { working_dir: "/tmp".into(), assets_dir: "/tmp".into(), script_dir: "/tmp".into(), lang: "en".into(), skill_mcp_dir: None, harness_dir: None, session_id: String::new() }
+        TC {
+            working_dir: "/tmp".into(),
+            assets_dir: "/tmp".into(),
+            script_dir: "/tmp".into(),
+            lang: "en".into(),
+            skill_mcp_dir: None,
+            harness_dir: None,
+            session_id: String::new(),
+        }
     }
 
     #[tokio::test]
     async fn test_working_mem_basic() {
         let r = WorkingMemTool
-            .execute(serde_json::json!({"key_info": "current task: read file"}), &ctx())
+            .execute(
+                serde_json::json!({"key_info": "current task: read file"}),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert_eq!(r.data["status"], "ok");
@@ -68,18 +88,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_working_mem_empty() {
-        let r = WorkingMemTool.execute(serde_json::json!({}), &ctx()).await.unwrap();
+        let r = WorkingMemTool
+            .execute(serde_json::json!({}), &ctx())
+            .await
+            .unwrap();
         assert_eq!(r.data["status"], "ok");
     }
 
     #[tokio::test]
     async fn test_working_mem_with_all_params() {
         let r = WorkingMemTool
-            .execute(serde_json::json!({
-                "key_info": "step 2",
-                "related_sop": "some instructions",
-                "plan_mode": "careful"
-            }), &ctx())
+            .execute(
+                serde_json::json!({
+                    "key_info": "step 2",
+                    "related_sop": "some instructions",
+                    "plan_mode": "careful"
+                }),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert_eq!(r.data["status"], "ok");
@@ -103,12 +129,18 @@ mod tests {
             .await
             .unwrap();
         let prompt = r.next_prompt.unwrap_or_default();
-        assert!(prompt.contains("working_mem"), "next_prompt should reference working_mem");
+        assert!(
+            prompt.contains("working_mem"),
+            "next_prompt should reference working_mem"
+        );
     }
 
     #[tokio::test]
     async fn test_working_mem_should_not_exit() {
-        let r = WorkingMemTool.execute(serde_json::json!({}), &ctx()).await.unwrap();
+        let r = WorkingMemTool
+            .execute(serde_json::json!({}), &ctx())
+            .await
+            .unwrap();
         assert!(!r.should_exit);
     }
 

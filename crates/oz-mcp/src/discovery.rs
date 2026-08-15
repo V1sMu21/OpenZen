@@ -34,7 +34,11 @@ impl McpManager {
                 match client.start().await {
                     Ok(()) => started += 1,
                     Err(e) => {
-                        tracing::warn!("Failed to start MCP server '{}': {}", client.server_name(), e);
+                        tracing::warn!(
+                            "Failed to start MCP server '{}': {}",
+                            client.server_name(),
+                            e
+                        );
                     }
                 }
             }
@@ -61,8 +65,14 @@ impl McpManager {
     }
 
     /// Call a tool on a specific server.
-    pub async fn call_tool(&mut self, server_name: &str, tool_name: &str, arguments: serde_json::Value) -> Result<crate::types::CallToolResult, McpError> {
-        let client = self.clients
+    pub async fn call_tool(
+        &mut self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<crate::types::CallToolResult, McpError> {
+        let client = self
+            .clients
             .iter_mut()
             .find(|c| c.server_name() == server_name && c.state() == &McpState::Connected)
             .ok_or_else(|| McpError::ServerNotFound(server_name.to_string()))?;

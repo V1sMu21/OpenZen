@@ -169,8 +169,8 @@ pub struct App {
     pub config_path: String,
     pub system_prompt: String,
 
-            // Prompt template — loaded from `[tui] left_prompt` /
-            // `right_prompt` in mykey.toml. See `template` module.
+    // Prompt template — loaded from `[tui] left_prompt` /
+    // `right_prompt` in mykey.toml. See `template` module.
     pub left_prompt: Option<crate::template::PromptTemplate>,
     pub right_prompt: Option<crate::template::PromptTemplate>,
     pub tokens_total: std::sync::atomic::AtomicU64,
@@ -179,7 +179,9 @@ pub struct App {
 
 impl App {
     pub fn new(working_dir: String, assets_dir: String, config_path: String) -> Self {
-        let sessions_path = PathBuf::from(&working_dir).join("openzen").join("tui-sessions.json");
+        let sessions_path = PathBuf::from(&working_dir)
+            .join("openzen")
+            .join("tui-sessions.json");
         let _ = std::fs::create_dir_all(sessions_path.parent().unwrap());
         let session_store = SessionStore::persisted(sessions_path);
         let sessions = session_store.list();
@@ -201,7 +203,8 @@ impl App {
             current_id,
             session_id_for_run: String::new(),
             session_store,
-            status: "type to chat · / for commands · PgUp/PgDn scroll history · G bottom · g top".into(),
+            status: "type to chat · / for commands · PgUp/PgDn scroll history · G bottom · g top"
+                .into(),
             is_processing: false,
             started_at: None,
             frame_count: 0,
@@ -247,9 +250,7 @@ impl App {
         vars.insert("agent", self.current_agent.clone().unwrap_or_default());
         vars.insert("role", "");
         vars.insert("rag", "");
-        let tokens = self
-            .tokens_total
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let tokens = self.tokens_total.load(std::sync::atomic::Ordering::Relaxed);
         vars.insert("consume_tokens", tokens.to_string());
         vars.insert("consume_percent", "0".to_string());
         vars
@@ -317,9 +318,16 @@ impl App {
 
     pub fn mark_tool_done(&mut self, name: &str, ok: bool) {
         for item in self.items.iter_mut().rev() {
-            if let ChatItem::ToolCall { name: n, status, .. } = item {
+            if let ChatItem::ToolCall {
+                name: n, status, ..
+            } = item
+            {
                 if n == name && *status == ToolStatus::Running {
-                    *status = if ok { ToolStatus::Done } else { ToolStatus::Error };
+                    *status = if ok {
+                        ToolStatus::Done
+                    } else {
+                        ToolStatus::Error
+                    };
                     break;
                 }
             }
@@ -327,9 +335,10 @@ impl App {
     }
 
     pub fn find_last_tool_call_mut(&mut self, name: &str) -> Option<&mut ChatItem> {
-        self.items.iter_mut().rev().find(|i| {
-            matches!(i, ChatItem::ToolCall { name: n, .. } if n == name)
-        })
+        self.items
+            .iter_mut()
+            .rev()
+            .find(|i| matches!(i, ChatItem::ToolCall { name: n, .. } if n == name))
     }
 
     pub fn toggle_last_expandable(&mut self) {
@@ -347,7 +356,9 @@ impl App {
                     *expanded = !*expanded;
                     return;
                 }
-                ChatItem::AssistantText { expanded, content, .. } => {
+                ChatItem::AssistantText {
+                    expanded, content, ..
+                } => {
                     if content.lines().count() > LONG_MSG_THRESHOLD {
                         *expanded = !*expanded;
                         return;
@@ -398,7 +409,11 @@ impl App {
                 .and_then(|v| v.as_str())
                 .map(|s| {
                     chrono::DateTime::parse_from_rfc3339(s)
-                        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+                        .map(|dt| {
+                            dt.with_timezone(&chrono::Local)
+                                .format("%H:%M:%S")
+                                .to_string()
+                        })
                         .unwrap_or_else(|_| s.to_string())
                 })
                 .unwrap_or_default();
@@ -429,15 +444,10 @@ impl App {
     /// current user prompt separately to `run_agent_loop`.
     pub fn to_message_history(&self) -> Vec<Message> {
         let items: &[ChatItem] = match self.items.last() {
-            Some(ChatItem::UserMessage { .. }) => {
-                &self.items[..self.items.len().saturating_sub(1)]
-            }
+            Some(ChatItem::UserMessage { .. }) => &self.items[..self.items.len().saturating_sub(1)],
             _ => &self.items[..],
         };
-        items
-            .iter()
-            .filter_map(chat_item_to_message)
-            .collect()
+        items.iter().filter_map(chat_item_to_message).collect()
     }
 }
 
@@ -451,7 +461,13 @@ fn chat_item_to_message(item: &ChatItem) -> Option<Message> {
                 Some(Message::assistant(content.clone()))
             }
         }
-        ChatItem::ToolCall { name, args, status, result, .. } => {
+        ChatItem::ToolCall {
+            name,
+            args,
+            status,
+            result,
+            ..
+        } => {
             let status_label = match status {
                 ToolStatus::Running => "running",
                 ToolStatus::Done => "ok",

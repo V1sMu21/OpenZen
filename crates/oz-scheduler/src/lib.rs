@@ -13,8 +13,8 @@ pub mod tasks;
 pub use task::{ScheduledTask, TaskContext, TaskError};
 pub use tasks::{SessionCleanup, SkillMcpScan, TrustDecay};
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct Scheduler {

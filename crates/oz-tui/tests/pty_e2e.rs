@@ -107,8 +107,7 @@ fn e2e_tui_no_tag_leak_and_no_overflow() {
     }
 
     // ── 1. Locate the ga binary ──
-    let exe = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/release/ga");
+    let exe = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/ga");
     let exe_str = exe.to_string_lossy().to_string();
     if !exe.exists() {
         panic!(
@@ -280,7 +279,9 @@ fn e2e_tui_no_tag_leak_and_no_overflow() {
         }
     }
     if !done {
-        eprintln!("warning: agent did not report Done within 60s of stop; asserting on output anyway");
+        eprintln!(
+            "warning: agent did not report Done within 60s of stop; asserting on output anyway"
+        );
     }
 
     // Give a final 800ms to flush any trailing frames.
@@ -306,7 +307,12 @@ fn e2e_tui_no_tag_leak_and_no_overflow() {
 
     // 7a. No raw tag fragments in the visible output.
     for needle in [
-        "<thinking>", "</thinking>", "<summary>", "</summary>", "<think>", "</think>",
+        "<thinking>",
+        "</thinking>",
+        "<summary>",
+        "</summary>",
+        "<think>",
+        "</think>",
     ] {
         assert!(
             !visible.contains(needle),

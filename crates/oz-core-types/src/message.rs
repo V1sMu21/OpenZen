@@ -43,11 +43,21 @@ impl ContentBlock {
     pub fn text_cached(text: impl Into<String>) -> Self {
         ContentBlock::Text {
             text: text.into(),
-            cache_control: Some(CacheControl { type_: "ephemeral".into() }),
+            cache_control: Some(CacheControl {
+                type_: "ephemeral".into(),
+            }),
         }
     }
-    pub fn tool_use(id: impl Into<String>, name: impl Into<String>, input: serde_json::Value) -> Self {
-        ContentBlock::ToolUse { id: id.into(), name: name.into(), input }
+    pub fn tool_use(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        input: serde_json::Value,
+    ) -> Self {
+        ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input,
+        }
     }
     pub fn tool_result(tool_use_id: impl Into<String>, content: impl Into<String>) -> Self {
         ContentBlock::ToolResult {
@@ -93,11 +103,15 @@ impl ContentContainer {
 }
 
 impl From<String> for ContentContainer {
-    fn from(s: String) -> Self { ContentContainer::Text(s) }
+    fn from(s: String) -> Self {
+        ContentContainer::Text(s)
+    }
 }
 
 impl From<Vec<ContentBlock>> for ContentContainer {
-    fn from(v: Vec<ContentBlock>) -> Self { ContentContainer::Blocks(v) }
+    fn from(v: Vec<ContentBlock>) -> Self {
+        ContentContainer::Blocks(v)
+    }
 }
 
 /// Message role in the conversation.
@@ -147,7 +161,11 @@ impl Message {
         }
     }
     pub fn user_with_blocks(blocks: Vec<ContentBlock>) -> Self {
-        Message { role: Role::User, content: blocks, tool_results: None }
+        Message {
+            role: Role::User,
+            content: blocks,
+            tool_results: None,
+        }
     }
     pub fn assistant(text: impl Into<String>) -> Self {
         Message {
@@ -157,7 +175,11 @@ impl Message {
         }
     }
     pub fn assistant_with_blocks(blocks: Vec<ContentBlock>) -> Self {
-        Message { role: Role::Assistant, content: blocks, tool_results: None }
+        Message {
+            role: Role::Assistant,
+            content: blocks,
+            tool_results: None,
+        }
     }
     pub fn tool(tool_use_id: impl Into<String>, content: impl Into<String>) -> Self {
         Message {
@@ -169,16 +191,26 @@ impl Message {
 
     /// Extract all text from text-type content blocks.
     pub fn content_text(&self) -> String {
-        self.content.iter().filter_map(|b| match b {
-            ContentBlock::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        }).collect::<Vec<_>>().join("\n")
+        self.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Mark last user block with cache_control: ephemeral (Claude prompt caching).
     pub fn mark_cache_control(&mut self) {
-        if let Some(ContentBlock::Text { ref mut cache_control, .. }) = self.content.last_mut() {
-            let _ = cache_control.insert(CacheControl { type_: "ephemeral".into() });
+        if let Some(ContentBlock::Text {
+            ref mut cache_control,
+            ..
+        }) = self.content.last_mut()
+        {
+            let _ = cache_control.insert(CacheControl {
+                type_: "ephemeral".into(),
+            });
         }
     }
 }
@@ -209,7 +241,11 @@ impl MockToolCall {
             id: String::new(),
         }
     }
-    pub fn with_id(name: impl Into<String>, arguments: serde_json::Value, id: impl Into<String>) -> Self {
+    pub fn with_id(
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+        id: impl Into<String>,
+    ) -> Self {
         MockToolCall {
             name: name.into(),
             arguments,
@@ -274,7 +310,11 @@ impl MockResponse {
         }
     }
     pub fn with_tools(content: impl Into<String>, tool_calls: Vec<MockToolCall>) -> Self {
-        let stop = if tool_calls.is_empty() { "end_turn".into() } else { "tool_use".into() };
+        let stop = if tool_calls.is_empty() {
+            "end_turn".into()
+        } else {
+            "tool_use".into()
+        };
         MockResponse {
             thinking: String::new(),
             content: content.into(),
@@ -296,7 +336,10 @@ mod tests {
     fn content_block_text_basic() {
         let block = ContentBlock::text("hello");
         match &block {
-            ContentBlock::Text { text, cache_control } => {
+            ContentBlock::Text {
+                text,
+                cache_control,
+            } => {
                 assert_eq!(text, "hello");
                 assert!(cache_control.is_none());
             }
@@ -308,7 +351,10 @@ mod tests {
     fn content_block_text_empty_string() {
         let block = ContentBlock::text("");
         match &block {
-            ContentBlock::Text { text, cache_control } => {
+            ContentBlock::Text {
+                text,
+                cache_control,
+            } => {
                 assert_eq!(text, "");
                 assert!(cache_control.is_none());
             }
@@ -320,7 +366,10 @@ mod tests {
     fn content_block_text_cached() {
         let block = ContentBlock::text_cached("cached text");
         match &block {
-            ContentBlock::Text { text, cache_control } => {
+            ContentBlock::Text {
+                text,
+                cache_control,
+            } => {
                 assert_eq!(text, "cached text");
                 assert!(cache_control.is_some());
                 assert_eq!(cache_control.as_ref().unwrap().type_, "ephemeral");
@@ -333,7 +382,10 @@ mod tests {
     fn content_block_text_cached_empty_string() {
         let block = ContentBlock::text_cached("");
         match &block {
-            ContentBlock::Text { text, cache_control } => {
+            ContentBlock::Text {
+                text,
+                cache_control,
+            } => {
                 assert_eq!(text, "");
                 assert!(cache_control.is_some());
             }
@@ -359,7 +411,11 @@ mod tests {
     fn content_block_tool_result() {
         let block = ContentBlock::tool_result("tu_1", "result content");
         match &block {
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 assert_eq!(tool_use_id, "tu_1");
                 assert!(matches!(content.as_text().unwrap(), s if s == "result content"));
                 assert!(is_error.is_none());
@@ -458,7 +514,10 @@ mod tests {
         assert_eq!(msg.content.len(), 1);
 
         match &msg.content[0] {
-            ContentBlock::Text { text, cache_control } => {
+            ContentBlock::Text {
+                text,
+                cache_control,
+            } => {
                 assert_eq!(text, "user query");
                 assert!(cache_control.is_none());
             }
@@ -483,7 +542,11 @@ mod tests {
 
     #[test]
     fn message_assistant_with_blocks() {
-        let blocks = vec![ContentBlock::tool_use("tu_1", "read_file", serde_json::json!({}))];
+        let blocks = vec![ContentBlock::tool_use(
+            "tu_1",
+            "read_file",
+            serde_json::json!({}),
+        )];
         let msg = Message::assistant_with_blocks(blocks);
         assert_eq!(msg.role, Role::Assistant);
         assert_eq!(msg.content.len(), 1);
@@ -496,7 +559,11 @@ mod tests {
         assert_eq!(msg.content.len(), 1);
 
         match &msg.content[0] {
-            ContentBlock::ToolResult { tool_use_id, content, .. } => {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
                 assert_eq!(tool_use_id, "tu_1");
                 match content.as_text() {
                     Some(t) => assert_eq!(t, "tool output"),
@@ -550,7 +617,11 @@ mod tests {
 
     #[test]
     fn content_text_all_non_text() {
-        let blocks = vec![ContentBlock::tool_use("tu_1", "read", serde_json::json!({}))];
+        let blocks = vec![ContentBlock::tool_use(
+            "tu_1",
+            "read",
+            serde_json::json!({}),
+        )];
         let msg = Message::assistant_with_blocks(blocks);
         assert_eq!(msg.content_text(), "");
     }
@@ -580,7 +651,11 @@ mod tests {
 
     #[test]
     fn mark_cache_control_on_non_text_last_block() {
-        let blocks = vec![ContentBlock::tool_use("tu_1", "read", serde_json::json!({}))];
+        let blocks = vec![ContentBlock::tool_use(
+            "tu_1",
+            "read",
+            serde_json::json!({}),
+        )];
         let mut msg = Message::assistant_with_blocks(blocks);
         msg.mark_cache_control();
 
@@ -599,10 +674,7 @@ mod tests {
 
     #[test]
     fn mark_cache_control_mixed_blocks_marks_last_only() {
-        let blocks = vec![
-            ContentBlock::text("first"),
-            ContentBlock::text("last"),
-        ];
+        let blocks = vec![ContentBlock::text("first"), ContentBlock::text("last")];
         let mut msg = Message::user_with_blocks(blocks);
         msg.mark_cache_control();
 
@@ -733,7 +805,11 @@ mod tests {
         let msg = Message {
             role: Role::Tool,
             content: vec![ContentBlock::tool_result("tu_1", "ok")],
-            tool_results: Some(vec![ToolResultItem { tool_use_id: "tu_1".into(), content: "ok".into(), images: vec![] }]),
+            tool_results: Some(vec![ToolResultItem {
+                tool_use_id: "tu_1".into(),
+                content: "ok".into(),
+                images: vec![],
+            }]),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("tool_results"));

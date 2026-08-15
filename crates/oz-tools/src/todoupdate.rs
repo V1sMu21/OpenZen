@@ -7,7 +7,9 @@ pub struct TodoUpdateTool;
 
 #[async_trait]
 impl ToolHandler for TodoUpdateTool {
-    fn name(&self) -> String { "todoupdate".to_string() }
+    fn name(&self) -> String {
+        "todoupdate".to_string()
+    }
     fn description(&self) -> String {
         "Mark ONE todo item as in_progress, completed, or cancelled. Call once per todo — do NOT batch multiple updates. REQUIRED: always pass the todo's `content` so the chat card shows what changed.".to_string()
     }
@@ -36,13 +38,19 @@ impl ToolHandler for TodoUpdateTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let id = args["id"].as_str().unwrap_or("").to_string();
         let status = args["status"].as_str().unwrap_or("in_progress").to_string();
         let content = args["content"].as_str().unwrap_or("").to_string();
 
         if id.is_empty() {
-            return Err(ToolError::Custom("todoupdate requires a valid todo id".into()));
+            return Err(ToolError::Custom(
+                "todoupdate requires a valid todo id".into(),
+            ));
         }
 
         let status_emoji = match status.as_str() {

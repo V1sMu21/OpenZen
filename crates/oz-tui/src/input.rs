@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{InputMode, App};
+use crate::app::{App, InputMode};
 use crate::theme::*;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
@@ -35,7 +35,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(HIGHLIGHT_FG),
         ),
     };
-    let display = if text.is_empty() && !app.cmd_mode && matches!(app.input_mode, InputMode::Editing) && !app.is_processing {
+    let display = if text.is_empty()
+        && !app.cmd_mode
+        && matches!(app.input_mode, InputMode::Editing)
+        && !app.is_processing
+    {
         Line::from(Span::styled(
             format!("{}type to chat · / for commands · /exit to quit", prefix),
             Style::default().fg(Color::DarkGray),

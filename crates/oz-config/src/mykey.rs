@@ -1,6 +1,6 @@
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
-use serde::Deserialize;
 
 /// Session type inferred from config key name.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,7 +68,6 @@ pub enum ApiMode {
     ChatCompletions,
     Responses,
 }
-
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MyKeyConfig {
@@ -142,12 +141,14 @@ pub struct RouteRule {
 impl MyKeyConfig {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, anyhow::Error> {
         let content = std::fs::read_to_string(path.as_ref())?;
-        let raw: toml::Table = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("TOML parse error: {e}"))?;
-        let default_session = raw.get("default_session")
+        let raw: toml::Table =
+            toml::from_str(&content).map_err(|e| anyhow::anyhow!("TOML parse error: {e}"))?;
+        let default_session = raw
+            .get("default_session")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let summary_model = raw.get("summary_model")
+        let summary_model = raw
+            .get("summary_model")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let memory_backend = match raw.get("memory_backend") {
@@ -206,13 +207,27 @@ impl MyKeyConfig {
         }
 
         for (key, value) in &raw {
-            if key == "default_session" { continue; }
-            if key == "summary_model" { continue; }
-            if key == "memory_backend" { continue; }
-            if key == "erme_idle_interval_secs" { continue; }
-            if key == "tui" { continue; }
-            if key == "router" { continue; }
-            if !value.is_table() { continue; }
+            if key == "default_session" {
+                continue;
+            }
+            if key == "summary_model" {
+                continue;
+            }
+            if key == "memory_backend" {
+                continue;
+            }
+            if key == "erme_idle_interval_secs" {
+                continue;
+            }
+            if key == "tui" {
+                continue;
+            }
+            if key == "router" {
+                continue;
+            }
+            if !value.is_table() {
+                continue;
+            }
             let sub = value.as_table().unwrap();
             // Try direct parse first
             let val_clone = value.clone();
@@ -249,7 +264,10 @@ impl MyKeyConfig {
     pub fn default_session_name(&self) -> Option<&str> {
         self.default_session.as_deref().or_else(|| {
             // Pick first non-mixin session
-            self.sessions.keys().find(|k| !k.to_lowercase().contains("mixin")).map(|s| s.as_str())
+            self.sessions
+                .keys()
+                .find(|k| !k.to_lowercase().contains("mixin"))
+                .map(|s| s.as_str())
         })
     }
 
@@ -261,8 +279,8 @@ impl MyKeyConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::env;
+    use std::fs;
 
     #[test]
     fn session_type_claude() {
@@ -276,12 +294,18 @@ mod tests {
 
     #[test]
     fn session_type_native_claude() {
-        assert_eq!(SessionType::from_key_name("native_claude"), SessionType::NativeClaude);
+        assert_eq!(
+            SessionType::from_key_name("native_claude"),
+            SessionType::NativeClaude
+        );
     }
 
     #[test]
     fn session_type_native_oai() {
-        assert_eq!(SessionType::from_key_name("native_oai"), SessionType::NativeOai);
+        assert_eq!(
+            SessionType::from_key_name("native_oai"),
+            SessionType::NativeOai
+        );
     }
 
     #[test]
@@ -293,14 +317,26 @@ mod tests {
     fn session_type_case_insensitive() {
         assert_eq!(SessionType::from_key_name("CLAUDE"), SessionType::Claude);
         assert_eq!(SessionType::from_key_name("MiXin_Key"), SessionType::Mixin);
-        assert_eq!(SessionType::from_key_name("GPT-3.5-TURBO"), SessionType::Oai);
+        assert_eq!(
+            SessionType::from_key_name("GPT-3.5-TURBO"),
+            SessionType::Oai
+        );
     }
 
     #[test]
     fn session_type_substring_matching() {
-        assert_eq!(SessionType::from_key_name("my_claude_key"), SessionType::Claude);
-        assert_eq!(SessionType::from_key_name("native_claude_prod"), SessionType::NativeClaude);
-        assert_eq!(SessionType::from_key_name("native_oai_staging"), SessionType::NativeOai);
+        assert_eq!(
+            SessionType::from_key_name("my_claude_key"),
+            SessionType::Claude
+        );
+        assert_eq!(
+            SessionType::from_key_name("native_claude_prod"),
+            SessionType::NativeClaude
+        );
+        assert_eq!(
+            SessionType::from_key_name("native_oai_staging"),
+            SessionType::NativeOai
+        );
         assert_eq!(SessionType::from_key_name("mixin_prod"), SessionType::Mixin);
     }
 
@@ -324,7 +360,8 @@ mod tests {
             apibase = "https://api.example.com/v1"
             model = "gpt-4"
             "#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(cfg.context_win, 28000);
     }
 
@@ -336,7 +373,8 @@ mod tests {
             apibase = "https://api.example.com/v1"
             model = "gpt-4"
             "#,
-        ).unwrap();
+        )
+        .unwrap();
         let mode: ApiMode = cfg.api_mode;
         assert_eq!(mode, ApiMode::ChatCompletions);
     }
@@ -350,7 +388,8 @@ mod tests {
             model = "gpt-4"
             context_win = 120000
             "#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(cfg.context_win, 120000);
     }
 
@@ -362,7 +401,8 @@ mod tests {
             apibase = "https://api.example.com/v1"
             model = "gpt-4"
             "#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(cfg.max_tokens, None);
         assert_eq!(cfg.temperature, None);
         assert_eq!(cfg.reasoning_effort, None);
@@ -395,7 +435,8 @@ mod tests {
             base_delay = 1.5
             spring_back = 60
             "#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(cfg.apikey, "sk-123");
         assert_eq!(cfg.apibase, "https://api.openai.com/v1");
         assert_eq!(cfg.model, "gpt-4o");
@@ -419,7 +460,9 @@ mod tests {
         fs::create_dir_all(&tmp_dir).unwrap();
         let path = tmp_dir.join("config.toml");
 
-        fs::write(&path, r#"
+        fs::write(
+            &path,
+            r#"
 default_session = "gpt4"
 
 [gpt4]
@@ -436,7 +479,9 @@ model = "claude-3-opus"
 apikey = "sk-mixinkey"
 apibase = "https://api.mixin.example/v1"
 model = "mixin-llm"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.sessions.len(), 3);
@@ -477,8 +522,11 @@ model = "mixin-llm"
         let path = tmp_dir.join("empty.toml");
 
         // A TOML with nothing parseable as sessions
-        fs::write(&path, r#"
-"#).unwrap();
+        fs::write(
+            &path, r#"
+"#,
+        )
+        .unwrap();
 
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert!(cfg.sessions.is_empty());
@@ -493,7 +541,9 @@ model = "mixin-llm"
         fs::create_dir_all(&tmp_dir).unwrap();
         let path = tmp_dir.join("default_session.toml");
 
-        fs::write(&path, r#"
+        fs::write(
+            &path,
+            r#"
 default_session = "gpt4"
 
 [gpt4]
@@ -505,7 +555,9 @@ model = "gpt-4"
 apikey = "sk-claude"
 apibase = "https://api.anthropic.com/v1"
 model = "claude-3"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.default_session_name(), Some("gpt4"));
@@ -519,7 +571,9 @@ model = "claude-3"
         fs::create_dir_all(&tmp_dir).unwrap();
         let path = tmp_dir.join("fallback.toml");
 
-        fs::write(&path, r#"
+        fs::write(
+            &path,
+            r#"
 [mixin_prod]
 apikey = "sk-mixin"
 apibase = "https://api.mixin.example/v1"
@@ -534,16 +588,27 @@ model = "gpt-4"
 apikey = "sk-claude"
 apibase = "https://api.anthropic.com/v1"
 model = "claude-3"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         // No default_session set — should pick first non-mixin
         // HashMap iteration is not ordered, but result must be non-mixin and present
         let name = cfg.default_session_name();
-        assert!(name.is_some(), "Should fall back to first non-mixin session");
+        assert!(
+            name.is_some(),
+            "Should fall back to first non-mixin session"
+        );
         let name = name.unwrap();
-        assert!(!name.to_lowercase().contains("mixin"), "Fallback should skip mixin sessions");
-        assert!(cfg.get(name).is_some(), "Fallback session must exist in sessions map");
+        assert!(
+            !name.to_lowercase().contains("mixin"),
+            "Fallback should skip mixin sessions"
+        );
+        assert!(
+            cfg.get(name).is_some(),
+            "Fallback session must exist in sessions map"
+        );
 
         fs::remove_dir_all(&tmp_dir).unwrap();
     }
@@ -554,7 +619,9 @@ model = "claude-3"
         fs::create_dir_all(&tmp_dir).unwrap();
         let path = tmp_dir.join("all_mixin.toml");
 
-        fs::write(&path, r#"
+        fs::write(
+            &path,
+            r#"
 [mixin_1]
 apikey = "sk-mixin1"
 apibase = "https://api.mixin.example/v1"
@@ -564,7 +631,9 @@ model = "mixin-llm"
 apikey = "sk-mixin2"
 apibase = "https://api.mixin.example/v1"
 model = "mixin-llm"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.default_session_name(), None);
@@ -590,13 +659,17 @@ model = "mixin-llm"
     #[test]
     fn mykey_config_iter_sessions() {
         let mut sessions = HashMap::new();
-        sessions.insert("gpt".to_string(), toml::from_str(
-            r#"
+        sessions.insert(
+            "gpt".to_string(),
+            toml::from_str(
+                r#"
             apikey = "sk-gpt"
             apibase = "https://api.openai.com/v1"
             model = "gpt-4"
             "#,
-        ).unwrap());
+            )
+            .unwrap(),
+        );
 
         let cfg = MyKeyConfig {
             sessions,
@@ -622,7 +695,8 @@ model = "mixin-llm"
             apibase = "y"
             model = "z"
             "#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(cfg.apikey, "x");
         assert_eq!(cfg.apibase, "y");
         assert_eq!(cfg.model, "z");
@@ -650,7 +724,8 @@ model = "mixin-llm"
             model = "gpt-4"
             api_mode = "chat_completions"
             "#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(cfg.api_mode, ApiMode::ChatCompletions);
     }
 
@@ -664,14 +739,17 @@ model = "mixin-llm"
 
     #[test]
     fn memory_backend_defaults_to_erme() {
-        let path = write_config("oz_config_test_mb_default", r#"
+        let path = write_config(
+            "oz_config_test_mb_default",
+            r#"
 default_session = "gpt4"
 
 [gpt4]
 apikey = "sk-test"
 apibase = "https://api.example.com/v1"
 model = "gpt-4"
-"#);
+"#,
+        );
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.memory_backend, "erme");
         assert_eq!(cfg.erme_idle_interval_secs, None);
@@ -680,7 +758,9 @@ model = "gpt-4"
 
     #[test]
     fn memory_backend_parses_erme() {
-        let path = write_config("oz_config_test_mb_erme", r#"
+        let path = write_config(
+            "oz_config_test_mb_erme",
+            r#"
 memory_backend = "erme"
 default_session = "gpt4"
 
@@ -688,7 +768,8 @@ default_session = "gpt4"
 apikey = "sk-test"
 apibase = "https://api.example.com/v1"
 model = "gpt-4"
-"#);
+"#,
+        );
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.memory_backend, "erme");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -696,7 +777,9 @@ model = "gpt-4"
 
     #[test]
     fn memory_backend_unknown_value_falls_back_to_file() {
-        let path = write_config("oz_config_test_mb_unknown", r#"
+        let path = write_config(
+            "oz_config_test_mb_unknown",
+            r#"
 memory_backend = "quantum"
 default_session = "gpt4"
 
@@ -704,7 +787,8 @@ default_session = "gpt4"
 apikey = "sk-test"
 apibase = "https://api.example.com/v1"
 model = "gpt-4"
-"#);
+"#,
+        );
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.memory_backend, "file");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -712,7 +796,9 @@ model = "gpt-4"
 
     #[test]
     fn memory_backend_whitespace_trimmed() {
-        let path = write_config("oz_config_test_mb_trim", r#"
+        let path = write_config(
+            "oz_config_test_mb_trim",
+            r#"
 memory_backend = "  erme  "
 default_session = "gpt4"
 
@@ -720,7 +806,8 @@ default_session = "gpt4"
 apikey = "sk-test"
 apibase = "https://api.example.com/v1"
 model = "gpt-4"
-"#);
+"#,
+        );
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.memory_backend, "erme");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -728,7 +815,9 @@ model = "gpt-4"
 
     #[test]
     fn erme_idle_interval_parses() {
-        let path = write_config("oz_config_test_erme_idle", r#"
+        let path = write_config(
+            "oz_config_test_erme_idle",
+            r#"
 erme_idle_interval_secs = 60
 default_session = "gpt4"
 
@@ -736,7 +825,8 @@ default_session = "gpt4"
 apikey = "sk-test"
 apibase = "https://api.example.com/v1"
 model = "gpt-4"
-"#);
+"#,
+        );
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.erme_idle_interval_secs, Some(60));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -744,7 +834,9 @@ model = "gpt-4"
 
     #[test]
     fn erme_idle_interval_zero_is_ignored() {
-        let path = write_config("oz_config_test_erme_idle_zero", r#"
+        let path = write_config(
+            "oz_config_test_erme_idle_zero",
+            r#"
 erme_idle_interval_secs = 0
 default_session = "gpt4"
 
@@ -752,15 +844,21 @@ default_session = "gpt4"
 apikey = "sk-test"
 apibase = "https://api.example.com/v1"
 model = "gpt-4"
-"#);
+"#,
+        );
         let cfg = MyKeyConfig::from_file(&path).unwrap();
-        assert_eq!(cfg.erme_idle_interval_secs, None, "0 must fall back to default");
+        assert_eq!(
+            cfg.erme_idle_interval_secs, None,
+            "0 must fall back to default"
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn erme_idle_interval_negative_is_ignored() {
-        let path = write_config("oz_config_test_erme_idle_neg", r#"
+        let path = write_config(
+            "oz_config_test_erme_idle_neg",
+            r#"
 erme_idle_interval_secs = -1
 default_session = "gpt4"
 
@@ -768,7 +866,8 @@ default_session = "gpt4"
 apikey = "sk-test"
 apibase = "https://api.example.com/v1"
 model = "gpt-4"
-"#);
+"#,
+        );
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(
             cfg.erme_idle_interval_secs, None,

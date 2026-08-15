@@ -14,16 +14,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, UriSchemeContext};
 use tauri::http::{Response, StatusCode};
+use tauri::{AppHandle, Manager, UriSchemeContext};
 
 use crate::AppState;
 
 /// Register the `ozfile` URI scheme handler on the app builder.
 pub fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
-    builder.register_uri_scheme_protocol("ozfile", |ctx, request| {
-        handle_request(ctx, request)
-    })
+    builder.register_uri_scheme_protocol("ozfile", |ctx, request| handle_request(ctx, request))
 }
 
 fn handle_request(
@@ -41,10 +39,7 @@ fn handle_request(
     };
 
     if !is_allowed(ctx.app_handle(), &canonical) {
-        eprintln!(
-            "[sidepanel::scheme] ozfile denied: {}",
-            canonical.display()
-        );
+        eprintln!("[sidepanel::scheme] ozfile denied: {}", canonical.display());
         return error_response(StatusCode::FORBIDDEN, "not allowed");
     }
 
@@ -77,10 +72,7 @@ fn decode_path(encoded: &str) -> Option<String> {
 /// Check that the canonical file path is inside one of the whitelisted roots.
 fn is_allowed(app: &AppHandle<tauri::Wry>, canonical: &Path) -> bool {
     let state = app.state::<Arc<AppState>>();
-    let roots = state
-        .html_roots
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let roots = state.html_roots.lock().unwrap_or_else(|e| e.into_inner());
     roots.iter().any(|root| canonical.starts_with(root))
 }
 
@@ -91,4 +83,3 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Vec<u8>> {
         .body(msg.as_bytes().to_vec())
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }
-

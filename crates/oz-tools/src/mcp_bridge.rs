@@ -43,7 +43,12 @@ impl McpToolHandler {
     }
 
     pub fn from_mcp_tool(server_name: &str, tool: &oz_mcp::McpTool) -> Self {
-        Self::new(server_name, &tool.name, &tool.description, tool.input_schema.clone())
+        Self::new(
+            server_name,
+            &tool.name,
+            &tool.description,
+            tool.input_schema.clone(),
+        )
     }
 
     /// Attach the live MCP manager so tool calls reach the server.
@@ -75,7 +80,11 @@ impl ToolHandler for McpToolHandler {
         self.input_schema.clone()
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let Some(manager) = &self.manager else {
             return Ok(ToolOutput::success_with_prompt(
                 serde_json::json!({
@@ -90,20 +99,31 @@ impl ToolHandler for McpToolHandler {
         };
 
         let mut manager = manager.lock().await;
-        let result = manager.call_tool(&self.server_name, &self.tool_name, args).await
+        let result = manager
+            .call_tool(&self.server_name, &self.tool_name, args)
+            .await
             .map_err(|e| ToolError::Custom(format!("MCP tool `{}` failed: {e}", self.tool_name)))?;
 
-        let text = result.content.iter()
+        let text = result
+            .content
+            .iter()
             .filter_map(|c| c.text.clone())
             .collect::<Vec<_>>()
             .join("\n");
         let is_err = result.is_error;
         if is_err {
-            return Err(ToolError::Custom(format!("MCP tool `{}` returned error: {}", self.tool_name, text)));
+            return Err(ToolError::Custom(format!(
+                "MCP tool `{}` returned error: {}",
+                self.tool_name, text
+            )));
         }
         Ok(ToolOutput::success_with_prompt(
             serde_json::json!({ "output": text }),
-            if text.is_empty() { format!("\n[MCP] Tool `{}` returned empty result.", self.tool_name) } else { text },
+            if text.is_empty() {
+                format!("\n[MCP] Tool `{}` returned empty result.", self.tool_name)
+            } else {
+                text
+            },
         ))
     }
 }
@@ -125,8 +145,7 @@ pub async fn register_mcp_tools(
             tracing::info!("[mcp] skipping known-broken tool: {}", tool.name);
             continue;
         }
-        let handler = McpToolHandler::from_mcp_tool("mcp", &tool)
-            .with_manager(manager_ref.clone());
+        let handler = McpToolHandler::from_mcp_tool("mcp", &tool).with_manager(manager_ref.clone());
         let name = handler.full_name().to_string();
         registry.register_with_name(&name, handler);
         count += 1;
@@ -157,14 +176,20 @@ mod tests {
 
     #[test]
     fn test_mcp_tool_handler_parameters() {
-        let schema = serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}});
+        let schema =
+            serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}});
         let handler = McpToolHandler::new("test_srv", "test_tool", "desc", schema.clone());
         assert_eq!(handler.parameters(), schema);
     }
 
     #[tokio::test]
     async fn test_mcp_tool_handler_execute_placeholder() {
-        let handler = McpToolHandler::new("test_srv", "test_tool", "A test tool", serde_json::json!({}));
+        let handler = McpToolHandler::new(
+            "test_srv",
+            "test_tool",
+            "A test tool",
+            serde_json::json!({}),
+        );
         let ctx = oz_core_types::ToolContext::test();
         let result = handler.execute(serde_json::json!({}), &ctx).await.unwrap();
         assert_eq!(result.data["status"], "mcp_not_connected");

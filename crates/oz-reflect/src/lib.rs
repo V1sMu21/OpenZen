@@ -1,7 +1,7 @@
+pub mod auto_fetch;
 pub mod autonomous;
 pub mod goal_mode;
 pub mod scheduler;
-pub mod auto_fetch;
 
 use std::path::PathBuf;
 use std::time::Duration;

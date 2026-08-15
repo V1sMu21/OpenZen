@@ -3,9 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use oz_core_types::{
-    MockResponse, MockToolCall, StepOutcome, ToolContext, ToolResultItem,
-};
+use oz_core_types::{MockResponse, MockToolCall, StepOutcome, ToolContext, ToolResultItem};
 use serde::Serialize;
 
 // ── Loop-detection guard messages (injected into LLM conversation) ──
@@ -110,18 +108,18 @@ impl Sensorium {
         let n = h.len();
 
         // Pattern 1: A-B-A-B (period-2 loop, last 6 calls)
-        if n >= 6 && h[n-3..] == h[n-6..n-3] {
+        if n >= 6 && h[n - 3..] == h[n - 6..n - 3] {
             let unique: std::collections::HashSet<&str> =
-                h[n-6..].iter().map(|s| s.as_str()).collect();
+                h[n - 6..].iter().map(|s| s.as_str()).collect();
             if unique.len() == 2 {
                 return Some(GUARD_LOOP_ABAB.into());
             }
         }
 
         // Pattern 2: A-B-C-A-B-C (period-3 loop, last 9 calls)
-        if n >= 9 && h[n-3..] == h[n-6..n-3] && h[n-6..n-3] == h[n-9..n-6] {
+        if n >= 9 && h[n - 3..] == h[n - 6..n - 3] && h[n - 6..n - 3] == h[n - 9..n - 6] {
             let unique: std::collections::HashSet<&str> =
-                h[n-9..].iter().map(|s| s.as_str()).collect();
+                h[n - 9..].iter().map(|s| s.as_str()).collect();
             if unique.len() == 3 {
                 return Some(GUARD_LOOP_ABCABC.into());
             }
@@ -130,7 +128,7 @@ impl Sensorium {
         // Pattern 3: single tool called 5+ consecutive times
         if n >= 5 {
             let last5: std::collections::HashSet<&str> =
-                h[n-5..].iter().map(|s| s.as_str()).collect();
+                h[n - 5..].iter().map(|s| s.as_str()).collect();
             if last5.len() == 1 {
                 return Some(GUARD_REPEAT_5X.replace("{tool}", h.last().unwrap()));
             }
@@ -170,7 +168,9 @@ impl Breaker {
 }
 
 impl Default for Breaker {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Handler trait — all tools register through this.
@@ -180,7 +180,13 @@ pub trait Handler: Send + Sync {
     fn working_mut(&mut self) -> &mut WorkingMemory;
 
     fn tool_before(&mut self, _tool_name: &str, _args: &serde_json::Value) {}
-    fn tool_after(&mut self, _tool_name: &str, _args: &serde_json::Value, _result: Result<StepOutcome, oz_core_types::ToolError>) {}
+    fn tool_after(
+        &mut self,
+        _tool_name: &str,
+        _args: &serde_json::Value,
+        _result: Result<StepOutcome, oz_core_types::ToolError>,
+    ) {
+    }
     fn turn_end(
         &mut self,
         response: &MockResponse,
@@ -239,7 +245,8 @@ pub struct LoopConfig {
     pub tool_timeout_secs: u64,
     /// Channel for receiving user interventions mid-loop.
     /// Checked at the start of each turn.
-    pub intervention_rx: Option<Arc<Mutex<std::collections::VecDeque<crate::checkpoint::InterventionEvent>>>>,
+    pub intervention_rx:
+        Option<Arc<Mutex<std::collections::VecDeque<crate::checkpoint::InterventionEvent>>>>,
     /// Channel the `ask_user` tool blocks on for the user's reply.
     /// Lets the loop stay alive across the wait so the same run resumes
     /// with the user's answer as a tool_result.
@@ -478,8 +485,12 @@ mod tests {
     fn sensorium_detect_loop_abab_pattern() {
         let mut s = Sensorium::new();
         s.tool_history = vec![
-            "a".into(), "a".into(), "b".into(),
-            "a".into(), "a".into(), "b".into(),
+            "a".into(),
+            "a".into(),
+            "b".into(),
+            "a".into(),
+            "a".into(),
+            "b".into(),
         ];
         let result = s.detect_loop();
         assert!(result.is_some());
@@ -491,8 +502,12 @@ mod tests {
         let mut s = Sensorium::new();
         // Repeating pattern but 4 unique - should NOT trigger A-B-A-B
         s.tool_history = vec![
-            "a".into(), "b".into(), "c".into(),
-            "a".into(), "b".into(), "c".into(),
+            "a".into(),
+            "b".into(),
+            "c".into(),
+            "a".into(),
+            "b".into(),
+            "c".into(),
         ];
         let result = s.detect_loop();
         // unique in last 6 is {a,b,c}=3 != 2, so no A-B-A-B trigger

@@ -30,12 +30,11 @@ impl ScheduledTask for TrustDecay {
     }
 
     async fn execute(&self, ctx: &TaskContext) -> Result<(), TaskError> {
-        let trust_path = ctx.trust_path.as_ref()
-            .map(PathBuf::from)
-            .or_else(|| {
-                ctx.working_dir.as_ref()
-                    .map(|wd| PathBuf::from(wd).join("openzen").join("trust.json"))
-            });
+        let trust_path = ctx.trust_path.as_ref().map(PathBuf::from).or_else(|| {
+            ctx.working_dir
+                .as_ref()
+                .map(|wd| PathBuf::from(wd).join("openzen").join("trust.json"))
+        });
 
         let Some(trust_path) = trust_path else {
             return Ok(());

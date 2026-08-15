@@ -43,7 +43,9 @@ impl ApprovalQueue {
     }
 
     pub fn pending_count(&self) -> usize {
-        self.inner.lock().unwrap()
+        self.inner
+            .lock()
+            .unwrap()
             .iter()
             .filter(|p| !p.resolved)
             .count()
@@ -54,7 +56,9 @@ impl ApprovalQueue {
     }
 
     pub fn current(&self) -> Option<ApprovalRequest> {
-        self.inner.lock().unwrap()
+        self.inner
+            .lock()
+            .unwrap()
             .iter()
             .find(|p| !p.resolved)
             .map(|p| p.request.clone())

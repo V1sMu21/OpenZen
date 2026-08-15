@@ -137,7 +137,10 @@ impl MemorySystem {
                     let name = sanitize_filename(&item.content);
                     let path = self.memory_dir.join(format!("{}_sop.md", name));
                     if !path.exists() {
-                        let content = format!("# {}\n\n{}\n\n---\nSource: {}\n", item.content, item.content, item.source);
+                        let content = format!(
+                            "# {}\n\n{}\n\n---\nSource: {}\n",
+                            item.content, item.content, item.source
+                        );
                         tokio::fs::write(&path, &content).await?;
                     }
                 }
@@ -145,7 +148,10 @@ impl MemorySystem {
                     tokio::fs::create_dir_all(&self.l4_dir).await?;
                     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
                     let path = self.l4_dir.join(format!("session_{ts}.md"));
-                    let content = format!("# Session {ts}\n\nSource: {}\n\n{}\n", item.source, item.content);
+                    let content = format!(
+                        "# Session {ts}\n\nSource: {}\n\n{}\n",
+                        item.source, item.content
+                    );
                     tokio::fs::write(&path, &content).await?;
                 }
             }
@@ -165,7 +171,13 @@ impl MemorySystem {
 
 fn sanitize_filename(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_lowercase()
@@ -237,7 +249,9 @@ mod tests {
         }];
         ms.distill_memory(&items).await.unwrap();
         let sops = ms.list_sops().unwrap();
-        assert!(sops.iter().any(|p| p.to_string_lossy().contains("my_cool_procedure")));
+        assert!(sops
+            .iter()
+            .any(|p| p.to_string_lossy().contains("my_cool_procedure")));
     }
 
     #[tokio::test]

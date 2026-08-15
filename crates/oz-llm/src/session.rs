@@ -1,16 +1,24 @@
 use std::sync::Mutex;
 
-use oz_core_types::{ContentBlock, LlmError, Message, MockToolCall, StreamEvent, TokenUsage, ToolDefinition};
 use oz_config::SessionConfig;
+use oz_core_types::{
+    ContentBlock, LlmError, Message, MockToolCall, StreamEvent, TokenUsage, ToolDefinition,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Core Session trait — abstracts all LLM API backends.
 #[async_trait::async_trait]
 pub trait Session: Send + Sync {
     fn config(&self) -> &SessionConfig;
-    fn model(&self) -> &str { &self.config().model }
-    fn api_base(&self) -> &str { &self.config().apibase }
-    fn context_window(&self) -> usize { self.config().context_win }
+    fn model(&self) -> &str {
+        &self.config().model
+    }
+    fn api_base(&self) -> &str {
+        &self.config().apibase
+    }
+    fn context_window(&self) -> usize {
+        self.config().context_win
+    }
 
     fn history(&self) -> &Mutex<Vec<Message>>;
     fn history_mut(&self) -> &Mutex<Vec<Message>>;
@@ -19,7 +27,10 @@ pub trait Session: Send + Sync {
     fn set_tools(&mut self, tools: Vec<ToolDefinition>);
 
     /// Raw API call. Returns ContentBlock list and optional token usage.
-    async fn raw_ask(&self, messages: &[Message]) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError>;
+    async fn raw_ask(
+        &self,
+        messages: &[Message],
+    ) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError>;
 
     /// Streaming raw API call. Emits typed start-delta-end protocol
     /// events (`TextStart`/`TextDelta`/`TextEnd`,
@@ -37,34 +48,32 @@ pub trait Session: Send + Sync {
         let mut reasoning_id: Option<String> = None;
         for block in &blocks {
             match block {
-                ContentBlock::Text { text, .. }
-                    if !text.is_empty() => {
-                        if text_id.is_none() {
-                            let id = format!("t_fallback_{}", uuid::Uuid::new_v4());
-                            let _ = event_tx.send(StreamEvent::TextStart { id: id.clone() });
-                            text_id = Some(id);
-                        }
-                        if let Some(ref id) = text_id {
-                            let _ = event_tx.send(StreamEvent::TextDelta {
-                                id: id.clone(),
-                                text: text.clone(),
-                            });
-                        }
+                ContentBlock::Text { text, .. } if !text.is_empty() => {
+                    if text_id.is_none() {
+                        let id = format!("t_fallback_{}", uuid::Uuid::new_v4());
+                        let _ = event_tx.send(StreamEvent::TextStart { id: id.clone() });
+                        text_id = Some(id);
                     }
-                ContentBlock::Thinking { thinking, .. }
-                    if !thinking.is_empty() => {
-                        if reasoning_id.is_none() {
-                            let id = format!("r_fallback_{}", uuid::Uuid::new_v4());
-                            let _ = event_tx.send(StreamEvent::ReasoningStart { id: id.clone() });
-                            reasoning_id = Some(id);
-                        }
-                        if let Some(ref id) = reasoning_id {
-                            let _ = event_tx.send(StreamEvent::ReasoningDelta {
-                                id: id.clone(),
-                                text: thinking.clone(),
-                            });
-                        }
+                    if let Some(ref id) = text_id {
+                        let _ = event_tx.send(StreamEvent::TextDelta {
+                            id: id.clone(),
+                            text: text.clone(),
+                        });
                     }
+                }
+                ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
+                    if reasoning_id.is_none() {
+                        let id = format!("r_fallback_{}", uuid::Uuid::new_v4());
+                        let _ = event_tx.send(StreamEvent::ReasoningStart { id: id.clone() });
+                        reasoning_id = Some(id);
+                    }
+                    if let Some(ref id) = reasoning_id {
+                        let _ = event_tx.send(StreamEvent::ReasoningDelta {
+                            id: id.clone(),
+                            text: thinking.clone(),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -94,7 +103,11 @@ pub fn blocks_to_response(blocks: &[ContentBlock]) -> (String, String, Vec<MockT
             ContentBlock::Text { text, .. } => content.push_str(text),
             ContentBlock::Thinking { thinking: t, .. } => thinking.push_str(t),
             ContentBlock::ToolUse { id, name, input } => {
-                tool_calls.push(MockToolCall::with_id(name.clone(), input.clone(), id.clone()));
+                tool_calls.push(MockToolCall::with_id(
+                    name.clone(),
+                    input.clone(),
+                    id.clone(),
+                ));
             }
             _ => {}
         }
@@ -125,7 +138,10 @@ mod tests {
 
     #[test]
     fn test_blocks_to_response_thinking() {
-        let blocks = vec![ContentBlock::Thinking { thinking: "let me think...".into(), signature: None }];
+        let blocks = vec![ContentBlock::Thinking {
+            thinking: "let me think...".into(),
+            signature: None,
+        }];
         let (thinking, content, tool_calls) = blocks_to_response(&blocks);
         assert_eq!(thinking, "let me think...");
         assert!(content.is_empty());
@@ -134,7 +150,11 @@ mod tests {
 
     #[test]
     fn test_blocks_to_response_tool_use() {
-        let blocks = vec![ContentBlock::ToolUse { id: "tu_1".into(), name: "read_file".into(), input: serde_json::json!({"path": "/tmp/foo.txt"}) }];
+        let blocks = vec![ContentBlock::ToolUse {
+            id: "tu_1".into(),
+            name: "read_file".into(),
+            input: serde_json::json!({"path": "/tmp/foo.txt"}),
+        }];
         let (thinking, content, tool_calls) = blocks_to_response(&blocks);
         assert!(thinking.is_empty());
         assert!(content.is_empty());
@@ -145,9 +165,16 @@ mod tests {
     #[test]
     fn test_blocks_to_response_mixed() {
         let blocks = vec![
-            ContentBlock::Thinking { thinking: "processing...".into(), signature: None },
+            ContentBlock::Thinking {
+                thinking: "processing...".into(),
+                signature: None,
+            },
             ContentBlock::text("result here"),
-            ContentBlock::ToolUse { id: "tu_2".into(), name: "write_file".into(), input: serde_json::json!({"data": "x"}) },
+            ContentBlock::ToolUse {
+                id: "tu_2".into(),
+                name: "write_file".into(),
+                input: serde_json::json!({"data": "x"}),
+            },
         ];
         let (thinking, content, tool_calls) = blocks_to_response(&blocks);
         assert_eq!(thinking, "processing...");
@@ -167,7 +194,11 @@ mod tests {
 
     #[test]
     fn test_blocks_to_response_tool_use_with_id() {
-        let blocks = vec![ContentBlock::ToolUse { id: "abc-123".into(), name: "search".into(), input: serde_json::json!({}) }];
+        let blocks = vec![ContentBlock::ToolUse {
+            id: "abc-123".into(),
+            name: "search".into(),
+            input: serde_json::json!({}),
+        }];
         let (_, _, tool_calls) = blocks_to_response(&blocks);
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].id, "abc-123");
@@ -176,8 +207,16 @@ mod tests {
     #[test]
     fn test_blocks_to_response_multiple_tools() {
         let blocks = vec![
-            ContentBlock::ToolUse { id: "tu_a".into(), name: "read_file".into(), input: serde_json::json!({}) },
-            ContentBlock::ToolUse { id: "tu_b".into(), name: "write_file".into(), input: serde_json::json!({}) },
+            ContentBlock::ToolUse {
+                id: "tu_a".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "tu_b".into(),
+                name: "write_file".into(),
+                input: serde_json::json!({}),
+            },
         ];
         let (_, _, tool_calls) = blocks_to_response(&blocks);
         assert_eq!(tool_calls.len(), 2);

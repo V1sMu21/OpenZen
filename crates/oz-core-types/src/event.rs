@@ -35,23 +35,55 @@ pub struct TodoItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
-    ReasoningStart { id: String },
-    ReasoningDelta { id: String, text: String },
-    ReasoningEnd { id: String },
+    ReasoningStart {
+        id: String,
+    },
+    ReasoningDelta {
+        id: String,
+        text: String,
+    },
+    ReasoningEnd {
+        id: String,
+    },
 
-    TextStart { id: String },
-    TextDelta { id: String, text: String },
-    TextEnd { id: String },
+    TextStart {
+        id: String,
+    },
+    TextDelta {
+        id: String,
+        text: String,
+    },
+    TextEnd {
+        id: String,
+    },
 
-    ToolInputStart { tool_call_id: String, name: String },
-    ToolInputDelta { tool_call_id: String, delta: String },
-    ToolInputAvailable { tool_call_id: String, name: String, args: String },
-    ToolOutputAvailable { tool_call_id: String, name: String, output: String },
+    ToolInputStart {
+        tool_call_id: String,
+        name: String,
+    },
+    ToolInputDelta {
+        tool_call_id: String,
+        delta: String,
+    },
+    ToolInputAvailable {
+        tool_call_id: String,
+        name: String,
+        args: String,
+    },
+    ToolOutputAvailable {
+        tool_call_id: String,
+        name: String,
+        output: String,
+    },
 
     /// Internal — emitted by the OpenAI parser when accumulated JSON
     /// args parse cleanly, so the agent loop can speculatively dispatch.
     /// UIs ignore it.
-    ToolCallReady { id: String, name: String, args: String },
+    ToolCallReady {
+        id: String,
+        name: String,
+        args: String,
+    },
 
     /// Emitted when the ask_user tool fires. The agent loop is now
     /// blocked waiting for the user's reply on `ask_user_rx` and the
@@ -59,7 +91,9 @@ pub enum StreamEvent {
     /// user message. `data` is a JSON string of
     /// `{tool_use_id, tool_name, payload}` so the frontend can show
     /// the AskUserDialog without spawning a new assistant turn.
-    AskUserPending { data: String },
+    AskUserPending {
+        data: String,
+    },
 
     /// Emitted when context compression runs. Carries before/after token
     /// estimates so the frontend can show a transient notification.
@@ -80,9 +114,13 @@ pub enum StreamEvent {
 
     StartStep {},
     FinishStep {},
-    FinishMessage { stop_reason: String },
+    FinishMessage {
+        stop_reason: String,
+    },
 
-    Error { message: String },
+    Error {
+        message: String,
+    },
 
     /// Agent called open_side_panel — frontend should open the artifact
     /// in the right sidebar.
@@ -108,5 +146,7 @@ pub enum StreamEvent {
     /// Emitted when a user intervention was applied mid-task.
     /// The frontend should render an inline card showing the user's message
     /// inside the current assistant bubble with distinct styling.
-    UserIntervention { content: String },
+    UserIntervention {
+        content: String,
+    },
 }

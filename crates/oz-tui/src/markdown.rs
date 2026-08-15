@@ -16,9 +16,9 @@
 //!     ``` ```code``` ```, and `[link](url)` parse correctly without
 //!     consuming the wrong delimiter.
 
+use crate::theme::*;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use crate::theme::*;
 
 // ── Styles ──
 
@@ -26,16 +26,22 @@ fn base() -> Style {
     Style::default().fg(AGENT_FG)
 }
 fn bold_s() -> Style {
-    Style::default().fg(HIGHLIGHT_FG).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(HIGHLIGHT_FG)
+        .add_modifier(Modifier::BOLD)
 }
 fn italic_s() -> Style {
     Style::default().fg(AGENT_FG).add_modifier(Modifier::ITALIC)
 }
 fn bold_italic_s() -> Style {
-    Style::default().fg(HIGHLIGHT_FG).add_modifier(Modifier::BOLD | Modifier::ITALIC)
+    Style::default()
+        .fg(HIGHLIGHT_FG)
+        .add_modifier(Modifier::BOLD | Modifier::ITALIC)
 }
 fn del_s() -> Style {
-    Style::default().fg(MUTED_FG).add_modifier(Modifier::CROSSED_OUT)
+    Style::default()
+        .fg(MUTED_FG)
+        .add_modifier(Modifier::CROSSED_OUT)
 }
 fn code_inline_s() -> Style {
     Style::default().fg(USER_FG).add_modifier(Modifier::ITALIC)
@@ -44,7 +50,9 @@ fn code_block_s() -> Style {
     Style::default().fg(USER_FG)
 }
 fn link_s() -> Style {
-    Style::default().fg(ACCENT_FG).add_modifier(Modifier::UNDERLINED)
+    Style::default()
+        .fg(ACCENT_FG)
+        .add_modifier(Modifier::UNDERLINED)
 }
 fn heading_s(level: u8) -> Style {
     let color = match level {
@@ -61,7 +69,9 @@ fn hr_s() -> Style {
     Style::default().fg(MUTED_FG)
 }
 fn table_head_s() -> Style {
-    Style::default().fg(HIGHLIGHT_FG).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(HIGHLIGHT_FG)
+        .add_modifier(Modifier::BOLD)
 }
 fn table_cell_s() -> Style {
     Style::default().fg(AGENT_FG)
@@ -117,12 +127,21 @@ fn strip_unwanted_tags(s: &str) -> String {
 #[allow(clippy::enum_variant_names)]
 enum Block {
     Paragraph(String),
-    Heading { level: u8, text: String },
-    CodeBlock { lang: String, content: String },
+    Heading {
+        level: u8,
+        text: String,
+    },
+    CodeBlock {
+        lang: String,
+        content: String,
+    },
     Hr,
     Ulist(Vec<String>),
     Olist(Vec<String>),
-    Table { head: Vec<String>, rows: Vec<Vec<String>> },
+    Table {
+        head: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
     Blockquote(Vec<String>),
 }
 
@@ -156,7 +175,10 @@ fn split_blocks(text: &str) -> Vec<Block> {
 
         // ── Heading ──
         if let Some((level, text)) = parse_heading(trimmed) {
-            blocks.push(Block::Heading { level, text: text.to_string() });
+            blocks.push(Block::Heading {
+                level,
+                text: text.to_string(),
+            });
             i += 1;
             continue;
         }
@@ -334,8 +356,7 @@ fn is_hr(line: &str) -> bool {
     if ch != '-' && ch != '*' && ch != '_' {
         return false;
     }
-    t.chars().all(|c| c == ch || c == ' ')
-        && t.chars().filter(|c| *c == ch).count() >= 3
+    t.chars().all(|c| c == ch || c == ' ') && t.chars().filter(|c| *c == ch).count() >= 3
 }
 
 fn is_unordered_list_item(line: &str) -> bool {
@@ -406,8 +427,7 @@ fn parse_table(lines: &[&str]) -> Option<Block> {
     let sep_cells: Vec<&str> = sep.trim_matches('|').split('|').collect();
     if !sep_cells.iter().all(|c| {
         let t = c.trim();
-        !t.is_empty()
-            && t.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
+        !t.is_empty() && t.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
     }) {
         return None;
     }
@@ -421,7 +441,10 @@ fn parse_table(lines: &[&str]) -> Option<Block> {
             rows.push(cells);
         }
     }
-    Some(Block::Table { head: head_cells, rows })
+    Some(Block::Table {
+        head: head_cells,
+        rows,
+    })
 }
 
 // ── Block renderers ──
@@ -467,13 +490,20 @@ fn render_hr(out: &mut Vec<Line<'static>>, width: usize) {
 }
 
 fn render_code_block(out: &mut Vec<Line<'static>>, content: &str, lang: &str, width: usize) {
-    let label = if lang.is_empty() { "code".to_string() } else { lang.to_string() };
+    let label = if lang.is_empty() {
+        "code".to_string()
+    } else {
+        lang.to_string()
+    };
     let header = format!("─── {} ───", label);
     out.push(Line::from(Span::styled(header, hr_s())));
     let inner_w = width.saturating_sub(4).max(10);
     for line in content.lines() {
         for seg in wrap_text(line, inner_w) {
-            out.push(Line::from(Span::styled(format!("  {}", seg), code_block_s())));
+            out.push(Line::from(Span::styled(
+                format!("  {}", seg),
+                code_block_s(),
+            )));
         }
     }
     out.push(Line::from(Span::styled("───".to_string(), hr_s())));
@@ -485,10 +515,7 @@ fn render_ulist(out: &mut Vec<Line<'static>>, items: &[String], width: usize) {
     for item in items {
         for (i, seg) in wrap_text(item, inner).into_iter().enumerate() {
             let spans = if i == 0 {
-                vec![
-                    Span::styled(" • ", bullet_s()),
-                    Span::styled(seg, base()),
-                ]
+                vec![Span::styled(" • ", bullet_s()), Span::styled(seg, base())]
             } else {
                 vec![Span::styled("   ", base()), Span::styled(seg, base())]
             };
@@ -512,10 +539,7 @@ fn render_olist(out: &mut Vec<Line<'static>>, items: &[String], width: usize) {
                 ]
             } else {
                 let pad: String = " ".repeat(marker_w);
-                vec![
-                    Span::styled(pad, base()),
-                    Span::styled(seg, base()),
-                ]
+                vec![Span::styled(pad, base()), Span::styled(seg, base())]
             };
             out.push(Line::from(spans));
         }
@@ -675,7 +699,9 @@ fn tokenize_inline(s: &str) -> Vec<InlineNode> {
         // Inline code: `…`
         if bytes[i] == b'`' {
             if let Some(end) = find_byte(bytes, i + 1, b'`') {
-                let code = std::str::from_utf8(&bytes[i + 1..end]).unwrap_or("").to_string();
+                let code = std::str::from_utf8(&bytes[i + 1..end])
+                    .unwrap_or("")
+                    .to_string();
                 if !text.is_empty() {
                     nodes.push(InlineNode::Text(std::mem::take(&mut text)));
                 }
@@ -689,22 +715,32 @@ fn tokenize_inline(s: &str) -> Vec<InlineNode> {
         if bytes[i] == b'$' {
             if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
                 if let Some(end) = find_subslice(bytes, i + 2, b"$$") {
-                    let body = std::str::from_utf8(&bytes[i + 2..end]).unwrap_or("").to_string();
+                    let body = std::str::from_utf8(&bytes[i + 2..end])
+                        .unwrap_or("")
+                        .to_string();
                     if !text.is_empty() {
                         nodes.push(InlineNode::Text(std::mem::take(&mut text)));
                     }
-                    nodes.push(InlineNode::Math { text: body, display: true });
+                    nodes.push(InlineNode::Math {
+                        text: body,
+                        display: true,
+                    });
                     i = end + 2;
                     continue;
                 }
             } else {
                 if let Some(end) = find_byte(bytes, i + 1, b'$') {
                     if end > i + 1 {
-                        let body = std::str::from_utf8(&bytes[i + 1..end]).unwrap_or("").to_string();
+                        let body = std::str::from_utf8(&bytes[i + 1..end])
+                            .unwrap_or("")
+                            .to_string();
                         if !text.is_empty() {
                             nodes.push(InlineNode::Text(std::mem::take(&mut text)));
                         }
-                        nodes.push(InlineNode::Math { text: body, display: false });
+                        nodes.push(InlineNode::Math {
+                            text: body,
+                            display: false,
+                        });
                         i = end + 1;
                         continue;
                     }
@@ -807,7 +843,9 @@ fn tokenize_inline(s: &str) -> Vec<InlineNode> {
         // Strikethrough: ~~…~~
         if i + 1 < bytes.len() && bytes[i] == b'~' && bytes[i + 1] == b'~' {
             if let Some(end) = find_subslice(bytes, i + 2, b"~~") {
-                let inner = std::str::from_utf8(&bytes[i + 2..end]).unwrap_or("").to_string();
+                let inner = std::str::from_utf8(&bytes[i + 2..end])
+                    .unwrap_or("")
+                    .to_string();
                 if !text.is_empty() {
                     nodes.push(InlineNode::Text(std::mem::take(&mut text)));
                 }
@@ -823,7 +861,10 @@ fn tokenize_inline(s: &str) -> Vec<InlineNode> {
                 if !text.is_empty() {
                     nodes.push(InlineNode::Text(std::mem::take(&mut text)));
                 }
-                nodes.push(InlineNode::Link { text: text_, url: url_ });
+                nodes.push(InlineNode::Link {
+                    text: text_,
+                    url: url_,
+                });
                 i += consumed;
                 continue;
             }
@@ -835,7 +876,10 @@ fn tokenize_inline(s: &str) -> Vec<InlineNode> {
                 if !text.is_empty() {
                     nodes.push(InlineNode::Text(std::mem::take(&mut text)));
                 }
-                nodes.push(InlineNode::Link { text: url.clone(), url });
+                nodes.push(InlineNode::Link {
+                    text: url.clone(),
+                    url,
+                });
                 i += consumed;
                 continue;
             }
@@ -1048,7 +1092,11 @@ mod tests {
     use super::*;
 
     fn flat(lines: &[Line<'_>]) -> String {
-        lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect()
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect()
     }
 
     #[test]
@@ -1074,20 +1122,18 @@ mod tests {
     #[test]
     fn italic_renders() {
         let lines = render_markdown("*italic* text", 80);
-        let has_italic = lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .any(|s| s.content.contains("italic") && s.style.add_modifier.contains(Modifier::ITALIC));
+        let has_italic = lines.iter().flat_map(|l| l.spans.iter()).any(|s| {
+            s.content.contains("italic") && s.style.add_modifier.contains(Modifier::ITALIC)
+        });
         assert!(has_italic, "expected italic span with ITALIC modifier");
     }
 
     #[test]
     fn strikethrough_renders() {
         let lines = render_markdown("~~del~~ text", 80);
-        let has_strike = lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .any(|s| s.content.contains("del") && s.style.add_modifier.contains(Modifier::CROSSED_OUT));
+        let has_strike = lines.iter().flat_map(|l| l.spans.iter()).any(|s| {
+            s.content.contains("del") && s.style.add_modifier.contains(Modifier::CROSSED_OUT)
+        });
         assert!(has_strike, "expected strikethrough span");
     }
 
@@ -1114,14 +1160,20 @@ mod tests {
     fn code_block_protects_inner_markers() {
         let lines = render_markdown("```\n**not bold**\n```", 80);
         let f = flat(&lines);
-        assert!(f.contains("**not bold**"), "code block should preserve raw markers");
+        assert!(
+            f.contains("**not bold**"),
+            "code block should preserve raw markers"
+        );
     }
 
     #[test]
     fn inline_code_protects_inner_markers() {
         let lines = render_markdown("`**not bold**`", 80);
         let f = flat(&lines);
-        assert!(f.contains("**not bold**"), "inline code should preserve raw markers");
+        assert!(
+            f.contains("**not bold**"),
+            "inline code should preserve raw markers"
+        );
     }
 
     #[test]

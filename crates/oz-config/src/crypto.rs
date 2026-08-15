@@ -32,9 +32,13 @@ fn get_hostname() -> String {
         std::process::Command::new("hostname")
             .output()
             .ok()
-            .and_then(|o| if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else { None })
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| "localhost".to_string())
     }
     #[cfg(not(unix))]
@@ -96,7 +100,11 @@ pub fn read_config(path: &Path) -> std::io::Result<String> {
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("config not found: {} or {}", path.display(), enc_path.display()),
+            format!(
+                "config not found: {} or {}",
+                path.display(),
+                enc_path.display()
+            ),
         ))
     }
 }
@@ -127,6 +135,9 @@ mod tests {
         assert!(enc_path.exists());
 
         let decrypted = decrypt_config(&path).unwrap();
-        assert_eq!(String::from_utf8(decrypted).unwrap(), "api_key = sk-secret-123");
+        assert_eq!(
+            String::from_utf8(decrypted).unwrap(),
+            "api_key = sk-secret-123"
+        );
     }
 }

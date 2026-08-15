@@ -39,22 +39,30 @@ impl SidePanelState {
 
     /// Find the index of the active artifact in the artifacts vec.
     pub fn active_index(&self) -> Option<usize> {
-        self.active_id.as_ref().and_then(|id| {
-            self.artifacts.iter().position(|a| &a.id == id)
-        })
+        self.active_id
+            .as_ref()
+            .and_then(|id| self.artifacts.iter().position(|a| &a.id == id))
     }
 
     /// Move to the previous tab (wraps around).
     pub fn prev_tab(&mut self) {
-        if self.artifacts.is_empty() { return; }
+        if self.artifacts.is_empty() {
+            return;
+        }
         let idx = self.active_index().unwrap_or(0);
-        let new_idx = if idx == 0 { self.artifacts.len() - 1 } else { idx - 1 };
+        let new_idx = if idx == 0 {
+            self.artifacts.len() - 1
+        } else {
+            idx - 1
+        };
         self.active_id = Some(self.artifacts[new_idx].id.clone());
     }
 
     /// Move to the next tab (wraps around).
     pub fn next_tab(&mut self) {
-        if self.artifacts.is_empty() { return; }
+        if self.artifacts.is_empty() {
+            return;
+        }
         let idx = self.active_index().unwrap_or(0);
         let new_idx = (idx + 1) % self.artifacts.len();
         self.active_id = Some(self.artifacts[new_idx].id.clone());
@@ -62,7 +70,9 @@ impl SidePanelState {
 
     /// Remove an artifact by tab index. Returns the removed artifact or None.
     pub fn remove_tab(&mut self, index: usize) -> Option<ArtifactInfo> {
-        if index >= self.artifacts.len() { return None; }
+        if index >= self.artifacts.len() {
+            return None;
+        }
         let removed = self.artifacts.remove(index);
         // Adjust active_id if needed
         if self.active_id.as_ref() == Some(&removed.id) {

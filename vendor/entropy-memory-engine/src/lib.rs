@@ -1,4 +1,8 @@
-#![allow(clippy::manual_clamp, clippy::unnecessary_sort_by, clippy::len_without_is_empty)]
+#![allow(
+    clippy::manual_clamp,
+    clippy::unnecessary_sort_by,
+    clippy::len_without_is_empty
+)]
 
 pub mod consolidation;
 pub mod core;

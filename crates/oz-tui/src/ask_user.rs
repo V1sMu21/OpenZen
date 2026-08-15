@@ -21,7 +21,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
             "Agent needs your input",
-            Style::default().fg(HIGHLIGHT_FG).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(HIGHLIGHT_FG)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(question, Style::default().fg(AGENT_FG))),
@@ -32,7 +34,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             let sel = i == app.cmd_selected;
             let prefix = if sel { "●" } else { "○" };
             let style = if sel {
-                Style::default().fg(HIGHLIGHT_FG).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(HIGHLIGHT_FG)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(MUTED_FG)
             };
@@ -64,7 +68,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(HIGHLIGHT_FG))
         .title("Ask User");
-    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(Clear, popup);
     f.render_widget(para, popup);
 }

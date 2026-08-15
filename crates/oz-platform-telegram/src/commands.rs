@@ -17,7 +17,9 @@ pub async fn handle_command(bot: &Bot, msg: &Message, text: &str) {
             let _ = bot.send_message(msg.chat.id, "✅ 新对话已开启").await;
         }
         "/status" => {
-            let _ = bot.send_message(msg.chat.id, "🟢 OpenZen 运行中（通过平台适配器）").await;
+            let _ = bot
+                .send_message(msg.chat.id, "🟢 OpenZen 运行中（通过平台适配器）")
+                .await;
         }
         "/llm" => {
             let _ = bot.send_message(msg.chat.id, "模型列表功能开发中").await;

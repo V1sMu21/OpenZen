@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::event::StreamEvent;
 use crate::error::LlmError;
+use crate::event::StreamEvent;
 use crate::message::{Message, MockResponse};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -18,13 +18,28 @@ pub struct StepOutcome {
 
 impl StepOutcome {
     pub fn success(data: serde_json::Value) -> Self {
-        StepOutcome { data, next_prompt: Some("\n".into()), should_exit: false, images: vec![] }
+        StepOutcome {
+            data,
+            next_prompt: Some("\n".into()),
+            should_exit: false,
+            images: vec![],
+        }
     }
     pub fn success_with_prompt(data: serde_json::Value, prompt: impl Into<String>) -> Self {
-        StepOutcome { data, next_prompt: Some(prompt.into()), should_exit: false, images: vec![] }
+        StepOutcome {
+            data,
+            next_prompt: Some(prompt.into()),
+            should_exit: false,
+            images: vec![],
+        }
     }
     pub fn exit(data: serde_json::Value) -> Self {
-        StepOutcome { data, next_prompt: None, should_exit: true, images: vec![] }
+        StepOutcome {
+            data,
+            next_prompt: None,
+            should_exit: true,
+            images: vec![],
+        }
     }
     pub fn ask_user(question: impl Into<String>) -> Self {
         let question = question.into();
@@ -78,7 +93,9 @@ impl ExitReason {
         match self {
             ExitReason::CurrentTaskDone => serde_json::json!({"exit_reason": "current_task_done"}),
             ExitReason::Exited => serde_json::json!({"exit_reason": "exited"}),
-            ExitReason::MaxTurnsExceeded => serde_json::json!({"exit_reason": "max_turns_exceeded"}),
+            ExitReason::MaxTurnsExceeded => {
+                serde_json::json!({"exit_reason": "max_turns_exceeded"})
+            }
         }
     }
 }
@@ -140,11 +157,21 @@ impl From<ToolOutput> for StepOutcome {
 
 impl ToolOutput {
     pub fn success(data: serde_json::Value) -> Self {
-        ToolOutput { data, next_prompt: Some("\n".into()), should_exit: false, images: vec![] }
+        ToolOutput {
+            data,
+            next_prompt: Some("\n".into()),
+            should_exit: false,
+            images: vec![],
+        }
     }
 
     pub fn success_with_prompt(data: serde_json::Value, prompt: impl Into<String>) -> Self {
-        ToolOutput { data, next_prompt: Some(prompt.into()), should_exit: false, images: vec![] }
+        ToolOutput {
+            data,
+            next_prompt: Some(prompt.into()),
+            should_exit: false,
+            images: vec![],
+        }
     }
 
     pub fn unknown_tool(name: &str) -> Self {
@@ -220,7 +247,11 @@ impl ToolContext {
 /// LLM client trait — allows the agent loop to call different backends.
 #[async_trait::async_trait]
 pub trait LlmClient: Send {
-    async fn chat(&mut self, messages: &[Message], tools: &[ToolDefinition]) -> Result<MockResponse, LlmError>;
+    async fn chat(
+        &mut self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<MockResponse, LlmError>;
 
     /// Stream a chat, sending events through `event_tx` as they arrive.
     /// When `speculative_tx` is provided, `ToolCallReady` events may be sent
@@ -273,7 +304,8 @@ mod tests {
 
     #[test]
     fn step_outcome_success_with_prompt() {
-        let outcome = StepOutcome::success_with_prompt(serde_json::json!({ "ok": true }), "continue here");
+        let outcome =
+            StepOutcome::success_with_prompt(serde_json::json!({ "ok": true }), "continue here");
         assert_eq!(outcome.next_prompt.as_ref().unwrap(), "continue here");
         assert!(!outcome.should_exit);
     }
@@ -411,7 +443,10 @@ mod tests {
             harness_dir: None,
             session_id: String::new(),
         };
-        assert_eq!(ctx.resolve_path("src/main.rs"), "/home/user/project/src/main.rs");
+        assert_eq!(
+            ctx.resolve_path("src/main.rs"),
+            "/home/user/project/src/main.rs"
+        );
     }
 
     #[test]

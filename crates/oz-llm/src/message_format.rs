@@ -55,19 +55,27 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
 
                 for b in &blocks {
                     match b {
-                        ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => {
                             if !text_parts.is_empty() {
-                                result.push(serde_json::json!({"role": "user", "content": text_parts}));
+                                result.push(
+                                    serde_json::json!({"role": "user", "content": text_parts}),
+                                );
                                 text_parts = Vec::new();
                             }
                             let tr_content = match content {
                                 ContentContainer::Text(t) => t.clone(),
-                                ContentContainer::Blocks(bs) => {
-                                    bs.iter().filter_map(|b| match b {
+                                ContentContainer::Blocks(bs) => bs
+                                    .iter()
+                                    .filter_map(|b| match b {
                                         ContentBlock::Text { text, .. } => Some(text.clone()),
                                         _ => None,
-                                    }).collect::<Vec<_>>().join("\n")
-                                }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
                             };
                             tool_items.push(serde_json::json!({
                                 "role": "tool",
@@ -78,7 +86,9 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
                         ContentBlock::Text { text, .. } => {
                             text_parts.push(serde_json::json!({"type": "text", "text": text}));
                         }
-                        ContentBlock::ImageUrl { url, media_type: _, .. } => {
+                        ContentBlock::ImageUrl {
+                            url, media_type: _, ..
+                        } => {
                             text_parts.push(serde_json::json!({
                                 "type": "image_url",
                                 "image_url": {"url": url, "detail": "auto"}
@@ -110,7 +120,9 @@ pub fn stamp_oai_cache_markers(messages: &mut [serde_json::Value], model: &str) 
     if !ml.contains("claude") && !ml.contains("anthropic") {
         return;
     }
-    let user_idxs: Vec<usize> = messages.iter().enumerate()
+    let user_idxs: Vec<usize> = messages
+        .iter()
+        .enumerate()
         .filter(|(_, m)| m["role"] == "user")
         .map(|(i, _)| i)
         .collect();
@@ -150,10 +162,7 @@ pub fn fix_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         if let Some(last) = fixed.last() {
             if last["role"] == role {
                 // Merge consecutive same-role messages
-                let merged_content = merge_content_blocks(
-                    last["content"].clone(),
-                    content_val,
-                );
+                let merged_content = merge_content_blocks(last["content"].clone(), content_val);
                 let mut merged = last.clone();
                 merged["content"] = merged_content;
                 fixed.pop();
@@ -165,7 +174,11 @@ pub fn fix_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                 // Check for missing tool_result pairs
                 let uses = extract_tool_use_ids(last);
                 let has = extract_tool_result_ids(&content_val);
-                let missing: Vec<&str> = uses.iter().filter(|id| !has.contains(*id)).map(|s| s.as_str()).collect();
+                let missing: Vec<&str> = uses
+                    .iter()
+                    .filter(|id| !has.contains(*id))
+                    .map(|s| s.as_str())
+                    .collect();
                 let mut adjusted_content = content_val.clone();
                 for uid in &missing {
                     let err_block = serde_json::json!([{
@@ -173,13 +186,13 @@ pub fn fix_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                         "tool_use_id": uid,
                         "content": "(error)"
                     }]);
-                        if let Some(arr) = adjusted_content.as_array() {
-                            let mut new_arr = arr.clone();
-                            if let Some(err_arr) = err_block.as_array() {
-                                new_arr.extend(err_arr.clone());
-                            }
-                            adjusted_content = serde_json::json!(new_arr);
+                    if let Some(arr) = adjusted_content.as_array() {
+                        let mut new_arr = arr.clone();
+                        if let Some(err_arr) = err_block.as_array() {
+                            new_arr.extend(err_arr.clone());
                         }
+                        adjusted_content = serde_json::json!(new_arr);
+                    }
                 }
                 fixed.push(serde_json::json!({"role": role, "content": adjusted_content}));
                 continue;
@@ -189,7 +202,11 @@ pub fn fix_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         fixed.push(serde_json::json!({"role": role, "content": content_val}));
     }
 
-    while fixed.first().map(|m| m["role"].as_str() != Some("user")).unwrap_or(false) {
+    while fixed
+        .first()
+        .map(|m| m["role"].as_str() != Some("user"))
+        .unwrap_or(false)
+    {
         fixed.remove(0);
     }
 
@@ -247,20 +264,34 @@ fn extract_tool_result_ids(content: &serde_json::Value) -> Vec<String> {
 
 /// Drop unsigned thinking blocks — some models need this.
 pub fn drop_unsigned_thinking(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    messages.iter().map(|m| {
-        let mut m = m.clone();
-        if let Some(content) = m["content"].as_array() {
-            let filtered: Vec<serde_json::Value> = content.iter().filter(|b| {
-                !(b["type"] == "thinking" && b.get("signature").and_then(|s| s.as_str()).unwrap_or("").is_empty())
-            }).cloned().collect();
-            m["content"] = serde_json::json!(filtered);
-        }
-        m
-    }).collect()
+    messages
+        .iter()
+        .map(|m| {
+            let mut m = m.clone();
+            if let Some(content) = m["content"].as_array() {
+                let filtered: Vec<serde_json::Value> = content
+                    .iter()
+                    .filter(|b| {
+                        !(b["type"] == "thinking"
+                            && b.get("signature")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("")
+                                .is_empty())
+                    })
+                    .cloned()
+                    .collect();
+                m["content"] = serde_json::json!(filtered);
+            }
+            m
+        })
+        .collect()
 }
 
 /// DeepSeek needs thinking blocks in history.
-pub fn ensure_thinking_blocks(messages: &[serde_json::Value], model: &str) -> Vec<serde_json::Value> {
+pub fn ensure_thinking_blocks(
+    messages: &[serde_json::Value],
+    model: &str,
+) -> Vec<serde_json::Value> {
     if !model.to_lowercase().contains("deepseek") {
         return messages.to_vec();
     }
@@ -284,14 +315,17 @@ pub fn ensure_thinking_blocks(messages: &[serde_json::Value], model: &str) -> Ve
 /// Convert OAI tool format to Claude tool format.
 /// Matches Python openai_tools_to_claude
 pub fn openai_tools_to_claude(tools: &[oz_core_types::ToolDefinition]) -> Vec<serde_json::Value> {
-    tools.iter().map(|t| {
-        let fn_ = &t.function;
-        serde_json::json!({
-            "name": fn_.name,
-            "description": fn_.description,
-            "input_schema": fn_.parameters,
+    tools
+        .iter()
+        .map(|t| {
+            let fn_ = &t.function;
+            serde_json::json!({
+                "name": fn_.name,
+                "description": fn_.description,
+                "input_schema": fn_.parameters,
+            })
         })
-    }).collect()
+        .collect()
 }
 
 #[cfg(test)]
@@ -326,7 +360,10 @@ mod tests {
     #[test]
     fn test_claude2oai_assistant_with_thinking() {
         let msg = Message::assistant_with_blocks(vec![
-            ContentBlock::Thinking { thinking: "let me think...".into(), signature: None },
+            ContentBlock::Thinking {
+                thinking: "let me think...".into(),
+                signature: None,
+            },
             ContentBlock::text("the answer is 42"),
         ]);
         let result = msgs_claude2oai(&[msg], "gpt-4");
@@ -337,9 +374,11 @@ mod tests {
 
     #[test]
     fn test_claude2oai_assistant_with_tool_use() {
-        let msg = Message::assistant_with_blocks(vec![
-            ContentBlock::tool_use("tu_1", "read_file", serde_json::json!({"path": "/tmp/x.txt"})),
-        ]);
+        let msg = Message::assistant_with_blocks(vec![ContentBlock::tool_use(
+            "tu_1",
+            "read_file",
+            serde_json::json!({"path": "/tmp/x.txt"}),
+        )]);
         let result = msgs_claude2oai(&[msg], "gpt-4");
         assert_eq!(result.len(), 1);
         assert!(result[0].get("tool_calls").is_some());
@@ -357,10 +396,7 @@ mod tests {
 
     #[test]
     fn test_claude2oai_roundtrip_structure() {
-        let msgs = vec![
-            Message::user("hi"),
-            Message::assistant("hello!"),
-        ];
+        let msgs = vec![Message::user("hi"), Message::assistant("hello!")];
         let oai = msgs_claude2oai(&msgs, "gpt-4");
         assert_eq!(oai.len(), 2);
         assert_eq!(oai[0]["role"], "user");
@@ -377,20 +413,14 @@ mod tests {
 
     #[test]
     fn test_fix_messages_merges_consecutive() {
-        let msgs = vec![
-            Message::user("first"),
-            Message::user("second"),
-        ];
+        let msgs = vec![Message::user("first"), Message::user("second")];
         let result = fix_messages(&msgs);
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn test_fix_messages_alternating() {
-        let msgs = vec![
-            Message::user("hello"),
-            Message::assistant("hi"),
-        ];
+        let msgs = vec![Message::user("hello"), Message::assistant("hi")];
         let result = fix_messages(&msgs);
         assert_eq!(result.len(), 2);
     }
@@ -405,10 +435,7 @@ mod tests {
 
     #[test]
     fn test_fix_removes_leading_non_user() {
-        let msgs = vec![
-            Message::system("system prompt"),
-            Message::user("hello"),
-        ];
+        let msgs = vec![Message::system("system prompt"), Message::user("hello")];
         let result = fix_messages(&msgs);
         assert!(!result.is_empty());
         assert_eq!(result[0]["role"], "user");
@@ -435,14 +462,18 @@ mod tests {
 
     #[test]
     fn test_ensure_thinking_blocks_non_deepseek() {
-        let input = vec![serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "hi"}]})];
+        let input = vec![
+            serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "hi"}]}),
+        ];
         let result = ensure_thinking_blocks(&input, "gpt-4");
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn test_ensure_thinking_blocks_deepseek() {
-        let input = vec![serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "hi"}]})];
+        let input = vec![
+            serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "hi"}]}),
+        ];
         let result = ensure_thinking_blocks(&input, "deepseek-chat");
         assert_eq!(result.len(), 1);
         let blocks = result[0]["content"].as_array().unwrap();

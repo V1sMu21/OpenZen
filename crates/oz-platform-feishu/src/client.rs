@@ -106,7 +106,8 @@ impl FeishuClient {
         receive_id_type: &str,
     ) -> Result<Option<String>, String> {
         let content = serde_json::json!({ "text": text }).to_string();
-        self.send_raw(receive_id, &content, "text", receive_id_type).await
+        self.send_raw(receive_id, &content, "text", receive_id_type)
+            .await
     }
 
     pub async fn send_card(
@@ -115,7 +116,8 @@ impl FeishuClient {
         card_json: &str,
         receive_id_type: &str,
     ) -> Result<Option<String>, String> {
-        self.send_raw(receive_id, card_json, "interactive", receive_id_type).await
+        self.send_raw(receive_id, card_json, "interactive", receive_id_type)
+            .await
     }
 
     pub async fn patch_card(&self, message_id: &str, card_json: &str) -> Result<bool, String> {
@@ -126,7 +128,9 @@ impl FeishuClient {
             .http
             .patch(&url)
             .header("Authorization", format!("Bearer {token}"))
-            .json(&PatchMessageBody { content: card_json.to_string() })
+            .json(&PatchMessageBody {
+                content: card_json.to_string(),
+            })
             .send()
             .await
             .map_err(|e| format!("patch_card network error: {e}"))?;
@@ -140,7 +144,8 @@ impl FeishuClient {
             Ok(true)
         } else {
             let msg = format!("{} {}", body.code, body.msg.unwrap_or_default());
-            let is_limit = msg.contains("230099") || msg.contains("11310") || msg.contains("element exceeds");
+            let is_limit =
+                msg.contains("230099") || msg.contains("11310") || msg.contains("element exceeds");
             if is_limit {
                 Err(format!("card_limit: {msg}"))
             } else {
@@ -154,8 +159,8 @@ impl FeishuClient {
         let token = self.get_token().await?;
         let url = format!("{FEISHU_API_BASE}/im/v1/images");
 
-        let file_bytes = std::fs::read(file_path)
-            .map_err(|e| format!("read image file error: {e}"))?;
+        let file_bytes =
+            std::fs::read(file_path).map_err(|e| format!("read image file error: {e}"))?;
         let file_name = file_path
             .file_name()
             .unwrap_or_default()
@@ -164,7 +169,10 @@ impl FeishuClient {
 
         let form = reqwest::multipart::Form::new()
             .text("image_type", "message")
-            .part("image", reqwest::multipart::Part::bytes(file_bytes).file_name(file_name));
+            .part(
+                "image",
+                reqwest::multipart::Part::bytes(file_bytes).file_name(file_name),
+            );
 
         let resp = self
             .http
@@ -187,7 +195,8 @@ impl FeishuClient {
         } else {
             Err(format!(
                 "upload_image failed: {} {}",
-                body.code, body.msg.unwrap_or_default()
+                body.code,
+                body.msg.unwrap_or_default()
             ))
         }
     }
@@ -196,8 +205,7 @@ impl FeishuClient {
         let token = self.get_token().await?;
         let url = format!("{FEISHU_API_BASE}/im/v1/files");
 
-        let file_bytes = std::fs::read(file_path)
-            .map_err(|e| format!("read file error: {e}"))?;
+        let file_bytes = std::fs::read(file_path).map_err(|e| format!("read file error: {e}"))?;
         let file_name = file_path
             .file_name()
             .unwrap_or_default()
@@ -223,7 +231,10 @@ impl FeishuClient {
         let form = reqwest::multipart::Form::new()
             .text("file_type", file_type)
             .text("file_name", file_name)
-            .part("file", reqwest::multipart::Part::bytes(file_bytes).file_name(file_name_clone));
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(file_bytes).file_name(file_name_clone),
+            );
 
         let resp = self
             .http
@@ -246,7 +257,8 @@ impl FeishuClient {
         } else {
             Err(format!(
                 "upload_file failed: {} {}",
-                body.code, body.msg.unwrap_or_default()
+                body.code,
+                body.msg.unwrap_or_default()
             ))
         }
     }
@@ -324,7 +336,8 @@ impl FeishuClient {
         if result.code == 0 {
             let token = result.tenant_access_token.ok_or("no token in response")?;
             let expire_secs = result.expire.unwrap_or(7200) as u64;
-            let expiry = Instant::now() + std::time::Duration::from_secs(expire_secs.saturating_sub(300));
+            let expiry =
+                Instant::now() + std::time::Duration::from_secs(expire_secs.saturating_sub(300));
 
             let mut cached = self.access_token.lock().unwrap();
             *cached = Some((token.clone(), expiry));
@@ -354,7 +367,10 @@ impl FeishuClient {
             .map_err(|e| format!("get_ws_endpoint network error: {e}"))?;
 
         let status = resp.status();
-        let body_text = resp.text().await.map_err(|e| format!("get_ws_endpoint read body: {e}"))?;
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| format!("get_ws_endpoint read body: {e}"))?;
         eprintln!("[feishu] ws endpoint HTTP {status}, body: {body_text}");
 
         let result: serde_json::Value = serde_json::from_str(&body_text)
@@ -362,13 +378,17 @@ impl FeishuClient {
 
         let code = result.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
         if code == 0 {
-            let url = result.get("data")
+            let url = result
+                .get("data")
                 .and_then(|d| d.get("URL").or_else(|| d.get("url")))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             Ok(WsEndpointData { url })
         } else {
-            let msg = result.get("msg").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let msg = result
+                .get("msg")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             Err(format!("get_ws_endpoint failed: {code} {msg}"))
         }
     }
@@ -382,20 +402,28 @@ impl FeishuClient {
             }
         };
         let url = format!("{FEISHU_API_BASE}/bot/v3/info");
-        let resp = self.http.get(&url)
+        let resp = self
+            .http
+            .get(&url)
             .header("Authorization", format!("Bearer {token}"))
-            .send().await
+            .send()
+            .await
             .map_err(|e| format!("get_bot_open_id network error: {e}"))?;
-        let body_text = resp.text().await
+        let body_text = resp
+            .text()
+            .await
             .map_err(|e| format!("get_bot_open_id read body: {e}"))?;
         eprintln!("[feishu] bot/v3/info response: {body_text}");
         let result: serde_json::Value = serde_json::from_str(&body_text)
             .map_err(|e| format!("get_bot_open_id parse error: {e}"))?;
         let code = result.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
         if code == 0 {
-            result.get("data").and_then(|d| d.get("bot"))
+            result
+                .get("data")
+                .and_then(|d| d.get("bot"))
                 .and_then(|b| b.get("open_id"))
-                .and_then(|v| v.as_str()).map(|s| s.to_string())
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
                 .ok_or_else(|| "get_bot_open_id: no open_id".into())
         } else {
             Err(format!("get_bot_open_id failed: {code}"))

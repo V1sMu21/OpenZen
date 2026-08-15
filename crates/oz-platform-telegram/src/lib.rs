@@ -4,8 +4,7 @@ mod stream;
 
 use async_trait::async_trait;
 use oz_platform::{
-    PlatformAdapter, PlatformConfig, PlatformContext,
-    PlatformError, PlatformHealth, FILE_HINT,
+    PlatformAdapter, PlatformConfig, PlatformContext, PlatformError, PlatformHealth, FILE_HINT,
 };
 use teloxide::prelude::*;
 
@@ -23,11 +22,10 @@ impl TelegramAdapter {
             .telegram_token()
             .ok_or_else(|| PlatformError::Config("telegram.bot_token is required".into()))?
             .to_string();
-        let allowed_users = config.allowed_users.as_ref().map(|ids| {
-            ids.iter()
-                .filter_map(|s| s.parse::<i64>().ok())
-                .collect()
-        });
+        let allowed_users = config
+            .allowed_users
+            .as_ref()
+            .map(|ids| ids.iter().filter_map(|s| s.parse::<i64>().ok()).collect());
         Ok(TelegramAdapter {
             token,
             allowed_users,
@@ -85,7 +83,10 @@ impl PlatformAdapter for TelegramAdapter {
                         let prompt = format!("{FILE_HINT}\n\n{text}");
                         let model = default_model.as_deref();
 
-                        match agent.send_message(&session_id, &prompt, "telegram", model).await {
+                        match agent
+                            .send_message(&session_id, &prompt, "telegram", model)
+                            .await
+                        {
                             Ok(event_rx) => {
                                 stream_agent_output(&bot, &msg, event_rx).await;
                             }
@@ -103,7 +104,10 @@ impl PlatformAdapter for TelegramAdapter {
                             format!("[用户发送了图片]\n{caption}")
                         };
 
-                        match agent.send_message(&session_id, &prompt, "telegram", None).await {
+                        match agent
+                            .send_message(&session_id, &prompt, "telegram", None)
+                            .await
+                        {
                             Ok(event_rx) => {
                                 stream_agent_output(&bot, &msg, event_rx).await;
                             }
@@ -118,7 +122,10 @@ impl PlatformAdapter for TelegramAdapter {
             })
             .await;
 
-            tracing::warn!("[telegram] disconnected, reconnecting in {:?}...", retry_delay);
+            tracing::warn!(
+                "[telegram] disconnected, reconnecting in {:?}...",
+                retry_delay
+            );
             tokio::time::sleep(retry_delay).await;
             retry_delay = std::cmp::min(retry_delay * 2, std::time::Duration::from_secs(60));
         }

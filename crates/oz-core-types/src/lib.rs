@@ -6,16 +6,16 @@
 //! - `StepOutcome` — tool dispatch result
 //! - `MockResponse` / `MockToolCall` — LLM response abstraction
 
+pub mod error;
 pub mod event;
 pub mod message;
-pub mod tool;
-pub mod error;
-pub mod skill_mcp;
 pub mod reminder;
+pub mod skill_mcp;
+pub mod tool;
 
+pub use error::*;
 pub use event::*;
 pub use message::*;
-pub use tool::*;
-pub use error::*;
-pub use skill_mcp::*;
 pub use reminder::*;
+pub use skill_mcp::*;
+pub use tool::*;

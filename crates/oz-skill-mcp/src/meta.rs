@@ -29,26 +29,36 @@ impl MetaStore {
 
     /// Load metadata for an artifact.
     /// Returns `None` if the file does not exist.
-    pub fn load(&self, category: &str, name: &str) -> Result<Option<SkillMcpMetadata>, SkillMcpError> {
+    pub fn load(
+        &self,
+        category: &str,
+        name: &str,
+    ) -> Result<Option<SkillMcpMetadata>, SkillMcpError> {
         let path = self.meta_path(category, name);
         if !path.exists() {
             return Ok(None);
         }
         let content = std::fs::read_to_string(&path).map_err(SkillMcpError::Io)?;
-        let meta = toml::from_str(&content)
-            .map_err(|e| SkillMcpError::Parse(format!("Failed to parse {}: {e}", path.display())))?;
+        let meta = toml::from_str(&content).map_err(|e| {
+            SkillMcpError::Parse(format!("Failed to parse {}: {e}", path.display()))
+        })?;
         Ok(Some(meta))
     }
 
     /// Save metadata for an artifact.
     /// Creates parent directories if needed.
-    pub fn save(&self, category: &str, name: &str, meta: &SkillMcpMetadata) -> Result<(), SkillMcpError> {
+    pub fn save(
+        &self,
+        category: &str,
+        name: &str,
+        meta: &SkillMcpMetadata,
+    ) -> Result<(), SkillMcpError> {
         let path = self.meta_path(category, name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(SkillMcpError::Io)?;
         }
-        let content = toml::to_string_pretty(meta)
-            .map_err(|e| SkillMcpError::Serialize(e.to_string()))?;
+        let content =
+            toml::to_string_pretty(meta).map_err(|e| SkillMcpError::Serialize(e.to_string()))?;
         std::fs::write(&path, &content).map_err(SkillMcpError::Io)?;
         Ok(())
     }
@@ -66,7 +76,7 @@ impl MetaStore {
     pub fn list_category(&self, category: &str) -> Result<Vec<SkillMcpMetadata>, SkillMcpError> {
         let dir = self.base_dir.join(category);
         if !dir.exists() {
-            return Ok(vec!());
+            return Ok(vec![]);
         }
 
         let mut metas = Vec::new();

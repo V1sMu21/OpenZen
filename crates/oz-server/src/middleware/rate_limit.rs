@@ -80,25 +80,26 @@ impl RateLimiter {
     }
 }
 
-pub async fn rate_limit(
-    req: Request,
-    next: Next,
-) -> Response {
+pub async fn rate_limit(req: Request, next: Next) -> Response {
     // Extract session identifier: prefer session_id from path, fallback to IP
-    let key = req.uri().path()
+    let key = req
+        .uri()
+        .path()
         .split('/')
         .nth(3) // /api/sessions/:id/...
         .filter(|s| !s.is_empty())
         .map(|s| format!("session:{s}"))
         .unwrap_or_else(|| {
-            let ip = req.headers()
+            let ip = req
+                .headers()
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("unknown");
             format!("ip:{ip}")
         });
 
-    let limiter = req.extensions()
+    let limiter = req
+        .extensions()
         .get::<RateLimiter>()
         .cloned()
         .unwrap_or_else(|| RateLimiter::new(DEFAULT_RATE, DEFAULT_WINDOW.as_secs()));

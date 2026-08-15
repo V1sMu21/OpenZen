@@ -11,10 +11,24 @@ const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Paths that are always blocked regardless of working_dir.
 const SENSITIVE_PATHS: &[&str] = &[
-    "/etc/", "/usr/", "/bin/", "/sbin/", "/var/", "/boot/",
-    "/dev/", "/proc/", "/sys/", "/root/",
-    ".ssh/", ".aws/", ".gnupg/", ".docker/",
-    "mykey.toml", ".env", "credentials", "id_rsa",
+    "/etc/",
+    "/usr/",
+    "/bin/",
+    "/sbin/",
+    "/var/",
+    "/boot/",
+    "/dev/",
+    "/proc/",
+    "/sys/",
+    "/root/",
+    ".ssh/",
+    ".aws/",
+    ".gnupg/",
+    ".docker/",
+    "mykey.toml",
+    ".env",
+    "credentials",
+    "id_rsa",
 ];
 
 pub(crate) fn is_in_working_dir(path: &str, working_dir: &str) -> bool {
@@ -45,8 +59,11 @@ pub(crate) fn is_in_working_dir(path: &str, working_dir: &str) -> bool {
         wd.join(p)
     };
 
-    let real_p = std::fs::canonicalize(&resolved).ok()
-        .or_else(|| resolved.parent().and_then(|parent| std::fs::canonicalize(parent).ok()));
+    let real_p = std::fs::canonicalize(&resolved).ok().or_else(|| {
+        resolved
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+    });
     let real_wd = std::fs::canonicalize(wd).ok();
 
     match (real_p, real_wd) {
@@ -65,8 +82,12 @@ pub struct FileReadTool;
 
 #[async_trait]
 impl ToolHandler for FileReadTool {
-    fn name(&self) -> String { "read".to_string() }
-    fn description(&self) -> String { "Read a file (txt, pdf, docx, pptx, xlsx) with optional line range. Do NOT re-read files you just wrote/edited — failures report themselves and the harness tracks file state. Use start/count for long files.".to_string() }
+    fn name(&self) -> String {
+        "read".to_string()
+    }
+    fn description(&self) -> String {
+        "Read a file (txt, pdf, docx, pptx, xlsx) with optional line range. Do NOT re-read files you just wrote/edited — failures report themselves and the harness tracks file state. Use start/count for long files.".to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -79,16 +100,22 @@ impl ToolHandler for FileReadTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let path = args["file_path"].as_str().unwrap_or("");
         if path.is_empty() {
             return Ok(ToolOutput::bad_json("read: missing file_path"));
         }
         if let Ok(meta) = tokio::fs::metadata(path).await {
             if meta.len() > MAX_READ_SIZE {
-                return Ok(ToolOutput::bad_json(
-                    format!("read: file too large ({} bytes, max {})", meta.len(), MAX_READ_SIZE)
-                ));
+                return Ok(ToolOutput::bad_json(format!(
+                    "read: file too large ({} bytes, max {})",
+                    meta.len(),
+                    MAX_READ_SIZE
+                )));
             }
         }
         if !is_in_working_dir(path, &ctx.working_dir) {
@@ -166,8 +193,12 @@ pub struct FileWriteTool;
 
 #[async_trait]
 impl ToolHandler for FileWriteTool {
-    fn name(&self) -> String { "write".to_string() }
-    fn description(&self) -> String { "Write content to a file (creates parent dirs). No confirmation re-read after writing — failures report themselves.".to_string() }
+    fn name(&self) -> String {
+        "write".to_string()
+    }
+    fn description(&self) -> String {
+        "Write content to a file (creates parent dirs). No confirmation re-read after writing — failures report themselves.".to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -179,7 +210,11 @@ impl ToolHandler for FileWriteTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let path = args["file_path"].as_str().unwrap_or("");
         let content = args["content"].as_str().unwrap_or("");
         if path.is_empty() {
@@ -214,8 +249,12 @@ pub struct FilePatchTool;
 
 #[async_trait]
 impl ToolHandler for FilePatchTool {
-    fn name(&self) -> String { "patch".to_string() }
-    fn description(&self) -> String { "Apply a search-and-replace edit to a file. No confirmation re-read after editing — failures report themselves.".to_string() }
+    fn name(&self) -> String {
+        "patch".to_string()
+    }
+    fn description(&self) -> String {
+        "Apply a search-and-replace edit to a file. No confirmation re-read after editing — failures report themselves.".to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -228,12 +267,18 @@ impl ToolHandler for FilePatchTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let path = args["file_path"].as_str().unwrap_or("");
         let old = args["old_string"].as_str().unwrap_or("");
         let new = args["new_string"].as_str().unwrap_or("");
         if path.is_empty() || old.is_empty() {
-            return Ok(ToolOutput::bad_json("patch: missing file_path or old_string"));
+            return Ok(ToolOutput::bad_json(
+                "patch: missing file_path or old_string",
+            ));
         }
         if !is_in_working_dir(path, &ctx.working_dir) {
             let hint = if !Path::new(path).is_absolute() {
@@ -242,9 +287,10 @@ impl ToolHandler for FilePatchTool {
             } else {
                 String::new()
             };
-            return Ok(ToolOutput::bad_json(
-                format!("patch: path `{path}` is outside working directory or in a protected location.{}", hint)
-            ));
+            return Ok(ToolOutput::bad_json(format!(
+                "patch: path `{path}` is outside working directory or in a protected location.{}",
+                hint
+            )));
         }
 
         let content = match tokio::fs::read_to_string(path).await {
@@ -260,14 +306,16 @@ impl ToolHandler for FilePatchTool {
 
         let count = content.matches(old).count();
         if count > 1 {
-            return Ok(ToolOutput::bad_json(
-                format!("patch: old_string appears {count} times — must be unique"),
-            ));
+            return Ok(ToolOutput::bad_json(format!(
+                "patch: old_string appears {count} times — must be unique"
+            )));
         }
 
         let new_content = content.replace(old, new);
         match tokio::fs::write(path, &new_content).await {
-            Ok(()) => Ok(ToolOutput::success(serde_json::json!({"status": "patched"}))),
+            Ok(()) => Ok(ToolOutput::success(
+                serde_json::json!({"status": "patched"}),
+            )),
             Err(e) => Ok(ToolOutput::bad_json(format!("patch write failed: {e}"))),
         }
     }
@@ -277,7 +325,9 @@ pub struct FileEditTool;
 
 #[async_trait]
 impl ToolHandler for FileEditTool {
-    fn name(&self) -> String { "edit".to_string() }
+    fn name(&self) -> String {
+        "edit".to_string()
+    }
     fn description(&self) -> String {
         "Make a focused edit to a file by replacing an exact text match. The old_string must be unique in the file. Prefer this over `write` for code changes — it shows a clean +/- diff to the user and avoids touching lines you don't intend to change.".to_string()
     }
@@ -293,12 +343,18 @@ impl ToolHandler for FileEditTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let path = args["file_path"].as_str().unwrap_or("");
         let old = args["old_string"].as_str().unwrap_or("");
         let new = args["new_string"].as_str().unwrap_or("");
         if path.is_empty() || old.is_empty() {
-            return Ok(ToolOutput::bad_json("edit: missing file_path or old_string"));
+            return Ok(ToolOutput::bad_json(
+                "edit: missing file_path or old_string",
+            ));
         }
         if !is_in_working_dir(path, &ctx.working_dir) {
             let hint = if !Path::new(path).is_absolute() {
@@ -307,9 +363,10 @@ impl ToolHandler for FileEditTool {
             } else {
                 String::new()
             };
-            return Ok(ToolOutput::bad_json(
-                format!("edit: path `{path}` is outside working directory or in a protected location.{}", hint)
-            ));
+            return Ok(ToolOutput::bad_json(format!(
+                "edit: path `{path}` is outside working directory or in a protected location.{}",
+                hint
+            )));
         }
 
         let content = match tokio::fs::read_to_string(path).await {
@@ -325,9 +382,9 @@ impl ToolHandler for FileEditTool {
 
         let count = content.matches(old).count();
         if count > 1 {
-            return Ok(ToolOutput::bad_json(
-                format!("edit: old_string appears {count} times — must be unique"),
-            ));
+            return Ok(ToolOutput::bad_json(format!(
+                "edit: old_string appears {count} times — must be unique"
+            )));
         }
 
         let new_content = content.replace(old, new);
@@ -344,8 +401,12 @@ pub struct GlobTool;
 
 #[async_trait]
 impl ToolHandler for GlobTool {
-    fn name(&self) -> String { "glob".to_string() }
-    fn description(&self) -> String { "List files matching a glob pattern. Use this tool for search — do not write python scripts to read large directories.".to_string() }
+    fn name(&self) -> String {
+        "glob".to_string()
+    }
+    fn description(&self) -> String {
+        "List files matching a glob pattern. Use this tool for search — do not write python scripts to read large directories.".to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -357,7 +418,11 @@ impl ToolHandler for GlobTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let pattern = args["pattern"].as_str().unwrap_or("");
         if pattern.is_empty() {
             return Ok(ToolOutput::bad_json("glob: missing pattern"));
@@ -382,8 +447,12 @@ pub struct GrepTool;
 
 #[async_trait]
 impl ToolHandler for GrepTool {
-    fn name(&self) -> String { "grep".to_string() }
-    fn description(&self) -> String { "Search file contents with a regex pattern. Use this tool for search — do not write python scripts to scan large files.".to_string() }
+    fn name(&self) -> String {
+        "grep".to_string()
+    }
+    fn description(&self) -> String {
+        "Search file contents with a regex pattern. Use this tool for search — do not write python scripts to scan large files.".to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -396,7 +465,11 @@ impl ToolHandler for GrepTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let pattern = args["pattern"].as_str().unwrap_or("");
         if pattern.is_empty() {
             return Ok(ToolOutput::bad_json("grep: missing pattern"));
@@ -419,10 +492,15 @@ impl ToolHandler for GrepTool {
             }
             // Only non-recursive for now; keep simple
             for entry_path in walk_entries {
-                if entry_path.is_dir() { continue; }
+                if entry_path.is_dir() {
+                    continue;
+                }
                 if let Some(inc) = include {
                     let fname = entry_path.file_name().unwrap_or_default().to_string_lossy();
-                    if !glob::Pattern::new(inc).map(|p| p.matches(&fname)).unwrap_or(false) {
+                    if !glob::Pattern::new(inc)
+                        .map(|p| p.matches(&fname))
+                        .unwrap_or(false)
+                    {
                         continue;
                     }
                 }
@@ -430,7 +508,10 @@ impl ToolHandler for GrepTool {
                     for (lineno, line) in content.lines().enumerate() {
                         if re.is_match(line) {
                             let mut m = HashMap::new();
-                            m.insert("file".into(), serde_json::json!(entry_path.to_string_lossy().to_string()));
+                            m.insert(
+                                "file".into(),
+                                serde_json::json!(entry_path.to_string_lossy().to_string()),
+                            );
                             m.insert("line".into(), serde_json::json!(lineno + 1));
                             m.insert("text".into(), serde_json::json!(line.to_string()));
                             results.push(m);
@@ -443,7 +524,10 @@ impl ToolHandler for GrepTool {
                 for (lineno, line) in content.lines().enumerate() {
                     if re.is_match(line) {
                         let mut m = HashMap::new();
-                        m.insert("file".into(), serde_json::json!(walk_path.to_string_lossy().to_string()));
+                        m.insert(
+                            "file".into(),
+                            serde_json::json!(walk_path.to_string_lossy().to_string()),
+                        );
                         m.insert("line".into(), serde_json::json!(lineno + 1));
                         m.insert("text".into(), serde_json::json!(line.to_string()));
                         results.push(m);
@@ -452,7 +536,9 @@ impl ToolHandler for GrepTool {
             }
         }
 
-        Ok(ToolOutput::success(serde_json::json!({"matches": results, "count": results.len()})))
+        Ok(ToolOutput::success(
+            serde_json::json!({"matches": results, "count": results.len()}),
+        ))
     }
 }
 
@@ -462,8 +548,13 @@ pub struct LsTool;
 
 #[async_trait]
 impl ToolHandler for LsTool {
-    fn name(&self) -> String { "ls".to_string() }
-    fn description(&self) -> String { "List directory contents. Use this tool for directory exploration — not python scripts.".to_string() }
+    fn name(&self) -> String {
+        "ls".to_string()
+    }
+    fn description(&self) -> String {
+        "List directory contents. Use this tool for directory exploration — not python scripts."
+            .to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -474,7 +565,11 @@ impl ToolHandler for LsTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         let mut entries: Vec<serde_json::Value> = Vec::new();
         if let Ok(mut rd) = tokio::fs::read_dir(path).await {
@@ -501,13 +596,27 @@ impl ToolHandler for LsTool {
 
 // ── backward compat helpers ──
 
-pub fn read_definition() -> ToolDefinition { def_for(&FileReadTool) }
-pub fn write_definition() -> ToolDefinition { def_for(&FileWriteTool) }
-pub fn edit_definition() -> ToolDefinition { def_for(&FileEditTool) }
-pub fn patch_definition() -> ToolDefinition { def_for(&FilePatchTool) }
-pub fn glob_definition() -> ToolDefinition { def_for(&GlobTool) }
-pub fn grep_definition() -> ToolDefinition { def_for(&GrepTool) }
-pub fn ls_definition() -> ToolDefinition { def_for(&LsTool) }
+pub fn read_definition() -> ToolDefinition {
+    def_for(&FileReadTool)
+}
+pub fn write_definition() -> ToolDefinition {
+    def_for(&FileWriteTool)
+}
+pub fn edit_definition() -> ToolDefinition {
+    def_for(&FileEditTool)
+}
+pub fn patch_definition() -> ToolDefinition {
+    def_for(&FilePatchTool)
+}
+pub fn glob_definition() -> ToolDefinition {
+    def_for(&GlobTool)
+}
+pub fn grep_definition() -> ToolDefinition {
+    def_for(&GrepTool)
+}
+pub fn ls_definition() -> ToolDefinition {
+    def_for(&LsTool)
+}
 
 fn def_for(t: &dyn ToolHandler) -> ToolDefinition {
     ToolDefinition {
@@ -521,31 +630,53 @@ fn def_for(t: &dyn ToolHandler) -> ToolDefinition {
 }
 
 // Old-style handlers (blocking, for backward compat)
-use std::sync::Arc;
 use oz_core_types::StepOutcome;
+use std::sync::Arc;
 
 macro_rules! compat_handler {
     ($tool:expr) => {{
         let t = Arc::new($tool);
-        Arc::new(move |_name: &str, args: &serde_json::Value, ctx: &oz_core_types::ToolContext| {
-            let args = args.clone();
-            let ctx = ctx.clone();
-            let t = t.clone();
-            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-            let result = rt.block_on(t.execute(args, &ctx))
-                .unwrap_or_else(|e| ToolOutput::bad_json(e.to_string()));
-            StepOutcome { data: result.data, next_prompt: result.next_prompt, should_exit: result.should_exit, images: result.images }
-        }) as super::ToolHandler
+        Arc::new(
+            move |_name: &str, args: &serde_json::Value, ctx: &oz_core_types::ToolContext| {
+                let args = args.clone();
+                let ctx = ctx.clone();
+                let t = t.clone();
+                let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+                let result = rt
+                    .block_on(t.execute(args, &ctx))
+                    .unwrap_or_else(|e| ToolOutput::bad_json(e.to_string()));
+                StepOutcome {
+                    data: result.data,
+                    next_prompt: result.next_prompt,
+                    should_exit: result.should_exit,
+                    images: result.images,
+                }
+            },
+        ) as super::ToolHandler
     }};
 }
 
-pub fn read_handler() -> super::ToolHandler { compat_handler!(FileReadTool) }
-pub fn write_handler() -> super::ToolHandler { compat_handler!(FileWriteTool) }
-pub fn edit_handler() -> super::ToolHandler { compat_handler!(FileEditTool) }
-pub fn patch_handler() -> super::ToolHandler { compat_handler!(FilePatchTool) }
-pub fn glob_handler() -> super::ToolHandler { compat_handler!(GlobTool) }
-pub fn grep_handler() -> super::ToolHandler { compat_handler!(GrepTool) }
-pub fn ls_handler() -> super::ToolHandler { compat_handler!(LsTool) }
+pub fn read_handler() -> super::ToolHandler {
+    compat_handler!(FileReadTool)
+}
+pub fn write_handler() -> super::ToolHandler {
+    compat_handler!(FileWriteTool)
+}
+pub fn edit_handler() -> super::ToolHandler {
+    compat_handler!(FileEditTool)
+}
+pub fn patch_handler() -> super::ToolHandler {
+    compat_handler!(FilePatchTool)
+}
+pub fn glob_handler() -> super::ToolHandler {
+    compat_handler!(GlobTool)
+}
+pub fn grep_handler() -> super::ToolHandler {
+    compat_handler!(GrepTool)
+}
+pub fn ls_handler() -> super::ToolHandler {
+    compat_handler!(LsTool)
+}
 
 #[cfg(test)]
 mod tests {
@@ -553,19 +684,33 @@ mod tests {
     use oz_core_types::ToolContext as TC;
 
     fn ctx() -> TC {
-        TC { working_dir: "/tmp".into(), assets_dir: "/tmp".into(), script_dir: "/tmp".into(), lang: "en".into(), skill_mcp_dir: None, harness_dir: None, session_id: String::new() }
+        TC {
+            working_dir: "/tmp".into(),
+            assets_dir: "/tmp".into(),
+            script_dir: "/tmp".into(),
+            lang: "en".into(),
+            skill_mcp_dir: None,
+            harness_dir: None,
+            session_id: String::new(),
+        }
     }
 
     #[tokio::test]
     async fn test_read_missing_path() {
-        let r = FileReadTool.execute(serde_json::json!({}), &ctx()).await.unwrap();
+        let r = FileReadTool
+            .execute(serde_json::json!({}), &ctx())
+            .await
+            .unwrap();
         assert!(r.next_prompt.unwrap().contains("missing"));
     }
 
     #[tokio::test]
     async fn test_read_nonexistent_file() {
         let r = FileReadTool
-            .execute(serde_json::json!({"file_path": "/tmp/nonexistent_ga_test_xxx"}), &ctx())
+            .execute(
+                serde_json::json!({"file_path": "/tmp/nonexistent_ga_test_xxx"}),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert!(r.next_prompt.unwrap().contains("failed"));
@@ -577,7 +722,10 @@ mod tests {
         let path = tmp.to_string_lossy().to_string();
 
         let w = FileWriteTool
-            .execute(serde_json::json!({"file_path": path, "content": "hello world\nline2"}), &ctx())
+            .execute(
+                serde_json::json!({"file_path": path, "content": "hello world\nline2"}),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert_eq!(w.data["status"], "written");
@@ -586,7 +734,10 @@ mod tests {
             .execute(serde_json::json!({"file_path": path}), &ctx())
             .await
             .unwrap();
-        assert!(r.data["content"].as_str().unwrap_or("").contains("hello world"));
+        assert!(r.data["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("hello world"));
 
         let _ = std::fs::remove_file(&tmp);
     }
@@ -598,7 +749,10 @@ mod tests {
         tokio::fs::write(&path, "hello world\n").await.unwrap();
 
         let r = FilePatchTool
-            .execute(serde_json::json!({"file_path": path, "old_string": "hello", "new_string": "hi"}), &ctx())
+            .execute(
+                serde_json::json!({"file_path": path, "old_string": "hello", "new_string": "hi"}),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert_eq!(r.data["status"], "patched");
@@ -624,7 +778,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_glob_empty_pattern() {
-        let r = GlobTool.execute(serde_json::json!({}), &ctx()).await.unwrap();
+        let r = GlobTool
+            .execute(serde_json::json!({}), &ctx())
+            .await
+            .unwrap();
         assert!(r.next_prompt.unwrap().contains("missing"));
     }
 

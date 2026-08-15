@@ -128,10 +128,17 @@ pub async fn handle_approve(
     };
 
     if state.approval_handler.resolve(&body.request_id, decision) {
-        tracing::info!("[safety] approval resolved: {request_id} → {d}", request_id = body.request_id, d = body.decision);
+        tracing::info!(
+            "[safety] approval resolved: {request_id} → {d}",
+            request_id = body.request_id,
+            d = body.decision
+        );
         Json(serde_json::json!({"status": "ok"})).into_response()
     } else {
-        tracing::warn!("[safety] approval not found: {request_id}", request_id = body.request_id);
+        tracing::warn!(
+            "[safety] approval not found: {request_id}",
+            request_id = body.request_id
+        );
         (StatusCode::NOT_FOUND, "approval request not found").into_response()
     }
 }

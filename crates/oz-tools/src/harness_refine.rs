@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use oz_core::harness::{HarnessKind, refine};
+use oz_core::harness::{refine, HarnessKind};
 use oz_core_types::{ToolContext, ToolError, ToolOutput};
 
 use crate::registry::ToolHandler;
@@ -25,7 +25,9 @@ pub struct HarnessRefineTool;
 
 #[async_trait]
 impl ToolHandler for HarnessRefineTool {
-    fn name(&self) -> String { "harness_refine".to_string() }
+    fn name(&self) -> String {
+        "harness_refine".to_string()
+    }
     fn description(&self) -> String {
         "Record a small, evidence-backed lesson into the persistent harness ledger (memory / skill note / subagent spec). Every change is snapshot for rollback. Requires non-empty evidence citing observed behavior.".to_string()
     }
@@ -56,16 +58,27 @@ impl ToolHandler for HarnessRefineTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let kind = match args.get("kind").and_then(|v| v.as_str()) {
             Some("memory") => HarnessKind::Memory,
             Some("skill_note") => HarnessKind::SkillNote,
             Some("subagent_spec") => HarnessKind::SubagentSpec,
-            _ => return Err(ToolError::Custom("kind must be memory | skill_note | subagent_spec".into())),
+            _ => {
+                return Err(ToolError::Custom(
+                    "kind must be memory | skill_note | subagent_spec".into(),
+                ))
+            }
         };
         let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
         let evidence = args.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
-        let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("upsert");
+        let mode = args
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("upsert");
         let dir = harness_dir(ctx);
 
         match refine(&dir, kind, content, evidence, "model-initiated refine", mode) {
@@ -122,7 +135,10 @@ mod tests {
         assert_eq!(r.data["status"], "ok");
         let state = oz_core::harness::HarnessState::load(&harness_dir(&c));
         assert_eq!(state.entries.len(), 1);
-        assert_eq!(state.entries[0].content, "use --locked for reproducible builds");
+        assert_eq!(
+            state.entries[0].content,
+            "use --locked for reproducible builds"
+        );
     }
 
     #[tokio::test]
@@ -183,6 +199,9 @@ mod tests {
         assert_eq!(state.entries[0].content, "lesson for explicit dir");
         let old_location = std::path::PathBuf::from(c.skill_mcp_dir.unwrap()).join("harness");
         let fallback = oz_core::harness::HarnessState::load(&old_location);
-        assert!(fallback.entries.is_empty(), "explicit dir must win over fallback");
+        assert!(
+            fallback.entries.is_empty(),
+            "explicit dir must win over fallback"
+        );
     }
 }

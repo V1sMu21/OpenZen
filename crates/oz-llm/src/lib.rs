@@ -1,14 +1,14 @@
-pub mod session;
 pub mod claude;
-pub mod openai;
+pub mod client;
+pub mod message_format;
+pub mod mixin;
 pub mod native_claude;
 pub mod native_oai;
-pub mod mixin;
-pub mod stream;
+pub mod openai;
 pub mod retry;
-pub mod message_format;
-pub mod client;
+pub mod session;
 pub mod smart_router;
+pub mod stream;
 
 /// True when the API base points at a local deployment (omlx, ollama,
 /// llama.cpp on 127.0.0.1 / localhost). Local quantized models prefill
@@ -39,10 +39,10 @@ pub fn build_http_client(apibase: &str, timeout_secs: u64) -> reqwest::Client {
     builder.build().unwrap_or_default()
 }
 
-pub use session::*;
-pub use client::*;
 pub use claude::ClaudeSession;
-pub use openai::OaiSession;
+pub use client::*;
+pub use mixin::MixinSession;
 pub use native_claude::NativeClaudeSession;
 pub use native_oai::NativeOAISession;
-pub use mixin::MixinSession;
+pub use openai::OaiSession;
+pub use session::*;

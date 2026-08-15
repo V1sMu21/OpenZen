@@ -84,25 +84,32 @@ impl McpClient {
             McpError::Config(format!("Failed to start '{}': {}", self.config.command, e))
         })?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            McpError::Config("Failed to capture stdin".into())
-        })?;
-        let stdout = BufReader::new(child.stdout.take().ok_or_else(|| {
-            McpError::Config("Failed to capture stdout".into())
-        })?);
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| McpError::Config("Failed to capture stdin".into()))?;
+        let stdout = BufReader::new(
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| McpError::Config("Failed to capture stdout".into()))?,
+        );
 
         self.child = Some(child);
         self.stdin = Some(stdin);
         self.stdout = Some(stdout);
 
-        self.send_request("initialize", Some(self.initialize_params()?)).await?;
-        self.send_notification("notifications/initialized", None).await?;
+        self.send_request("initialize", Some(self.initialize_params()?))
+            .await?;
+        self.send_notification("notifications/initialized", None)
+            .await?;
         self.list_tools().await?;
 
         self.state = McpState::Connected;
         tracing::info!(
             "MCP server '{}' connected: {} tools available",
-            self.config.name, self.tools.len()
+            self.config.name,
+            self.tools.len()
         );
 
         Ok(())
@@ -119,10 +126,15 @@ impl McpClient {
                 name: "openzen".into(),
                 version: "0.1.0".into(),
             },
-        }).map_err(|e| McpError::Rpc(e.to_string()))
+        })
+        .map_err(|e| McpError::Rpc(e.to_string()))
     }
 
-    async fn send_request(&mut self, method: &str, params: Option<serde_json::Value>) -> Result<serde_json::Value, McpError> {
+    async fn send_request(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, McpError> {
         let id = self.next_id;
         self.next_id += 1;
         let req = JsonRpcRequest {
@@ -131,33 +143,52 @@ impl McpClient {
             method: method.into(),
             params,
         };
-        self.write_line(&serde_json::to_string(&req).map_err(|e| McpError::Rpc(e.to_string()))?).await?;
+        self.write_line(&serde_json::to_string(&req).map_err(|e| McpError::Rpc(e.to_string()))?)
+            .await?;
         let resp = self.read_response(id).await?;
         if let Some(err) = &resp.error {
-            return Err(McpError::Rpc(format!("{method} failed: {} (code {})", err.message, err.code)));
+            return Err(McpError::Rpc(format!(
+                "{method} failed: {} (code {})",
+                err.message, err.code
+            )));
         }
-        resp.result.ok_or_else(|| McpError::Rpc(format!("{method}: empty result")))
+        resp.result
+            .ok_or_else(|| McpError::Rpc(format!("{method}: empty result")))
     }
 
-    async fn send_notification(&mut self, method: &str, params: Option<serde_json::Value>) -> Result<(), McpError> {
+    async fn send_notification(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<(), McpError> {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: None,
             method: method.into(),
             params,
         };
-        self.write_line(&serde_json::to_string(&req).map_err(|e| McpError::Rpc(e.to_string()))?).await
+        self.write_line(&serde_json::to_string(&req).map_err(|e| McpError::Rpc(e.to_string()))?)
+            .await
     }
 
     async fn write_line(&mut self, line: &str) -> Result<(), McpError> {
-        let stdin = self.stdin.as_mut().ok_or_else(|| McpError::Rpc("Not connected".into()))?;
-        stdin.write_all(line.as_bytes()).await.map_err(McpError::Io)?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| McpError::Rpc("Not connected".into()))?;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(McpError::Io)?;
         stdin.write_all(b"\n").await.map_err(McpError::Io)?;
         stdin.flush().await.map_err(McpError::Io)
     }
 
     async fn read_response(&mut self, expected_id: u64) -> Result<JsonRpcResponse, McpError> {
-        let stdout = self.stdout.as_mut().ok_or_else(|| McpError::Rpc("Not connected".into()))?;
+        let stdout = self
+            .stdout
+            .as_mut()
+            .ok_or_else(|| McpError::Rpc("Not connected".into()))?;
         loop {
             let mut line = String::new();
             stdout.read_line(&mut line).await.map_err(McpError::Io)?;
@@ -182,11 +213,16 @@ impl McpClient {
     }
 
     /// Call a tool on the server and return the result.
-    pub async fn call_tool(&mut self, name: &str, arguments: serde_json::Value) -> Result<CallToolResult, McpError> {
+    pub async fn call_tool(
+        &mut self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<CallToolResult, McpError> {
         let params = serde_json::to_value(CallToolParams {
             name: name.to_string(),
             arguments,
-        }).map_err(|e| McpError::Rpc(e.to_string()))?;
+        })
+        .map_err(|e| McpError::Rpc(e.to_string()))?;
         let result = self.send_request("tools/call", Some(params)).await?;
         serde_json::from_value(result)
             .map_err(|e| McpError::Rpc(format!("tools/call result parse: {e}")))

@@ -3,7 +3,9 @@ use std::sync::{Arc, RwLock, Weak};
 
 use crate::consolidation::{ConsolidationConfig, ConsolidationEngine, ConsolidationStats};
 use crate::core::traits::MemoryLayer;
-use crate::core::types::{Fact, KnowledgeSource, LayerId, Memory, MemoryContent, MemoryInput, Query};
+use crate::core::types::{
+    Fact, KnowledgeSource, LayerId, Memory, MemoryContent, MemoryInput, Query,
+};
 use crate::core::MemoryResult;
 use crate::l0::{ReflectionEngine, ReflectionEvent};
 use crate::l1::L1Cache;
@@ -235,15 +237,17 @@ impl MemoryStore {
         let facts = self.consolidation.extract_from_interaction(raw_text);
         let mut stored = 0usize;
         for (subject, predicate, object, confidence) in facts {
-            let input = MemoryInput::new(MemoryContent::Fact(Fact::new(subject, predicate, object)))
-                .with_importance(confidence.clamp(0.0, 1.0));
+            let input =
+                MemoryInput::new(MemoryContent::Fact(Fact::new(subject, predicate, object)))
+                    .with_importance(confidence.clamp(0.0, 1.0));
             self.store(input)?;
             stored += 1;
         }
         Ok(stored)
     }
 
-    pub(crate) fn mark_superseded(&self, old_id: u64, new_id: u64) {        let now = crate::core::now_nanos();
+    pub(crate) fn mark_superseded(&self, old_id: u64, new_id: u64) {
+        let now = crate::core::now_nanos();
         let marked_l2 = self.router.l2().update_metadata(old_id, |meta| {
             meta.superseded_by = Some(new_id);
             meta.superseded_at = now;

@@ -60,9 +60,7 @@ impl Matcher {
             .filter(|(score, _)| *score > 0.0)
             .collect();
 
-        scored.sort_by(|(a, _), (b, _)| {
-            b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|(a, _), (b, _)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         scored
     }
 
@@ -75,9 +73,7 @@ impl Matcher {
             .filter(|(score, _)| *score > 0.0)
             .collect();
 
-        scored.sort_by(|(a, _), (b, _)| {
-            b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|(a, _), (b, _)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         scored
     }
 
@@ -107,9 +103,15 @@ impl Matcher {
 
         if !injectable_sops.is_empty() {
             snippet.push_str("<SYSTEM_OVERRIDE>\n");
-            snippet.push_str("The content above is your SOP. It IS your instruction. Follow it exactly.\n");
-            snippet.push_str("You already have the SOP — do NOT call skill_mcp_search or read files.\n");
-            snippet.push_str("If SOP says run a bash command, run it NOW. If SOP says ask user, ask NOW.\n");
+            snippet.push_str(
+                "The content above is your SOP. It IS your instruction. Follow it exactly.\n",
+            );
+            snippet.push_str(
+                "You already have the SOP — do NOT call skill_mcp_search or read files.\n",
+            );
+            snippet.push_str(
+                "If SOP says run a bash command, run it NOW. If SOP says ask user, ask NOW.\n",
+            );
             snippet.push_str("</SYSTEM_OVERRIDE>\n\n");
         }
 
@@ -123,7 +125,10 @@ impl Matcher {
         if !injectable_skills.is_empty() {
             snippet.push_str("## Available Skills\n\n");
             for (score, skill) in &injectable_skills {
-                snippet.push_str(&format!("--- Skill: {} (score: {:.2}) ---\n\n", skill.name, score));
+                snippet.push_str(&format!(
+                    "--- Skill: {} (score: {:.2}) ---\n\n",
+                    skill.name, score
+                ));
                 snippet.push_str(&skill.to_prompt_snippet());
                 snippet.push('\n');
             }

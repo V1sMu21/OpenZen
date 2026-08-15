@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oz_core_types::{ToolContext, ToolDefinition, ToolFunction, ToolError, ToolOutput};
+use oz_core_types::{ToolContext, ToolDefinition, ToolError, ToolFunction, ToolOutput};
 use oz_tools::registry::ToolHandler;
 use tokio::sync::Mutex;
 
@@ -19,7 +19,10 @@ impl McpServerConnection {
     /// Connect to an MCP server via its SSE endpoint URL.
     /// The URL should be the SSE endpoint (e.g. `http://host:port/sse`).
     pub async fn connect(name: &str, sse_url: &str) -> Result<Self, String> {
-        let base_url = sse_url.trim_end_matches("/sse").trim_end_matches('/').to_string();
+        let base_url = sse_url
+            .trim_end_matches("/sse")
+            .trim_end_matches('/')
+            .to_string();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -40,7 +43,11 @@ impl McpServerConnection {
     }
 
     /// Call a tool on the remote MCP server.
-    pub async fn call_tool(&self, tool_name: &str, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+    pub async fn call_tool(
+        &self,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
         let id = {
             let mut seq = self.sequence.lock().await;
             let id = *seq;
@@ -59,13 +66,17 @@ impl McpServerConnection {
         });
 
         let url = format!("{}/messages", self.base_url);
-        let resp = self.client.post(&url)
+        let resp = self
+            .client
+            .post(&url)
             .json(&request)
             .send()
             .await
             .map_err(|e| ToolError::Custom(format!("MCP request failed: {e}")))?;
 
-        let data: serde_json::Value = resp.json().await
+        let data: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| ToolError::Custom(format!("MCP response parse failed: {e}")))?;
 
         if let Some(err) = data.get("error") {
@@ -74,7 +85,11 @@ impl McpServerConnection {
         }
 
         let result = data.get("result").cloned().unwrap_or_default();
-        let content = result.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+        let content = result
+            .get("content")
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         let mut text_output = String::new();
         for block in &content {
@@ -84,7 +99,11 @@ impl McpServerConnection {
             }
         }
 
-        if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return Err(ToolError::Custom(text_output));
         }
 
@@ -117,21 +136,30 @@ impl McpServerConnection {
         });
 
         let url = format!("{}/messages", self.base_url);
-        let resp = self.client.post(&url)
+        let resp = self
+            .client
+            .post(&url)
             .json(&request)
             .send()
             .await
             .map_err(|e| format!("MCP initialize failed: {e}"))?;
 
-        let data: serde_json::Value = resp.json().await
+        let data: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| format!("MCP initialize parse failed: {e}"))?;
 
         if let Some(err) = data.get("error") {
             return Err(format!("MCP initialize error: {}", err["message"]));
         }
 
-        tracing::info!("MCP server '{}' initialized: protocol={}", self.name,
-            data["result"]["protocolVersion"].as_str().unwrap_or("unknown"));
+        tracing::info!(
+            "MCP server '{}' initialized: protocol={}",
+            self.name,
+            data["result"]["protocolVersion"]
+                .as_str()
+                .unwrap_or("unknown")
+        );
 
         Ok(())
     }
@@ -151,16 +179,21 @@ impl McpServerConnection {
         });
 
         let url = format!("{}/messages", self.base_url);
-        let resp = self.client.post(&url)
+        let resp = self
+            .client
+            .post(&url)
             .json(&request)
             .send()
             .await
             .map_err(|e| format!("MCP tools/list failed: {e}"))?;
 
-        let data: serde_json::Value = resp.json().await
+        let data: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| format!("MCP tools/list parse failed: {e}"))?;
 
-        let tools = data["result"]["tools"].as_array()
+        let tools = data["result"]["tools"]
+            .as_array()
             .ok_or_else(|| "MCP tools/list returned no tools array".to_string())?;
 
         for tool in tools {
@@ -179,7 +212,11 @@ impl McpServerConnection {
             self.tools.push(def);
         }
 
-        tracing::info!("MCP server '{}' discovered {} tools", self.name, self.tools.len());
+        tracing::info!(
+            "MCP server '{}' discovered {} tools",
+            self.name,
+            self.tools.len()
+        );
         Ok(())
     }
 }
@@ -215,7 +252,11 @@ impl ToolHandler for McpToolHandler {
         serde_json::json!({"type": "object", "properties": {}})
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         self.connection.call_tool(&self.tool_name, args).await
     }
 }
@@ -239,8 +280,14 @@ impl McpManager {
         for entry in config_entries {
             match McpServerConnection::connect(&entry.name, &entry.url).await {
                 Ok(conn) => {
-                    tracing::info!("Connected to MCP server: {} ({} tools)", entry.name, conn.tools.len());
-                    manager.connections.insert(entry.name.clone(), Arc::new(conn));
+                    tracing::info!(
+                        "Connected to MCP server: {} ({} tools)",
+                        entry.name,
+                        conn.tools.len()
+                    );
+                    manager
+                        .connections
+                        .insert(entry.name.clone(), Arc::new(conn));
                 }
                 Err(e) => {
                     tracing::warn!("Failed to connect to MCP server '{}': {e}", entry.name);
@@ -255,7 +302,10 @@ impl McpManager {
         for (server_name, conn) in &self.connections {
             let name_prefix = format!("mcp_{}_", server_name);
             for def in &conn.tools {
-                let mcp_tool_name = def.function.name.strip_prefix(&name_prefix)
+                let mcp_tool_name = def
+                    .function
+                    .name
+                    .strip_prefix(&name_prefix)
                     .unwrap_or(&def.function.name);
                 let handler = McpToolHandler::new(server_name, mcp_tool_name, conn.clone());
                 // Register with the full prefixed name

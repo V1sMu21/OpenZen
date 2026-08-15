@@ -7,7 +7,9 @@ pub struct TodoWriteTool;
 
 #[async_trait]
 impl ToolHandler for TodoWriteTool {
-    fn name(&self) -> String { "todowrite".to_string() }
+    fn name(&self) -> String {
+        "todowrite".to_string()
+    }
     fn description(&self) -> String {
         "Create ONE todo item. Call multiple times for multi-step tasks — do NOT put multiple steps in a single call. Each todo must be a single verifiable action. For complex tasks (writes/build/test): create task_spec.md with [verify] acceptance assertions first, then break it into steps.".to_string()
     }
@@ -32,11 +34,22 @@ impl ToolHandler for TodoWriteTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let content = args["content"].as_str().unwrap_or("").to_string();
         let priority = args["priority"].as_str().unwrap_or("medium").to_string();
 
-        let id = format!("todo_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+        let id = format!(
+            "todo_{}",
+            uuid::Uuid::new_v4()
+                .to_string()
+                .split('-')
+                .next()
+                .unwrap_or("0")
+        );
 
         Ok(ToolOutput::success_with_prompt(
             serde_json::json!({

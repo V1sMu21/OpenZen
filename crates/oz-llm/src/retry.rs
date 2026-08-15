@@ -2,16 +2,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use oz_core_types::{LlmError, Message};
 use oz_config::SessionConfig;
+use oz_core_types::{LlmError, Message};
 
 type AsyncFn<T> = Pin<Box<dyn Future<Output = Result<T, LlmError>> + Send>>;
 
 /// Retry with exponential backoff — matches Python _stream_with_retry
-pub async fn retry_with_backoff<T, F>(
-    operation: F,
-    config: &SessionConfig,
-) -> Result<T, LlmError>
+pub async fn retry_with_backoff<T, F>(operation: F, config: &SessionConfig) -> Result<T, LlmError>
 where
     F: FnMut() -> AsyncFn<T>,
     T: Send + 'static,
@@ -29,7 +26,8 @@ where
                 let delay = compute_delay(attempt, config.timeout);
                 tracing::warn!(
                     "[LLM Retry] {e}, retry in {delay:.1}s ({}/{})",
-                    attempt + 1, max_retries + 1
+                    attempt + 1,
+                    max_retries + 1
                 );
                 tokio::time::sleep(Duration::from_secs_f64(delay)).await;
             }
@@ -37,7 +35,9 @@ where
         }
     }
 
-    Err(LlmError::MaxRetriesExceeded("All retry attempts failed".into()))
+    Err(LlmError::MaxRetriesExceeded(
+        "All retry attempts failed".into(),
+    ))
 }
 
 /// Backoff delay for retry `attempt` (0-based): 1.5s × 2^attempt, capped at
@@ -68,44 +68,54 @@ pub fn trim_history(history: &mut Vec<Message>, context_win: usize) {
 }
 
 fn estimate_chars(messages: &[Message]) -> usize {
-    messages.iter().map(|m| {
-        m.content.iter().map(|b| match b {
-            oz_core_types::ContentBlock::Text { text, .. } => text.len(),
-            oz_core_types::ContentBlock::ToolUse { name, input, .. } => {
-                name.len() + serde_json::to_string(input).unwrap_or_default().len()
-            }
-            oz_core_types::ContentBlock::ToolResult { content, .. } => {
-                match content {
-                    oz_core_types::ContentContainer::Text(t) => t.len(),
-                    oz_core_types::ContentContainer::Blocks(bs) => {
-                        bs.iter().map(|b| match b {
-                            oz_core_types::ContentBlock::Text { text, .. } => text.len(),
-                            _ => 0,
-                        }).sum()
+    messages
+        .iter()
+        .map(|m| {
+            m.content
+                .iter()
+                .map(|b| match b {
+                    oz_core_types::ContentBlock::Text { text, .. } => text.len(),
+                    oz_core_types::ContentBlock::ToolUse { name, input, .. } => {
+                        name.len() + serde_json::to_string(input).unwrap_or_default().len()
                     }
-                }
-            }
-            _ => 0,
-        }).sum::<usize>()
-    }).sum()
+                    oz_core_types::ContentBlock::ToolResult { content, .. } => match content {
+                        oz_core_types::ContentContainer::Text(t) => t.len(),
+                        oz_core_types::ContentContainer::Blocks(bs) => bs
+                            .iter()
+                            .map(|b| match b {
+                                oz_core_types::ContentBlock::Text { text, .. } => text.len(),
+                                _ => 0,
+                            })
+                            .sum(),
+                    },
+                    _ => 0,
+                })
+                .sum::<usize>()
+        })
+        .sum()
 }
 
 fn sanitize_leading_user_msg(msg: &mut Message) {
-    let texts: Vec<String> = msg.content.iter().filter_map(|b| match b {
-        oz_core_types::ContentBlock::Text { text, .. } => Some(text.clone()),
-        oz_core_types::ContentBlock::ToolResult { content, .. } => {
-            match content {
+    let texts: Vec<String> = msg
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            oz_core_types::ContentBlock::Text { text, .. } => Some(text.clone()),
+            oz_core_types::ContentBlock::ToolResult { content, .. } => match content {
                 oz_core_types::ContentContainer::Text(t) => Some(t.clone()),
-                oz_core_types::ContentContainer::Blocks(bs) => {
-                    Some(bs.iter().filter_map(|b| match b {
-                        oz_core_types::ContentBlock::Text { text, .. } => Some(text.clone()),
-                        _ => None,
-                    }).collect::<Vec<_>>().join("\n"))
-                }
-            }
-        }
-        _ => None,
-    }).collect();
+                oz_core_types::ContentContainer::Blocks(bs) => Some(
+                    bs.iter()
+                        .filter_map(|b| match b {
+                            oz_core_types::ContentBlock::Text { text, .. } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+            },
+            _ => None,
+        })
+        .collect();
     msg.content = vec![oz_core_types::ContentBlock::text(texts.join("\n"))];
 }
 
@@ -209,10 +219,12 @@ mod tests {
     #[test]
     fn test_trim_history_preserves_minimum() {
         let long_text: String = "z".repeat(10000);
-        let mut history = (0..50).map(|i| match i % 2 {
-            0 => Message::user(long_text.clone()),
-            _ => Message::assistant(format!("response {}", i)),
-        }).collect::<Vec<_>>();
+        let mut history = (0..50)
+            .map(|i| match i % 2 {
+                0 => Message::user(long_text.clone()),
+                _ => Message::assistant(format!("response {}", i)),
+            })
+            .collect::<Vec<_>>();
         let original_len = history.len();
         trim_history(&mut history, 50);
         assert!(history.len() < original_len);

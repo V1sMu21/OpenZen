@@ -63,7 +63,10 @@ impl Default for DaemonConfig {
 
 impl DaemonConfig {
     #[allow(clippy::type_complexity)]
-    pub fn new_command_channel() -> (watch::Sender<Option<DaemonCommand>>, Arc<Mutex<watch::Receiver<Option<DaemonCommand>>>>) {
+    pub fn new_command_channel() -> (
+        watch::Sender<Option<DaemonCommand>>,
+        Arc<Mutex<watch::Receiver<Option<DaemonCommand>>>>,
+    ) {
         let (cmd_tx, cmd_rx) = watch::channel(None);
         (cmd_tx, Arc::new(Mutex::new(cmd_rx)))
     }
@@ -172,9 +175,7 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
         }
 
         if restart_count > max_restarts {
-            anyhow::bail!(
-                "Max restarts ({max_restarts}) exceeded, giving up"
-            );
+            anyhow::bail!("Max restarts ({max_restarts}) exceeded, giving up");
         }
 
         tracing::info!("Restarting in 2 seconds...");
@@ -208,7 +209,8 @@ async fn spawn_serve(config: &DaemonConfig) -> anyhow::Result<Child> {
         .arg(config.dir.to_string_lossy().as_ref());
 
     if let Some(ref frontend) = config.frontend_dir {
-        cmd.arg("--frontend-dir").arg(frontend.to_string_lossy().as_ref());
+        cmd.arg("--frontend-dir")
+            .arg(frontend.to_string_lossy().as_ref());
     }
 
     cmd.stdout(std::process::Stdio::inherit())
@@ -346,6 +348,7 @@ pub async fn send_command(
     cmd_tx: &watch::Sender<Option<DaemonCommand>>,
     cmd: DaemonCommand,
 ) -> anyhow::Result<()> {
-    cmd_tx.send(Some(cmd))
+    cmd_tx
+        .send(Some(cmd))
         .map_err(|_| anyhow::anyhow!("Failed to send command to daemon (receiver dropped)"))
 }

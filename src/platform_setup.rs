@@ -126,7 +126,15 @@ pub async fn handle_platform_command(
     config_path: &Path,
 ) -> anyhow::Result<()> {
     match action {
-        crate::PlatformAction::Add { name, app_id, app_secret, bot_token, model, allowed_users, proxy } => {
+        crate::PlatformAction::Add {
+            name,
+            app_id,
+            app_secret,
+            bot_token,
+            model,
+            allowed_users,
+            proxy,
+        } => {
             let path = resolve_config_path(config_path);
             let mut raw: toml::Table = if path.exists() {
                 let content = std::fs::read_to_string(&path)?;
@@ -139,7 +147,10 @@ pub async fn handle_platform_command(
                 toml::Value::Array(vec![toml::Value::String("*".into())])
             } else {
                 toml::Value::Array(
-                    allowed_users.split(',').map(|s| toml::Value::String(s.trim().into())).collect()
+                    allowed_users
+                        .split(',')
+                        .map(|s| toml::Value::String(s.trim().into()))
+                        .collect(),
                 )
             };
 
@@ -147,12 +158,21 @@ pub async fn handle_platform_command(
             platform.insert("enabled".into(), toml::Value::Boolean(true));
             platform.insert("default_model".into(), toml::Value::String(model.clone()));
             platform.insert("allowed_users".into(), allowed);
-            if let Some(ref id) = *app_id { platform.insert("app_id".into(), toml::Value::String(id.clone())); }
-            if let Some(ref s) = *app_secret { platform.insert("app_secret".into(), toml::Value::String(s.clone())); }
-            if let Some(ref t) = *bot_token { platform.insert("bot_token".into(), toml::Value::String(t.clone())); }
-            if let Some(ref p) = *proxy { platform.insert("proxy".into(), toml::Value::String(p.clone())); }
+            if let Some(ref id) = *app_id {
+                platform.insert("app_id".into(), toml::Value::String(id.clone()));
+            }
+            if let Some(ref s) = *app_secret {
+                platform.insert("app_secret".into(), toml::Value::String(s.clone()));
+            }
+            if let Some(ref t) = *bot_token {
+                platform.insert("bot_token".into(), toml::Value::String(t.clone()));
+            }
+            if let Some(ref p) = *proxy {
+                platform.insert("proxy".into(), toml::Value::String(p.clone()));
+            }
 
-            let existing_platforms = raw.remove("platforms")
+            let existing_platforms = raw
+                .remove("platforms")
                 .and_then(|v| v.try_into::<toml::Table>().ok())
                 .unwrap_or_default();
             let mut platforms = existing_platforms;
@@ -178,8 +198,14 @@ pub async fn handle_platform_command(
                 Some(t) if !t.is_empty() => {
                     println!("Configured platforms:");
                     for (name, val) in t {
-                        let enabled = val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let model = val.get("default_model").and_then(|v| v.as_str()).unwrap_or("?");
+                        let enabled = val
+                            .get("enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let model = val
+                            .get("default_model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
                         println!("  {}  enabled={}  model={}", name, enabled, model);
                     }
                 }
@@ -191,7 +217,9 @@ pub async fn handle_platform_command(
 }
 
 fn resolve_config_path(cli_config: &Path) -> PathBuf {
-    if cli_config.exists() { return cli_config.to_path_buf(); }
+    if cli_config.exists() {
+        return cli_config.to_path_buf();
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let candidates = [
         PathBuf::from("config/mykey.toml"),
@@ -199,7 +227,9 @@ fn resolve_config_path(cli_config: &Path) -> PathBuf {
         PathBuf::from(&home).join("mykey.toml"),
     ];
     for c in &candidates {
-        if c.exists() { return c.clone(); }
+        if c.exists() {
+            return c.clone();
+        }
     }
     PathBuf::from("config/mykey.toml")
 }

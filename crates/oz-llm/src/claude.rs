@@ -1,12 +1,12 @@
 use std::sync::Mutex;
 
-use oz_core_types::{ContentBlock, LlmError, Message, TokenUsage, ToolDefinition};
 use oz_config::SessionConfig;
+use oz_core_types::{ContentBlock, LlmError, Message, TokenUsage, ToolDefinition};
 
+use crate::message_format::fix_messages;
+use crate::retry::retry_with_backoff;
 use crate::session::Session;
 use crate::stream::parse_claude_sse;
-use crate::retry::retry_with_backoff;
-use crate::message_format::fix_messages;
 
 pub struct ClaudeSession {
     config: SessionConfig,
@@ -32,7 +32,10 @@ impl ClaudeSession {
         use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert("x-api-key", HeaderValue::from_str(&self.config.apikey).unwrap());
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(&self.config.apikey).unwrap(),
+        );
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         if let Some(val) = &self.config.reasoning_effort {
             headers.insert("anthropic-thinking", HeaderValue::from_str(val).unwrap());
@@ -43,13 +46,26 @@ impl ClaudeSession {
 
 #[async_trait::async_trait]
 impl Session for ClaudeSession {
-    fn config(&self) -> &SessionConfig { &self.config }
-    fn history(&self) -> &Mutex<Vec<Message>> { &self.history }
-    fn history_mut(&self) -> &Mutex<Vec<Message>> { &self.history }
-    fn set_system(&mut self, system: String) { self.system = Some(system); }
-    fn set_tools(&mut self, tools: Vec<ToolDefinition>) { self.tools = Some(tools); }
+    fn config(&self) -> &SessionConfig {
+        &self.config
+    }
+    fn history(&self) -> &Mutex<Vec<Message>> {
+        &self.history
+    }
+    fn history_mut(&self) -> &Mutex<Vec<Message>> {
+        &self.history
+    }
+    fn set_system(&mut self, system: String) {
+        self.system = Some(system);
+    }
+    fn set_tools(&mut self, tools: Vec<ToolDefinition>) {
+        self.tools = Some(tools);
+    }
 
-    async fn raw_ask(&self, messages: &[Message]) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
+    async fn raw_ask(
+        &self,
+        messages: &[Message],
+    ) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
         let messages = fix_messages(messages);
         let max_tokens = self.config.max_tokens.unwrap_or(8192);
         let url = format!("{}/v1/messages", self.config.apibase.trim_end_matches('/'));
@@ -104,30 +120,43 @@ impl Session for ClaudeSession {
                 })
             },
             &self.config,
-        ).await
+        )
+        .await
     }
 
     async fn ask(&self, prompt: &str) -> Result<Vec<ContentBlock>, LlmError> {
         let raw_messages = {
-            let mut history = self.history.lock().map_err(|e| LlmError::Custom(e.to_string()))?;
+            let mut history = self
+                .history
+                .lock()
+                .map_err(|e| LlmError::Custom(e.to_string()))?;
             history.push(Message::user(prompt));
             if history.len() > 5 {
                 crate::retry::trim_history(&mut history, self.config.context_win);
             }
-            history.iter().map(|m| Message {
-                role: m.role,
-                content: m.content.clone(),
-                tool_results: None,
-            }).collect::<Vec<_>>()
+            history
+                .iter()
+                .map(|m| Message {
+                    role: m.role,
+                    content: m.content.clone(),
+                    tool_results: None,
+                })
+                .collect::<Vec<_>>()
         };
         let (blocks, _usage) = self.raw_ask(&raw_messages).await?;
         if !blocks.is_empty() {
-            let has_error = blocks.first().map(|b| match b {
-                ContentBlock::Text { text, .. } => text.starts_with("!!!Error:"),
-                _ => false,
-            }).unwrap_or(false);
+            let has_error = blocks
+                .first()
+                .map(|b| match b {
+                    ContentBlock::Text { text, .. } => text.starts_with("!!!Error:"),
+                    _ => false,
+                })
+                .unwrap_or(false);
             if !has_error {
-                let mut history = self.history.lock().map_err(|e| LlmError::Custom(e.to_string()))?;
+                let mut history = self
+                    .history
+                    .lock()
+                    .map_err(|e| LlmError::Custom(e.to_string()))?;
                 history.push(Message::assistant_with_blocks(blocks.clone()));
             }
         }
@@ -141,7 +170,10 @@ impl Session for ClaudeSession {
             let mut blocks: Vec<serde_json::Value> = Vec::new();
             for block in &msg.content {
                 match block {
-                    ContentBlock::Text { text, cache_control } => {
+                    ContentBlock::Text {
+                        text,
+                        cache_control,
+                    } => {
                         let mut b = serde_json::json!({"type": "text", "text": text});
                         if let Some(_cc) = cache_control {
                             b["cache_control"] = serde_json::json!({"type": "ephemeral"});
@@ -156,7 +188,11 @@ impl Session for ClaudeSession {
                             "input": input,
                         }));
                     }
-                    ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
                         let content_val = match content {
                             oz_core_types::ContentContainer::Text(t) => {
                                 serde_json::json!([{"type": "text", "text": t}])

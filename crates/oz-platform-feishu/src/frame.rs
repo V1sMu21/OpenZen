@@ -15,8 +15,8 @@ pub fn decode_frame(data: &[u8]) -> Result<WsFrame, String> {
 
     let mut pos = 0;
     while pos < data.len() {
-        let (tag, n) = read_varint(&data[pos..])
-            .ok_or_else(|| "protobuf: eof reading tag".to_string())?;
+        let (tag, n) =
+            read_varint(&data[pos..]).ok_or_else(|| "protobuf: eof reading tag".to_string())?;
         pos += n;
 
         let field_num = (tag >> 3) as u32;
@@ -27,7 +27,9 @@ pub fn decode_frame(data: &[u8]) -> Result<WsFrame, String> {
                 let (_, n) = read_varint(&data[pos..])
                     .ok_or_else(|| "protobuf: eof reading varint".to_string())?;
                 pos += n;
-                if field_num == 4 { method = read_i32_from_bytes(&data[pos.saturating_sub(n)..pos]); }
+                if field_num == 4 {
+                    method = read_i32_from_bytes(&data[pos.saturating_sub(n)..pos]);
+                }
             }
             (4, 0) => {
                 let (val, n) = read_varint(&data[pos..])
@@ -39,7 +41,8 @@ pub fn decode_frame(data: &[u8]) -> Result<WsFrame, String> {
                 let (len, n) = read_varint(&data[pos..])
                     .ok_or_else(|| "protobuf: eof reading header length".to_string())?;
                 pos += n;
-                let header_data = data.get(pos..pos.saturating_add(len as usize))
+                let header_data = data
+                    .get(pos..pos.saturating_add(len as usize))
                     .ok_or_else(|| "protobuf: eof reading header body".to_string())?;
                 pos += len as usize;
                 if let Some((k, v)) = decode_header(header_data) {
@@ -55,7 +58,8 @@ pub fn decode_frame(data: &[u8]) -> Result<WsFrame, String> {
                 let (len, n) = read_varint(&data[pos..])
                     .ok_or_else(|| "protobuf: eof reading payload_type length".to_string())?;
                 pos += n;
-                let bytes = data.get(pos..pos.saturating_add(len as usize))
+                let bytes = data
+                    .get(pos..pos.saturating_add(len as usize))
                     .ok_or_else(|| "protobuf: eof reading payload_type body".to_string())?;
                 payload_type = String::from_utf8_lossy(bytes).to_string();
                 pos += len as usize;
@@ -64,7 +68,8 @@ pub fn decode_frame(data: &[u8]) -> Result<WsFrame, String> {
                 let (len, n) = read_varint(&data[pos..])
                     .ok_or_else(|| "protobuf: eof reading payload length".to_string())?;
                 pos += n;
-                let bytes = data.get(pos..pos.saturating_add(len as usize))
+                let bytes = data
+                    .get(pos..pos.saturating_add(len as usize))
                     .ok_or_else(|| "protobuf: eof reading payload body".to_string())?;
                 payload = Some(bytes.to_vec());
                 pos += len as usize;
@@ -94,7 +99,12 @@ pub fn decode_frame(data: &[u8]) -> Result<WsFrame, String> {
         }
     }
 
-    Ok(WsFrame { headers, payload_type, payload, method })
+    Ok(WsFrame {
+        headers,
+        payload_type,
+        payload,
+        method,
+    })
 }
 
 fn decode_header(data: &[u8]) -> Option<(String, String)> {

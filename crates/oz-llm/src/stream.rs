@@ -75,7 +75,12 @@ fn find_next_internal_tag(text: &str) -> Option<(Option<usize>, usize, String)> 
                         let is_self_closing = bytes.get(close_abs.wrapping_sub(1)) == Some(&b'/');
                         let start = abs;
                         if best.as_ref().is_none_or(|(b, _, _, _)| start < *b) {
-                            best = Some((start, close_abs + 1 - start, tag.to_string(), is_self_closing));
+                            best = Some((
+                                start,
+                                close_abs + 1 - start,
+                                tag.to_string(),
+                                is_self_closing,
+                            ));
                         }
                         break;
                     }
@@ -85,7 +90,11 @@ fn find_next_internal_tag(text: &str) -> Option<(Option<usize>, usize, String)> 
         }
     }
     best.map(|(start, open_len, name, self_closing)| {
-        let end_after = if self_closing { Some(start + open_len) } else { None };
+        let end_after = if self_closing {
+            Some(start + open_len)
+        } else {
+            None
+        };
         (end_after, start, name)
     })
 }
@@ -145,7 +154,11 @@ fn find_any_close_tag(text: &str) -> Option<(usize, String)> {
 /// for minutes without emitting a chunk, so they get a much larger
 /// ceiling than the 60s used for cloud APIs.
 fn chunk_timeout_secs(apibase: &str) -> u64 {
-    if crate::is_local_apibase(apibase) { 300 } else { 60 }
+    if crate::is_local_apibase(apibase) {
+        300
+    } else {
+        60
+    }
 }
 
 /// Parse Claude SSE stream. Emits typed start-delta-end protocol events
@@ -181,14 +194,15 @@ pub async fn parse_claude_sse(
     let mut buffer = String::new();
 
     loop {
-        let chunk = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            stream.next(),
-        )
-        .await
-        .map_err(|_| LlmError::StreamError(
-            format!("Claude SSE stream timed out (no data for {}s)", timeout_secs)
-        ))?;
+        let chunk =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), stream.next())
+                .await
+                .map_err(|_| {
+                    LlmError::StreamError(format!(
+                        "Claude SSE stream timed out (no data for {}s)",
+                        timeout_secs
+                    ))
+                })?;
         let chunk = match chunk {
             Some(c) => c.map_err(|e| LlmError::StreamError(e.to_string()))?,
             None => break,
@@ -199,8 +213,12 @@ pub async fn parse_claude_sse(
             let line = buffer[..newline].to_string();
             buffer = buffer[newline + 1..].to_string();
             let line = line.trim().to_string();
-            if line.is_empty() { continue; }
-            if !line.starts_with("data:") { continue; }
+            if line.is_empty() {
+                continue;
+            }
+            if !line.starts_with("data:") {
+                continue;
+            }
 
             let data_str = line[5..].trim().to_string();
             if data_str == "[DONE]" {
@@ -211,12 +229,17 @@ pub async fn parse_claude_sse(
                 if let Some(id) = current_reasoning_id.take() {
                     emit(&event_tx, StreamEvent::ReasoningEnd { id });
                 }
-                if let (Some(tc_id), Some(name)) = (current_tool_call_id.take(), current_tool_name.take()) {
-                    emit(&event_tx, StreamEvent::ToolInputAvailable {
-                        tool_call_id: tc_id,
-                        name,
-                        args: std::mem::take(&mut tool_json_buf),
-                    });
+                if let (Some(tc_id), Some(name)) =
+                    (current_tool_call_id.take(), current_tool_name.take())
+                {
+                    emit(
+                        &event_tx,
+                        StreamEvent::ToolInputAvailable {
+                            tool_call_id: tc_id,
+                            name,
+                            args: std::mem::take(&mut tool_json_buf),
+                        },
+                    );
                 }
                 return Ok((content_blocks, usage));
             }
@@ -224,7 +247,10 @@ pub async fn parse_claude_sse(
             let evt: serde_json::Value = match serde_json::from_str(&data_str) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("[SSE] JSON parse error: {e}, line: {}", &data_str[..data_str.len().min(200)]);
+                    tracing::warn!(
+                        "[SSE] JSON parse error: {e}, line: {}",
+                        &data_str[..data_str.len().min(200)]
+                    );
                     continue;
                 }
             };
@@ -258,10 +284,13 @@ pub async fn parse_claude_sse(
                                 let tc_id = if !id.is_empty() { id } else { next_id("tc") };
                                 current_tool_call_id = Some(tc_id.clone());
                                 current_tool_name = Some(name.clone());
-                                emit(&event_tx, StreamEvent::ToolInputStart {
-                                    tool_call_id: tc_id,
-                                    name,
-                                });
+                                emit(
+                                    &event_tx,
+                                    StreamEvent::ToolInputStart {
+                                        tool_call_id: tc_id,
+                                        name,
+                                    },
+                                );
                             }
                             Some("text") => {
                                 let id = next_id("t");
@@ -286,13 +315,18 @@ pub async fn parse_claude_sse(
                                     let text = delta["text"].as_str().unwrap_or("");
                                     if !text.is_empty() {
                                         if let Some(ref id) = current_text_id {
-                                            emit(&event_tx, StreamEvent::TextDelta {
-                                                id: id.clone(),
-                                                text: text.to_string(),
-                                            });
+                                            emit(
+                                                &event_tx,
+                                                StreamEvent::TextDelta {
+                                                    id: id.clone(),
+                                                    text: text.to_string(),
+                                                },
+                                            );
                                         }
                                     }
-                                    block["text"] = serde_json::json!(block["text"].as_str().unwrap_or("").to_owned() + text);
+                                    block["text"] = serde_json::json!(
+                                        block["text"].as_str().unwrap_or("").to_owned() + text
+                                    );
                                 }
                             }
                         }
@@ -302,20 +336,27 @@ pub async fn parse_claude_sse(
                                     let t = delta["thinking"].as_str().unwrap_or("");
                                     if !t.is_empty() {
                                         if let Some(ref id) = current_reasoning_id {
-                                            emit(&event_tx, StreamEvent::ReasoningDelta {
-                                                id: id.clone(),
-                                                text: t.to_string(),
-                                            });
+                                            emit(
+                                                &event_tx,
+                                                StreamEvent::ReasoningDelta {
+                                                    id: id.clone(),
+                                                    text: t.to_string(),
+                                                },
+                                            );
                                         }
                                     }
-                                    block["thinking"] = serde_json::json!(block["thinking"].as_str().unwrap_or("").to_owned() + t);
+                                    block["thinking"] = serde_json::json!(
+                                        block["thinking"].as_str().unwrap_or("").to_owned() + t
+                                    );
                                 }
                             }
                         }
                         Some("signature_delta") => {
                             if let Some(block) = current_block.as_mut() {
                                 if block["type"] == "thinking" {
-                                    block["signature"] = serde_json::json!(delta["signature"].as_str().unwrap_or(""));
+                                    block["signature"] = serde_json::json!(delta["signature"]
+                                        .as_str()
+                                        .unwrap_or(""));
                                 }
                             }
                         }
@@ -324,10 +365,13 @@ pub async fn parse_claude_sse(
                             if !piece.is_empty() {
                                 tool_json_buf.push_str(piece);
                                 if let Some(ref tc_id) = current_tool_call_id {
-                                    emit(&event_tx, StreamEvent::ToolInputDelta {
-                                        tool_call_id: tc_id.clone(),
-                                        delta: piece.to_string(),
-                                    });
+                                    emit(
+                                        &event_tx,
+                                        StreamEvent::ToolInputDelta {
+                                            tool_call_id: tc_id.clone(),
+                                            delta: piece.to_string(),
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -340,18 +384,24 @@ pub async fn parse_claude_sse(
                             let input: serde_json::Value = if tool_json_buf.is_empty() {
                                 serde_json::Value::Object(Default::default())
                             } else {
-                                serde_json::from_str(&tool_json_buf).unwrap_or(serde_json::Value::Object(Default::default()))
+                                serde_json::from_str(&tool_json_buf)
+                                    .unwrap_or(serde_json::Value::Object(Default::default()))
                             };
                             block["input"] = input.clone();
                             tool_json_buf.clear();
 
-                            if let (Some(tc_id), Some(name)) = (current_tool_call_id.take(), current_tool_name.take()) {
+                            if let (Some(tc_id), Some(name)) =
+                                (current_tool_call_id.take(), current_tool_name.take())
+                            {
                                 let args_str = serde_json::to_string(&input).unwrap_or_default();
-                                emit(&event_tx, StreamEvent::ToolInputAvailable {
-                                    tool_call_id: tc_id,
-                                    name,
-                                    args: args_str,
-                                });
+                                emit(
+                                    &event_tx,
+                                    StreamEvent::ToolInputAvailable {
+                                        tool_call_id: tc_id,
+                                        name,
+                                        args: args_str,
+                                    },
+                                );
                             }
                         } else if block["type"] == "text" {
                             if let Some(id) = current_text_id.take() {
@@ -372,11 +422,26 @@ pub async fn parse_claude_sse(
                         let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                         let current = usage.unwrap_or_default();
                         usage = Some(TokenUsage {
-                            input_tokens: if input > 0 { input } else { current.input_tokens },
-                            output_tokens: if output > 0 { output } else { current.output_tokens },
+                            input_tokens: if input > 0 {
+                                input
+                            } else {
+                                current.input_tokens
+                            },
+                            output_tokens: if output > 0 {
+                                output
+                            } else {
+                                current.output_tokens
+                            },
                             total_tokens: Some(
-                                (if input > 0 { input } else { current.input_tokens })
-                                + (if output > 0 { output } else { current.output_tokens })
+                                (if input > 0 {
+                                    input
+                                } else {
+                                    current.input_tokens
+                                }) + (if output > 0 {
+                                    output
+                                } else {
+                                    current.output_tokens
+                                }),
                             ),
                         });
                     }
@@ -403,11 +468,14 @@ pub async fn parse_claude_sse(
         emit(&event_tx, StreamEvent::ReasoningEnd { id });
     }
     if let (Some(tc_id), Some(name)) = (current_tool_call_id.take(), current_tool_name.take()) {
-        emit(&event_tx, StreamEvent::ToolInputAvailable {
-            tool_call_id: tc_id,
-            name,
-            args: tool_json_buf.clone(),
-        });
+        emit(
+            &event_tx,
+            StreamEvent::ToolInputAvailable {
+                tool_call_id: tc_id,
+                name,
+                args: tool_json_buf.clone(),
+            },
+        );
     }
 
     if got_message_stop {
@@ -469,19 +537,21 @@ pub async fn parse_openai_sse(
 
     // Tool call accumulation (chat_completions format sends tool_calls in the delta)
     // Keyed by tool_call index
-    let mut tool_calls: std::collections::HashMap<u32, OpenAIToolCall> = std::collections::HashMap::new();
+    let mut tool_calls: std::collections::HashMap<u32, OpenAIToolCall> =
+        std::collections::HashMap::new();
     // Track which tool calls have already been dispatched via speculative_tx
     let mut tool_call_dispatched: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
     loop {
-        let chunk = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            stream.next(),
-        )
-        .await
-        .map_err(|_| LlmError::StreamError(
-            format!("OpenAI SSE stream timed out (no data for {}s)", timeout_secs)
-        ))?;
+        let chunk =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), stream.next())
+                .await
+                .map_err(|_| {
+                    LlmError::StreamError(format!(
+                        "OpenAI SSE stream timed out (no data for {}s)",
+                        timeout_secs
+                    ))
+                })?;
         let chunk = match chunk {
             Some(c) => c.map_err(|e| LlmError::StreamError(e.to_string()))?,
             None => break,
@@ -491,10 +561,12 @@ pub async fn parse_openai_sse(
         while let Some(newline) = buffer.find('\n') {
             let line = buffer[..newline].trim().to_string();
             buffer = buffer[newline + 1..].to_string();
-            if line.is_empty() || !line.starts_with("data:") { continue; }
+            if line.is_empty() || !line.starts_with("data:") {
+                continue;
+            }
 
             let data_str = line[5..].trim().to_string();
-            if data_str == "[DONE]" { 
+            if data_str == "[DONE]" {
                 // Flush open blocks and return cleanly
                 if let Some(id) = current_text_id.take() {
                     emit(&event_tx, StreamEvent::TextEnd { id });
@@ -506,18 +578,28 @@ pub async fn parse_openai_sse(
                     content_blocks.push(ContentBlock::text(std::mem::take(&mut current_text)));
                 }
                 if !current_thinking.is_empty() {
-                    content_blocks.push(ContentBlock::Thinking { thinking: std::mem::take(&mut current_thinking), signature: None });
+                    content_blocks.push(ContentBlock::Thinking {
+                        thinking: std::mem::take(&mut current_thinking),
+                        signature: None,
+                    });
                 }
                 // Emit ToolInputAvailable for any unclosed tool calls
                 for idx in 0..tool_calls.len() as u32 {
                     if let Some(t) = tool_calls.get(&idx) {
-                        if t.available_emitted { continue; }
-                        let parsed_args: serde_json::Value = serde_json::from_str(&t.args).unwrap_or_else(|_| serde_json::Value::String(t.args.clone()));
-                        emit(&event_tx, StreamEvent::ToolInputAvailable {
-                            tool_call_id: t.id.clone(),
-                            name: t.name.clone(),
-                            args: serde_json::to_string(&parsed_args).unwrap_or_else(|_| t.args.clone()),
-                        });
+                        if t.available_emitted {
+                            continue;
+                        }
+                        let parsed_args: serde_json::Value = serde_json::from_str(&t.args)
+                            .unwrap_or_else(|_| serde_json::Value::String(t.args.clone()));
+                        emit(
+                            &event_tx,
+                            StreamEvent::ToolInputAvailable {
+                                tool_call_id: t.id.clone(),
+                                name: t.name.clone(),
+                                args: serde_json::to_string(&parsed_args)
+                                    .unwrap_or_else(|_| t.args.clone()),
+                            },
+                        );
                         content_blocks.push(ContentBlock::ToolUse {
                             id: t.id.clone(),
                             name: t.name.clone(),
@@ -553,18 +635,27 @@ pub async fn parse_openai_sse(
                                             if !before.is_empty() {
                                                 current_text.push_str(before);
                                                 if let Some(ref id) = current_text_id {
-                                                    emit(&event_tx, StreamEvent::TextDelta {
-                                                        id: id.clone(),
-                                                        text: before.to_string(),
-                                                    });
+                                                    emit(
+                                                        &event_tx,
+                                                        StreamEvent::TextDelta {
+                                                            id: id.clone(),
+                                                            text: before.to_string(),
+                                                        },
+                                                    );
                                                 } else {
                                                     let id = next_id("t");
                                                     current_text_id = Some(id.clone());
-                                                    emit(&event_tx, StreamEvent::TextStart { id: id.clone() });
-                                                    emit(&event_tx, StreamEvent::TextDelta {
-                                                        id,
-                                                        text: before.to_string(),
-                                                    });
+                                                    emit(
+                                                        &event_tx,
+                                                        StreamEvent::TextStart { id: id.clone() },
+                                                    );
+                                                    emit(
+                                                        &event_tx,
+                                                        StreamEvent::TextDelta {
+                                                            id,
+                                                            text: before.to_string(),
+                                                        },
+                                                    );
                                                 }
                                             }
                                             if let Some(end) = tag {
@@ -580,9 +671,13 @@ pub async fn parse_openai_sse(
                                                 if current_reasoning_id.is_none() {
                                                     let id = next_id("r");
                                                     current_reasoning_id = Some(id.clone());
-                                                    emit(&event_tx, StreamEvent::ReasoningStart { id });
+                                                    emit(
+                                                        &event_tx,
+                                                        StreamEvent::ReasoningStart { id },
+                                                    );
                                                 }
-                                                let open_len = find_open_tag_len(&remaining[start..]);
+                                                let open_len =
+                                                    find_open_tag_len(&remaining[start..]);
                                                 remaining = &remaining[start + open_len..];
                                             }
                                         }
@@ -602,10 +697,13 @@ pub async fn parse_openai_sse(
                                                 if !think.is_empty() {
                                                     current_thinking.push_str(think);
                                                     if let Some(ref id) = current_reasoning_id {
-                                                        emit(&event_tx, StreamEvent::ReasoningDelta {
-                                                            id: id.clone(),
-                                                            text: think.to_string(),
-                                                        });
+                                                        emit(
+                                                            &event_tx,
+                                                            StreamEvent::ReasoningDelta {
+                                                                id: id.clone(),
+                                                                text: think.to_string(),
+                                                            },
+                                                        );
                                                     }
                                                 }
                                                 in_thinking_tag = false;
@@ -613,10 +711,13 @@ pub async fn parse_openai_sse(
                                             } else {
                                                 current_thinking.push_str(remaining);
                                                 if let Some(ref id) = current_reasoning_id {
-                                                    emit(&event_tx, StreamEvent::ReasoningDelta {
-                                                        id: id.clone(),
-                                                        text: remaining.to_string(),
-                                                    });
+                                                    emit(
+                                                        &event_tx,
+                                                        StreamEvent::ReasoningDelta {
+                                                            id: id.clone(),
+                                                            text: remaining.to_string(),
+                                                        },
+                                                    );
                                                 }
                                                 break;
                                             }
@@ -626,13 +727,19 @@ pub async fn parse_openai_sse(
                                             if current_text_id.is_none() {
                                                 let id = next_id("t");
                                                 current_text_id = Some(id.clone());
-                                                emit(&event_tx, StreamEvent::TextStart { id: id.clone() });
+                                                emit(
+                                                    &event_tx,
+                                                    StreamEvent::TextStart { id: id.clone() },
+                                                );
                                             }
                                             if let Some(ref id) = current_text_id {
-                                                emit(&event_tx, StreamEvent::TextDelta {
-                                                    id: id.clone(),
-                                                    text: remaining.to_string(),
-                                                });
+                                                emit(
+                                                    &event_tx,
+                                                    StreamEvent::TextDelta {
+                                                        id: id.clone(),
+                                                        text: remaining.to_string(),
+                                                    },
+                                                );
                                             }
                                             break;
                                         }
@@ -648,10 +755,13 @@ pub async fn parse_openai_sse(
                                                 if !think.is_empty() {
                                                     current_thinking.push_str(think);
                                                     if let Some(ref id) = current_reasoning_id {
-                                                        emit(&event_tx, StreamEvent::ReasoningDelta {
-                                                            id: id.clone(),
-                                                            text: think.to_string(),
-                                                        });
+                                                        emit(
+                                                            &event_tx,
+                                                            StreamEvent::ReasoningDelta {
+                                                                id: id.clone(),
+                                                                text: think.to_string(),
+                                                            },
+                                                        );
                                                     }
                                                 }
                                                 in_thinking_tag = false;
@@ -660,10 +770,13 @@ pub async fn parse_openai_sse(
                                             }
                                             current_thinking.push_str(remaining);
                                             if let Some(ref id) = current_reasoning_id {
-                                                emit(&event_tx, StreamEvent::ReasoningDelta {
-                                                    id: id.clone(),
-                                                    text: remaining.to_string(),
-                                                });
+                                                emit(
+                                                    &event_tx,
+                                                    StreamEvent::ReasoningDelta {
+                                                        id: id.clone(),
+                                                        text: remaining.to_string(),
+                                                    },
+                                                );
                                             }
                                             break;
                                         }
@@ -672,7 +785,9 @@ pub async fn parse_openai_sse(
                             }
                         }
 
-                        if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                        if let Some(reasoning) =
+                            delta.get("reasoning_content").and_then(|v| v.as_str())
+                        {
                             if !reasoning.is_empty() {
                                 current_thinking.push_str(reasoning);
                                 if current_reasoning_id.is_none() {
@@ -681,24 +796,31 @@ pub async fn parse_openai_sse(
                                     emit(&event_tx, StreamEvent::ReasoningStart { id: id.clone() });
                                 }
                                 if let Some(ref id) = current_reasoning_id {
-                                    emit(&event_tx, StreamEvent::ReasoningDelta {
-                                        id: id.clone(),
-                                        text: reasoning.to_string(),
-                                    });
+                                    emit(
+                                        &event_tx,
+                                        StreamEvent::ReasoningDelta {
+                                            id: id.clone(),
+                                            text: reasoning.to_string(),
+                                        },
+                                    );
                                 }
                             }
                         }
 
                         if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                             for tc in tcs {
-                                let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                let idx =
+                                    tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
                                 if let Some(tc_id) = tc.get("id").and_then(|v| v.as_str()) {
                                     if !tc_id.is_empty() {
-                                        tool_calls.entry(idx).or_insert_with(|| OpenAIToolCall {
-                                            id: tc_id.to_string(),
-                                            ..Default::default()
-                                        }).id = tc_id.to_string();
+                                        tool_calls
+                                            .entry(idx)
+                                            .or_insert_with(|| OpenAIToolCall {
+                                                id: tc_id.to_string(),
+                                                ..Default::default()
+                                            })
+                                            .id = tc_id.to_string();
                                     }
                                 }
 
@@ -717,14 +839,19 @@ pub async fn parse_openai_sse(
                                                 let name_owned = name.to_string();
                                                 entry.name = name_owned.clone();
                                                 entry.started = true;
-                                                emit(&event_tx, StreamEvent::ToolInputStart {
-                                                    tool_call_id: tc_id,
-                                                    name: name_owned,
-                                                });
+                                                emit(
+                                                    &event_tx,
+                                                    StreamEvent::ToolInputStart {
+                                                        tool_call_id: tc_id,
+                                                        name: name_owned,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
-                                    if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+                                    if let Some(args) =
+                                        func.get("arguments").and_then(|v| v.as_str())
+                                    {
                                         if !args.is_empty() {
                                             let entry = tool_calls.entry(idx).or_default();
                                             entry.args.push_str(args);
@@ -737,30 +864,50 @@ pub async fn parse_openai_sse(
                                             };
                                             if !entry.started {
                                                 entry.started = true;
-                                                emit(&event_tx, StreamEvent::ToolInputStart {
-                                                    tool_call_id: tc_id.clone(),
-                                                    name: String::new(),
-                                                });
+                                                emit(
+                                                    &event_tx,
+                                                    StreamEvent::ToolInputStart {
+                                                        tool_call_id: tc_id.clone(),
+                                                        name: String::new(),
+                                                    },
+                                                );
                                             }
-                                            emit(&event_tx, StreamEvent::ToolInputDelta {
-                                                tool_call_id: tc_id,
-                                                delta: args.to_string(),
-                                            });
+                                            emit(
+                                                &event_tx,
+                                                StreamEvent::ToolInputDelta {
+                                                    tool_call_id: tc_id,
+                                                    delta: args.to_string(),
+                                                },
+                                            );
                                         }
                                     }
 
                                     if let Some(ref spec_tx) = speculative_tx {
                                         if !tool_call_dispatched.contains(&idx) {
-                                            let tc_name = tool_calls.get(&idx).map(|t| t.name.as_str()).unwrap_or("");
+                                            let tc_name = tool_calls
+                                                .get(&idx)
+                                                .map(|t| t.name.as_str())
+                                                .unwrap_or("");
                                             if !tc_name.is_empty() {
-                                                let tc_args = tool_calls.get(&idx).map(|t| t.args.as_str()).unwrap_or("");
-                                                if serde_json::from_str::<serde_json::Value>(tc_args).is_ok() {
-                                                    let tc_id = tool_calls.get(&idx).map(|t| t.id.as_str()).unwrap_or("");
-                                                    let _ = spec_tx.send(StreamEvent::ToolCallReady {
-                                                        id: tc_id.to_string(),
-                                                        name: tc_name.to_string(),
-                                                        args: tc_args.to_string(),
-                                                    });
+                                                let tc_args = tool_calls
+                                                    .get(&idx)
+                                                    .map(|t| t.args.as_str())
+                                                    .unwrap_or("");
+                                                if serde_json::from_str::<serde_json::Value>(
+                                                    tc_args,
+                                                )
+                                                .is_ok()
+                                                {
+                                                    let tc_id = tool_calls
+                                                        .get(&idx)
+                                                        .map(|t| t.id.as_str())
+                                                        .unwrap_or("");
+                                                    let _ =
+                                                        spec_tx.send(StreamEvent::ToolCallReady {
+                                                            id: tc_id.to_string(),
+                                                            name: tc_name.to_string(),
+                                                            args: tc_args.to_string(),
+                                                        });
                                                     tool_call_dispatched.insert(idx);
                                                 }
                                             }
@@ -774,9 +921,15 @@ pub async fn parse_openai_sse(
             }
 
             if let Some(u) = evt.get("usage").and_then(|v| v.as_object()) {
-                tracing::warn!("[oz-llm] usage raw (openai): {}", serde_json::to_string(u).unwrap_or_default());
+                tracing::warn!(
+                    "[oz-llm] usage raw (openai): {}",
+                    serde_json::to_string(u).unwrap_or_default()
+                );
                 let prompt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let completion = u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                let completion = u
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 let total = u.get("total_tokens").and_then(|v| v.as_u64());
                 if prompt > 0 || completion > 0 || total.is_some() {
                     usage = Some(TokenUsage {
@@ -785,9 +938,19 @@ pub async fn parse_openai_sse(
                         total_tokens: total,
                     });
                 }
-            } else if let Some(resp_usage) = evt.get("response").and_then(|v| v.get("usage")).and_then(|v| v.as_object()) {
-                let prompt = resp_usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let completion = resp_usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            } else if let Some(resp_usage) = evt
+                .get("response")
+                .and_then(|v| v.get("usage"))
+                .and_then(|v| v.as_object())
+            {
+                let prompt = resp_usage
+                    .get("input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let completion = resp_usage
+                    .get("output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 let total = resp_usage.get("total_tokens").and_then(|v| v.as_u64());
                 if prompt > 0 || completion > 0 || total.is_some() {
                     usage = Some(TokenUsage {
@@ -812,7 +975,10 @@ pub async fn parse_openai_sse(
         content_blocks.push(ContentBlock::text(current_text));
     }
     if !current_thinking.is_empty() {
-        content_blocks.push(ContentBlock::Thinking { thinking: current_thinking, signature: None });
+        content_blocks.push(ContentBlock::Thinking {
+            thinking: current_thinking,
+            signature: None,
+        });
     }
 
     // Build ContentBlock::ToolUse from accumulated tool call data and emit
@@ -824,14 +990,16 @@ pub async fn parse_openai_sse(
             }
             let raw_args = t.args.clone();
             let tc_id = t.id.clone();
-            let parsed_args: serde_json::Value = serde_json::from_str(&raw_args).unwrap_or_else(|_| {
-                serde_json::Value::String(raw_args.clone())
-            });
-            emit(&event_tx, StreamEvent::ToolInputAvailable {
-                tool_call_id: tc_id,
-                name: t.name.clone(),
-                args: serde_json::to_string(&parsed_args).unwrap_or_else(|_| raw_args.clone()),
-            });
+            let parsed_args: serde_json::Value = serde_json::from_str(&raw_args)
+                .unwrap_or_else(|_| serde_json::Value::String(raw_args.clone()));
+            emit(
+                &event_tx,
+                StreamEvent::ToolInputAvailable {
+                    tool_call_id: tc_id,
+                    name: t.name.clone(),
+                    args: serde_json::to_string(&parsed_args).unwrap_or_else(|_| raw_args.clone()),
+                },
+            );
             content_blocks.push(ContentBlock::ToolUse {
                 id: t.id.clone(),
                 name: t.name.clone(),

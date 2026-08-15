@@ -4,7 +4,9 @@ use oz_mcp::{McpDiscovery, McpManager};
 fn test_multi_server_config() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("servers.toml");
-    std::fs::write(&config_path, r#"
+    std::fs::write(
+        &config_path,
+        r#"
 [[servers]]
 name = "server-a"
 command = "echo"
@@ -22,7 +24,9 @@ name = "disabled-server"
 command = "echo"
 args = ["disabled"]
 enabled = false
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let mut discovery = McpDiscovery::new(&config_path);
     let count = discovery.load().unwrap();

@@ -40,7 +40,9 @@ impl ScheduledTask for SessionCleanup {
 
     async fn execute(&self, ctx: &TaskContext) -> Result<(), TaskError> {
         let working_dir = ctx.working_dir.as_deref().unwrap_or(".");
-        let sessions_path = PathBuf::from(working_dir).join("openzen").join("sessions.json");
+        let sessions_path = PathBuf::from(working_dir)
+            .join("openzen")
+            .join("sessions.json");
 
         if !sessions_path.exists() {
             return Ok(());
@@ -57,12 +59,18 @@ impl ScheduledTask for SessionCleanup {
         let mut removed = 0u32;
 
         if let Some(map) = sessions.as_object_mut() {
-            let keys_to_remove: Vec<String> = map.iter()
+            let keys_to_remove: Vec<String> = map
+                .iter()
                 .filter_map(|(id, sess)| {
-                    let created = sess.get("info").and_then(|i| i.get("created_at"))
+                    let created = sess
+                        .get("info")
+                        .and_then(|i| i.get("created_at"))
                         .and_then(|c| c.as_str())
                         .and_then(|c| chrono::DateTime::parse_from_rfc3339(c).ok());
-                    let status = sess.get("status").and_then(|s| s.as_str()).unwrap_or("idle");
+                    let status = sess
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("idle");
                     let is_idle = status == "idle" || status == "stopped";
                     match created {
                         Some(d) if d < threshold && is_idle => Some(id.clone()),

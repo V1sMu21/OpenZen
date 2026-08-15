@@ -106,7 +106,8 @@ impl Skill {
         }
         s.push_str(&format!(
             "*Use `skill_mcp_search(\"{}\")` to load full content ({} chars).*\n",
-            self.name, self.content.len()
+            self.name,
+            self.content.len()
         ));
         s
     }
@@ -247,7 +248,9 @@ fn parse_yaml_frontmatter(content: &str) -> (Option<String>, Option<String>, Opt
     // Find the closing `---` line
     let after_open = trimmed.strip_prefix("---").unwrap_or("");
     // Skip optional newline after `---`
-    let after_open = after_open.trim_start_matches('\n').trim_start_matches("\r\n");
+    let after_open = after_open
+        .trim_start_matches('\n')
+        .trim_start_matches("\r\n");
 
     let close_pos = after_open.find("\n---");
     let (yaml_block, body) = match close_pos {
@@ -304,7 +307,9 @@ fn frontmatter_tags_from(content: &str) -> Option<Vec<String>> {
         return None;
     }
     let after_open = trimmed.strip_prefix("---").unwrap_or("");
-    let after_open = after_open.trim_start_matches('\n').trim_start_matches("\r\n");
+    let after_open = after_open
+        .trim_start_matches('\n')
+        .trim_start_matches("\r\n");
     let close_pos = after_open.find("\n---")?;
     let yaml_block = &after_open[..close_pos];
 
@@ -487,11 +492,8 @@ impl SkillManager {
             skill.metadata = meta;
             skill.quality = skill.metadata.quality_score;
         } else {
-            skill.metadata = SkillMcpMetadata::new(
-                &skill.name,
-                &skill.description,
-                skill.tags.clone(),
-            );
+            skill.metadata =
+                SkillMcpMetadata::new(&skill.name, &skill.description, skill.tags.clone());
             let _ = self.meta_store.save("skills", &skill.name, &skill.metadata);
         }
         if let Some(existing) = self.skills.iter_mut().find(|s| s.name == skill.name) {
@@ -520,9 +522,7 @@ impl SkillManager {
             .filter(|(_, score)| *score > 0.0)
             .collect();
 
-        scored.sort_by(|(_, a), (_, b)| {
-            b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
         scored.into_iter().map(|(s, _)| s).collect()
     }
@@ -534,7 +534,8 @@ impl SkillManager {
             return String::new();
         }
 
-        let mut snippet = String::from("\n\n## 🔴 EXECUTION ORDER — perform these steps with tools NOW\n\n");
+        let mut snippet =
+            String::from("\n\n## 🔴 EXECUTION ORDER — perform these steps with tools NOW\n\n");
         snippet.push_str("The following skill matches your task. You MUST execute every step using your tools — do NOT describe the steps, perform them.\n\n");
 
         for (i, skill) in matched.iter().take(max_skills).enumerate() {
@@ -717,7 +718,8 @@ description: Senior UI/UX Engineer
 ---
 
 # Body
-"#.to_string();
+"#
+        .to_string();
         let path = PathBuf::from("/fake/skills/taste-skill/SKILL.md");
         let skill = parse_skill_md(&path, &md).unwrap();
         // Searching for "taste" should now match via the YAML name field,
@@ -858,7 +860,11 @@ Tags: web, search
         let dir = tempfile::tempdir().unwrap();
         let skills_dir = dir.path().join("skills").join("test_skill");
         std::fs::create_dir_all(&skills_dir).unwrap();
-        std::fs::write(skills_dir.join("SKILL.md"), "# test_skill — Test\nTags: test\n\n## Procedure\n1. Do\n").unwrap();
+        std::fs::write(
+            skills_dir.join("SKILL.md"),
+            "# test_skill — Test\nTags: test\n\n## Procedure\n1. Do\n",
+        )
+        .unwrap();
 
         let mut mgr = SkillManager::new(dir.path());
 
@@ -896,11 +902,19 @@ Tags: web, search
         assert_eq!(mgr.len(), 1);
 
         // SKILL.md should exist on disk
-        let skill_md = dir.path().join("skills").join("registered_skill").join("SKILL.md");
+        let skill_md = dir
+            .path()
+            .join("skills")
+            .join("registered_skill")
+            .join("SKILL.md");
         assert!(skill_md.exists());
 
         // meta.toml should exist
-        let meta = dir.path().join("skills").join("registered_skill").join("meta.toml");
+        let meta = dir
+            .path()
+            .join("skills")
+            .join("registered_skill")
+            .join("meta.toml");
         assert!(meta.exists());
     }
 

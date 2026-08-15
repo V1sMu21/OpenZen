@@ -39,10 +39,7 @@ pub async fn serve(state: SharedMcpState) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_message(
-    state: &SharedMcpState,
-    msg: JsonRpcMessage,
-) -> Option<JsonRpcMessage> {
+async fn handle_message(state: &SharedMcpState, msg: JsonRpcMessage) -> Option<JsonRpcMessage> {
     let method = msg.method.as_deref().unwrap_or("");
     let id = msg.id.unwrap_or(0);
 
@@ -50,7 +47,10 @@ async fn handle_message(
         "tools/list" => {
             let s = state.lock().await;
             let tools = s.tool_definitions();
-            Some(JsonRpcMessage::success(id, serde_json::json!({ "tools": tools })))
+            Some(JsonRpcMessage::success(
+                id,
+                serde_json::json!({ "tools": tools }),
+            ))
         }
         "tools/call" => {
             let params = msg.params.unwrap_or_default();
@@ -58,14 +58,18 @@ async fn handle_message(
             let args = params.get("arguments").cloned().unwrap_or_default();
             let s = state.lock().await;
             match s.call_tool(name, args).await {
-                Ok(result) => Some(JsonRpcMessage::success(id, serde_json::json!({
-                    "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}]
-                }))),
+                Ok(result) => Some(JsonRpcMessage::success(
+                    id,
+                    serde_json::json!({
+                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}]
+                    }),
+                )),
                 Err(e) => Some(JsonRpcMessage::error(id, -1, e)),
             }
         }
-        "initialize" => {
-            Some(JsonRpcMessage::success(id, serde_json::json!({
+        "initialize" => Some(JsonRpcMessage::success(
+            id,
+            serde_json::json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
                     "tools": {}
@@ -74,16 +78,14 @@ async fn handle_message(
                     "name": "openzen",
                     "version": "0.1.0"
                 }
-            })))
-        }
-        "ping" => {
-            Some(JsonRpcMessage::success(id, serde_json::json!({})))
-        }
-        "notifications/initialized" => {
-            None
-        }
-        _ => {
-            Some(JsonRpcMessage::error(id, -32601, format!("method not found: {method}")))
-        }
+            }),
+        )),
+        "ping" => Some(JsonRpcMessage::success(id, serde_json::json!({}))),
+        "notifications/initialized" => None,
+        _ => Some(JsonRpcMessage::error(
+            id,
+            -32601,
+            format!("method not found: {method}"),
+        )),
     }
 }

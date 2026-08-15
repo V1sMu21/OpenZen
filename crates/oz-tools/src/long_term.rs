@@ -12,10 +12,11 @@ pub struct LongTermTool;
 
 #[async_trait]
 impl ToolHandler for LongTermTool {
-    fn name(&self) -> String { "long_term".to_string() }
+    fn name(&self) -> String {
+        "long_term".to_string()
+    }
     fn description(&self) -> String {
-        "Record important information into long-term memory (facts, SOPs, history). "
-            .to_string()
+        "Record important information into long-term memory (facts, SOPs, history). ".to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
@@ -35,8 +36,14 @@ impl ToolHandler for LongTermTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let data = args["data"].as_str().ok_or_else(|| ToolError::Custom("missing data".into()))?;
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let data = args["data"]
+            .as_str()
+            .ok_or_else(|| ToolError::Custom("missing data".into()))?;
         let category_str = args["category"].as_str().unwrap_or("fact");
 
         let skill_mcp_dir = ctx.skill_mcp_dir.as_deref().unwrap_or(&ctx.working_dir);
@@ -48,7 +55,9 @@ impl ToolHandler for LongTermTool {
         match category_str {
             "sop" => {
                 let tools: Vec<(String, serde_json::Value)> = Vec::new();
-                store.sops.crystallise(data, data, &tools, None)
+                store
+                    .sops
+                    .crystallise(data, data, &tools, None)
                     .map_err(|e| ToolError::Custom(e.to_string()))?;
 
                 Ok(ToolOutput::success_with_prompt(
@@ -57,7 +66,9 @@ impl ToolHandler for LongTermTool {
                 ))
             }
             "history" => {
-                store.archive_session(data).await
+                store
+                    .archive_session(data)
+                    .await
                     .map_err(|e| ToolError::Custom(e.to_string()))?;
 
                 Ok(ToolOutput::success_with_prompt(
@@ -66,7 +77,9 @@ impl ToolHandler for LongTermTool {
                 ))
             }
             _ => {
-                store.distill_memory(data, &oz_core_types::SkillMcpType::Fact).await
+                store
+                    .distill_memory(data, &oz_core_types::SkillMcpType::Fact)
+                    .await
                     .map_err(|e| ToolError::Custom(e.to_string()))?;
 
                 Ok(ToolOutput::success_with_prompt(
@@ -98,26 +111,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_long_term_fact() {
-        let result = LongTermTool.execute(
-            serde_json::json!({"data": "important fact", "category": "fact"}),
-            &ctx(),
-        ).await.unwrap();
+        let result = LongTermTool
+            .execute(
+                serde_json::json!({"data": "important fact", "category": "fact"}),
+                &ctx(),
+            )
+            .await
+            .unwrap();
         assert_eq!(result.data["status"], "memorized");
         assert_eq!(result.data["category"], "fact");
     }
 
     #[tokio::test]
     async fn test_long_term_history() {
-        let result = LongTermTool.execute(
-            serde_json::json!({"data": "session log content", "category": "history"}),
-            &ctx(),
-        ).await.unwrap();
+        let result = LongTermTool
+            .execute(
+                serde_json::json!({"data": "session log content", "category": "history"}),
+                &ctx(),
+            )
+            .await
+            .unwrap();
         assert_eq!(result.data["status"], "memorized");
     }
 
     #[tokio::test]
     async fn test_long_term_missing_data() {
-        let result = LongTermTool.execute(serde_json::json!({"category": "fact"}), &ctx()).await;
+        let result = LongTermTool
+            .execute(serde_json::json!({"category": "fact"}), &ctx())
+            .await;
         assert!(result.is_err());
     }
 }

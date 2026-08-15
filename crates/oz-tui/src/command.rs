@@ -8,8 +8,10 @@
 use crate::app::App;
 
 const COMMANDS: &[&str] = &[
-    "/help", "/h",
-    "/sessions", "/s",
+    "/help",
+    "/h",
+    "/sessions",
+    "/s",
     "/session",
     "/rename",
     "/delete",
@@ -18,7 +20,8 @@ const COMMANDS: &[&str] = &[
     "/agent",
     "/clear",
     "/export",
-    "/exit", "/quit",
+    "/exit",
+    "/quit",
 ];
 
 /// Update `app.cmd_suggestions` based on what the user has typed
@@ -31,9 +34,7 @@ pub fn update_suggestions(app: &mut App) {
     } else {
         app.cmd_suggestions = COMMANDS
             .iter()
-            .filter(|cmd| {
-                cmd.contains(&typed) || cmd.trim_start_matches('/').contains(&typed)
-            })
+            .filter(|cmd| cmd.contains(&typed) || cmd.trim_start_matches('/').contains(&typed))
             .copied()
             .collect();
     }
@@ -96,7 +97,9 @@ pub async fn handle(app: &mut App, input: &str) {
                         s.message_count
                     ));
                 }
-                msg.push_str("\n\nUse /session <number or name> to switch, /session new to create.");
+                msg.push_str(
+                    "\n\nUse /session <number or name> to switch, /session new to create.",
+                );
                 app.add_system(&msg);
             }
             app.status = "type to chat · / for commands · /exit to quit".into();
@@ -186,7 +189,11 @@ pub async fn handle(app: &mut App, input: &str) {
                         } else {
                             let mut msg = "Available agents:".to_string();
                             for name in &names {
-                                let marker = if Some(name) == app.current_agent.as_ref() { "  ● " } else { "    " };
+                                let marker = if Some(name) == app.current_agent.as_ref() {
+                                    "  ● "
+                                } else {
+                                    "    "
+                                };
                                 msg.push_str(&format!("\n{}{}", marker, name));
                             }
                             msg.push_str("\n\nUse /agent <name> to select an agent.");
@@ -206,10 +213,16 @@ pub async fn handle(app: &mut App, input: &str) {
                         }
                         app.add_system(&format!("Agent set to: {}.", agent.name));
                         if !agent.config.use_tools.as_ref().is_none_or(|s| s.is_empty()) {
-                            app.add_system(&format!("  Tools: {}", agent.config.use_tools.unwrap_or_default()));
+                            app.add_system(&format!(
+                                "  Tools: {}",
+                                agent.config.use_tools.unwrap_or_default()
+                            ));
                         }
                         if !agent.config.documents.is_empty() {
-                            app.add_system(&format!("  Documents: {}", agent.config.documents.join(", ")));
+                            app.add_system(&format!(
+                                "  Documents: {}",
+                                agent.config.documents.join(", ")
+                            ));
                         }
                     }
                     Err(e) => app.add_system(&format!("Failed to load agent '{}': {}", arg, e)),

@@ -36,7 +36,9 @@ pub struct WebJsTool {
 
 impl WebJsTool {
     pub fn new() -> Self {
-        WebJsTool { browser: Mutex::new(None) }
+        WebJsTool {
+            browser: Mutex::new(None),
+        }
     }
 
     fn get_browser(&self) -> BrowserClient {
@@ -49,13 +51,19 @@ impl WebJsTool {
 }
 
 impl Default for WebJsTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
 impl ToolHandler for WebJsTool {
-    fn name(&self) -> String { "web_js".to_string() }
-    fn description(&self) -> String { "Execute JavaScript in the current browser page and return the result.".to_string() }
+    fn name(&self) -> String {
+        "web_js".to_string()
+    }
+    fn description(&self) -> String {
+        "Execute JavaScript in the current browser page and return the result.".to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -69,11 +77,17 @@ impl ToolHandler for WebJsTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let code = args["code"].as_str().ok_or_else(|| ToolError::Custom("missing code".into()))?;
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let code = args["code"]
+            .as_str()
+            .ok_or_else(|| ToolError::Custom("missing code".into()))?;
         if !is_js_safe(code) {
             return Ok(ToolOutput::bad_json(
-                "web_js: blocked pattern detected (data exfiltration risk). Operation denied."
+                "web_js: blocked pattern detected (data exfiltration risk). Operation denied.",
             ));
         }
 
@@ -94,7 +108,9 @@ mod tests {
     #[tokio::test]
     async fn test_web_js_missing_code() {
         let tool = WebJsTool::new();
-        let result = tool.execute(serde_json::json!({}), &ToolContext::default()).await;
+        let result = tool
+            .execute(serde_json::json!({}), &ToolContext::default())
+            .await;
         assert!(result.is_err());
     }
 }

@@ -10,8 +10,12 @@ pub struct AskUserTool;
 
 #[async_trait]
 impl ToolHandler for AskUserTool {
-    fn name(&self) -> String { "ask_user".to_string() }
-    fn description(&self) -> String { "Ask user a question. Pauses until user responds. — it does NOT treat the reply as a brand-new conversation.".to_string() }
+    fn name(&self) -> String {
+        "ask_user".to_string()
+    }
+    fn description(&self) -> String {
+        "Ask user a question. Pauses until user responds. — it does NOT treat the reply as a brand-new conversation.".to_string()
+    }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -30,9 +34,14 @@ impl ToolHandler for AskUserTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let question = args["question"].as_str().unwrap_or("");
-        let candidates = args.get("candidates")
+        let candidates = args
+            .get("candidates")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
@@ -59,7 +68,15 @@ mod tests {
     use oz_core_types::ToolContext as TC;
 
     fn ctx() -> TC {
-        TC { working_dir: "/tmp".into(), assets_dir: "/tmp".into(), script_dir: "/tmp".into(), lang: "en".into(), skill_mcp_dir: None, harness_dir: None, session_id: String::new() }
+        TC {
+            working_dir: "/tmp".into(),
+            assets_dir: "/tmp".into(),
+            script_dir: "/tmp".into(),
+            lang: "en".into(),
+            skill_mcp_dir: None,
+            harness_dir: None,
+            session_id: String::new(),
+        }
     }
 
     #[tokio::test]
@@ -76,7 +93,10 @@ mod tests {
     #[tokio::test]
     async fn test_ask_user_with_candidates() {
         let r = AskUserTool
-            .execute(serde_json::json!({"question": "choose?", "candidates": ["a", "b"]}), &ctx())
+            .execute(
+                serde_json::json!({"question": "choose?", "candidates": ["a", "b"]}),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert_eq!(r.data["data"]["candidates"].as_array().unwrap().len(), 2);
@@ -84,7 +104,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_ask_user_missing_question_does_not_panic() {
-        let r = AskUserTool.execute(serde_json::json!({}), &ctx()).await.unwrap();
+        let r = AskUserTool
+            .execute(serde_json::json!({}), &ctx())
+            .await
+            .unwrap();
         assert_eq!(r.data["status"], "INTERRUPT");
         assert_eq!(r.data["data"]["question"], "");
     }
@@ -105,7 +128,10 @@ mod tests {
             .execute(serde_json::json!({"question": "continue?"}), &ctx())
             .await
             .unwrap();
-        assert!(!r.should_exit, "ask_user must keep the loop alive so the user reply can resume the same run");
+        assert!(
+            !r.should_exit,
+            "ask_user must keep the loop alive so the user reply can resume the same run"
+        );
     }
 
     #[tokio::test]

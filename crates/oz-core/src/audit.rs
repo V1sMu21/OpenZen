@@ -65,7 +65,13 @@ impl AuditLog {
         decision: &str,
     ) {
         let args_summary = serde_json::to_string(args)
-            .map(|s| if s.len() > 200 { format!("{}...", &s[..200]) } else { s })
+            .map(|s| {
+                if s.len() > 200 {
+                    format!("{}...", &s[..200])
+                } else {
+                    s
+                }
+            })
             .unwrap_or_default();
 
         self.record(AuditEntry {

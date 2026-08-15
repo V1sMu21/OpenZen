@@ -1,14 +1,13 @@
 mod client;
 mod crypto;
 
-    use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use oz_core_types::StreamEvent;
 use oz_platform::{
-    AgentBridge, PlatformAdapter, PlatformConfig, PlatformContext,
-    PlatformError, PlatformHealth,
+    AgentBridge, PlatformAdapter, PlatformConfig, PlatformContext, PlatformError, PlatformHealth,
 };
 
 use crate::client::WxBotClient;
@@ -56,8 +55,9 @@ impl PlatformAdapter for WechatAdapter {
         let mut seen_ids: HashSet<String> = HashSet::new();
         // Shared with spawned agent tasks: per-user counters and the
         // per-user "task running" gate must be consistent across them.
-        let counters: Arc<tokio::sync::Mutex<HashMap<String, u32>>> =
-            Arc::new(tokio::sync::Mutex::new(oz_platform::load_platform_counters(&counter_path)));
+        let counters: Arc<tokio::sync::Mutex<HashMap<String, u32>>> = Arc::new(
+            tokio::sync::Mutex::new(oz_platform::load_platform_counters(&counter_path)),
+        );
         let running: Arc<tokio::sync::Mutex<HashMap<String, bool>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
@@ -116,8 +116,14 @@ impl PlatformAdapter for WechatAdapter {
                             }
                             // Other commands may want to run agent after reply
                             spawn_wechat_agent(
-                                &agent, bot.clone(), &running, uid, ctx_token,
-                                &sid, &text, &default_model,
+                                &agent,
+                                bot.clone(),
+                                &running,
+                                uid,
+                                ctx_token,
+                                &sid,
+                                &text,
+                                &default_model,
                             );
                             continue;
                         }
@@ -147,8 +153,14 @@ impl PlatformAdapter for WechatAdapter {
                         }
 
                         spawn_wechat_agent(
-                            &agent, bot.clone(), &running, uid, ctx_token,
-                            &sid, &text, &default_model,
+                            &agent,
+                            bot.clone(),
+                            &running,
+                            uid,
+                            ctx_token,
+                            &sid,
+                            &text,
+                            &default_model,
                         );
                     }
                 }
@@ -194,7 +206,10 @@ fn spawn_wechat_agent(
     let model = default_model.clone();
 
     tokio::spawn(async move {
-        match agent.send_message(&sid, &prompt, "wechat", model.as_deref()).await {
+        match agent
+            .send_message(&sid, &prompt, "wechat", model.as_deref())
+            .await
+        {
             Ok(event_rx) => stream_to_wechat(&bot, &uid, &ctx_token, event_rx).await,
             Err(e) => {
                 let _ = bot.send_text(&uid, &format!("❌ {e}"), &ctx_token).await;
@@ -215,20 +230,36 @@ fn handle_wechat_command(
 
     match op.as_str() {
         "/help" => {
-            let sid = if *c > 1 { format!("wechat:{uid}:{c}") } else { format!("wechat:{uid}") };
+            let sid = if *c > 1 {
+                format!("wechat:{uid}:{c}")
+            } else {
+                format!("wechat:{uid}")
+            };
             Some(("📖 /help /stop /new /status /llm".to_string(), sid))
         }
         "/stop" | "/abort" => {
-            let sid = if *c > 1 { format!("wechat:{uid}:{c}") } else { format!("wechat:{uid}") };
+            let sid = if *c > 1 {
+                format!("wechat:{uid}:{c}")
+            } else {
+                format!("wechat:{uid}")
+            };
             Some(("⏹️ 已停止".to_string(), sid))
         }
         "/new" => {
             *c += 1;
-            let sid = if *c > 1 { format!("wechat:{uid}:{c}") } else { format!("wechat:{uid}") };
+            let sid = if *c > 1 {
+                format!("wechat:{uid}:{c}")
+            } else {
+                format!("wechat:{uid}")
+            };
             Some((format!("✅ 新对话已开启（会话: {sid}）"), sid))
         }
         "/status" => {
-            let sid = if *c > 1 { format!("wechat:{uid}:{c}") } else { format!("wechat:{uid}") };
+            let sid = if *c > 1 {
+                format!("wechat:{uid}:{c}")
+            } else {
+                format!("wechat:{uid}")
+            };
             Some(("🟢 OpenZen 运行中".to_string(), sid))
         }
         _ => None,
@@ -269,8 +300,10 @@ async fn stream_to_wechat(
                             .and_then(|e| e.to_str())
                             .unwrap_or("")
                             .to_lowercase();
-                        if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")
-                        {
+                        if matches!(
+                            ext.as_str(),
+                            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
+                        ) {
                             let _ = bot.send_image(uid, path, ctx_token).await;
                         } else {
                             let _ = bot.send_file(uid, path, ctx_token).await;
@@ -280,14 +313,18 @@ async fn stream_to_wechat(
                 return;
             }
             StreamEvent::Error { message } => {
-                let _ = bot.send_text(uid, &format!("❌ {message}"), ctx_token).await;
+                let _ = bot
+                    .send_text(uid, &format!("❌ {message}"), ctx_token)
+                    .await;
                 return;
             }
             _ => {}
         }
 
         let now = std::time::Instant::now();
-        if sent_parts >= 9 || (sent_parts > 0 && now.duration_since(last_send).as_secs() < 6 * sent_parts as u64) {
+        if sent_parts >= 9
+            || (sent_parts > 0 && now.duration_since(last_send).as_secs() < 6 * sent_parts as u64)
+        {
             continue;
         }
 
@@ -320,7 +357,9 @@ fn clean_for_wechat(text: &str) -> String {
     }
     // Second pass: strip any leftover standalone tags.
     for tag in &tags {
-        result = result.replace(&format!("</{tag}>"), "").replace(&format!("<{tag}>"), "");
+        result = result
+            .replace(&format!("</{tag}>"), "")
+            .replace(&format!("<{tag}>"), "");
     }
 
     let re_turn = regex::Regex::new(r"(?m)^\**LLM Running \(Turn \d+\) \.\.\.\**\s*$").ok();

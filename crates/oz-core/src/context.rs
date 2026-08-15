@@ -18,50 +18,54 @@ pub fn trim_history(history: &mut Vec<Message>, context_win: usize) {
 }
 
 fn estimate_chars(messages: &[Message]) -> usize {
-    messages.iter().map(|m| {
-        m.content.iter().map(|b| {
-            match b {
-                oz_core_types::ContentBlock::Text { text, .. } => text.len(),
-                oz_core_types::ContentBlock::ToolUse { name, input, .. } => {
-                    name.len() + serde_json::to_string(input).unwrap_or_default().len()
-                }
-                oz_core_types::ContentBlock::ToolResult { content, .. } => {
-                    match content {
+    messages
+        .iter()
+        .map(|m| {
+            m.content
+                .iter()
+                .map(|b| match b {
+                    oz_core_types::ContentBlock::Text { text, .. } => text.len(),
+                    oz_core_types::ContentBlock::ToolUse { name, input, .. } => {
+                        name.len() + serde_json::to_string(input).unwrap_or_default().len()
+                    }
+                    oz_core_types::ContentBlock::ToolResult { content, .. } => match content {
                         oz_core_types::ContentContainer::Text(t) => t.len(),
-                        oz_core_types::ContentContainer::Blocks(bs) => {
-                            bs.iter().map(|b| match b {
+                        oz_core_types::ContentContainer::Blocks(bs) => bs
+                            .iter()
+                            .map(|b| match b {
                                 oz_core_types::ContentBlock::Text { text, .. } => text.len(),
                                 _ => 0,
-                            }).sum()
-                        }
-                    }
-                }
-                _ => 0,
-            }
-        }).sum::<usize>()
-    }).sum()
+                            })
+                            .sum(),
+                    },
+                    _ => 0,
+                })
+                .sum::<usize>()
+        })
+        .sum()
 }
 
 fn sanitize_leading_user_msg(msg: &mut Message) {
-    let texts: Vec<String> = msg.content.iter().filter_map(|b| {
-        match b {
+    let texts: Vec<String> = msg
+        .content
+        .iter()
+        .filter_map(|b| match b {
             oz_core_types::ContentBlock::Text { text, .. } => Some(text.clone()),
-            oz_core_types::ContentBlock::ToolResult { content, .. } => {
-                match content {
-                    oz_core_types::ContentContainer::Text(t) => Some(t.clone()),
-                    oz_core_types::ContentContainer::Blocks(bs) => {
-                        Some(bs.iter().filter_map(|b| {
-                            match b {
-                                oz_core_types::ContentBlock::Text { text, .. } => Some(text.clone()),
-                                _ => None,
-                            }
-                        }).collect::<Vec<_>>().join("\n"))
-                    }
-                }
-            }
+            oz_core_types::ContentBlock::ToolResult { content, .. } => match content {
+                oz_core_types::ContentContainer::Text(t) => Some(t.clone()),
+                oz_core_types::ContentContainer::Blocks(bs) => Some(
+                    bs.iter()
+                        .filter_map(|b| match b {
+                            oz_core_types::ContentBlock::Text { text, .. } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+            },
             _ => None,
-        }
-    }).collect();
+        })
+        .collect();
     msg.content = vec![oz_core_types::ContentBlock::text(texts.join("\n"))];
 }
 

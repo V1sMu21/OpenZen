@@ -31,73 +31,98 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
         }
         return VerifyResult::Failed(format!(
             "File does not exist: {} (checked {}, {} and recursively under {})",
-            path, full.display(), direct.display(), working_dir
+            path,
+            full.display(),
+            direct.display(),
+            working_dir
         ));
     }
 
     // 2. Build/compile detection
     let build_keywords = ["编译", "build", "cargo build", "npm run build", "make"];
-    if build_keywords.iter().any(|k| content.to_lowercase().contains(k)) {
+    if build_keywords
+        .iter()
+        .any(|k| content.to_lowercase().contains(k))
+    {
         let wd = working_dir.to_string();
         return match run_command_with_timeout("cargo", &["build", "--quiet"], &wd, 60).await {
             CommandResult::Success => VerifyResult::Passed,
             CommandResult::Failed(stderr) => VerifyResult::Failed(stderr),
-            CommandResult::Timeout(secs) => VerifyResult::Failed(
-                format!("Build timed out after {}s", secs)
-            ),
-            CommandResult::SpawnError(e) => VerifyResult::Failed(
-                format!("Cannot run cargo build: {}", e)
-            ),
+            CommandResult::Timeout(secs) => {
+                VerifyResult::Failed(format!("Build timed out after {}s", secs))
+            }
+            CommandResult::SpawnError(e) => {
+                VerifyResult::Failed(format!("Cannot run cargo build: {}", e))
+            }
         };
     }
 
     // 3. Test detection
     let test_keywords = ["测试", "test", "cargo test", "npm test", "pytest"];
-    if test_keywords.iter().any(|k| content.to_lowercase().contains(k)) {
+    if test_keywords
+        .iter()
+        .any(|k| content.to_lowercase().contains(k))
+    {
         let wd = working_dir.to_string();
         return match run_command_with_timeout("cargo", &["test", "--quiet"], &wd, 120).await {
             CommandResult::Success => VerifyResult::Passed,
             CommandResult::Failed(stderr) => VerifyResult::Failed(stderr),
-            CommandResult::Timeout(secs) => VerifyResult::Failed(
-                format!("Tests timed out after {}s", secs)
-            ),
-            CommandResult::SpawnError(e) => VerifyResult::Failed(
-                format!("Cannot run cargo test: {}", e)
-            ),
+            CommandResult::Timeout(secs) => {
+                VerifyResult::Failed(format!("Tests timed out after {}s", secs))
+            }
+            CommandResult::SpawnError(e) => {
+                VerifyResult::Failed(format!("Cannot run cargo test: {}", e))
+            }
         };
     }
 
     // 4. Lint/check detection
     let lint_keywords = ["lint", "clippy", "cargo clippy", "cargo check", "check"];
-    if lint_keywords.iter().any(|k| content.to_lowercase().contains(k)) {
+    if lint_keywords
+        .iter()
+        .any(|k| content.to_lowercase().contains(k))
+    {
         let wd = working_dir.to_string();
-        return match run_command_with_timeout("cargo", &["clippy", "--quiet", "--", "-D", "warnings"], &wd, 90).await {
+        return match run_command_with_timeout(
+            "cargo",
+            &["clippy", "--quiet", "--", "-D", "warnings"],
+            &wd,
+            90,
+        )
+        .await
+        {
             CommandResult::Success => VerifyResult::Passed,
             CommandResult::Failed(stderr) => VerifyResult::Failed(stderr),
-            CommandResult::Timeout(secs) => VerifyResult::Failed(
-                format!("Clippy timed out after {}s", secs)
-            ),
-            CommandResult::SpawnError(e) => VerifyResult::Failed(
-                format!("Cannot run cargo clippy: {}", e)
-            ),
+            CommandResult::Timeout(secs) => {
+                VerifyResult::Failed(format!("Clippy timed out after {}s", secs))
+            }
+            CommandResult::SpawnError(e) => {
+                VerifyResult::Failed(format!("Cannot run cargo clippy: {}", e))
+            }
         };
     }
 
     // 5. Document/spec creation: check for .md/.txt file content
     let doc_keywords = ["document", "文档", "spec", "说明", "readme"];
-    if doc_keywords.iter().any(|k| content.to_lowercase().contains(k)) {
+    if doc_keywords
+        .iter()
+        .any(|k| content.to_lowercase().contains(k))
+    {
         // Try to find a recently created .md or .txt file in working_dir
         if let Some(_path) = find_recent_doc(working_dir) {
             return VerifyResult::Passed;
         }
         return VerifyResult::Failed(
-            "No .md or .txt file found in working directory for document task".to_string()
+            "No .md or .txt file found in working directory for document task".to_string(),
         );
     }
 
     // 6. Code review / analysis: soft pass (can't verify subjective quality)
     let review_keywords = ["review", "审查", "analyze", "分析", "检查", "check"];
-    if review_keywords.iter().any(|k| content.to_lowercase().contains(k)) {
+    if review_keywords
+        .iter()
+        .any(|k| content.to_lowercase().contains(k))
+    {
         return VerifyResult::SoftPass;
     }
 
@@ -213,7 +238,14 @@ fn file_exists_recursive(dir: &Path, target: &str, max_depth: u32) -> bool {
                 .unwrap_or_default();
             if matches!(
                 name.as_str(),
-                "node_modules" | "target" | ".git" | "dist" | "build" | ".venv" | "venv" | "__pycache__"
+                "node_modules"
+                    | "target"
+                    | ".git"
+                    | "dist"
+                    | "build"
+                    | ".venv"
+                    | "venv"
+                    | "__pycache__"
             ) {
                 continue;
             }
@@ -221,9 +253,13 @@ fn file_exists_recursive(dir: &Path, target: &str, max_depth: u32) -> bool {
                 return true;
             }
         } else if path.is_file()
-            && path.file_name().map(|n| n.to_string_lossy() == target).unwrap_or(false) {
-                return true;
-            }
+            && path
+                .file_name()
+                .map(|n| n.to_string_lossy() == target)
+                .unwrap_or(false)
+        {
+            return true;
+        }
     }
     false
 }
@@ -255,7 +291,8 @@ mod tests {
         let result = verify_todo_item(
             "Phase 1: create backend (models.py, schemas.py)",
             dir.to_str().unwrap(),
-        ).await;
+        )
+        .await;
         assert!(matches!(result, VerifyResult::Passed));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -279,10 +316,7 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("models.py"), "x = 1").unwrap();
 
-        let result = verify_todo_item(
-            "create models.py",
-            dir.to_str().unwrap(),
-        ).await;
+        let result = verify_todo_item("create models.py", dir.to_str().unwrap()).await;
         assert!(matches!(result, VerifyResult::Failed(_)));
 
         std::fs::remove_dir_all(&dir).unwrap();

@@ -35,7 +35,10 @@ impl McpState {
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let result = self.registry.dispatch(name, args, &self.ctx).await
+        let result = self
+            .registry
+            .dispatch(name, args, &self.ctx)
+            .await
             .map_err(|e| format!("tool error: {e}"))?;
         Ok(result.data)
     }

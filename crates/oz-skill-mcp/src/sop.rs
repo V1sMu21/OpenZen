@@ -59,7 +59,10 @@ impl Sop {
                 }
             })
             .unwrap_or_else(|| {
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
                 (stem.to_string(), String::new())
             });
 
@@ -199,11 +202,8 @@ impl SopManager {
                     if let Ok(Some(meta)) = self.meta_store.load("sops", meta_key) {
                         sop.metadata = meta;
                     } else {
-                        sop.metadata = SkillMcpMetadata::new(
-                            &sop.name,
-                            &sop.description,
-                            sop.tags.clone(),
-                        );
+                        sop.metadata =
+                            SkillMcpMetadata::new(&sop.name, &sop.description, sop.tags.clone());
                         let _ = self.meta_store.save("sops", &sop.name, &sop.metadata);
                     }
 
@@ -233,9 +233,7 @@ impl SopManager {
             .filter(|(_, score)| *score > 0.0)
             .collect();
 
-        scored.sort_by(|(_, a), (_, b)| {
-            b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
         scored.into_iter().map(|(s, _)| s).collect()
     }
@@ -247,7 +245,8 @@ impl SopManager {
             return String::new();
         }
 
-        let mut snippet = String::from("\n\n## 🔴 EXECUTION ORDER — perform these steps with tools NOW\n\n");
+        let mut snippet =
+            String::from("\n\n## 🔴 EXECUTION ORDER — perform these steps with tools NOW\n\n");
         snippet.push_str("The following SOP matches your task. You MUST execute every step using your tools — do NOT describe the procedure, perform each action.\n\n");
 
         for sop in matched.iter().take(max_sops) {
@@ -377,7 +376,13 @@ impl SopManager {
 
 fn sanitize_name(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_lowercase()
@@ -483,12 +488,23 @@ Use web_search to find current information.
         let mut mgr = SopManager::new(dir.path());
 
         let sequence = vec![
-            ("read".to_string(), serde_json::json!({"path": "/etc/hosts"})),
-            ("grep".to_string(), serde_json::json!({"pattern": "localhost"})),
+            (
+                "read".to_string(),
+                serde_json::json!({"path": "/etc/hosts"}),
+            ),
+            (
+                "grep".to_string(),
+                serde_json::json!({"pattern": "localhost"}),
+            ),
         ];
 
         let sop = mgr
-            .crystallise("check_hosts", "Check hosts file", &sequence, Some("sess_abc".into()))
+            .crystallise(
+                "check_hosts",
+                "Check hosts file",
+                &sequence,
+                Some("sess_abc".into()),
+            )
             .unwrap();
 
         assert_eq!(sop.name, "check_hosts");

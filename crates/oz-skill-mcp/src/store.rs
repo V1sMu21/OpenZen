@@ -93,7 +93,10 @@ impl SkillMcpStore {
         // Recent auto-insights (L1a): compact one-line summary so the model
         // knows past experience exists, without loading full bodies. Full
         // content is retrievable via skill_mcp_search.
-        let recent = self.memory.read_recent_auto_insights_sync(7).unwrap_or_default();
+        let recent = self
+            .memory
+            .read_recent_auto_insights_sync(7)
+            .unwrap_or_default();
         let insight_lines: Vec<&str> = recent
             .lines()
             .filter(|l| l.starts_with("- "))
@@ -123,17 +126,18 @@ impl SkillMcpStore {
     /// - Matched skills (up to config.max_skills)
     /// - Matched SOPs (up to config.max_sops)
     /// - Persistent memory (L1 + L2)
-    pub async fn build_context(&self, query: &str, working_dir: &Path, config: Option<MatchConfig>) -> String {
+    pub async fn build_context(
+        &self,
+        query: &str,
+        working_dir: &Path,
+        config: Option<MatchConfig>,
+    ) -> String {
         let cfg = config.unwrap_or_default();
         let mut context = String::new();
 
         // 1. Skill/SOP matching
-        let combined = Matcher::build_combined_snippet(
-            self.skills.list(),
-            self.sops.all(),
-            query,
-            &cfg,
-        );
+        let combined =
+            Matcher::build_combined_snippet(self.skills.list(), self.sops.all(), query, &cfg);
         context.push_str(&combined);
 
         // 2. Persistent memory
@@ -191,7 +195,8 @@ impl SkillMcpStore {
         tool_sequence: &[(String, serde_json::Value)],
         session_id: Option<String>,
     ) -> Result<crate::sop::Sop, SkillMcpError> {
-        self.sops.crystallise(name, description, tool_sequence, session_id)
+        self.sops
+            .crystallise(name, description, tool_sequence, session_id)
     }
 
     /// Record a successful SOP usage.
@@ -342,7 +347,9 @@ mod tests {
             .await
             .unwrap();
 
-        let context = store.build_context("search for things", Path::new("/tmp"), None).await;
+        let context = store
+            .build_context("search for things", Path::new("/tmp"), None)
+            .await;
         assert!(context.contains("web_search"));
         assert!(context.contains("user_name"));
     }
@@ -376,7 +383,9 @@ mod tests {
     fn test_record_sop_success() {
         let (_dir, mut store) = tmp_skill_mcp();
         let seq = vec![("grep".to_string(), serde_json::json!({}))];
-        store.crystallise_sop("tracked_sop", "Track", &seq, None).unwrap();
+        store
+            .crystallise_sop("tracked_sop", "Track", &seq, None)
+            .unwrap();
 
         store.record_sop_success("tracked_sop", 5).unwrap();
         let sop = store.sops.get("tracked_sop").unwrap();
@@ -426,7 +435,9 @@ mod tests {
         store.skills.register(skill).unwrap();
 
         let seq = vec![("grep".to_string(), serde_json::json!({}))];
-        store.crystallise_sop("deploy", "平台部署 SOP", &seq, None).unwrap();
+        store
+            .crystallise_sop("deploy", "平台部署 SOP", &seq, None)
+            .unwrap();
 
         let index = store.build_index();
         assert!(index.contains("`skill:brandkit` — 高级品牌设计"));

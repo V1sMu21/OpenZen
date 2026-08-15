@@ -22,11 +22,16 @@ pub fn build_pattern(tool: &str, args: &Value) -> (String, String) {
         }
         "read" | "write" | "patch" | "edit" => {
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            let segments: Vec<&str> = path.split('/')
+            let segments: Vec<&str> = path
+                .split('/')
                 .filter(|s| !s.is_empty() && *s != ".")
                 .collect();
             let key = if segments.len() <= 2 {
-                if segments.is_empty() { ".".to_string() } else { segments.join("/") }
+                if segments.is_empty() {
+                    ".".to_string()
+                } else {
+                    segments.join("/")
+                }
             } else {
                 segments[..2].join("/")
             };
@@ -34,7 +39,8 @@ pub fn build_pattern(tool: &str, args: &Value) -> (String, String) {
         }
         "web_scan" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let host = url.split("://")
+            let host = url
+                .split("://")
                 .nth(1)
                 .unwrap_or(url)
                 .split('/')
@@ -43,15 +49,9 @@ pub fn build_pattern(tool: &str, args: &Value) -> (String, String) {
                 .to_lowercase();
             (tool.to_string(), host)
         }
-        "web_js" => {
-            (tool.to_string(), "*".to_string())
-        }
-        name if name.starts_with("mcp__") => {
-            (tool.to_string(), tool.to_string())
-        }
-        _ => {
-            (tool.to_string(), tool.to_string())
-        }
+        "web_js" => (tool.to_string(), "*".to_string()),
+        name if name.starts_with("mcp__") => (tool.to_string(), tool.to_string()),
+        _ => (tool.to_string(), tool.to_string()),
     }
 }
 
@@ -61,7 +61,10 @@ mod tests {
 
     #[test]
     fn test_code_run_pattern() {
-        let (t, p) = build_pattern("code_run", &serde_json::json!({"code": "npm install --save-dev typescript"}));
+        let (t, p) = build_pattern(
+            "code_run",
+            &serde_json::json!({"code": "npm install --save-dev typescript"}),
+        );
         assert_eq!(t, "code_run");
         assert_eq!(p, "npm");
     }
@@ -74,7 +77,10 @@ mod tests {
 
     #[test]
     fn test_write_pattern_deep() {
-        let (t, p) = build_pattern("write", &serde_json::json!({"file_path": "/tmp/project/src/main.rs"}));
+        let (t, p) = build_pattern(
+            "write",
+            &serde_json::json!({"file_path": "/tmp/project/src/main.rs"}),
+        );
         assert_eq!(t, "write");
         assert_eq!(p, "tmp/project");
     }
@@ -87,7 +93,10 @@ mod tests {
 
     #[test]
     fn test_web_scan_pattern() {
-        let (t, p) = build_pattern("web_scan", &serde_json::json!({"url": "https://docs.rs/tokio/latest/tokio/"}));
+        let (t, p) = build_pattern(
+            "web_scan",
+            &serde_json::json!({"url": "https://docs.rs/tokio/latest/tokio/"}),
+        );
         assert_eq!(p, "docs.rs");
     }
 

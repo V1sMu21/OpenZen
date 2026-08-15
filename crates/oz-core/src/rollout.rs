@@ -40,7 +40,10 @@ impl RolloutRecorder {
         let id8: String = meta.session_id.chars().take(8).collect();
         let path = dir.join(format!("rollout-{ts}-{id8}.jsonl"));
         let file = std::fs::File::create(&path)?;
-        let mut recorder = RolloutRecorder { path, file: std::io::BufWriter::new(file) };
+        let mut recorder = RolloutRecorder {
+            path,
+            file: std::io::BufWriter::new(file),
+        };
         recorder.write(&StreamEvent::StartStep {})?;
         Ok(recorder)
     }
@@ -95,9 +98,18 @@ mod tests {
             },
         )
         .unwrap();
-        recorder.write(&StreamEvent::TextStart { id: "t1".into() }).unwrap();
-        recorder.write(&StreamEvent::TextDelta { id: "t1".into(), text: "hi".into() }).unwrap();
-        recorder.write(&StreamEvent::TextEnd { id: "t1".into() }).unwrap();
+        recorder
+            .write(&StreamEvent::TextStart { id: "t1".into() })
+            .unwrap();
+        recorder
+            .write(&StreamEvent::TextDelta {
+                id: "t1".into(),
+                text: "hi".into(),
+            })
+            .unwrap();
+        recorder
+            .write(&StreamEvent::TextEnd { id: "t1".into() })
+            .unwrap();
 
         let events = read_rollout(recorder.path()).unwrap();
         assert_eq!(events.len(), 4); // StartStep + 3

@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 /// One search hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,20 +54,29 @@ impl MemoryFts {
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                 content, category, session_id,
                 tokenize = 'trigram'
-            );"
+            );",
         )?;
-        Ok(MemoryFts { conn: Mutex::new(conn) })
+        Ok(MemoryFts {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// In-memory index (used by tests and ephemeral sessions).
     pub fn open_in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
-        Ok(MemoryFts { conn: Mutex::new(conn) })
+        Ok(MemoryFts {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Index one memory item. `category` is searchable too.
-    pub fn insert(&self, session_id: &str, category: &str, content: &str) -> Result<(), rusqlite::Error> {
+    pub fn insert(
+        &self,
+        session_id: &str,
+        category: &str,
+        content: &str,
+    ) -> Result<(), rusqlite::Error> {
         let guard = self.conn.lock().unwrap();
         let tx = guard.unchecked_transaction()?;
         tx.execute(
@@ -161,7 +170,8 @@ mod tests {
     #[test]
     fn test_cjk_trigram_search() {
         let fts = MemoryFts::open_in_memory().unwrap();
-        fts.insert("s1", "insight", "用户偏好天青色主题，背景使用暖白").unwrap();
+        fts.insert("s1", "insight", "用户偏好天青色主题，背景使用暖白")
+            .unwrap();
         let hits = fts.search("天青色", 10).unwrap();
         assert_eq!(hits.len(), 1, "3-char CJK query must hit via trigram");
     }
@@ -186,8 +196,10 @@ mod tests {
     #[test]
     fn test_ranking_prefers_exact_content() {
         let fts = MemoryFts::open_in_memory().unwrap();
-        fts.insert("s1", "fact", "rust is a systems language").unwrap();
-        fts.insert("s2", "fact", "rust cargo build is slow").unwrap();
+        fts.insert("s1", "fact", "rust is a systems language")
+            .unwrap();
+        fts.insert("s2", "fact", "rust cargo build is slow")
+            .unwrap();
         let hits = fts.search("rust systems", 10).unwrap();
         assert!(!hits.is_empty());
         assert_eq!(hits[0].content, "rust is a systems language");

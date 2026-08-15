@@ -30,10 +30,7 @@ pub enum HookEvent {
     SessionStart,
     /// Fired after a tool call completes. `file` is set when the tool
     /// operates on a single file (write/edit/patch).
-    PostToolUse {
-        tool: String,
-        file: Option<String>,
-    },
+    PostToolUse { tool: String, file: Option<String> },
 }
 
 /// Hook handler: fires on events, optionally returning context to inject.
@@ -111,7 +108,10 @@ impl TomlHooks {
                 continue;
             }
             if self.is_blocked(tool, file) {
-                tracing::warn!("[hooks] command blocked by permission policy: {}", rule.command);
+                tracing::warn!(
+                    "[hooks] command blocked by permission policy: {}",
+                    rule.command
+                );
                 continue;
             }
             run_command_detached(&rule.command, file);
@@ -177,7 +177,11 @@ fn run_command_timeout(command: &str, file: Option<&str>) -> Option<String> {
     match rx.recv_timeout(HOOK_TIMEOUT + std::time::Duration::from_secs(1)) {
         Ok(Some(out)) if out.status.success() => {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         }
         Ok(Some(_)) => None,
         Ok(None) => {
@@ -198,7 +202,11 @@ fn run_command_detached(command: &str, file: Option<&str>) {
     tokio::spawn(async move {
         match tokio::time::timeout(
             HOOK_TIMEOUT,
-            tokio::process::Command::new(&cmd).args(&args).stdout(Stdio::null()).stderr(Stdio::null()).output(),
+            tokio::process::Command::new(&cmd)
+                .args(&args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .output(),
         )
         .await
         {
@@ -282,7 +290,13 @@ command = "echo hook-fired"
         )
         .unwrap();
         // Non-matching tool: no crash, no output.
-        assert_eq!(hooks.fire(&HookEvent::PostToolUse { tool: "read".into(), file: None }), None);
+        assert_eq!(
+            hooks.fire(&HookEvent::PostToolUse {
+                tool: "read".into(),
+                file: None
+            }),
+            None
+        );
     }
 
     #[test]
@@ -308,7 +322,10 @@ decision = "deny"
         assert!(!hooks.is_blocked("read", Some("/etc/passwd")));
         // Blocked hook fires but the command is skipped (no output to collect).
         assert_eq!(
-            hooks.fire(&HookEvent::PostToolUse { tool: "write".into(), file: Some("/etc/passwd".into()) }),
+            hooks.fire(&HookEvent::PostToolUse {
+                tool: "write".into(),
+                file: Some("/etc/passwd".into())
+            }),
             None
         );
     }
@@ -347,7 +364,10 @@ command = "touch /tmp/oz-hook-ran.txt"
         )
         .unwrap();
         let _ = std::fs::remove_file("/tmp/oz-hook-ran.txt");
-        hooks.fire(&HookEvent::PostToolUse { tool: "write".into(), file: None });
+        hooks.fire(&HookEvent::PostToolUse {
+            tool: "write".into(),
+            file: None,
+        });
         // Give the detached task time to complete.
         for _ in 0..50 {
             if std::path::Path::new("/tmp/oz-hook-ran.txt").exists() {

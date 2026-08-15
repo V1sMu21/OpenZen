@@ -243,16 +243,15 @@ impl L1Cache {
             }
         }
 
-        if query.embedding().is_some()
-            && self.sdr.is_enabled() {
-                let sdr_results = self.sdr.search(query).ok().unwrap_or_default();
-                if let Some(&(id, _)) = sdr_results.first() {
-                    if let Some(cached) = self.get_by_id_fast(id) {
-                        let mem = cached.read();
-                        return Ok(Some(mem.clone()));
-                    }
+        if query.embedding().is_some() && self.sdr.is_enabled() {
+            let sdr_results = self.sdr.search(query).ok().unwrap_or_default();
+            if let Some(&(id, _)) = sdr_results.first() {
+                if let Some(cached) = self.get_by_id_fast(id) {
+                    let mem = cached.read();
+                    return Ok(Some(mem.clone()));
                 }
             }
+        }
 
         if let Some(text) = query.text() {
             if self.sdr.is_enabled() {

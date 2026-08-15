@@ -31,22 +31,22 @@
 //! - [`MetaStore`] — metadata persistence (meta.toml)
 //! - [`Matcher`] — cross-type artifact matching for context injection
 
-pub mod meta;
+pub mod matcher;
 pub mod memory;
+pub mod meta;
+pub mod migration;
 pub mod skill;
 pub mod sop;
-pub mod matcher;
-pub mod store;
 pub mod staleness;
-pub mod migration;
+pub mod store;
 
-pub use meta::MetaStore;
+pub use matcher::{MatchConfig, Matcher};
 pub use memory::SkillMcpMemory;
+pub use meta::MetaStore;
 pub use skill::{Skill, SkillManager};
 pub use sop::SopManager;
-pub use matcher::{Matcher, MatchConfig};
-pub use store::SkillMcpStore;
 pub use staleness::{StalenessChecker, StalenessConfig};
+pub use store::SkillMcpStore;
 
 /// Default on-disk directory name for the skill/MCP registry.
 pub const SKILL_MCP_DIR: &str = ".skill_mcp";

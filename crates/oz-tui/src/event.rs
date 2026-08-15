@@ -22,7 +22,7 @@ use oz_tools::handler::ToolRegistryHandler;
 use oz_tools::registry::ToolRegistry;
 use tokio::sync::mpsc;
 
-use crate::app::{AskUserStatus, ChatItem, InputMode, ToolStatus, App};
+use crate::app::{App, AskUserStatus, ChatItem, InputMode, ToolStatus};
 
 /// Channel rx half: drives the agent loop's output into the UI.
 pub type StreamRx = mpsc::UnboundedReceiver<StreamEvent>;
@@ -80,9 +80,7 @@ pub fn spawn_agent_loop(
         SessionType::NativeClaude => {
             Box::new(oz_llm::NativeClaudeSession::new(sess_config.clone()))
         }
-        SessionType::NativeOai => {
-            Box::new(oz_llm::NativeOAISession::new(sess_config.clone()))
-        }
+        SessionType::NativeOai => Box::new(oz_llm::NativeOAISession::new(sess_config.clone())),
         SessionType::Mixin => {
             tracing::error!("Mixin session not supported in TUI");
             let (_tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
@@ -181,9 +179,9 @@ pub fn handle_stream_event(app: &mut App, evt: StreamEvent) {
             if delta.is_empty() {
                 return;
             }
-            if let Some(ChatItem::ToolCall { args, .. }) = app.items.iter_mut().rev().find(|i| {
-                matches!(i, ChatItem::ToolCall { status: s, .. } if *s == ToolStatus::Running)
-            }) {
+            if let Some(ChatItem::ToolCall { args, .. }) = app.items.iter_mut().rev().find(
+                |i| matches!(i, ChatItem::ToolCall { status: s, .. } if *s == ToolStatus::Running),
+            ) {
                 args.push_str(&delta);
             }
         }
@@ -214,7 +212,8 @@ pub fn handle_stream_event(app: &mut App, evt: StreamEvent) {
                         app.add_ask_user(q, cands.clone());
                         app.pending_ask_user = Some((q.to_string(), cands));
                         app.input_mode = InputMode::AskUser;
-                        app.status = "Ask user: ↑/↓ to pick candidate, Enter to send, Esc to dismiss".into();
+                        app.status =
+                            "Ask user: ↑/↓ to pick candidate, Enter to send, Esc to dismiss".into();
                         app.mark_tool_done("ask_user", true);
                         return;
                     }
@@ -252,7 +251,9 @@ pub fn handle_stream_event(app: &mut App, evt: StreamEvent) {
             app.current_tool_name.clear();
             let reason_display = match stop_reason.as_str() {
                 "stopped_by_user" => {
-                    app.add_system("Task stopped by user. Checkpoint saved — you can resume later.");
+                    app.add_system(
+                        "Task stopped by user. Checkpoint saved — you can resume later.",
+                    );
                     "Stopped by user".to_string()
                 }
                 r => r.to_string(),
@@ -364,10 +365,9 @@ pub async fn handle_key(
                 app.pending_ask_user = None;
                 app.status = "ask_user dismissed".into();
             }
-            KeyCode::Up
-                if app.cmd_selected > 0 => {
-                    app.cmd_selected -= 1;
-                }
+            KeyCode::Up if app.cmd_selected > 0 => {
+                app.cmd_selected -= 1;
+            }
             KeyCode::Down => {
                 if let Some((_, cands)) = app.pending_ask_user.clone() {
                     if app.cmd_selected + 1 < cands.len() {
@@ -474,7 +474,8 @@ pub async fn handle_key(
                             if let Some(sig) = &app.stop_signal {
                                 sig.store(true, Ordering::SeqCst);
                                 app.status =
-                                    "Stop signal sent. Waiting for current tool to finish...".into();
+                                    "Stop signal sent. Waiting for current tool to finish..."
+                                        .into();
                             }
                         }
                         return;
@@ -524,23 +525,26 @@ pub async fn handle_key(
                     app.cmd_suggestions.clear();
                     app.status = "Resume typing...".into();
                 }
-                KeyCode::Tab if app.cmd_mode
-                    && !app.cmd_suggestions.is_empty() => {
-                        let sel = app
-                            .cmd_selected
-                            .min(app.cmd_suggestions.len().saturating_sub(1));
-                        let completion = app.cmd_suggestions[sel].trim_start_matches('/');
-                        app.input = format!("/{} ", completion);
-                        app.cmd_suggestions.clear();
-                    }
-                KeyCode::Up if app.cmd_mode && !app.cmd_suggestions.is_empty()
-                    && app.cmd_selected > 0 => {
-                        app.cmd_selected -= 1;
-                    }
-                KeyCode::Down if app.cmd_mode && !app.cmd_suggestions.is_empty()
-                    && app.cmd_selected + 1 < app.cmd_suggestions.len() => {
-                        app.cmd_selected += 1;
-                    }
+                KeyCode::Tab if app.cmd_mode && !app.cmd_suggestions.is_empty() => {
+                    let sel = app
+                        .cmd_selected
+                        .min(app.cmd_suggestions.len().saturating_sub(1));
+                    let completion = app.cmd_suggestions[sel].trim_start_matches('/');
+                    app.input = format!("/{} ", completion);
+                    app.cmd_suggestions.clear();
+                }
+                KeyCode::Up
+                    if app.cmd_mode && !app.cmd_suggestions.is_empty() && app.cmd_selected > 0 =>
+                {
+                    app.cmd_selected -= 1;
+                }
+                KeyCode::Down
+                    if app.cmd_mode
+                        && !app.cmd_suggestions.is_empty()
+                        && app.cmd_selected + 1 < app.cmd_suggestions.len() =>
+                {
+                    app.cmd_selected += 1;
+                }
                 KeyCode::Up => {
                     recall_history(app, history, true);
                 }
@@ -653,8 +657,9 @@ pub async fn start_run(app: &mut App, prompt: String) {
             app.model_provider = match sess_type {
                 oz_config::mykey::SessionType::Claude
                 | oz_config::mykey::SessionType::NativeClaude => "claude",
-                oz_config::mykey::SessionType::Oai
-                | oz_config::mykey::SessionType::NativeOai => "openai",
+                oz_config::mykey::SessionType::Oai | oz_config::mykey::SessionType::NativeOai => {
+                    "openai"
+                }
                 oz_config::mykey::SessionType::Mixin => "mixin",
             }
             .to_string();
@@ -698,10 +703,7 @@ mod tests {
         app.input_mode = InputMode::Editing;
         let prior_status = app.status.clone();
 
-        let key = crossterm::event::KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::empty(),
-        );
+        let key = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
         handle_key(&mut app, &mut hist, key).await;
 
         assert_eq!(app.input, "上面那个文件，我打不开");
@@ -723,10 +725,7 @@ mod tests {
         app.input = "   ".to_string();
         let items_before = app.items.len();
 
-        let key = crossterm::event::KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::empty(),
-        );
+        let key = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
         handle_key(&mut app, &mut hist, key).await;
 
         assert_eq!(app.items.len(), items_before);

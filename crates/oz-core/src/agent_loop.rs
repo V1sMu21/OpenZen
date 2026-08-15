@@ -3,18 +3,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oz_core_types::{
-    ContentBlock, Message, MockResponse, Role, StepOutcome, StreamEvent,
-    ToolContext, ToolDefinition, ToolError, ToolResultItem,
+    ContentBlock, Message, MockResponse, Role, StepOutcome, StreamEvent, ToolContext,
+    ToolDefinition, ToolError, ToolResultItem,
 };
 
-use crate::handler::{AgentState, Breaker, Handler, LoopConfig, LoopOutcome};
-use crate::sop::SopStore;
 use crate::crystallizer::Crystallizer;
-use crate::refiner::Refiner;
+use crate::handler::{AgentState, Breaker, Handler, LoopConfig, LoopOutcome};
 use crate::meter;
+use crate::refiner::Refiner;
+use crate::sop::SopStore;
 
 const BREAKER_BLOCKED_MSG: &str = "[BREAKER] 工具 {tool} 调用过于频繁，已跳过本轮";
-const DANGER_LOOP_MSG: &str = "\n[DANGER] 已连续执行第 {turn} 轮。禁止无效重试。若无有效进展，必须切换策略";
+const DANGER_LOOP_MSG: &str =
+    "\n[DANGER] 已连续执行第 {turn} 轮。禁止无效重试。若无有效进展，必须切换策略";
 
 static BLOCK_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -41,9 +42,16 @@ async fn backoff_or_stop(stop_signal: &AtomicBool, consecutive: u32) {
 /// Transition the agent FSM state and log the change.
 fn transition_state(handler: &mut dyn Handler, to: AgentState, reason: &str) {
     let from = handler.working_mut().current_state.clone();
-    handler.working_mut().state_transitions.push((from.clone(), to.clone(), reason.to_string()));
+    handler
+        .working_mut()
+        .state_transitions
+        .push((from.clone(), to.clone(), reason.to_string()));
     handler.working_mut().current_state = to;
-    tracing::debug!("{} — {}", from.transition_to(&handler.working().current_state), reason);
+    tracing::debug!(
+        "{} — {}",
+        from.transition_to(&handler.working().current_state),
+        reason
+    );
 }
 
 /// A pending `ask_user` tool call waiting for the user's reply.
@@ -148,17 +156,16 @@ fn smart_format(text: &str, max_len: usize) -> String {
         if max_len == 0 && !text.is_empty() {
             let half = 3.min(chars.len() / 2);
             let left: String = chars[..half].iter().collect();
-            let right: String = chars[chars.len()-half..].iter().collect();
+            let right: String = chars[chars.len() - half..].iter().collect();
             return format!("{}...{}", left, right);
         }
         return text.to_string();
     }
     let half = max_len / 2;
     let left: String = chars[..half].iter().collect();
-    let right: String = chars[chars.len()-half..].iter().collect();
+    let right: String = chars[chars.len() - half..].iter().collect();
     format!("{}...{}", left, right)
 }
-
 
 /// Strip model-output tag wrappers from `text`, returning the cleaned
 /// text and the extracted `<summary>` body. Other tags
@@ -215,7 +222,6 @@ fn strip_summary_tags(text: &str) -> (String, String) {
     (cleaned, summary)
 }
 
-
 /// Extract tool calls from a MockResponse.
 pub fn extract_tool_calls(response: &MockResponse) -> Vec<oz_core_types::MockToolCall> {
     response.tool_calls.clone()
@@ -229,9 +235,8 @@ fn build_system_reminder(working_dir: &str, session_id: &str) -> String {
     let (git_sha, git_branch, _origin) =
         crate::checkpoint::git_snapshot(std::path::Path::new(working_dir));
     let date = chrono::Local::now().format("%Y-%m-%d");
-    let mut block = format!(
-        "<system-reminder>\nToday's date: {date}\nWorking directory: {working_dir}\n"
-    );
+    let mut block =
+        format!("<system-reminder>\nToday's date: {date}\nWorking directory: {working_dir}\n");
     if let Some(branch) = git_branch {
         block.push_str(&format!("Git branch: {branch}\n"));
     }
@@ -319,9 +324,10 @@ where
     // keeping it byte-stable for prefix caching.
     let reminder = if let Some(ref hooks) = config.hooks {
         match hooks.fire(&crate::hooks::HookEvent::SessionStart) {
-            Some(extra) if !extra.is_empty() => {
-                reminder.replace("</system-reminder>", &format!("{extra}\n</system-reminder>"))
-            }
+            Some(extra) if !extra.is_empty() => reminder.replace(
+                "</system-reminder>",
+                &format!("{extra}\n</system-reminder>"),
+            ),
             _ => reminder,
         }
     } else {
@@ -383,24 +389,28 @@ where
     // Session rollout recorder (U4): mirrors all stream events to a JSONL file.
     let (git_sha, git_branch, _git_origin) =
         crate::checkpoint::git_snapshot(std::path::Path::new(&config.working_dir));
-    let mut rollout: Option<crate::rollout::RolloutRecorder> = config.rollout_dir.as_ref().and_then(|dir| {
-        let meta = crate::rollout::RolloutMeta {
-            session_id: config.session_id.clone(),
-            cwd: config.working_dir.clone(),
-            model: "unknown".into(),
-            git_sha,
-            git_branch,
-        };
-        crate::rollout::RolloutRecorder::create(std::path::Path::new(dir), &meta).ok()
-    });
+    let mut rollout: Option<crate::rollout::RolloutRecorder> =
+        config.rollout_dir.as_ref().and_then(|dir| {
+            let meta = crate::rollout::RolloutMeta {
+                session_id: config.session_id.clone(),
+                cwd: config.working_dir.clone(),
+                model: "unknown".into(),
+                git_sha,
+                git_branch,
+            };
+            crate::rollout::RolloutRecorder::create(std::path::Path::new(dir), &meta).ok()
+        });
 
     // Helper: save a loop checkpoint before exiting due to user stop.
     // Ensures all stop paths (top of loop, LLM stream cancel, ask_user wait)
     // persist state for /resume.
-    let save_stop_checkpoint = |turn: u32, exit: &str, messages: &[Message],
-                                 history_info: &[String], full_response: &str,
-                                 full_thinking: &str,
-                                 todos: &[oz_core_types::TodoItem]| {
+    let save_stop_checkpoint = |turn: u32,
+                                exit: &str,
+                                messages: &[Message],
+                                history_info: &[String],
+                                full_response: &str,
+                                full_thinking: &str,
+                                todos: &[oz_core_types::TodoItem]| {
         if !config.session_id.is_empty() {
             let cp_dir =
                 crate::checkpoint::checkpoint_dir(std::path::Path::new(&config.working_dir));
@@ -439,7 +449,9 @@ where
             );
             eprintln!(
                 "[openzen] Knowledge store: {} skills, {} SOPs from {}",
-                ks.skill_count(), ks.sop_count(), dir
+                ks.skill_count(),
+                ks.sop_count(),
+                dir
             );
             ks
         });
@@ -492,9 +504,15 @@ where
     // Try to resume from checkpoint if configured
     if let Some(ref resume_from) = config.resume_from {
         if let Some(cp) = crate::checkpoint::load_best_loop_checkpoint(
-            &std::path::PathBuf::from(resume_from), &config.session_id,
+            &std::path::PathBuf::from(resume_from),
+            &config.session_id,
         ) {
-            tracing::info!("Resuming from checkpoint at turn {} ({} messages, {} todos)", cp.turn, cp.messages.len(), cp.todos.len());
+            tracing::info!(
+                "Resuming from checkpoint at turn {} ({} messages, {} todos)",
+                cp.turn,
+                cp.messages.len(),
+                cp.todos.len()
+            );
             messages = cp.messages;
             turn = cp.turn;
             history_info = cp.history_info;
@@ -526,13 +544,26 @@ where
     // forever — otherwise a persistently-failing verifier traps the agent in
     // an infinite todoupdate → revert → retry loop (observed with bare
     // filenames in todos whose files live in nested project subdirectories).
-    let mut verify_fail_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut verify_fail_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
 
     while turn < config.max_turns {
         if stop_signal.load(Ordering::Relaxed) {
             tracing::info!("Stop signal received, saving checkpoint and exiting agent loop");
-            save_stop_checkpoint(turn, "stopped_by_user", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos);
-            transition_state(handler, AgentState::Done("stopped_by_user".into()), "stop signal received");
+            save_stop_checkpoint(
+                turn,
+                "stopped_by_user",
+                &messages,
+                &history_info,
+                &full_response,
+                &full_thinking,
+                &handler.working().todos,
+            );
+            transition_state(
+                handler,
+                AgentState::Done("stopped_by_user".into()),
+                "stop signal received",
+            );
             return LoopOutcome {
                 turn,
                 exit_reason: "stopped_by_user".into(),
@@ -556,7 +587,11 @@ where
                 items
             };
             for intervention in &interventions {
-                tracing::info!("Applying intervention '{}': {}", intervention.kind, &intervention.content[..intervention.content.len().min(100)]);
+                tracing::info!(
+                    "Applying intervention '{}': {}",
+                    intervention.kind,
+                    &intervention.content[..intervention.content.len().min(100)]
+                );
                 crate::checkpoint::apply_intervention(&mut messages, intervention);
 
                 // Notify frontend to render an intervention card
@@ -567,10 +602,25 @@ where
                 }
 
                 // If pause, save final checkpoint and stop
-                if matches!(intervention.kind, crate::checkpoint::InterventionKind::Pause) {
+                if matches!(
+                    intervention.kind,
+                    crate::checkpoint::InterventionKind::Pause
+                ) {
                     tracing::info!("Pause intervention received, saving checkpoint and stopping");
-                    save_stop_checkpoint(turn, "paused_by_user", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos);
-                    transition_state(handler, AgentState::Done("paused_by_user".into()), "pause intervention");
+                    save_stop_checkpoint(
+                        turn,
+                        "paused_by_user",
+                        &messages,
+                        &history_info,
+                        &full_response,
+                        &full_thinking,
+                        &handler.working().todos,
+                    );
+                    transition_state(
+                        handler,
+                        AgentState::Done("paused_by_user".into()),
+                        "pause intervention",
+                    );
                     return LoopOutcome {
                         turn,
                         exit_reason: "paused_by_user".into(),
@@ -611,7 +661,8 @@ where
             // system block never leaves). The summary must cover exactly
             // the removed window, so the JSON slice starts past the
             // system messages instead of at index 0.
-            let sys_count = messages.iter()
+            let sys_count = messages
+                .iter()
                 .take_while(|m| m.role == oz_core_types::Role::System)
                 .count();
 
@@ -635,8 +686,8 @@ where
             // regardless of percentage. This catches the exact scenario
             // this bug fix addresses: 82K context but trigger at 204K
             // (80% of 256K) → compression never fires.
-            let force_compress = est_tokens > trigger_tokens
-                || est_tokens > comp_config.hard_max_tokens;
+            let force_compress =
+                est_tokens > trigger_tokens || est_tokens > comp_config.hard_max_tokens;
             if config.verbose {
                 let msg = format!(
                     "compress check: est={est_tokens} trigger={trigger_tokens} hard_max={} ctx_win={} chars={} msgs={before_count} force={force_compress}",
@@ -667,7 +718,8 @@ where
                 let before_tokens = est_tokens.max(1);
                 let after_tokens = if stats_before.total_chars > 0 {
                     (before_tokens as f64 * stats_after.total_chars as f64
-                        / stats_before.total_chars as f64).round() as usize
+                        / stats_before.total_chars as f64)
+                        .round() as usize
                 } else {
                     0
                 };
@@ -705,18 +757,26 @@ where
                 let (summary_json, removed_label) = if removed_count > 0 {
                     let start = sys_count.min(snapshot_before.len());
                     let end = (sys_count + removed_count).min(snapshot_before.len());
-                    (&snapshot_before[start..end],
-                     format!("{} messages removed", removed_count))
+                    (
+                        &snapshot_before[start..end],
+                        format!("{} messages removed", removed_count),
+                    )
                 } else {
                     // Only content trimming happened (Phase 1/2), no messages
                     // were actually dropped. Don't summarize messages that are
                     // still in the conversation — pass empty to avoid duplicating
                     // context with a summary alongside the originals.
-                    (&snapshot_before[..0],
-                     format!("{} messages trimmed ({saved_tokens} tokens saved)", before_count))
+                    (
+                        &snapshot_before[..0],
+                        format!(
+                            "{} messages trimmed ({saved_tokens} tokens saved)",
+                            before_count
+                        ),
+                    )
                 };
 
-                let template = crate::compress::build_compression_summary(summary_json, &config.working_dir);
+                let template =
+                    crate::compress::build_compression_summary(summary_json, &config.working_dir);
                 let mut full_prompt = crate::compress::build_compression_prompt(summary_json);
                 // Feed the FULL removed window to the summary model.
                 // Truncating to `summary_max_prompt_chars` here used to drop
@@ -741,19 +801,20 @@ where
                 // actually dropped. Pure trimming (Phase 1/2) keeps the
                 // content in the conversation — summarizing it would
                 // duplicate context for zero information gain.
-                let summary_rx = if removed_count > 0
-                    && compression_service.is_configured()
-                {
+                let summary_rx = if removed_count > 0 && compression_service.is_configured() {
                     let full_prompt_len = full_prompt.len();
                     let rx = compression_service.spawn_summary(full_prompt, template.clone());
                     tracing::info!(
                         "Fired LLM compression summary for {} (full prompt ~{} chars)",
-                        removed_label, full_prompt_len
+                        removed_label,
+                        full_prompt_len
                     );
                     Some(rx)
                 } else {
                     if removed_count == 0 {
-                        tracing::debug!("No messages removed — skipping LLM summary (nothing lost)");
+                        tracing::debug!(
+                            "No messages removed — skipping LLM summary (nothing lost)"
+                        );
                     } else {
                         tracing::warn!(
                             "No summary model configured (summary_model_name is None); \
@@ -771,21 +832,23 @@ where
                 // by the late summary on a later turn, so each
                 // compression changes the injected prefix exactly once.
                 let summary_text = if removed_count > 0 {
-                    wait_for_summary(
-                        summary_rx, template, comp_config.summary_wait_secs,
-                    ).await
+                    wait_for_summary(summary_rx, template, comp_config.summary_wait_secs).await
                 } else {
                     template
                 };
 
                 if !summary_text.is_empty() {
-                    let inject_at = messages.iter().position(|m| {
-                        m.role == oz_core_types::Role::User
-                            || m.role == oz_core_types::Role::Assistant
-                    }).unwrap_or(0);
-                    messages.insert(inject_at, Message::system(format!(
-                        "[Compression summary]: {summary_text}"
-                    )));
+                    let inject_at = messages
+                        .iter()
+                        .position(|m| {
+                            m.role == oz_core_types::Role::User
+                                || m.role == oz_core_types::Role::Assistant
+                        })
+                        .unwrap_or(0);
+                    messages.insert(
+                        inject_at,
+                        Message::system(format!("[Compression summary]: {summary_text}")),
+                    );
                 }
             }
         }
@@ -796,8 +859,9 @@ where
         // ── Direction A: Speculative pre-execution cache ──
         // Stores results of tool calls speculatively dispatched while the LLM
         // is still streaming. Each entry maps tool_call_id → outcome.
-        let spec_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Result<StepOutcome, ToolError>>>> =
-            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let spec_cache: Arc<
+            std::sync::Mutex<std::collections::HashMap<String, Result<StepOutcome, ToolError>>>,
+        > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
         let response = match &config.event_tx {
             Some(tx) => {
@@ -807,7 +871,9 @@ where
                 let cancel_signal = stop_signal;
                 let cancel_fut = async move {
                     loop {
-                        if cancel_signal.load(Ordering::Relaxed) { break; }
+                        if cancel_signal.load(Ordering::Relaxed) {
+                            break;
+                        }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 };
@@ -830,7 +896,8 @@ where
                 let mut pending_spec: Vec<(String, String, serde_json::Value)> = Vec::new();
                 let result: Result<MockResponse, oz_core_types::LlmError> = loop {
                     let (spec_tx, mut spec_rx) = tokio::sync::mpsc::unbounded_channel();
-                    let stream_fut = client.stream_chat(&messages, tools, tx.clone(), Some(spec_tx));
+                    let stream_fut =
+                        client.stream_chat(&messages, tools, tx.clone(), Some(spec_tx));
                     tokio::pin!(stream_fut);
 
                     // Real stall detection lives inside the oz-llm parsers
@@ -840,7 +907,8 @@ where
                     // the configured window with a 1h floor instead of a
                     // fixed total duration.
                     let hang_timeout_secs = timeout_secs.saturating_mul(4).max(3600);
-                    let stream_hang_timeout = tokio::time::sleep(Duration::from_secs(hang_timeout_secs));
+                    let stream_hang_timeout =
+                        tokio::time::sleep(Duration::from_secs(hang_timeout_secs));
                     tokio::pin!(stream_hang_timeout);
 
                     let attempt_result = loop {
@@ -919,8 +987,16 @@ where
                                 oz_core_types::LlmError::StreamError(m) if m.contains("timed out")
                             );
                             if consecutive_llm_errors > max_llm_error_retries {
-                                let exit_reason = if is_timeout { "llm_timeout" } else { "llm_error" };
-                                transition_state(handler, AgentState::Done(exit_reason.into()), "LLM stream error");
+                                let exit_reason = if is_timeout {
+                                    "llm_timeout"
+                                } else {
+                                    "llm_error"
+                                };
+                                transition_state(
+                                    handler,
+                                    AgentState::Done(exit_reason.into()),
+                                    "LLM stream error",
+                                );
                                 return LoopOutcome {
                                     turn,
                                     exit_reason: exit_reason.into(),
@@ -944,7 +1020,11 @@ where
                     Ok(resp) => resp,
                     Err(e) => {
                         tracing::error!("LLM stream chat error: {e}");
-                        transition_state(handler, AgentState::Done("llm_error".into()), "LLM stream error");
+                        transition_state(
+                            handler,
+                            AgentState::Done("llm_error".into()),
+                            "LLM stream error",
+                        );
                         return LoopOutcome {
                             turn,
                             exit_reason: "llm_error".into(),
@@ -963,13 +1043,18 @@ where
                     let outcome = match tokio::time::timeout(
                         Duration::from_secs(5),
                         handler_ref.dispatch(&name, parsed, &empty, 0, ctx),
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(res) => res,
                         Err(_) => Err(ToolError::Custom(
                             "speculative execution timed out; skipped".into(),
                         )),
                     };
-                    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(cache_id, outcome);
+                    cache
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(cache_id, outcome);
                 }
                 response
             }
@@ -979,7 +1064,11 @@ where
                     Ok(resp) => resp,
                     Err(e) => {
                         tracing::error!("LLM chat error: {e}");
-                        transition_state(handler, AgentState::Done("llm_error".into()), "non-streaming LLM error");
+                        transition_state(
+                            handler,
+                            AgentState::Done("llm_error".into()),
+                            "non-streaming LLM error",
+                        );
                         return LoopOutcome {
                             turn,
                             exit_reason: "llm_error".into(),
@@ -996,15 +1085,25 @@ where
             }
             full_thinking.push_str(&response.thinking);
         }
-        let input_chars: usize = messages.iter().map(|m| {
-            m.content.iter().map(|b| match b {
-                ContentBlock::Text { text, .. } => text.len(),
-                ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
-                ContentBlock::ToolResult { content, .. } => content.as_text().map(|t| t.len()).unwrap_or(0),
-                ContentBlock::Thinking { thinking, .. } => thinking.len(),
-                ContentBlock::ImageUrl { url, .. } => url.len(),
-            }).sum::<usize>()
-        }).sum();
+        let input_chars: usize = messages
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .map(|b| match b {
+                        ContentBlock::Text { text, .. } => text.len(),
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            name.len() + input.to_string().len()
+                        }
+                        ContentBlock::ToolResult { content, .. } => {
+                            content.as_text().map(|t| t.len()).unwrap_or(0)
+                        }
+                        ContentBlock::Thinking { thinking, .. } => thinking.len(),
+                        ContentBlock::ImageUrl { url, .. } => url.len(),
+                    })
+                    .sum::<usize>()
+            })
+            .sum();
         // Prefer real token usage from the LLM provider; fall back to
         // the chars/4 estimate when the provider didn't report usage
         // (e.g. native sessions that wrap a different API).
@@ -1078,10 +1177,22 @@ where
 
         let tool_calls_iter: Vec<oz_core_types::MockToolCall> = if tool_calls.is_empty() {
             let intent_markers = [
-                "I'll read", "I will check", "let me look", "let me search",
-                "I'll open", "I need to", "I should", "let's first",
-                "我来读", "我来看", "让我查", "我先看看", "我先找一下",
-                "让我读", "我来搜索", "让我打开",
+                "I'll read",
+                "I will check",
+                "let me look",
+                "let me search",
+                "I'll open",
+                "I need to",
+                "I should",
+                "let's first",
+                "我来读",
+                "我来看",
+                "让我查",
+                "我先看看",
+                "我先找一下",
+                "让我读",
+                "我来搜索",
+                "让我打开",
             ];
             let has_intent = intent_markers.iter().any(|m| clean_content.contains(m));
             if has_intent && turn < config.max_turns.saturating_sub(1) {
@@ -1107,11 +1218,13 @@ where
                 // so the intent can proceed.
                 if consecutive_intent_hits == 1 {
                     if let Some(ref store) = skill_mcp_store {
-                        let matched = store.build_context(
-                            &user_input,
-                            std::path::Path::new(&config.working_dir),
-                            None,
-                        ).await;
+                        let matched = store
+                            .build_context(
+                                &user_input,
+                                std::path::Path::new(&config.working_dir),
+                                None,
+                            )
+                            .await;
                         if !matched.is_empty() {
                             let mut blocks = Vec::new();
                             blocks.push(ContentBlock::text(format!(
@@ -1128,7 +1241,10 @@ where
                 // Return empty vec — no respond → no exit → loop continues naturally.
                 vec![]
             } else {
-                vec![oz_core_types::MockToolCall::new("respond", serde_json::json!({"response": clean_content}))]
+                vec![oz_core_types::MockToolCall::new(
+                    "respond",
+                    serde_json::json!({"response": clean_content}),
+                )]
             }
         } else {
             // When the LLM explicitly called respond, its `response`
@@ -1146,7 +1262,10 @@ where
                             respond_override = Some(clean_resp);
                         }
                     } else {
-                        tracing::warn!("respond call found but no 'response' field in arguments: {:?}", tc.arguments);
+                        tracing::warn!(
+                            "respond call found but no 'response' field in arguments: {:?}",
+                            tc.arguments
+                        );
                     }
                 }
             }
@@ -1177,602 +1296,787 @@ where
         if is_text_only {
             // Only respond to handle — no parallel execution needed
             for m in &tool_calls_iter {
-                let outcome = handler.dispatch(&m.name, m.arguments.clone(), &response, 0, ctx).await;
+                let outcome = handler
+                    .dispatch(&m.name, m.arguments.clone(), &response, 0, ctx)
+                    .await;
                 handler.tool_after(&m.name, &m.arguments, outcome.clone());
                 process_tool_outcome(
-                    outcome, &m.name, &m.id, &m.id, 0, &mut tool_results,
-                    &mut next_prompts, &mut full_response, &mut exit_reason, config,
+                    outcome,
+                    &m.name,
+                    &m.id,
+                    &m.id,
+                    0,
+                    &mut tool_results,
+                    &mut next_prompts,
+                    &mut full_response,
+                    &mut exit_reason,
+                    config,
                     &mut pending_ask_user,
                 );
             }
         } else {
             // ── Parallel tool execution (Phases 1-6) ──
-        // Collect pre-processing info for each tool call
-        tool_meta = tool_calls_iter.iter().enumerate().map(|(ii, tc)| {
-            let tool_name = tc.name.clone();
-            let args = tc.arguments.clone();
-            let tid = tc.id.clone();
-            // Pre-compute the canonical SSE tc_id so Start, Available, and
-            // OutputAvailable all carry the same value.
-            let tc_id = if tid.is_empty() { next_block_id("tc") } else { tid.clone() };
+            // Collect pre-processing info for each tool call
+            tool_meta = tool_calls_iter
+                .iter()
+                .enumerate()
+                .map(|(ii, tc)| {
+                    let tool_name = tc.name.clone();
+                    let args = tc.arguments.clone();
+                    let tid = tc.id.clone();
+                    // Pre-compute the canonical SSE tc_id so Start, Available, and
+                    // OutputAvailable all carry the same value.
+                    let tc_id = if tid.is_empty() {
+                        next_block_id("tc")
+                    } else {
+                        tid.clone()
+                    };
 
-            handler.working_mut().sensorium.record_tool(&tool_name);
-            // `respond` is a synthetic wrapper around the LLM's text reply; its args
-            // are the full response body, which would flood the log and leak into
-            // terminal scrollback. Skip the verbose dump for it.
-            if config.verbose && tool_name != "respond" {
-                let args_pretty = serde_json::to_string_pretty(&args).unwrap_or_default();
-                tracing::debug!("Tool: `{tool_name}` args:\n```text\n{args_pretty}\n```");
-            }
-
-            // Check breaker
-            let blocked = tool_name != "respond" && !breaker.check(&tool_name);
-
-            ToolCallMeta { ii, tool_name, args, tid, tc_id, blocked }
-        }).collect();
-
-        // Phase 1: Call tool_before for all executable tools (sequential)
-        for m in &tool_meta {
-            if !m.blocked && m.tool_name != "respond" {
-                handler.tool_before(&m.tool_name, &m.args);
-                meter::record_tool_call();
-            }
-        }
-
-        // Phase 2: Execute all non-blocked tools in parallel
-        // dispatch() takes &self so we can share the handler reference
-        // Each tool gets a timeout; concurrency is limited by Semaphore;
-        // if any tool triggers should_exit, remaining tasks are cancelled.
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let semaphore = if config.max_concurrent_tools > 0 {
-            Some(Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_tools)))
-        } else {
-            None
-        };
-
-        let parallel_results = {
-            let handler_ref: &dyn Handler = &*handler;
-            let cancel = cancel_flag.clone();
-            let sem = semaphore.clone();
-
-            let spec_cache_for_phase2 = spec_cache.clone();
-            let futures: Vec<_> = tool_meta.iter()
-                .filter(|m| !m.blocked && m.tool_name != "respond")
-                .map(|m| {
-                    let ii = m.ii;
-                    let tool_name = m.tool_name.clone();
-                    let args = m.args.clone();
-                    let tid = m.tid.clone();
-                    tool_sequence.push((tool_name.clone(), args.clone()));
-                    if let Some(ref tx) = config.event_tx {
-                        let args_str = serde_json::to_string(&args).unwrap_or_default();
-                        let tc_id = m.tc_id.clone();
-                        let _ = tx.send(StreamEvent::ToolInputStart {
-                            tool_call_id: tc_id.clone(),
-                            name: tool_name.clone(),
-                        });
-                        let _ = tx.send(StreamEvent::ToolInputAvailable {
-                            tool_call_id: tc_id,
-                            name: tool_name.clone(),
-                            args: args_str,
-                        });
+                    handler.working_mut().sensorium.record_tool(&tool_name);
+                    // `respond` is a synthetic wrapper around the LLM's text reply; its args
+                    // are the full response body, which would flood the log and leak into
+                    // terminal scrollback. Skip the verbose dump for it.
+                    if config.verbose && tool_name != "respond" {
+                        let args_pretty = serde_json::to_string_pretty(&args).unwrap_or_default();
+                        tracing::debug!("Tool: `{tool_name}` args:\n```text\n{args_pretty}\n```");
                     }
-                    let cancel = cancel.clone();
-                    let sem = sem.clone();
-                    let resp = &response;
-                    let cx = ctx;
-                    let cfg = config;
-                    let cache = spec_cache_for_phase2.clone();
 
-                    async move {
-                        // Check speculative execution cache first (Direction A)
-                        if !tid.is_empty() {
-                            let cached = cache.lock().unwrap().remove(&tid);
-                            if let Some(cached_outcome) = cached {
-                                // Tool was already speculatively executed; skip re-dispatch
-                                if let Ok(ref outcome) = cached_outcome {
-                                    if outcome.should_exit {
-                                        cancel.store(true, Ordering::Relaxed);
-                                    }
-                                }
-                                return (ii, tool_name, cached_outcome);
-                            }
-                        }
+                    // Check breaker
+                    let blocked = tool_name != "respond" && !breaker.check(&tool_name);
 
-                        // Early cancellation check (another tool already requested exit)
-                        if cancel.load(Ordering::Relaxed) {
-                            return (ii, tool_name, Err(ToolError::Custom("cancelled".into())));
-                        }
-
-                        // Acquire concurrency permit (blocks if at capacity)
-                        let _permit = match &sem {
-                            Some(s) => match s.acquire().await {
-                                Ok(p) => Some(p),
-                                Err(_) => {
-                                    tracing::warn!("Semaphore closed, skipping {}", tool_name);
-                                    return (ii, tool_name.clone(), Err(ToolError::Custom("semaphore closed".into())));
-                                }
-                            },
-                            None => None,
-                        };
-
-                        // Check cancellation again after acquiring permit
-                        if cancel.load(Ordering::Relaxed) {
-                            return (ii, tool_name.clone(), Err(ToolError::Custom("cancelled".into())));
-                        }
-
-                        // Safety guard check — progressive trust + blocklist
-                        if let (Some(ref guard), Some(ref approval)) = (&cfg.safety_guard, &cfg.approval_handler) {
-                            let decision = guard.check(&tool_name, &args);
-                            match decision {
-                                oz_safety::TrustDecision::Blocked(msg) => {
-                                    tracing::warn!("[safety] blocked {tool_name}: {msg}");
-                                    return (ii, tool_name.clone(), Err(ToolError::Custom(format!("blocked: {msg}"))));
-                                }
-                                oz_safety::TrustDecision::NeedsApproval(info) => {
-                                    tracing::info!("[safety] requesting approval for {}/{}", info.tool_name, info.pattern);
-                                    let req = oz_safety::ApprovalRequest {
-                                        session_id: cfg.session_id.clone(),
-                                        tool_name: info.tool_name.clone(),
-                                        pattern: info.pattern.clone(),
-                                        arguments: args.clone(),
-                                        info,
-                                    };
-                                    let timeout = std::time::Duration::from_secs(cfg.approval_timeout_secs);
-                                    match approval.request_approval(req, timeout).await {
-                                        Ok(oz_safety::ApprovalDecision::Allow) => {
-                                            tracing::debug!("[safety] approved {tool_name}");
-                                        }
-                                        Ok(oz_safety::ApprovalDecision::TrustSession) => {
-                                            tracing::info!("[safety] session-trusted {tool_name}");
-                                            guard.record_approval(&tool_name, &args);
-                                        }
-                                        Ok(oz_safety::ApprovalDecision::TrustWorkspace) => {
-                                            tracing::info!("[safety] workspace-trusted {tool_name}");
-                                            guard.record_approval(&tool_name, &args);
-                                        }
-                                        Ok(oz_safety::ApprovalDecision::Deny) => {
-                                            tracing::info!("[safety] denied {tool_name}");
-                                            return (ii, tool_name.clone(), Err(ToolError::Custom("user denied operation".into())));
-                                        }
-                                        Ok(oz_safety::ApprovalDecision::BlockForever) => {
-                                            tracing::warn!("[safety] permanently blocked {tool_name}");
-                                            guard.block(&tool_name, &args);
-                                            return (ii, tool_name.clone(), Err(ToolError::Custom("user permanently blocked operation".into())));
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("[safety] approval error for {tool_name}: {e}");
-                                            return (ii, tool_name.clone(), Err(ToolError::Custom(format!("approval failed: {e}"))));
-                                        }
-                                    }
-                                }
-                                oz_safety::TrustDecision::Allowed => {
-                                    // Silent pass — trusted or safe tool
-                                }
-                            }
-                        }
-
-                        let dispatch_fut = handler_ref.dispatch(&tool_name, args, resp, ii as u32, cx);
-                        // Race the dispatch against both the tool timeout AND a
-                        // user stop-signal poll, so cancelling the session
-                        // actually interrupts an in-flight tool instead of
-                        // waiting for its 30s timeout to fire.
-                        let stop_poll = cancel.clone();
-                        let stop_wait = async move {
-                            loop {
-                                if stop_poll.load(Ordering::Relaxed) {
-                                    break;
-                                }
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                            }
-                        };
-                        tokio::pin!(stop_wait);
-                        let result = tokio::select! {
-                            biased;
-                            _ = &mut stop_wait => {
-                                tracing::info!("Tool {} interrupted by user stop", tool_name);
-                                Err(ToolError::Custom("interrupted by user stop".into()))
-                            }
-                            timed = tokio::time::timeout(
-                                Duration::from_secs(cfg.tool_timeout_secs),
-                                dispatch_fut,
-                            ) => match timed {
-                                Ok(outcome) => outcome,
-                                Err(_elapsed) => Err(ToolError::Custom(format!(
-                                    "tool '{}' timed out after {}s",
-                                    tool_name, cfg.tool_timeout_secs,
-                                ))),
-                            }
-                        };
-
-                        // If this tool requested exit, signal others to cancel
-                        if let Ok(ref outcome) = result {
-                            if outcome.should_exit {
-                                cancel.store(true, Ordering::Relaxed);
-                            }
-                        }
-
-                        (ii, tool_name.clone(), result)
+                    ToolCallMeta {
+                        ii,
+                        tool_name,
+                        args,
+                        tid,
+                        tc_id,
+                        blocked,
                     }
                 })
                 .collect();
-            futures::future::join_all(futures).await
-        };
 
-        // Phase 3: Call tool_after for all results (sequential)
-        for (ii, ref tool_name, ref outcome) in &parallel_results {
-            if let Some(meta) = tool_meta.iter().find(|m| m.ii == *ii) {
-                handler.tool_after(tool_name, &meta.args, outcome.clone());
-                // PostToolUse hooks fire only for successful file-writing
-                // tools, with the target file path for {file} substitution.
-                if outcome.is_ok() && matches!(tool_name.as_str(), "write" | "edit" | "patch") {
-                    if let Some(ref hooks) = config.hooks {
-                        let file = meta.args.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string());
-                        hooks.fire(&crate::hooks::HookEvent::PostToolUse {
-                            tool: tool_name.clone(),
-                            file,
-                        });
-                    }
+            // Phase 1: Call tool_before for all executable tools (sequential)
+            for m in &tool_meta {
+                if !m.blocked && m.tool_name != "respond" {
+                    handler.tool_before(&m.tool_name, &m.args);
+                    meter::record_tool_call();
                 }
             }
-        }
 
-        // Phase 4: Handle blocked (breaker) tools
-        for m in &tool_meta {
-            if m.blocked {
-                let msg = BREAKER_BLOCKED_MSG.replace("{tool}", &m.tool_name);
-                next_prompts.push(msg.clone());
-                if !m.tid.is_empty() {
-                    tool_results.push(ToolResultItem {
-                        tool_use_id: m.tid.clone(),
-                        content: msg,
-                        images: vec![],
-                    });
-                }
-            }
-        }
+            // Phase 2: Execute all non-blocked tools in parallel
+            // dispatch() takes &self so we can share the handler reference
+            // Each tool gets a timeout; concurrency is limited by Semaphore;
+            // if any tool triggers should_exit, remaining tasks are cancelled.
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+            let semaphore = if config.max_concurrent_tools > 0 {
+                Some(Arc::new(tokio::sync::Semaphore::new(
+                    config.max_concurrent_tools,
+                )))
+            } else {
+                None
+            };
 
-        // Phase 5: Handle respond (always sequential, single)
-        // respond events are NOT sent to frontends — internal mechanism only.
-        // We dispatch and record the side effect, but we intentionally do NOT
-        // call process_tool_outcome for respond here. Doing so would set
-        // exit_reason="EXITED" and break the loop, even when the LLM called
-        // respond alongside other tools in a multi-step task. The "I'm done"
-        // signal is only honoured in the is_text_only branch above, where
-        // respond is the sole tool call.
-        for m in &tool_meta {
-            if m.tool_name == "respond" && !m.blocked {
-                let outcome = handler.dispatch(&m.tool_name, m.args.clone(), &response, m.ii as u32, ctx).await;
-                handler.tool_after(&m.tool_name, &m.args, outcome.clone());
-            }
-        }
+            let parallel_results = {
+                let handler_ref: &dyn Handler = &*handler;
+                let cancel = cancel_flag.clone();
+                let sem = semaphore.clone();
 
-        // Phase 6: Process parallel results in order.
-        // Two-pass: send every ToolOutputAvailable event first so the UI never sees
-        // a stuck "Running..." card, then apply outcomes (which may set exit_reason).
-        // Third (inline): extract todowrite todo_ids so the Todo tracking section
-        // uses the same UUID-based IDs that the tool returns to the LLM — without
-        // this, the agent loop's sequential IDs (todo_1, todo_2) never match the
-        // UUID-based IDs the LLM passes to todoupdate, and status updates silently fail.
-        let mut todo_write_ids: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-        for (_ii, tool_name, ref outcome) in &parallel_results {
-            if tool_name == "todowrite" {
-                if let Ok(oc) = outcome {
-                    if let Some(id) = oc.data.get("todo_id").and_then(|v| v.as_str()) {
-                        todo_write_ids.insert(*_ii, id.to_string());
-                    }
-                }
-            }
-            if let Some(ref tx) = config.event_tx {
-                let result_str = match outcome {
-                    Ok(oc) => {
-                        let data = &oc.data;
-                        // For todoupdate, ensure content is in the result
-                        // even if the LLM didn't pass it — look it up from
-                        // working memory so the frontend card shows text.
-                        let enriched = if tool_name == "todoupdate" {
-                            let mut d = data.clone();
-                            if d.get("content").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty()) {
-                                if let Some(id) = d.get("todo_id").and_then(|v| v.as_str()) {
-                                    let wm = handler.working();
-                                    if let Some(t) = wm.todos.iter().find(|t| t.id == id) {
-                                        d["content"] = serde_json::Value::String(t.content.clone());
+                let spec_cache_for_phase2 = spec_cache.clone();
+                let futures: Vec<_> = tool_meta
+                    .iter()
+                    .filter(|m| !m.blocked && m.tool_name != "respond")
+                    .map(|m| {
+                        let ii = m.ii;
+                        let tool_name = m.tool_name.clone();
+                        let args = m.args.clone();
+                        let tid = m.tid.clone();
+                        tool_sequence.push((tool_name.clone(), args.clone()));
+                        if let Some(ref tx) = config.event_tx {
+                            let args_str = serde_json::to_string(&args).unwrap_or_default();
+                            let tc_id = m.tc_id.clone();
+                            let _ = tx.send(StreamEvent::ToolInputStart {
+                                tool_call_id: tc_id.clone(),
+                                name: tool_name.clone(),
+                            });
+                            let _ = tx.send(StreamEvent::ToolInputAvailable {
+                                tool_call_id: tc_id,
+                                name: tool_name.clone(),
+                                args: args_str,
+                            });
+                        }
+                        let cancel = cancel.clone();
+                        let sem = sem.clone();
+                        let resp = &response;
+                        let cx = ctx;
+                        let cfg = config;
+                        let cache = spec_cache_for_phase2.clone();
+
+                        async move {
+                            // Check speculative execution cache first (Direction A)
+                            if !tid.is_empty() {
+                                let cached = cache.lock().unwrap().remove(&tid);
+                                if let Some(cached_outcome) = cached {
+                                    // Tool was already speculatively executed; skip re-dispatch
+                                    if let Ok(ref outcome) = cached_outcome {
+                                        if outcome.should_exit {
+                                            cancel.store(true, Ordering::Relaxed);
+                                        }
+                                    }
+                                    return (ii, tool_name, cached_outcome);
+                                }
+                            }
+
+                            // Early cancellation check (another tool already requested exit)
+                            if cancel.load(Ordering::Relaxed) {
+                                return (ii, tool_name, Err(ToolError::Custom("cancelled".into())));
+                            }
+
+                            // Acquire concurrency permit (blocks if at capacity)
+                            let _permit = match &sem {
+                                Some(s) => match s.acquire().await {
+                                    Ok(p) => Some(p),
+                                    Err(_) => {
+                                        tracing::warn!("Semaphore closed, skipping {}", tool_name);
+                                        return (
+                                            ii,
+                                            tool_name.clone(),
+                                            Err(ToolError::Custom("semaphore closed".into())),
+                                        );
+                                    }
+                                },
+                                None => None,
+                            };
+
+                            // Check cancellation again after acquiring permit
+                            if cancel.load(Ordering::Relaxed) {
+                                return (
+                                    ii,
+                                    tool_name.clone(),
+                                    Err(ToolError::Custom("cancelled".into())),
+                                );
+                            }
+
+                            // Safety guard check — progressive trust + blocklist
+                            if let (Some(ref guard), Some(ref approval)) =
+                                (&cfg.safety_guard, &cfg.approval_handler)
+                            {
+                                let decision = guard.check(&tool_name, &args);
+                                match decision {
+                                    oz_safety::TrustDecision::Blocked(msg) => {
+                                        tracing::warn!("[safety] blocked {tool_name}: {msg}");
+                                        return (
+                                            ii,
+                                            tool_name.clone(),
+                                            Err(ToolError::Custom(format!("blocked: {msg}"))),
+                                        );
+                                    }
+                                    oz_safety::TrustDecision::NeedsApproval(info) => {
+                                        tracing::info!(
+                                            "[safety] requesting approval for {}/{}",
+                                            info.tool_name,
+                                            info.pattern
+                                        );
+                                        let req = oz_safety::ApprovalRequest {
+                                            session_id: cfg.session_id.clone(),
+                                            tool_name: info.tool_name.clone(),
+                                            pattern: info.pattern.clone(),
+                                            arguments: args.clone(),
+                                            info,
+                                        };
+                                        let timeout = std::time::Duration::from_secs(
+                                            cfg.approval_timeout_secs,
+                                        );
+                                        match approval.request_approval(req, timeout).await {
+                                            Ok(oz_safety::ApprovalDecision::Allow) => {
+                                                tracing::debug!("[safety] approved {tool_name}");
+                                            }
+                                            Ok(oz_safety::ApprovalDecision::TrustSession) => {
+                                                tracing::info!(
+                                                    "[safety] session-trusted {tool_name}"
+                                                );
+                                                guard.record_approval(&tool_name, &args);
+                                            }
+                                            Ok(oz_safety::ApprovalDecision::TrustWorkspace) => {
+                                                tracing::info!(
+                                                    "[safety] workspace-trusted {tool_name}"
+                                                );
+                                                guard.record_approval(&tool_name, &args);
+                                            }
+                                            Ok(oz_safety::ApprovalDecision::Deny) => {
+                                                tracing::info!("[safety] denied {tool_name}");
+                                                return (
+                                                    ii,
+                                                    tool_name.clone(),
+                                                    Err(ToolError::Custom(
+                                                        "user denied operation".into(),
+                                                    )),
+                                                );
+                                            }
+                                            Ok(oz_safety::ApprovalDecision::BlockForever) => {
+                                                tracing::warn!(
+                                                    "[safety] permanently blocked {tool_name}"
+                                                );
+                                                guard.block(&tool_name, &args);
+                                                return (
+                                                    ii,
+                                                    tool_name.clone(),
+                                                    Err(ToolError::Custom(
+                                                        "user permanently blocked operation".into(),
+                                                    )),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "[safety] approval error for {tool_name}: {e}"
+                                                );
+                                                return (
+                                                    ii,
+                                                    tool_name.clone(),
+                                                    Err(ToolError::Custom(format!(
+                                                        "approval failed: {e}"
+                                                    ))),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    oz_safety::TrustDecision::Allowed => {
+                                        // Silent pass — trusted or safe tool
                                     }
                                 }
                             }
-                            serde_json::to_string(&d).unwrap_or_default()
-                        } else {
-                            serde_json::to_string(data).unwrap_or_default()
-                        };
-                        enriched
-                    }
-                    Err(e) => format!("{{\"error\":\"{}\"}}", e),
-                };
-                let tc_id = tool_meta
-                    .iter()
-                    .find(|m| m.ii == *_ii)
-                    .map(|m| m.tc_id.clone())
-                    .unwrap_or_else(|| next_block_id("tc"));
-                const MAX_TOOL_OUTPUT_IN_STREAM: usize = 32 * 1024;
-                let output_for_stream = if result_str.len() > MAX_TOOL_OUTPUT_IN_STREAM {
-                    let mut t = result_str.clone();
-                    t.truncate(MAX_TOOL_OUTPUT_IN_STREAM);
-                    t.push_str(&format!(
-                        "\n...[truncated, original {} bytes, kept first {}]",
-                        result_str.len(),
-                        MAX_TOOL_OUTPUT_IN_STREAM
-                    ));
-                    t
-                } else {
-                    result_str
-                };
-                let _ = tx.send(StreamEvent::ToolOutputAvailable {
-                    tool_call_id: tc_id,
-                    name: tool_name.clone(),
-                    output: output_for_stream,
-                });
 
-                // open_side_panel → tell the frontend to open the sidebar artifact
-                if tool_name == "open_side_panel" {
+                            let dispatch_fut =
+                                handler_ref.dispatch(&tool_name, args, resp, ii as u32, cx);
+                            // Race the dispatch against both the tool timeout AND a
+                            // user stop-signal poll, so cancelling the session
+                            // actually interrupts an in-flight tool instead of
+                            // waiting for its 30s timeout to fire.
+                            let stop_poll = cancel.clone();
+                            let stop_wait = async move {
+                                loop {
+                                    if stop_poll.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                }
+                            };
+                            tokio::pin!(stop_wait);
+                            let result = tokio::select! {
+                                biased;
+                                _ = &mut stop_wait => {
+                                    tracing::info!("Tool {} interrupted by user stop", tool_name);
+                                    Err(ToolError::Custom("interrupted by user stop".into()))
+                                }
+                                timed = tokio::time::timeout(
+                                    Duration::from_secs(cfg.tool_timeout_secs),
+                                    dispatch_fut,
+                                ) => match timed {
+                                    Ok(outcome) => outcome,
+                                    Err(_elapsed) => Err(ToolError::Custom(format!(
+                                        "tool '{}' timed out after {}s",
+                                        tool_name, cfg.tool_timeout_secs,
+                                    ))),
+                                }
+                            };
+
+                            // If this tool requested exit, signal others to cancel
+                            if let Ok(ref outcome) = result {
+                                if outcome.should_exit {
+                                    cancel.store(true, Ordering::Relaxed);
+                                }
+                            }
+
+                            (ii, tool_name.clone(), result)
+                        }
+                    })
+                    .collect();
+                futures::future::join_all(futures).await
+            };
+
+            // Phase 3: Call tool_after for all results (sequential)
+            for (ii, ref tool_name, ref outcome) in &parallel_results {
+                if let Some(meta) = tool_meta.iter().find(|m| m.ii == *ii) {
+                    handler.tool_after(tool_name, &meta.args, outcome.clone());
+                    // PostToolUse hooks fire only for successful file-writing
+                    // tools, with the target file path for {file} substitution.
+                    if outcome.is_ok() && matches!(tool_name.as_str(), "write" | "edit" | "patch") {
+                        if let Some(ref hooks) = config.hooks {
+                            let file = meta
+                                .args
+                                .get("file_path")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            hooks.fire(&crate::hooks::HookEvent::PostToolUse {
+                                tool: tool_name.clone(),
+                                file,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Phase 4: Handle blocked (breaker) tools
+            for m in &tool_meta {
+                if m.blocked {
+                    let msg = BREAKER_BLOCKED_MSG.replace("{tool}", &m.tool_name);
+                    next_prompts.push(msg.clone());
+                    if !m.tid.is_empty() {
+                        tool_results.push(ToolResultItem {
+                            tool_use_id: m.tid.clone(),
+                            content: msg,
+                            images: vec![],
+                        });
+                    }
+                }
+            }
+
+            // Phase 5: Handle respond (always sequential, single)
+            // respond events are NOT sent to frontends — internal mechanism only.
+            // We dispatch and record the side effect, but we intentionally do NOT
+            // call process_tool_outcome for respond here. Doing so would set
+            // exit_reason="EXITED" and break the loop, even when the LLM called
+            // respond alongside other tools in a multi-step task. The "I'm done"
+            // signal is only honoured in the is_text_only branch above, where
+            // respond is the sole tool call.
+            for m in &tool_meta {
+                if m.tool_name == "respond" && !m.blocked {
+                    let outcome = handler
+                        .dispatch(&m.tool_name, m.args.clone(), &response, m.ii as u32, ctx)
+                        .await;
+                    handler.tool_after(&m.tool_name, &m.args, outcome.clone());
+                }
+            }
+
+            // Phase 6: Process parallel results in order.
+            // Two-pass: send every ToolOutputAvailable event first so the UI never sees
+            // a stuck "Running..." card, then apply outcomes (which may set exit_reason).
+            // Third (inline): extract todowrite todo_ids so the Todo tracking section
+            // uses the same UUID-based IDs that the tool returns to the LLM — without
+            // this, the agent loop's sequential IDs (todo_1, todo_2) never match the
+            // UUID-based IDs the LLM passes to todoupdate, and status updates silently fail.
+            let mut todo_write_ids: std::collections::HashMap<usize, String> =
+                std::collections::HashMap::new();
+            for (_ii, tool_name, ref outcome) in &parallel_results {
+                if tool_name == "todowrite" {
                     if let Ok(oc) = outcome {
-                        if oc.data.get("status").and_then(|v| v.as_str()) == Some("OPENED") {
-                            let artifact_type = oc.data.get("artifact_type")
-                                .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let artifact_path = oc.data.get("artifact_path")
-                                .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let artifact_label = oc.data.get("artifact_label")
-                                .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            if !artifact_type.is_empty() && !artifact_path.is_empty() {
-                                let _ = tx.send(StreamEvent::OpenArtifact {
-                                    artifact_type,
-                                    artifact_path,
-                                    artifact_label,
-                                });
+                        if let Some(id) = oc.data.get("todo_id").and_then(|v| v.as_str()) {
+                            todo_write_ids.insert(*_ii, id.to_string());
+                        }
+                    }
+                }
+                if let Some(ref tx) = config.event_tx {
+                    let result_str = match outcome {
+                        Ok(oc) => {
+                            let data = &oc.data;
+                            // For todoupdate, ensure content is in the result
+                            // even if the LLM didn't pass it — look it up from
+                            // working memory so the frontend card shows text.
+                            let enriched = if tool_name == "todoupdate" {
+                                let mut d = data.clone();
+                                if d.get("content")
+                                    .and_then(|v| v.as_str())
+                                    .is_none_or(|s| s.is_empty())
+                                {
+                                    if let Some(id) = d.get("todo_id").and_then(|v| v.as_str()) {
+                                        let wm = handler.working();
+                                        if let Some(t) = wm.todos.iter().find(|t| t.id == id) {
+                                            d["content"] =
+                                                serde_json::Value::String(t.content.clone());
+                                        }
+                                    }
+                                }
+                                serde_json::to_string(&d).unwrap_or_default()
+                            } else {
+                                serde_json::to_string(data).unwrap_or_default()
+                            };
+                            enriched
+                        }
+                        Err(e) => format!("{{\"error\":\"{}\"}}", e),
+                    };
+                    let tc_id = tool_meta
+                        .iter()
+                        .find(|m| m.ii == *_ii)
+                        .map(|m| m.tc_id.clone())
+                        .unwrap_or_else(|| next_block_id("tc"));
+                    const MAX_TOOL_OUTPUT_IN_STREAM: usize = 32 * 1024;
+                    let output_for_stream = if result_str.len() > MAX_TOOL_OUTPUT_IN_STREAM {
+                        let mut t = result_str.clone();
+                        t.truncate(MAX_TOOL_OUTPUT_IN_STREAM);
+                        t.push_str(&format!(
+                            "\n...[truncated, original {} bytes, kept first {}]",
+                            result_str.len(),
+                            MAX_TOOL_OUTPUT_IN_STREAM
+                        ));
+                        t
+                    } else {
+                        result_str
+                    };
+                    let _ = tx.send(StreamEvent::ToolOutputAvailable {
+                        tool_call_id: tc_id,
+                        name: tool_name.clone(),
+                        output: output_for_stream,
+                    });
+
+                    // open_side_panel → tell the frontend to open the sidebar artifact
+                    if tool_name == "open_side_panel" {
+                        if let Ok(oc) = outcome {
+                            if oc.data.get("status").and_then(|v| v.as_str()) == Some("OPENED") {
+                                let artifact_type = oc
+                                    .data
+                                    .get("artifact_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let artifact_path = oc
+                                    .data
+                                    .get("artifact_path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let artifact_label = oc
+                                    .data
+                                    .get("artifact_label")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !artifact_type.is_empty() && !artifact_path.is_empty() {
+                                    let _ = tx.send(StreamEvent::OpenArtifact {
+                                        artifact_type,
+                                        artifact_path,
+                                        artifact_label,
+                                    });
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        for (ii, tool_name, outcome) in &parallel_results {
-            let meta = &tool_meta[*ii];
-            process_tool_outcome(
-                outcome.clone(), tool_name, &meta.tid, &meta.tc_id, *ii, &mut tool_results,
-                &mut next_prompts, &mut full_response, &mut exit_reason, config,
-                &mut pending_ask_user,
-            );
-        }
+            for (ii, tool_name, outcome) in &parallel_results {
+                let meta = &tool_meta[*ii];
+                process_tool_outcome(
+                    outcome.clone(),
+                    tool_name,
+                    &meta.tid,
+                    &meta.tc_id,
+                    *ii,
+                    &mut tool_results,
+                    &mut next_prompts,
+                    &mut full_response,
+                    &mut exit_reason,
+                    config,
+                    &mut pending_ask_user,
+                );
+            }
 
-        // ── Todo tracking ──
-        {
-            let mut dirty = false;
-            let wm = handler.working_mut();
-            for m in &tool_meta {
-                if m.tool_name == "todowrite" {
-                    let content = m.args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let priority = m.args.get("priority").and_then(|v| v.as_str()).unwrap_or("medium").to_string();
-                    let id = todo_write_ids.get(&m.ii).cloned().unwrap_or_else(|| {
-                        format!("todo_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"))
-                    });
-                    if !content.is_empty() {
-                        let normalized = content.trim().to_lowercase();
-                        let is_duplicate = wm.todos.iter().any(|t| {
-                            t.content.trim().to_lowercase() == normalized
+            // ── Todo tracking ──
+            {
+                let mut dirty = false;
+                let wm = handler.working_mut();
+                for m in &tool_meta {
+                    if m.tool_name == "todowrite" {
+                        let content = m
+                            .args
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let priority = m
+                            .args
+                            .get("priority")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("medium")
+                            .to_string();
+                        let id = todo_write_ids.get(&m.ii).cloned().unwrap_or_else(|| {
+                            format!(
+                                "todo_{}",
+                                uuid::Uuid::new_v4()
+                                    .to_string()
+                                    .split('-')
+                                    .next()
+                                    .unwrap_or("0")
+                            )
                         });
-                        if !is_duplicate {
-                            wm.todos.push(oz_core_types::TodoItem {
-                                id, content, status: "pending".into(), priority, order: wm.todos.len(),
-                                in_progress_since_turn: None,
-                            });
-                            dirty = true;
+                        if !content.is_empty() {
+                            let normalized = content.trim().to_lowercase();
+                            let is_duplicate = wm
+                                .todos
+                                .iter()
+                                .any(|t| t.content.trim().to_lowercase() == normalized);
+                            if !is_duplicate {
+                                wm.todos.push(oz_core_types::TodoItem {
+                                    id,
+                                    content,
+                                    status: "pending".into(),
+                                    priority,
+                                    order: wm.todos.len(),
+                                    in_progress_since_turn: None,
+                                });
+                                dirty = true;
+                            }
                         }
-                    }
-                } else if m.tool_name == "submit_plan" {
-                    // P1 plan state machine with HUMAN APPROVAL: the plan is
-                    // staged and the user is asked to approve/modify it via
-                    // the ask_user dialog; todos are created only after
-                    // approval (in the ask_user pause section below).
-                    let goal = m.args.get("goal").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let steps: Vec<String> = m.args.get("steps")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .filter(|s| !s.trim().is_empty())
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if !goal.is_empty() && !steps.is_empty() {
-                        pending_plan = Some((goal.clone(), steps.clone()));
-                        pending_ask_user = Some(PendingAskUser {
-                            tool_use_id: m.tid.clone(),
-                            tool_call_id: m.tc_id.clone(),
-                            tool_name: "submit_plan".to_string(),
-                            payload: serde_json::json!({
-                                "data": {
-                                    "question": if ctx.lang == "zh" {
-                                        format!(
-                                            "Agent 提交了执行计划（{} 步）：{}。确认开始执行吗？",
-                                            steps.len(),
-                                            goal
-                                        )
-                                    } else {
-                                        format!(
-                                            "Agent submitted a plan ({} steps): {}. Approve to start?",
-                                            steps.len(),
-                                            goal
-                                        )
-                                    },
-                                    "candidates": if ctx.lang == "zh" {
-                                        ["确认，开始执行", "修改计划"]
-                                    } else {
-                                        ["Approve", "Modify plan"]
-                                    },
-                                }
-                            }),
-                        });
-                    }
-                } else if m.tool_name == "todoupdate" {
-                    let id = m.args.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let status = m.args.get("status").and_then(|v| v.as_str()).unwrap_or("in_progress").to_string();
-                    if !id.is_empty() {
-                        if let Some(t) = wm.todos.iter_mut().find(|t| t.id == id) {
-                            if status == "completed" {
-                                match crate::verifier::verify_todo_item(&t.content, &config.working_dir).await {
-                                    crate::verifier::VerifyResult::Failed(reason) => {
-                                        let fail_count = verify_fail_counts.entry(id.clone()).or_insert(0);
-                                        *fail_count += 1;
-                                        if *fail_count >= 2 {
-                                            // Safety valve: after repeated verification failures,
-                                            // accept the completion (with a warning) instead of
-                                            // reverting forever — a false-negative verifier would
-                                            // otherwise trap the agent in an infinite
-                                            // todoupdate → revert → retry loop.
-                                            t.in_progress_since_turn = None;
-                                            t.status = "completed".to_string();
-                                            let msg = if ctx.lang == "zh" {
-                                                format!(
+                    } else if m.tool_name == "submit_plan" {
+                        // P1 plan state machine with HUMAN APPROVAL: the plan is
+                        // staged and the user is asked to approve/modify it via
+                        // the ask_user dialog; todos are created only after
+                        // approval (in the ask_user pause section below).
+                        let goal = m
+                            .args
+                            .get("goal")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let steps: Vec<String> = m
+                            .args
+                            .get("steps")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .filter(|s| !s.trim().is_empty())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !goal.is_empty() && !steps.is_empty() {
+                            pending_plan = Some((goal.clone(), steps.clone()));
+                            pending_ask_user = Some(PendingAskUser {
+                                tool_use_id: m.tid.clone(),
+                                tool_call_id: m.tc_id.clone(),
+                                tool_name: "submit_plan".to_string(),
+                                payload: serde_json::json!({
+                                    "data": {
+                                        "question": if ctx.lang == "zh" {
+                                            format!(
+                                                "Agent 提交了执行计划（{} 步）：{}。确认开始执行吗？",
+                                                steps.len(),
+                                                goal
+                                            )
+                                        } else {
+                                            format!(
+                                                "Agent submitted a plan ({} steps): {}. Approve to start?",
+                                                steps.len(),
+                                                goal
+                                            )
+                                        },
+                                        "candidates": if ctx.lang == "zh" {
+                                            ["确认，开始执行", "修改计划"]
+                                        } else {
+                                            ["Approve", "Modify plan"]
+                                        },
+                                    }
+                                }),
+                            });
+                        }
+                    } else if m.tool_name == "todoupdate" {
+                        let id = m
+                            .args
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let status = m
+                            .args
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("in_progress")
+                            .to_string();
+                        if !id.is_empty() {
+                            if let Some(t) = wm.todos.iter_mut().find(|t| t.id == id) {
+                                if status == "completed" {
+                                    match crate::verifier::verify_todo_item(
+                                        &t.content,
+                                        &config.working_dir,
+                                    )
+                                    .await
+                                    {
+                                        crate::verifier::VerifyResult::Failed(reason) => {
+                                            let fail_count =
+                                                verify_fail_counts.entry(id.clone()).or_insert(0);
+                                            *fail_count += 1;
+                                            if *fail_count >= 2 {
+                                                // Safety valve: after repeated verification failures,
+                                                // accept the completion (with a warning) instead of
+                                                // reverting forever — a false-negative verifier would
+                                                // otherwise trap the agent in an infinite
+                                                // todoupdate → revert → retry loop.
+                                                t.in_progress_since_turn = None;
+                                                t.status = "completed".to_string();
+                                                let msg = if ctx.lang == "zh" {
+                                                    format!(
                                                     "[验证放行] \"{}\" 标记完成但验证连续失败（{}）。已接受完成状态，如确有问题请后续修复。",
                                                     t.content, reason
                                                 )
-                                            } else {
-                                                format!(
+                                                } else {
+                                                    format!(
                                                     "[VERIFY OVERRIDE] \"{}\" marked complete but verification failed repeatedly ({}). Accepted as done; fix later if needed.",
                                                     t.content, reason
                                                 )
-                                            };
-                                            next_prompts.push(msg);
-                                            dirty = true;
-                                        } else {
-                                            t.status = "in_progress".to_string();
-                                            let msg = if ctx.lang == "zh" {
-                                                format!(
+                                                };
+                                                next_prompts.push(msg);
+                                                dirty = true;
+                                            } else {
+                                                t.status = "in_progress".to_string();
+                                                let msg = if ctx.lang == "zh" {
+                                                    format!(
                                                     "[验证失败] \"{}\" 标记完成但验证失败：{}。请修复后重试。",
                                                     t.content, reason
                                                 )
-                                            } else {
-                                                format!(
+                                                } else {
+                                                    format!(
                                                     "[VERIFY FAILED] \"{}\" was marked complete but verification failed: {}. Fix and re-verify.",
                                                     t.content, reason
                                                 )
-                                            };
-                                            next_prompts.push(msg);
+                                                };
+                                                next_prompts.push(msg);
+                                                dirty = true;
+                                            }
+                                        }
+                                        crate::verifier::VerifyResult::Passed
+                                        | crate::verifier::VerifyResult::SoftPass => {
+                                            verify_fail_counts.remove(&id);
+                                            t.in_progress_since_turn = None;
+                                            t.status = status;
                                             dirty = true;
                                         }
                                     }
-                                    crate::verifier::VerifyResult::Passed | crate::verifier::VerifyResult::SoftPass => {
-                                        verify_fail_counts.remove(&id);
+                                } else {
+                                    verify_fail_counts.remove(&id);
+                                    let is_in_progress = status == "in_progress";
+                                    t.status = status;
+                                    dirty = true;
+                                    if is_in_progress {
+                                        t.in_progress_since_turn = Some(turn);
+                                    } else {
                                         t.in_progress_since_turn = None;
-                                        t.status = status;
-                                        dirty = true;
                                     }
                                 }
                             } else {
-                                verify_fail_counts.remove(&id);
-                                let is_in_progress = status == "in_progress";
-                                t.status = status;
-                                dirty = true;
-                                if is_in_progress {
-                                    t.in_progress_since_turn = Some(turn);
-                                } else {
-                                    t.in_progress_since_turn = None;
-                                }
-                            }
-                        } else {
-                            let existing: Vec<String> = wm.todos.iter().map(|t| t.id.clone()).collect();
-                            let msg = if ctx.lang == "zh" {
-                                format!(
+                                let existing: Vec<String> =
+                                    wm.todos.iter().map(|t| t.id.clone()).collect();
+                                let msg = if ctx.lang == "zh" {
+                                    format!(
                                     "[todoupdate] 未找到 id={id} 的待办项。当前列表: [{}]。请使用 todowrite 返回的正确 todo_id。",
                                     existing.join(", ")
                                 )
-                            } else {
-                                format!(
+                                } else {
+                                    format!(
                                     "[todoupdate] No todo found with id={id}. Current IDs: [{}]. Use the exact todo_id returned by todowrite.",
                                     existing.join(", ")
                                 )
-                            };
-                            next_prompts.push(msg);
+                                };
+                                next_prompts.push(msg);
+                            }
                         }
                     }
                 }
-            }
-            if dirty {
-                let items = wm.todos.clone();
-                let total = items.len();
-                let current = items.iter().filter(|t| t.status == "completed").count();
-                if let Some(ref tx) = config.event_tx {
-                    let _ = tx.send(oz_core_types::StreamEvent::DataTodoUpdate {
-                        items, current, total,
-                    });
+                if dirty {
+                    let items = wm.todos.clone();
+                    let total = items.len();
+                    let current = items.iter().filter(|t| t.status == "completed").count();
+                    if let Some(ref tx) = config.event_tx {
+                        let _ = tx.send(oz_core_types::StreamEvent::DataTodoUpdate {
+                            items,
+                            current,
+                            total,
+                        });
+                    }
                 }
-            }
 
-            // ── Status summary: inform the LLM about current todo state ──
-            // Injects only when the todo list changed or every 5 turns.
-            // Lists every item with status + stall info for in_progress items.
-            // No automatic promotion, completion, or blocking — the LLM decides.
-            {
-                let current_snapshot: String = wm.todos.iter()
-                    .map(|t| format!("{}|{}", t.id, t.status))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let changed = current_snapshot != last_todo_snapshot;
-                let periodic = turn.saturating_sub(last_todo_summary_turn) >= 5;
-                if changed || periodic {
-                    last_todo_snapshot = current_snapshot;
-                    last_todo_summary_turn = turn;
-                    let items: Vec<String> = wm.todos.iter()
-                        .map(|t| {
-                            let stall = if t.status == "in_progress" {
-                                t.in_progress_since_turn
-                                    .map(|s| format!(" ({} turns)", turn.saturating_sub(s)))
-                                    .unwrap_or_default()
-                            } else {
-                                String::new()
-                            };
-                            let status_label = match t.status.as_str() {
-                                "completed" => if ctx.lang == "zh" { "✅完成" } else { "✅done" },
-                                "in_progress" => if ctx.lang == "zh" { "⏳进行中" } else { "⏳in-progress" },
-                                "pending" => if ctx.lang == "zh" { "📋待处理" } else { "📋pending" },
-                                "cancelled" => if ctx.lang == "zh" { "❌已取消" } else { "❌cancelled" },
-                                _ => &t.status,
-                            };
-                            format!("  [{}] {} {}{}", t.id, status_label, t.content, stall)
-                        })
-                        .collect();
-                    let (completed, total) = (
-                        wm.todos.iter().filter(|t| t.status == "completed").count(),
-                        wm.todos.len(),
-                    );
-                    let hint = if ctx.lang == "zh" {
-                        format!(
+                // ── Status summary: inform the LLM about current todo state ──
+                // Injects only when the todo list changed or every 5 turns.
+                // Lists every item with status + stall info for in_progress items.
+                // No automatic promotion, completion, or blocking — the LLM decides.
+                {
+                    let current_snapshot: String = wm
+                        .todos
+                        .iter()
+                        .map(|t| format!("{}|{}", t.id, t.status))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let changed = current_snapshot != last_todo_snapshot;
+                    let periodic = turn.saturating_sub(last_todo_summary_turn) >= 5;
+                    if changed || periodic {
+                        last_todo_snapshot = current_snapshot;
+                        last_todo_summary_turn = turn;
+                        let items: Vec<String> = wm
+                            .todos
+                            .iter()
+                            .map(|t| {
+                                let stall = if t.status == "in_progress" {
+                                    t.in_progress_since_turn
+                                        .map(|s| format!(" ({} turns)", turn.saturating_sub(s)))
+                                        .unwrap_or_default()
+                                } else {
+                                    String::new()
+                                };
+                                let status_label = match t.status.as_str() {
+                                    "completed" => {
+                                        if ctx.lang == "zh" {
+                                            "✅完成"
+                                        } else {
+                                            "✅done"
+                                        }
+                                    }
+                                    "in_progress" => {
+                                        if ctx.lang == "zh" {
+                                            "⏳进行中"
+                                        } else {
+                                            "⏳in-progress"
+                                        }
+                                    }
+                                    "pending" => {
+                                        if ctx.lang == "zh" {
+                                            "📋待处理"
+                                        } else {
+                                            "📋pending"
+                                        }
+                                    }
+                                    "cancelled" => {
+                                        if ctx.lang == "zh" {
+                                            "❌已取消"
+                                        } else {
+                                            "❌cancelled"
+                                        }
+                                    }
+                                    _ => &t.status,
+                                };
+                                format!("  [{}] {} {}{}", t.id, status_label, t.content, stall)
+                            })
+                            .collect();
+                        let (completed, total) = (
+                            wm.todos.iter().filter(|t| t.status == "completed").count(),
+                            wm.todos.len(),
+                        );
+                        let hint = if ctx.lang == "zh" {
+                            format!(
                             "[待办状态] {}/{}\n{}\n\n请根据进度自行调用 todoupdate 更新状态。全部完成后调用 respond 退出。",
                             completed, total, items.join("\n")
                         )
-                    } else {
-                        format!(
+                        } else {
+                            format!(
                             "[TODO STATUS] {}/{}\n{}\n\nUpdate status via todoupdate as tasks progress. Call respond when ALL done.",
                             completed, total, items.join("\n")
                         )
-                    };
-                    next_prompts.push(hint);
+                        };
+                        next_prompts.push(hint);
+                    }
                 }
-            }
 
-            // Auto-complete disabled: file operations do not mean a task is
-            // finished. The agent must explicitly call todoupdate(id, "completed")
-            // when each todo is verified complete.
-            if dirty {
-                let items = wm.todos.clone();
-                let total = items.len();
-                let current = items.iter().filter(|t| t.status == "completed").count();
-                if let Some(ref tx) = config.event_tx {
-                    let _ = tx.send(oz_core_types::StreamEvent::DataTodoUpdate {
-                        items, current, total,
-                    });
+                // Auto-complete disabled: file operations do not mean a task is
+                // finished. The agent must explicitly call todoupdate(id, "completed")
+                // when each todo is verified complete.
+                if dirty {
+                    let items = wm.todos.clone();
+                    let total = items.len();
+                    let current = items.iter().filter(|t| t.status == "completed").count();
+                    if let Some(ref tx) = config.event_tx {
+                        let _ = tx.send(oz_core_types::StreamEvent::DataTodoUpdate {
+                            items,
+                            current,
+                            total,
+                        });
+                    }
                 }
             }
-        }
         } // end else (non-fast-path: parallel tool execution)
 
         // ── In-turn quick verification (P2-10) ──
@@ -1782,13 +2086,20 @@ where
         if config.quality_gates && next_prompts.is_empty() {
             let tool_names: Vec<String> = tool_meta.iter().map(|m| m.tool_name.clone()).collect();
             if let Some(check_fb) = crate::quality::quick_verify_after_write(
-                &tool_names, &config.working_dir, &config.lang,
-            ).await {
+                &tool_names,
+                &config.working_dir,
+                &config.lang,
+            )
+            .await
+            {
                 next_prompts.push(check_fb);
                 if exit_reason.is_some() {
                     exit_reason = None;
-                    transition_state(handler, AgentState::Thinking,
-                        "quick check: write needs fix");
+                    transition_state(
+                        handler,
+                        AgentState::Thinking,
+                        "quick check: write needs fix",
+                    );
                 }
             }
         }
@@ -1833,14 +2144,19 @@ where
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 };
-                match tokio::time::timeout(Duration::from_secs(ASK_USER_TIMEOUT_SECS), wait_fut).await {
+                match tokio::time::timeout(Duration::from_secs(ASK_USER_TIMEOUT_SECS), wait_fut)
+                    .await
+                {
                     Ok(Some(reply)) => reply,
                     Ok(None) => {
                         exit_reason.replace("stopped_by_user".to_string());
                         String::new()
                     }
                     Err(_elapsed) => {
-                        tracing::warn!("ask_user timed out after {}s — continuing with empty reply", ASK_USER_TIMEOUT_SECS);
+                        tracing::warn!(
+                            "ask_user timed out after {}s — continuing with empty reply",
+                            ASK_USER_TIMEOUT_SECS
+                        );
                         String::new()
                     }
                 }
@@ -1861,8 +2177,20 @@ where
             };
 
             if exit_reason.is_some() {
-                save_stop_checkpoint(turn, "stopped_by_user", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos);
-                transition_state(handler, AgentState::Done(exit_reason.clone().unwrap()), "stopped while waiting for ask_user");
+                save_stop_checkpoint(
+                    turn,
+                    "stopped_by_user",
+                    &messages,
+                    &history_info,
+                    &full_response,
+                    &full_thinking,
+                    &handler.working().todos,
+                );
+                transition_state(
+                    handler,
+                    AgentState::Done(exit_reason.clone().unwrap()),
+                    "stopped while waiting for ask_user",
+                );
                 break;
             }
 
@@ -1883,11 +2211,19 @@ where
                         }
                         for content in &steps {
                             let normalized = content.trim().to_lowercase();
-                            let is_duplicate = wm.todos.iter().any(|t| {
-                                t.content.trim().to_lowercase() == normalized
-                            });
+                            let is_duplicate = wm
+                                .todos
+                                .iter()
+                                .any(|t| t.content.trim().to_lowercase() == normalized);
                             if !is_duplicate {
-                                let id = format!("todo_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+                                let id = format!(
+                                    "todo_{}",
+                                    uuid::Uuid::new_v4()
+                                        .to_string()
+                                        .split('-')
+                                        .next()
+                                        .unwrap_or("0")
+                                );
                                 wm.todos.push(oz_core_types::TodoItem {
                                     id,
                                     content: content.clone(),
@@ -1921,38 +2257,40 @@ where
                 // USER_REPLIED tool result is needed (the plan is not a
                 // tool the model's turn depends on).
             } else {
-            // Re-emit ToolOutputAvailable so the frontend flips the
-            // AskUser card from "Running" to "Done" before the LLM
-            // resumes streaming.
-            tool_results.push(ToolResultItem {
-                tool_use_id: pending.tool_use_id.clone(),
-                content: serde_json::json!({
-                    "status": "USER_REPLIED",
-                    "user_reply": user_reply,
-                }).to_string(),
-                images: vec![],
-            });
-            if let Some(ref tx) = config.event_tx {
-                let _ = tx.send(StreamEvent::ToolOutputAvailable {
-                    tool_call_id: pending.tool_call_id.clone(),
-                    name: pending.tool_name.clone(),
-                    output: serde_json::json!({
+                // Re-emit ToolOutputAvailable so the frontend flips the
+                // AskUser card from "Running" to "Done" before the LLM
+                // resumes streaming.
+                tool_results.push(ToolResultItem {
+                    tool_use_id: pending.tool_use_id.clone(),
+                    content: serde_json::json!({
                         "status": "USER_REPLIED",
                         "user_reply": user_reply,
-                    }).to_string(),
+                    })
+                    .to_string(),
+                    images: vec![],
                 });
-            }
+                if let Some(ref tx) = config.event_tx {
+                    let _ = tx.send(StreamEvent::ToolOutputAvailable {
+                        tool_call_id: pending.tool_call_id.clone(),
+                        name: pending.tool_name.clone(),
+                        output: serde_json::json!({
+                            "status": "USER_REPLIED",
+                            "user_reply": user_reply,
+                        })
+                        .to_string(),
+                    });
+                }
 
-            // Required so the post-tool `next_prompts.is_empty()` check
-            // below does not short-circuit with CURRENT_TASK_DONE — the LLM
-            // must be told the reply is input, not a final answer.
-            next_prompts.push(format!(
-                "The user has answered the ask_user question with: \"{user_reply}\". \
+                // Required so the post-tool `next_prompts.is_empty()` check
+                // below does not short-circuit with CURRENT_TASK_DONE — the LLM
+                // must be told the reply is input, not a final answer.
+                next_prompts.push(format!(
+                    "The user has answered the ask_user question with: \"{user_reply}\". \
                  Continue the original task using this input — do NOT treat the reply as a \
                  final answer. If the task still requires tool calls (e.g. skill_mcp_search, \
                  respond), make them now. Only call the `respond` tool (or output a plain text \
                  reply) when the original task is actually complete."
-            ));
+                ));
             }
         }
 
@@ -1960,21 +2298,37 @@ where
             // ── Checklist Gate 1: pending checklist items ──
             let (pending_count, total_count, remaining_with_status, todos_empty) = {
                 let todos = &handler.working().todos;
-                let pending = todos.iter()
+                let pending = todos
+                    .iter()
                     .filter(|t| t.status == "pending" || t.status == "in_progress")
                     .count();
-                let remaining: Vec<(String, String, String)> = todos.iter()
+                let remaining: Vec<(String, String, String)> = todos
+                    .iter()
                     .filter(|t| t.status != "completed")
                     .map(|t| (t.id.clone(), t.content.clone(), t.status.clone()))
                     .collect();
                 (pending, todos.len(), remaining, todos.is_empty())
             };
             if pending_count > 0 {
-                let items_fmt: Vec<String> = remaining_with_status.iter().enumerate()
+                let items_fmt: Vec<String> = remaining_with_status
+                    .iter()
+                    .enumerate()
                     .map(|(i, (id, content, status))| {
                         let status_label = match status.as_str() {
-                            "in_progress" => if ctx.lang == "zh" { "⏳进行中" } else { "⏳in-progress" },
-                            _ => if ctx.lang == "zh" { "📋待处理" } else { "📋pending" },
+                            "in_progress" => {
+                                if ctx.lang == "zh" {
+                                    "⏳进行中"
+                                } else {
+                                    "⏳in-progress"
+                                }
+                            }
+                            _ => {
+                                if ctx.lang == "zh" {
+                                    "📋待处理"
+                                } else {
+                                    "📋pending"
+                                }
+                            }
                         };
                         format!("  {}. [{}] {} {}", i + 1, id, status_label, content)
                     })
@@ -1994,20 +2348,26 @@ where
                 };
                 next_prompts.push(hint);
                 exit_reason = None;
-                transition_state(handler, AgentState::Thinking, "checklist gate: pending items remain");
+                transition_state(
+                    handler,
+                    AgentState::Thinking,
+                    "checklist gate: pending items remain",
+                );
             }
 
             // ── Checklist Gate 2: complex ops without checklist ──
-            if todos_empty
-                && exit_reason.is_some()
-                && turn >= 2
-            {
-                let write_count = tool_sequence.iter()
-                    .filter(|(name, _)| matches!(name.as_str(),
-                        "write" | "file_write" | "edit" | "file_edit" | "patch" | "file_patch"
-                    ))
+            if todos_empty && exit_reason.is_some() && turn >= 2 {
+                let write_count = tool_sequence
+                    .iter()
+                    .filter(|(name, _)| {
+                        matches!(
+                            name.as_str(),
+                            "write" | "file_write" | "edit" | "file_edit" | "patch" | "file_patch"
+                        )
+                    })
                     .count();
-                let run_count = tool_sequence.iter()
+                let run_count = tool_sequence
+                    .iter()
                     .filter(|(name, _)| name == "code_run")
                     .count();
                 let is_complex = write_count >= 2 || (write_count >= 1 && run_count >= 1);
@@ -2027,8 +2387,11 @@ where
                     };
                     next_prompts.push(hint);
                     exit_reason = None;
-                    transition_state(handler, AgentState::Thinking,
-                        "checklist gate: complex operations without checklist");
+                    transition_state(
+                        handler,
+                        AgentState::Thinking,
+                        "checklist gate: complex operations without checklist",
+                    );
                 }
             }
 
@@ -2043,8 +2406,11 @@ where
                 spec_hint_sent = true;
                 next_prompts.push(crate::quality::spec_anchor_hint(&config.lang));
                 exit_reason = None;
-                transition_state(handler, AgentState::Thinking,
-                    "spec anchor: writes without task_spec.md");
+                transition_state(
+                    handler,
+                    AgentState::Thinking,
+                    "spec anchor: writes without task_spec.md",
+                );
             }
 
             // ── Plan gentle reminder (P1): writes without a plan ──
@@ -2081,12 +2447,17 @@ where
             if exit_reason.is_some() && config.quality_gates && !suspicion_checked {
                 suspicion_checked = true;
                 if let Some(hint) = crate::quality::find_unresolved_suspicion(
-                    &messages, &tool_sequence, &config.lang,
+                    &messages,
+                    &tool_sequence,
+                    &config.lang,
                 ) {
                     next_prompts.push(hint);
                     exit_reason = None;
-                    transition_state(handler, AgentState::Thinking,
-                        "quality gate: unresolved suspicion needs closure");
+                    transition_state(
+                        handler,
+                        AgentState::Thinking,
+                        "quality gate: unresolved suspicion needs closure",
+                    );
                 }
             }
 
@@ -2106,7 +2477,9 @@ where
                         if !failures.is_empty() {
                             assertion_rounds += 1;
                             next_prompts.push(crate::quality::format_assertion_feedback(
-                                &failures, &config.lang, assertion_rounds,
+                                &failures,
+                                &config.lang,
+                                assertion_rounds,
                             ));
                             // Reflexion: record the failure for later tasks.
                             crate::quality::log_reflection(
@@ -2115,8 +2488,11 @@ where
                                 &format!("{} failure(s): {}", failures.len(), failures[0].command),
                             );
                             exit_reason = None;
-                            transition_state(handler, AgentState::Thinking,
-                                "quality gate: verify assertion failed");
+                            transition_state(
+                                handler,
+                                AgentState::Thinking,
+                                "quality gate: verify assertion failed",
+                            );
                         }
                     } else if !assertions_exhausted_checked {
                         // Budget exhausted: check once more for the exit note
@@ -2151,9 +2527,9 @@ where
                     // Fall back to the original task text (first 1500 chars)
                     // when no spec was written — reviewing against an empty
                     // spec defeats the purpose of the cross-check.
-                    let spec_for_review = spec_text.clone().unwrap_or_else(|| {
-                        user_input.chars().take(1500).collect::<String>()
-                    });
+                    let spec_for_review = spec_text
+                        .clone()
+                        .unwrap_or_else(|| user_input.chars().take(1500).collect::<String>());
                     let reply_for_review = full_response.clone();
                     match crate::quality::run_independent_review(
                         client,
@@ -2168,14 +2544,21 @@ where
                             crate::quality::log_reflection(
                                 &config.working_dir,
                                 "review_failed",
-                                &format!("{} high issue(s)", v.issues.iter().filter(|i| i.severity == "high").count()),
+                                &format!(
+                                    "{} high issue(s)",
+                                    v.issues.iter().filter(|i| i.severity == "high").count()
+                                ),
                             );
                             next_prompts.push(crate::quality::format_review_feedback(
-                                &v.issues, &config.lang,
+                                &v.issues,
+                                &config.lang,
                             ));
                             exit_reason = None;
-                            transition_state(handler, AgentState::Thinking,
-                                "quality gate: review issues found");
+                            transition_state(
+                                handler,
+                                AgentState::Thinking,
+                                "quality gate: review issues found",
+                            );
                         }
                         Some(v) if !v.pass => {
                             quality_note = Some(if config.lang == "zh" {
@@ -2205,7 +2588,8 @@ where
                     // back to chars/4 when no LLM usage is known yet.
                     let est_tokens = if last_turn_input_tokens > 0 && last_turn_input_chars > 0 {
                         (pre_exit_stats.total_chars as f64
-                            * (last_turn_input_tokens as f64 / last_turn_input_chars as f64)) as usize
+                            * (last_turn_input_tokens as f64 / last_turn_input_chars as f64))
+                            as usize
                     } else {
                         pre_exit_stats.total_chars / 4
                     };
@@ -2214,39 +2598,57 @@ where
                             "Pre-exit compression: {} chars / {} msgs → compressing before agent exits",
                             pre_exit_stats.total_chars, messages.len()
                         );
-                        let snapshot: Vec<_> = messages.iter().filter_map(|m| serde_json::to_value(m).ok()).collect();
+                        let snapshot: Vec<_> = messages
+                            .iter()
+                            .filter_map(|m| serde_json::to_value(m).ok())
+                            .collect();
                         let emergency_win = if comp_config.trigger_pct > 0 {
                             comp_config.hard_max_tokens * 100 / comp_config.trigger_pct as usize
                         } else {
                             comp_config.hard_max_tokens
                         };
                         let _saved = crate::compress::compress_messages(
-                            &mut messages, emergency_win, &comp_config,
+                            &mut messages,
+                            emergency_win,
+                            &comp_config,
                             Some(est_tokens.max(1)),
                         );
-                        let template = crate::compress::build_compression_summary(&snapshot, &config.working_dir);
+                        let template = crate::compress::build_compression_summary(
+                            &snapshot,
+                            &config.working_dir,
+                        );
                         let full_prompt = crate::compress::build_compression_prompt(&snapshot);
                         // Wait (bounded) for the LLM summary so a later
                         // resume sees the real summary; the template is the
                         // terminal fallback on timeout (never replaced later).
                         let summary_text = if compression_service.is_configured() {
-                            let rx = compression_service.spawn_summary(full_prompt, template.clone());
-                            wait_for_summary(Some(rx), template, comp_config.summary_wait_secs).await
+                            let rx =
+                                compression_service.spawn_summary(full_prompt, template.clone());
+                            wait_for_summary(Some(rx), template, comp_config.summary_wait_secs)
+                                .await
                         } else {
                             template
                         };
                         if !summary_text.is_empty() {
-                            let inject_at = messages.iter().position(|m| {
-                                m.role == oz_core_types::Role::User
-                                    || m.role == oz_core_types::Role::Assistant
-                            }).unwrap_or(0);
-                            messages.insert(inject_at, Message::system(format!(
-                                "[Compression summary]: {summary_text}"
-                            )));
+                            let inject_at = messages
+                                .iter()
+                                .position(|m| {
+                                    m.role == oz_core_types::Role::User
+                                        || m.role == oz_core_types::Role::Assistant
+                                })
+                                .unwrap_or(0);
+                            messages.insert(
+                                inject_at,
+                                Message::system(format!("[Compression summary]: {summary_text}")),
+                            );
                         }
                     }
                 }
-                transition_state(handler, AgentState::Done(exit_reason.clone().unwrap()), "loop exit condition met");
+                transition_state(
+                    handler,
+                    AgentState::Done(exit_reason.clone().unwrap()),
+                    "loop exit condition met",
+                );
                 break;
             }
         }
@@ -2255,10 +2657,12 @@ where
         transition_state(handler, AgentState::Idle, "turn complete, ready for next");
 
         // Save loop checkpoint periodically
-        if config.checkpoint_interval > 0 && turn.is_multiple_of(config.checkpoint_interval) && !config.session_id.is_empty() {
-            let cp_dir = std::path::PathBuf::from(
-                config.checkpoint_dir.as_deref().unwrap_or("checkpoints")
-            );
+        if config.checkpoint_interval > 0
+            && turn.is_multiple_of(config.checkpoint_interval)
+            && !config.session_id.is_empty()
+        {
+            let cp_dir =
+                std::path::PathBuf::from(config.checkpoint_dir.as_deref().unwrap_or("checkpoints"));
             let (git_sha, git_branch, git_origin_url) =
                 crate::checkpoint::git_snapshot(std::path::Path::new(&config.working_dir));
             let cp = crate::checkpoint::LoopCheckpoint {
@@ -2306,8 +2710,20 @@ where
         // meaningful tool output, force-exit with a save point.
         if consecutive_empty_turns >= 10 {
             tracing::warn!("{consecutive_empty_turns} consecutive turns with no tool calls — LLM appears stuck, exiting");
-            save_stop_checkpoint(turn, "llm_stuck", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos);
-            transition_state(handler, AgentState::Done("llm_stuck".into()), "consecutive empty turns");
+            save_stop_checkpoint(
+                turn,
+                "llm_stuck",
+                &messages,
+                &history_info,
+                &full_response,
+                &full_thinking,
+                &handler.working().todos,
+            );
+            transition_state(
+                handler,
+                AgentState::Done("llm_stuck".into()),
+                "consecutive empty turns",
+            );
             return LoopOutcome {
                 turn,
                 exit_reason: "llm_stuck".into(),
@@ -2321,18 +2737,25 @@ where
         }
 
         if next_prompts.is_empty() && exit_reason.is_none() {
-            let pending_todos = handler.working().todos.iter()
+            let pending_todos = handler
+                .working()
+                .todos
+                .iter()
                 .filter(|t| t.status == "pending" || t.status == "in_progress")
                 .count();
             if pending_todos > 0 {
-                let remaining: Vec<String> = handler.working().todos.iter()
+                let remaining: Vec<String> = handler
+                    .working()
+                    .todos
+                    .iter()
                     .filter(|t| t.status != "completed")
                     .map(|t| format!("  [{}] {}", t.id, t.content))
                     .collect();
                 let hint = if ctx.lang == "zh" {
                     format!(
                         "还有 {} 项待办未完成，请继续：\n{}\n\n完成后调用 respond 结束任务。",
-                        pending_todos, remaining.join("\n")
+                        pending_todos,
+                        remaining.join("\n")
                     )
                 } else {
                     format!(
@@ -2342,17 +2765,32 @@ where
                 };
                 next_prompts.push(hint);
             } else {
-                transition_state(handler, AgentState::Done("CURRENT_TASK_DONE".into()), "no next prompts and no exit reason");
+                transition_state(
+                    handler,
+                    AgentState::Done("CURRENT_TASK_DONE".into()),
+                    "no next prompts and no exit reason",
+                );
                 break;
             }
         }
 
         let combined_next = next_prompts.join("\n");
-        let next_prompt_str = handler.turn_end(&response, &tool_calls_iter, &tool_results, turn, combined_next, exit_reason.clone());
+        let next_prompt_str = handler.turn_end(
+            &response,
+            &tool_calls_iter,
+            &tool_results,
+            turn,
+            combined_next,
+            exit_reason.clone(),
+        );
 
-        history_info.push(format!("[Agent] {}", smart_format(
-            &build_summary_from_response(&response, &tool_calls_iter), 80
-        )));
+        history_info.push(format!(
+            "[Agent] {}",
+            smart_format(
+                &build_summary_from_response(&response, &tool_calls_iter),
+                80
+            )
+        ));
 
         // Append the assistant turn and the tool-result turn instead
         // of replacing `messages`. Replacing was the root cause of the
@@ -2413,7 +2851,8 @@ where
             // are counted. Falls back to chars/4 when no LLM usage known.
             let est_tokens = if last_turn_input_tokens > 0 && last_turn_input_chars > 0 {
                 (post_tool_stats.total_chars as f64
-                    * (last_turn_input_tokens as f64 / last_turn_input_chars as f64)) as usize
+                    * (last_turn_input_tokens as f64 / last_turn_input_chars as f64))
+                    as usize
             } else {
                 post_tool_stats.total_chars / 4
             };
@@ -2426,7 +2865,10 @@ where
                 );
                 let before_chars = post_tool_stats.total_chars;
                 let before_count = messages.len();
-                let snapshot: Vec<_> = messages.iter().filter_map(|m| serde_json::to_value(m).ok()).collect();
+                let snapshot: Vec<_> = messages
+                    .iter()
+                    .filter_map(|m| serde_json::to_value(m).ok())
+                    .collect();
                 // P0: The emergency flag means we've exceeded hard_max_tokens
                 // (80K by default), but compress_messages targets
                 // context_win * trigger_pct% (e.g. 256K * 80% = 205K). At
@@ -2439,9 +2881,13 @@ where
                     comp_config.hard_max_tokens
                 };
                 let _saved = crate::compress::compress_messages(
-                    &mut messages, emergency_win, &comp_config, Some(est_tokens),
+                    &mut messages,
+                    emergency_win,
+                    &comp_config,
+                    Some(est_tokens),
                 );
-                let template = crate::compress::build_compression_summary(&snapshot, &config.working_dir);
+                let template =
+                    crate::compress::build_compression_summary(&snapshot, &config.working_dir);
                 let full_prompt = crate::compress::build_compression_prompt(&snapshot);
                 // Wait (bounded) for the LLM summary via the summary
                 // model; the template is the terminal fallback on timeout
@@ -2489,13 +2935,17 @@ where
                     });
                 }
                 if !summary_text.is_empty() {
-                    let inject_at = messages.iter().position(|m| {
-                        m.role == oz_core_types::Role::User
-                            || m.role == oz_core_types::Role::Assistant
-                    }).unwrap_or(0);
-                    messages.insert(inject_at, Message::system(format!(
-                        "[Compression summary]: {summary_text}"
-                    )));
+                    let inject_at = messages
+                        .iter()
+                        .position(|m| {
+                            m.role == oz_core_types::Role::User
+                                || m.role == oz_core_types::Role::Assistant
+                        })
+                        .unwrap_or(0);
+                    messages.insert(
+                        inject_at,
+                        Message::system(format!("[Compression summary]: {summary_text}")),
+                    );
                 }
             }
         }
@@ -2529,11 +2979,22 @@ where
         );
     }
     if !tool_sequence.is_empty() && final_reason == "EXITED" {
-        let safe_name: String = user_input.chars()
+        let safe_name: String = user_input
+            .chars()
             .take(40)
-            .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
-        let sess_id = if config.session_id.is_empty() { None } else { Some(config.session_id.clone()) };
+        let sess_id = if config.session_id.is_empty() {
+            None
+        } else {
+            Some(config.session_id.clone())
+        };
 
         // Priority: skill_mcp_store > sop_store (legacy)
         if config.enable_crystallization {
@@ -2545,7 +3006,10 @@ where
                     sess_id,
                 );
                 if config.verbose {
-                    tracing::info!("Crystallised SOP via SkillMcpStore from {} tool calls", tool_sequence.len());
+                    tracing::info!(
+                        "Crystallised SOP via SkillMcpStore from {} tool calls",
+                        tool_sequence.len()
+                    );
                 }
             } else if let Some(ref mut store) = sop_store {
                 store.crystallise(
@@ -2562,16 +3026,26 @@ where
     }
 
     // Session transcript: built once for the background distillation queue.
-    let transcript = messages.iter()
+    let transcript = messages
+        .iter()
         .filter_map(|m| {
-            if matches!(m.role, oz_core_types::Role::User | oz_core_types::Role::Assistant) {
-                let text: Vec<&str> = m.content.iter()
+            if matches!(
+                m.role,
+                oz_core_types::Role::User | oz_core_types::Role::Assistant
+            ) {
+                let text: Vec<&str> = m
+                    .content
+                    .iter()
                     .filter_map(|b| match b {
                         oz_core_types::ContentBlock::Text { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect();
-                if text.is_empty() { None } else { Some(text.join(" ")) }
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text.join(" "))
+                }
             } else {
                 None
             }
@@ -2587,9 +3061,14 @@ where
     // LLM-driven Crystallizer below when no scheduler is configured.
     if let Some(ref scheduler) = config.memory_scheduler {
         if !transcript.is_empty() {
-            scheduler.submit(config.session_id.clone(), transcript.to_string()).await;
+            scheduler
+                .submit(config.session_id.clone(), transcript.to_string())
+                .await;
             if config.verbose {
-                tracing::info!("Enqueued session '{}' for memory distillation", config.session_id);
+                tracing::info!(
+                    "Enqueued session '{}' for memory distillation",
+                    config.session_id
+                );
             }
         }
     }
@@ -2598,18 +3077,31 @@ where
     if let Some(ref mut store) = skill_mcp_store {
         if config.enable_crystallization && !tool_sequence.is_empty() && final_reason == "EXITED" {
             match Crystallizer::crystallize(
-                client, store, &user_input, &messages, &tool_sequence,
-                if config.session_id.is_empty() { None } else { Some(config.session_id.clone()) },
-            ).await {
+                client,
+                store,
+                &user_input,
+                &messages,
+                &tool_sequence,
+                if config.session_id.is_empty() {
+                    None
+                } else {
+                    Some(config.session_id.clone())
+                },
+            )
+            .await
+            {
                 Ok(results) => {
                     for r in &results {
                         match r {
-                            crate::crystallizer::CrystallizeResult::SkillCreated { name } =>
-                                tracing::info!("Crystallized skill: {}", name),
-                            crate::crystallizer::CrystallizeResult::SopCreated { name } =>
-                                tracing::info!("Crystallized SOP: {}", name),
-                            crate::crystallizer::CrystallizeResult::FactAdded { content } =>
-                                tracing::info!("Crystallized fact: {}", content),
+                            crate::crystallizer::CrystallizeResult::SkillCreated { name } => {
+                                tracing::info!("Crystallized skill: {}", name)
+                            }
+                            crate::crystallizer::CrystallizeResult::SopCreated { name } => {
+                                tracing::info!("Crystallized SOP: {}", name)
+                            }
+                            crate::crystallizer::CrystallizeResult::FactAdded { content } => {
+                                tracing::info!("Crystallized fact: {}", content)
+                            }
                             crate::crystallizer::CrystallizeResult::Nothing => {}
                         }
                     }
@@ -2622,8 +3114,18 @@ where
             match Refiner::refine_all_skills(client, store).await {
                 Ok(results) => {
                     for r in &results {
-                        if let crate::refiner::RefineResult::Refined { name, old_version, new_version } = r {
-                            tracing::info!("Refined skill '{}': v{} → v{}", name, old_version, new_version);
+                        if let crate::refiner::RefineResult::Refined {
+                            name,
+                            old_version,
+                            new_version,
+                        } = r
+                        {
+                            tracing::info!(
+                                "Refined skill '{}': v{} → v{}",
+                                name,
+                                old_version,
+                                new_version
+                            );
                         }
                     }
                 }
@@ -2634,12 +3136,17 @@ where
 
     // ── Direction B: ensure final Done state ──
     if !handler.working().current_state.is_terminal() {
-        transition_state(handler, AgentState::Done(final_reason.clone()), "loop ended");
+        transition_state(
+            handler,
+            AgentState::Done(final_reason.clone()),
+            "loop ended",
+        );
     }
 
-    let tool_seq_json: Vec<serde_json::Value> = tool_sequence.iter().map(|(name, args)| {
-        serde_json::json!({"name": name, "arguments": args})
-    }).collect();
+    let tool_seq_json: Vec<serde_json::Value> = tool_sequence
+        .iter()
+        .map(|(name, args)| serde_json::json!({"name": name, "arguments": args}))
+        .collect();
 
     // Bug-1 fallback: local Qwen3 / MiniMax / GLM / Step / Claude
     // (via proxy) sometimes emit the visible reply inside the
@@ -2647,9 +3154,7 @@ where
     // thinking-as-response so the user always sees a reply.
     let trimmed_response = full_response.trim();
     let trimmed_thinking = full_thinking.trim();
-    let final_full_response = if trimmed_response.is_empty()
-        && trimmed_thinking.len() >= 20
-    {
+    let final_full_response = if trimmed_response.is_empty() && trimmed_thinking.len() >= 20 {
         tracing::warn!(
             "[agent_loop] empty response, promoting {}-char thinking as the user reply",
             trimmed_thinking.len()
@@ -2691,17 +3196,22 @@ fn truncate_feedback(s: &str) -> String {
     }
 }
 
-fn build_summary_from_response(response: &MockResponse, tool_calls: &[oz_core_types::MockToolCall]) -> String {    // Extract <summary> tag from content
+fn build_summary_from_response(
+    response: &MockResponse,
+    tool_calls: &[oz_core_types::MockToolCall],
+) -> String {
+    // Extract <summary> tag from content
     if let Some(pos) = response.content.find("<summary>") {
         if let Some(end) = response.content[pos..].find("</summary>") {
-            return response.content[pos+9..pos+end].trim().to_string();
+            return response.content[pos + 9..pos + end].trim().to_string();
         }
     }
     if !tool_calls.is_empty() {
         let tc = &tool_calls[0];
         let clean_args: serde_json::Value = match &tc.arguments {
             serde_json::Value::Object(obj) => {
-                let filtered: serde_json::Map<String, serde_json::Value> = obj.iter()
+                let filtered: serde_json::Map<String, serde_json::Value> = obj
+                    .iter()
                     .filter(|(k, _)| !k.starts_with('_'))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
@@ -2709,7 +3219,11 @@ fn build_summary_from_response(response: &MockResponse, tool_calls: &[oz_core_ty
             }
             other => other.clone(),
         };
-        format!("调用工具{}, args: {}", tc.name, serde_json::to_string(&clean_args).unwrap_or_default())
+        format!(
+            "调用工具{}, args: {}",
+            tc.name,
+            serde_json::to_string(&clean_args).unwrap_or_default()
+        )
     } else {
         "直接回答了用户问题".into()
     }
@@ -2745,7 +3259,10 @@ mod tests {
 
     #[test]
     fn extract_tool_calls_independent_clone() {
-        let calls = vec![oz_core_types::MockToolCall::new("test", serde_json::json!({}))];
+        let calls = vec![oz_core_types::MockToolCall::new(
+            "test",
+            serde_json::json!({}),
+        )];
         let response = MockResponse::with_tools("ok", calls);
         let result = extract_tool_calls(&response);
         assert_eq!(result[0].name, response.tool_calls[0].name);
@@ -2826,7 +3343,9 @@ mod tests {
     struct MockHandler {
         working: WorkingMemory,
         /// Map from tool_name to list of (outcome, times_to_return)
-        tool_outcomes: std::sync::Mutex<std::collections::HashMap<String, Vec<Result<StepOutcome, oz_core_types::ToolError>>>>,
+        tool_outcomes: std::sync::Mutex<
+            std::collections::HashMap<String, Vec<Result<StepOutcome, oz_core_types::ToolError>>>,
+        >,
         tool_calls: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
         turn_end_calls: std::sync::Mutex<Vec<String>>,
     }
@@ -2841,8 +3360,17 @@ mod tests {
             }
         }
 
-        fn on_tool(self, name: &str, outcome: Result<StepOutcome, oz_core_types::ToolError>) -> Self {
-            self.tool_outcomes.lock().unwrap().entry(name.to_string()).or_default().push(outcome);
+        fn on_tool(
+            self,
+            name: &str,
+            outcome: Result<StepOutcome, oz_core_types::ToolError>,
+        ) -> Self {
+            self.tool_outcomes
+                .lock()
+                .unwrap()
+                .entry(name.to_string())
+                .or_default()
+                .push(outcome);
             self
         }
 
@@ -2872,7 +3400,10 @@ mod tests {
             next_prompt: String,
             _exit_reason: Option<String>,
         ) -> String {
-            self.turn_end_calls.lock().unwrap().push(next_prompt.clone());
+            self.turn_end_calls
+                .lock()
+                .unwrap()
+                .push(next_prompt.clone());
             next_prompt
         }
         async fn dispatch(
@@ -2909,13 +3440,17 @@ mod tests {
 
     #[tokio::test]
     async fn agent_loop_basic_no_tool_exit() {
-        let mut client = MockLlm::new(vec![
-            MockResponse::new("Hello, I'm the assistant."),
-        ]);
-        let mut handler = MockHandler::new()
-            .on_tool("respond", Ok(StepOutcome::exit(serde_json::json!({"status": "ok"}))));
+        let mut client = MockLlm::new(vec![MockResponse::new("Hello, I'm the assistant.")]);
+        let mut handler = MockHandler::new().on_tool(
+            "respond",
+            Ok(StepOutcome::exit(serde_json::json!({"status": "ok"}))),
+        );
         let signal = AtomicBool::new(false);
-        let config = LoopConfig { max_turns: 10, verbose: false, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 10,
+            verbose: false,
+            ..Default::default()
+        };
 
         let outcome = run_agent_loop(
             &mut client,
@@ -2927,7 +3462,8 @@ mod tests {
             &default_ctx(),
             &config,
             &signal,
-        ).await;
+        )
+        .await;
 
         assert_eq!(outcome.exit_reason, "EXITED");
         assert_eq!(outcome.turn, 1);
@@ -2943,14 +3479,21 @@ mod tests {
                 _: &[Message],
                 _: &[ToolDefinition],
             ) -> Result<MockResponse, oz_core_types::LlmError> {
-                Err(oz_core_types::LlmError::HttpError { status: 500, body: "server error".into() })
+                Err(oz_core_types::LlmError::HttpError {
+                    status: 500,
+                    body: "server error".into(),
+                })
             }
         }
 
         let mut client = ErrorLlm;
         let mut handler = MockHandler::new();
         let signal = AtomicBool::new(false);
-        let config = LoopConfig { max_turns: 10, verbose: false, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 10,
+            verbose: false,
+            ..Default::default()
+        };
 
         let outcome = run_agent_loop(
             &mut client,
@@ -2962,7 +3505,8 @@ mod tests {
             &default_ctx(),
             &config,
             &signal,
-        ).await;
+        )
+        .await;
 
         assert_eq!(outcome.exit_reason, "llm_error");
         assert_eq!(outcome.turn, 1);
@@ -2970,13 +3514,19 @@ mod tests {
 
     #[tokio::test]
     async fn agent_loop_stop_signal() {
-        let mut client = MockLlm::new(vec![
-            MockResponse::new("First response"),
-        ]);
-        let mut handler = MockHandler::new()
-            .on_tool("respond", Ok(StepOutcome::success(serde_json::json!({"status": "continue"}))));
+        let mut client = MockLlm::new(vec![MockResponse::new("First response")]);
+        let mut handler = MockHandler::new().on_tool(
+            "respond",
+            Ok(StepOutcome::success(
+                serde_json::json!({"status": "continue"}),
+            )),
+        );
         let signal = AtomicBool::new(true);
-        let config = LoopConfig { max_turns: 10, verbose: false, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 10,
+            verbose: false,
+            ..Default::default()
+        };
 
         let outcome = run_agent_loop(
             &mut client,
@@ -2988,7 +3538,8 @@ mod tests {
             &default_ctx(),
             &config,
             &signal,
-        ).await;
+        )
+        .await;
 
         assert_eq!(outcome.exit_reason, "stopped_by_user");
         assert_eq!(outcome.turn, 0);
@@ -2999,18 +3550,27 @@ mod tests {
         // Mock LLM that always returns a no_tool call that continues
         let no_tool_resp = {
             let mut r = MockResponse::new("still working");
-            r.tool_calls = vec![
-                oz_core_types::MockToolCall::new("respond", serde_json::json!({"response": "progress"})),
-            ];
+            r.tool_calls = vec![oz_core_types::MockToolCall::new(
+                "respond",
+                serde_json::json!({"response": "progress"}),
+            )];
             r
         };
         let responses = vec![no_tool_resp.clone(); 5];
         let mut client = MockLlm::new(responses);
 
-        let mut handler = MockHandler::new()
-            .on_tool("respond", Ok(StepOutcome::success(serde_json::json!({"status": "continue"}))));
+        let mut handler = MockHandler::new().on_tool(
+            "respond",
+            Ok(StepOutcome::success(
+                serde_json::json!({"status": "continue"}),
+            )),
+        );
         let signal = AtomicBool::new(false);
-        let config = LoopConfig { max_turns: 3, verbose: false, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 3,
+            verbose: false,
+            ..Default::default()
+        };
 
         let outcome = run_agent_loop(
             &mut client,
@@ -3022,7 +3582,8 @@ mod tests {
             &default_ctx(),
             &config,
             &signal,
-        ).await;
+        )
+        .await;
 
         assert_eq!(outcome.exit_reason, "max_turns_exhausted");
         assert_eq!(outcome.turn, 3);
@@ -3032,20 +3593,26 @@ mod tests {
     async fn agent_loop_tool_call_then_exit() {
         let resp = {
             let mut r = MockResponse::new("using tools");
-            r.tool_calls = vec![
-                oz_core_types::MockToolCall::with_id(
-                    "read",
-                    serde_json::json!({"file_path": "/tmp/test.txt"}),
-                    "call_1",
-                ),
-            ];
+            r.tool_calls = vec![oz_core_types::MockToolCall::with_id(
+                "read",
+                serde_json::json!({"file_path": "/tmp/test.txt"}),
+                "call_1",
+            )];
             r
         };
         let mut client = MockLlm::new(vec![resp]);
-        let mut handler = MockHandler::new()
-            .on_tool("read", Ok(StepOutcome::exit(serde_json::json!({"content": "file data"}))));
+        let mut handler = MockHandler::new().on_tool(
+            "read",
+            Ok(StepOutcome::exit(
+                serde_json::json!({"content": "file data"}),
+            )),
+        );
         let signal = AtomicBool::new(false);
-        let config = LoopConfig { max_turns: 10, verbose: false, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 10,
+            verbose: false,
+            ..Default::default()
+        };
 
         let outcome = run_agent_loop(
             &mut client,
@@ -3057,7 +3624,8 @@ mod tests {
             &default_ctx(),
             &config,
             &signal,
-        ).await;
+        )
+        .await;
 
         assert_eq!(outcome.exit_reason, "EXITED");
         assert_eq!(outcome.turn, 1);
@@ -3070,24 +3638,29 @@ mod tests {
     async fn agent_loop_tool_error_continues() {
         let resp = {
             let mut r = MockResponse::new("using tools");
-            r.tool_calls = vec![
-                oz_core_types::MockToolCall::with_id(
-                    "failing_tool",
-                    serde_json::json!({"arg": "val"}),
-                    "call_err",
-                ),
-            ];
+            r.tool_calls = vec![oz_core_types::MockToolCall::with_id(
+                "failing_tool",
+                serde_json::json!({"arg": "val"}),
+                "call_err",
+            )];
             r
         };
-        let mut client = MockLlm::new(vec![
-            resp,
-            MockResponse::new("done now"),
-        ]);
+        let mut client = MockLlm::new(vec![resp, MockResponse::new("done now")]);
         let mut handler = MockHandler::new()
-            .on_tool("failing_tool", Err(oz_core_types::ToolError::Custom("something broke".into())))
-            .on_tool("respond", Ok(StepOutcome::exit(serde_json::json!({"status": "ok"}))));
+            .on_tool(
+                "failing_tool",
+                Err(oz_core_types::ToolError::Custom("something broke".into())),
+            )
+            .on_tool(
+                "respond",
+                Ok(StepOutcome::exit(serde_json::json!({"status": "ok"}))),
+            );
         let signal = AtomicBool::new(false);
-        let config = LoopConfig { max_turns: 10, verbose: false, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 10,
+            verbose: false,
+            ..Default::default()
+        };
 
         let outcome = run_agent_loop(
             &mut client,
@@ -3099,7 +3672,8 @@ mod tests {
             &default_ctx(),
             &config,
             &signal,
-        ).await;
+        )
+        .await;
 
         // Tool error should be captured but loop should continue to next turn
         assert_eq!(outcome.exit_reason, "EXITED");
@@ -3110,20 +3684,19 @@ mod tests {
     async fn agent_loop_ask_user_keeps_run_alive() {
         let resp = {
             let mut r = MockResponse::new("need help");
-            r.tool_calls = vec![
-                oz_core_types::MockToolCall::with_id(
-                    "ask_user",
-                    serde_json::json!({"question": "what now?"}),
-                    "call_ask",
-                ),
-            ];
+            r.tool_calls = vec![oz_core_types::MockToolCall::with_id(
+                "ask_user",
+                serde_json::json!({"question": "what now?"}),
+                "call_ask",
+            )];
             r
         };
         // Single LLM turn: ask_user fires, gets the pre-supplied reply,
         // resumes, then exits normally (no more prompts) — NOT "ASK_USER".
         let mut client = MockLlm::new(vec![resp]);
-        let mut handler = MockHandler::new()
-            .on_tool("ask_user", Ok(StepOutcome {
+        let mut handler = MockHandler::new().on_tool(
+            "ask_user",
+            Ok(StepOutcome {
                 data: serde_json::json!({
                     "status": "INTERRUPT",
                     "intent": "HUMAN_INTERVENTION",
@@ -3132,7 +3705,8 @@ mod tests {
                 next_prompt: None,
                 should_exit: false,
                 images: vec![],
-            }));
+            }),
+        );
         let signal = AtomicBool::new(false);
         // Pre-populate so the loop's first poll finds the reply.
         let ask_rx = std::sync::Arc::new(std::sync::Mutex::new(Some("answer-1".to_string())));
@@ -3153,13 +3727,20 @@ mod tests {
             &default_ctx(),
             &config,
             &signal,
-        ).await;
+        )
+        .await;
 
-        assert_ne!(outcome.exit_reason, "ASK_USER", "ask_user must no longer exit the run");
+        assert_ne!(
+            outcome.exit_reason, "ASK_USER",
+            "ask_user must no longer exit the run"
+        );
         // The mock has no more prompts, so the loop runs to the turn budget;
         // with honest exit-reason reporting this is max_turns_exhausted, not
         // a silent CURRENT_TASK_DONE.
-        assert_eq!(outcome.exit_reason, "max_turns_exhausted", "loop should resume and complete normally");
+        assert_eq!(
+            outcome.exit_reason, "max_turns_exhausted",
+            "loop should resume and complete normally"
+        );
     }
 
     #[tokio::test]
@@ -3167,20 +3748,35 @@ mod tests {
         let resp = {
             let mut r = MockResponse::new("multi tool turn");
             r.tool_calls = vec![
-                oz_core_types::MockToolCall::with_id("tool_a", serde_json::json!({"x": 1}), "call_a"),
-                oz_core_types::MockToolCall::with_id("tool_b", serde_json::json!({"y": 2}), "call_b"),
+                oz_core_types::MockToolCall::with_id(
+                    "tool_a",
+                    serde_json::json!({"x": 1}),
+                    "call_a",
+                ),
+                oz_core_types::MockToolCall::with_id(
+                    "tool_b",
+                    serde_json::json!({"y": 2}),
+                    "call_b",
+                ),
             ];
             r
         };
-        let mut client = MockLlm::new(vec![
-            resp,
-            MockResponse::new("all done"),
-        ]);
+        let mut client = MockLlm::new(vec![resp, MockResponse::new("all done")]);
         let mut handler = MockHandler::new()
-            .on_tool("tool_a", Ok(StepOutcome::success(serde_json::json!({"result": "a"}))))
-            .on_tool("tool_b", Ok(StepOutcome::exit(serde_json::json!({"result": "b"}))));
+            .on_tool(
+                "tool_a",
+                Ok(StepOutcome::success(serde_json::json!({"result": "a"}))),
+            )
+            .on_tool(
+                "tool_b",
+                Ok(StepOutcome::exit(serde_json::json!({"result": "b"}))),
+            );
         let signal = AtomicBool::new(false);
-        let config = LoopConfig { max_turns: 10, verbose: false, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 10,
+            verbose: false,
+            ..Default::default()
+        };
 
         let outcome = run_agent_loop(
             &mut client,
@@ -3192,7 +3788,8 @@ mod tests {
             &default_ctx(),
             &config,
             &signal,
-        ).await;
+        )
+        .await;
 
         assert_eq!(outcome.exit_reason, "EXITED");
         assert_eq!(outcome.turn, 1);
@@ -3212,10 +3809,31 @@ mod tests {
         }
         #[async_trait]
         impl Handler for SlowHandler {
-            fn working(&self) -> &WorkingMemory { &self.working }
-            fn working_mut(&mut self) -> &mut WorkingMemory { &mut self.working }
-            fn turn_end(&mut self, _r: &MockResponse, _tc: &[MockToolCall], _tr: &[ToolResultItem], _t: u32, np: String, _er: Option<String>) -> String { np }
-            async fn dispatch(&self, name: &str, _a: serde_json::Value, _r: &MockResponse, _i: u32, _c: &ToolContext) -> Result<StepOutcome, oz_core_types::ToolError> {
+            fn working(&self) -> &WorkingMemory {
+                &self.working
+            }
+            fn working_mut(&mut self) -> &mut WorkingMemory {
+                &mut self.working
+            }
+            fn turn_end(
+                &mut self,
+                _r: &MockResponse,
+                _tc: &[MockToolCall],
+                _tr: &[ToolResultItem],
+                _t: u32,
+                np: String,
+                _er: Option<String>,
+            ) -> String {
+                np
+            }
+            async fn dispatch(
+                &self,
+                name: &str,
+                _a: serde_json::Value,
+                _r: &MockResponse,
+                _i: u32,
+                _c: &ToolContext,
+            ) -> Result<StepOutcome, oz_core_types::ToolError> {
                 self.calls.lock().unwrap().push(name.to_string());
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 Ok(StepOutcome::exit(serde_json::json!({"status": "ok"})))
@@ -3230,12 +3848,32 @@ mod tests {
             r
         };
         let mut client = MockLlm::new(vec![resp]);
-        let mut handler = SlowHandler { working: WorkingMemory::default(), calls: std::sync::Mutex::new(Vec::new()) };
+        let mut handler = SlowHandler {
+            working: WorkingMemory::default(),
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
         let signal = AtomicBool::new(false);
-        let config = LoopConfig { max_turns: 1, verbose: false, max_concurrent_tools: 8, tool_timeout_secs: 30, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 1,
+            verbose: false,
+            max_concurrent_tools: 8,
+            tool_timeout_secs: 30,
+            ..Default::default()
+        };
 
         let start = std::time::Instant::now();
-        let outcome = run_agent_loop(&mut client, "sys".into(), "user".into(), vec![], &mut handler, &[], &default_ctx(), &config, &signal).await;
+        let outcome = run_agent_loop(
+            &mut client,
+            "sys".into(),
+            "user".into(),
+            vec![],
+            &mut handler,
+            &[],
+            &default_ctx(),
+            &config,
+            &signal,
+        )
+        .await;
         let elapsed = start.elapsed();
 
         assert_eq!(outcome.exit_reason, "EXITED");
@@ -3243,7 +3881,11 @@ mod tests {
         // 400ms+ serial sum. The 600ms bound tolerates CI/parallel-test load
         // while still catching a serial-execution regression (which would
         // take >= 400ms even unloaded).
-        assert!(elapsed.as_millis() < 600, "parallel execution took {}ms, expected <600ms", elapsed.as_millis());
+        assert!(
+            elapsed.as_millis() < 600,
+            "parallel execution took {}ms, expected <600ms",
+            elapsed.as_millis()
+        );
         let calls = handler.calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
     }
@@ -3257,10 +3899,31 @@ mod tests {
         }
         #[async_trait]
         impl Handler for CancelHandler {
-            fn working(&self) -> &WorkingMemory { &self.working }
-            fn working_mut(&mut self) -> &mut WorkingMemory { &mut self.working }
-            fn turn_end(&mut self, _r: &MockResponse, _tc: &[MockToolCall], _tr: &[ToolResultItem], _t: u32, np: String, _er: Option<String>) -> String { np }
-            async fn dispatch(&self, name: &str, _a: serde_json::Value, _r: &MockResponse, _i: u32, _c: &ToolContext) -> Result<StepOutcome, oz_core_types::ToolError> {
+            fn working(&self) -> &WorkingMemory {
+                &self.working
+            }
+            fn working_mut(&mut self) -> &mut WorkingMemory {
+                &mut self.working
+            }
+            fn turn_end(
+                &mut self,
+                _r: &MockResponse,
+                _tc: &[MockToolCall],
+                _tr: &[ToolResultItem],
+                _t: u32,
+                np: String,
+                _er: Option<String>,
+            ) -> String {
+                np
+            }
+            async fn dispatch(
+                &self,
+                name: &str,
+                _a: serde_json::Value,
+                _r: &MockResponse,
+                _i: u32,
+                _c: &ToolContext,
+            ) -> Result<StepOutcome, oz_core_types::ToolError> {
                 self.dispatched.lock().unwrap().push(name.to_string());
                 match name {
                     "tool_a" => Ok(StepOutcome::exit(serde_json::json!({"status": "exited"}))),
@@ -3277,11 +3940,31 @@ mod tests {
             r
         };
         let mut client = MockLlm::new(vec![resp]);
-        let mut handler = CancelHandler { working: WorkingMemory::default(), dispatched: std::sync::Mutex::new(Vec::new()) };
+        let mut handler = CancelHandler {
+            working: WorkingMemory::default(),
+            dispatched: std::sync::Mutex::new(Vec::new()),
+        };
         let signal = AtomicBool::new(false);
-        let config = LoopConfig { max_turns: 1, verbose: false, max_concurrent_tools: 8, tool_timeout_secs: 30, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 1,
+            verbose: false,
+            max_concurrent_tools: 8,
+            tool_timeout_secs: 30,
+            ..Default::default()
+        };
 
-        let outcome = run_agent_loop(&mut client, "sys".into(), "user".into(), vec![], &mut handler, &[], &default_ctx(), &config, &signal).await;
+        let outcome = run_agent_loop(
+            &mut client,
+            "sys".into(),
+            "user".into(),
+            vec![],
+            &mut handler,
+            &[],
+            &default_ctx(),
+            &config,
+            &signal,
+        )
+        .await;
         assert_eq!(outcome.exit_reason, "EXITED");
     }
 
@@ -3293,10 +3976,31 @@ mod tests {
         }
         #[async_trait]
         impl Handler for TimeoutHandler {
-            fn working(&self) -> &WorkingMemory { &self.working }
-            fn working_mut(&mut self) -> &mut WorkingMemory { &mut self.working }
-            fn turn_end(&mut self, _r: &MockResponse, _tc: &[MockToolCall], _tr: &[ToolResultItem], _t: u32, np: String, _er: Option<String>) -> String { np }
-            async fn dispatch(&self, name: &str, _a: serde_json::Value, _r: &MockResponse, _i: u32, _c: &ToolContext) -> Result<StepOutcome, oz_core_types::ToolError> {
+            fn working(&self) -> &WorkingMemory {
+                &self.working
+            }
+            fn working_mut(&mut self) -> &mut WorkingMemory {
+                &mut self.working
+            }
+            fn turn_end(
+                &mut self,
+                _r: &MockResponse,
+                _tc: &[MockToolCall],
+                _tr: &[ToolResultItem],
+                _t: u32,
+                np: String,
+                _er: Option<String>,
+            ) -> String {
+                np
+            }
+            async fn dispatch(
+                &self,
+                name: &str,
+                _a: serde_json::Value,
+                _r: &MockResponse,
+                _i: u32,
+                _c: &ToolContext,
+            ) -> Result<StepOutcome, oz_core_types::ToolError> {
                 if name != "slow_tool" {
                     return Ok(StepOutcome::success(serde_json::json!({"status": "ok"})));
                 }
@@ -3306,22 +4010,47 @@ mod tests {
         }
         let resp = {
             let mut r = MockResponse::new("timeout turn");
-            r.tool_calls = vec![
-                oz_core_types::MockToolCall::with_id("slow_tool", serde_json::json!({}), "call_slow"),
-            ];
+            r.tool_calls = vec![oz_core_types::MockToolCall::with_id(
+                "slow_tool",
+                serde_json::json!({}),
+                "call_slow",
+            )];
             r
         };
         let mut client = MockLlm::new(vec![resp, MockResponse::new("after error")]);
-        let mut handler = TimeoutHandler { working: WorkingMemory::default() };
+        let mut handler = TimeoutHandler {
+            working: WorkingMemory::default(),
+        };
         let signal = AtomicBool::new(false);
-        let config = LoopConfig { max_turns: 2, verbose: false, max_concurrent_tools: 8, tool_timeout_secs: 1, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 2,
+            verbose: false,
+            max_concurrent_tools: 8,
+            tool_timeout_secs: 1,
+            ..Default::default()
+        };
 
         let start = std::time::Instant::now();
-        let outcome = run_agent_loop(&mut client, "sys".into(), "user".into(), vec![], &mut handler, &[], &default_ctx(), &config, &signal).await;
+        let outcome = run_agent_loop(
+            &mut client,
+            "sys".into(),
+            "user".into(),
+            vec![],
+            &mut handler,
+            &[],
+            &default_ctx(),
+            &config,
+            &signal,
+        )
+        .await;
         let elapsed = start.elapsed();
 
         // Should finish quickly (tool times out after 1s, not 10s)
-        assert!(elapsed.as_secs() < 5, "timeout tool took {}s, should be <5s", elapsed.as_secs());
+        assert!(
+            elapsed.as_secs() < 5,
+            "timeout tool took {}s, should be <5s",
+            elapsed.as_secs()
+        );
         // max_turns=2 runs out after the timed-out turn; honest exit reason.
         assert_eq!(outcome.exit_reason, "max_turns_exhausted");
     }
@@ -3358,10 +4087,11 @@ mod tests {
                 let tool_msg_count: usize = messages
                     .iter()
                     .map(|m| {
-                        let in_content = m.content.iter().filter(|b| matches!(
-                            b,
-                            oz_core_types::ContentBlock::ToolResult { .. }
-                        )).count();
+                        let in_content = m
+                            .content
+                            .iter()
+                            .filter(|b| matches!(b, oz_core_types::ContentBlock::ToolResult { .. }))
+                            .count();
                         let in_tool_results = m.tool_results.as_ref().map(|v| v.len()).unwrap_or(0);
                         in_content + in_tool_results
                     })
@@ -3384,9 +4114,11 @@ mod tests {
         }
 
         let mut r0 = MockResponse::new("calling tool_a");
-        r0.tool_calls = vec![
-            oz_core_types::MockToolCall::with_id("tool_a", serde_json::json!({}), "call_a"),
-        ];
+        r0.tool_calls = vec![oz_core_types::MockToolCall::with_id(
+            "tool_a",
+            serde_json::json!({}),
+            "call_a",
+        )];
         let r1 = MockResponse::new("all done, no more tools");
         let responses = vec![r0, r1];
         let mut client = CapturingLlm {
@@ -3395,10 +4127,24 @@ mod tests {
             snapshots: std::sync::Mutex::new(Vec::new()),
         };
         let mut handler = MockHandler::new()
-            .on_tool("tool_a", Ok(StepOutcome::success(serde_json::json!({"ok": true}))))
-            .on_tool("respond", Ok(StepOutcome::success(serde_json::json!({"status": "continue"}))));
+            .on_tool(
+                "tool_a",
+                Ok(StepOutcome::success(serde_json::json!({"ok": true}))),
+            )
+            .on_tool(
+                "respond",
+                Ok(StepOutcome::success(
+                    serde_json::json!({"status": "continue"}),
+                )),
+            );
         let signal = AtomicBool::new(false);
-        let config = LoopConfig { max_turns: 3, verbose: false, max_concurrent_tools: 4, tool_timeout_secs: 30, ..Default::default() };
+        let config = LoopConfig {
+            max_turns: 3,
+            verbose: false,
+            max_concurrent_tools: 4,
+            tool_timeout_secs: 30,
+            ..Default::default()
+        };
 
         let _ = run_agent_loop(
             &mut client,
@@ -3410,7 +4156,8 @@ mod tests {
             &default_ctx(),
             &config,
             &signal,
-        ).await;
+        )
+        .await;
 
         let snapshots = client.snapshots.lock().unwrap().clone();
         assert!(
@@ -3446,5 +4193,3 @@ mod tests {
         );
     }
 }
-
-

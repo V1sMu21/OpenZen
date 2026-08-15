@@ -319,8 +319,12 @@ mod tests {
             },
             ..Default::default()
         });
-        let store =
-            crate::memory_store::MemoryStore::new(l1, Arc::new(l2), l3, ConsolidationConfig::default());
+        let store = crate::memory_store::MemoryStore::new(
+            l1,
+            Arc::new(l2),
+            l3,
+            ConsolidationConfig::default(),
+        );
         MonitoredMemoryStore::new(store)
     }
 

@@ -180,7 +180,12 @@ mod tests {
             },
             ..Default::default()
         });
-        Arc::new(MemoryStore::new(l1, Arc::new(l2), l3, ConsolidationConfig::default()))
+        Arc::new(MemoryStore::new(
+            l1,
+            Arc::new(l2),
+            l3,
+            ConsolidationConfig::default(),
+        ))
     }
 
     #[test]

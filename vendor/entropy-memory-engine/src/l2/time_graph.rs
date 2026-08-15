@@ -111,16 +111,8 @@ impl TimeGraph {
             edges.len() - 1
         };
 
-        self.outgoing
-            .write()
-            .entry(source)
-            .or_default()
-            .push(idx);
-        self.incoming
-            .write()
-            .entry(target)
-            .or_default()
-            .push(idx);
+        self.outgoing.write().entry(source).or_default().push(idx);
+        self.incoming.write().entry(target).or_default().push(idx);
     }
 
     /// 查询邻居节点

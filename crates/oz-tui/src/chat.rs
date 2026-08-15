@@ -1,4 +1,3 @@
-
 // ga-tui :: chat rendering
 // (c) 2026 OpenZen contributors — MIT
 //
@@ -9,7 +8,9 @@
 // (folding, tag stripping, emoji mapping) live here so the rest of
 // the app can stay simple.
 
-use crate::app::{chat_item_role, App, ChatItem, LONG_MSG_PREVIEW, LONG_MSG_THRESHOLD, MsgRole, ToolStatus};
+use crate::app::{
+    chat_item_role, App, ChatItem, MsgRole, ToolStatus, LONG_MSG_PREVIEW, LONG_MSG_THRESHOLD,
+};
 use crate::markdown::render_markdown;
 use crate::theme::*;
 use ratatui::layout::{Alignment, Rect};
@@ -95,7 +96,11 @@ pub(crate) fn build_lines(items: &[ChatItem], width: usize) -> Vec<Line<'static>
             ChatItem::UserMessage { content, ts } => {
                 render_user_message(&mut out, content, ts, width);
             }
-            ChatItem::AssistantText { content, ts, expanded } => {
+            ChatItem::AssistantText {
+                content,
+                ts,
+                expanded,
+            } => {
                 render_agent_message(&mut out, content, ts, *expanded, width);
             }
             ChatItem::SummaryHeader { content, expanded } => {
@@ -111,14 +116,33 @@ pub(crate) fn build_lines(items: &[ChatItem], width: usize) -> Vec<Line<'static>
             ChatItem::ThinkingHeader { .. } | ChatItem::ThinkingBody { .. } => {
                 // Kept for session-store round-trips; never rendered.
             }
-            ChatItem::ToolCall { name, args, status, result, ts, expanded } => {
+            ChatItem::ToolCall {
+                name,
+                args,
+                status,
+                result,
+                ts,
+                expanded,
+            } => {
                 render_tool_call(&mut out, name, args, status, ts, result, *expanded, width);
             }
             ChatItem::SystemMessage { content, ts } => {
                 render_system_message(&mut out, content, ts, width);
             }
-            ChatItem::AskUserItem { question, candidates, status, response } => {
-                render_ask_user(&mut out, question, candidates, *status, response.as_deref(), width);
+            ChatItem::AskUserItem {
+                question,
+                candidates,
+                status,
+                response,
+            } => {
+                render_ask_user(
+                    &mut out,
+                    question,
+                    candidates,
+                    *status,
+                    response.as_deref(),
+                    width,
+                );
             }
         }
         // Blank line between items for breathing room — but never between
@@ -138,7 +162,10 @@ fn is_fold_pair(a: &ChatItem, b: &ChatItem) -> bool {
     matches!(
         (a, b),
         (ChatItem::SummaryHeader { .. }, ChatItem::SummaryBody { .. })
-            | (ChatItem::ThinkingHeader { .. }, ChatItem::ThinkingBody { .. })
+            | (
+                ChatItem::ThinkingHeader { .. },
+                ChatItem::ThinkingBody { .. }
+            )
     )
 }
 
@@ -149,9 +176,7 @@ fn render_user_message(lines: &mut Vec<Line>, text: &str, _ts: &str, width: usiz
     // The whole line gets a faint background tint to make the region
     // visually distinct from the agent's reply.
     let user_style = Style::default().fg(USER_FG).bg(Color::Rgb(20, 28, 38));
-    let bar_style = Style::default()
-        .fg(HIGHLIGHT_FG)
-        .bg(Color::Rgb(30, 38, 48));
+    let bar_style = Style::default().fg(HIGHLIGHT_FG).bg(Color::Rgb(30, 38, 48));
     let bar = "▌";
     let content_w = width.saturating_sub(2);
     for wrapped in wrap_text(text, content_w) {
@@ -163,7 +188,13 @@ fn render_user_message(lines: &mut Vec<Line>, text: &str, _ts: &str, width: usiz
     }
 }
 
-fn render_agent_message(lines: &mut Vec<Line>, text: &str, _ts: &str, expanded: bool, width: usize) {
+fn render_agent_message(
+    lines: &mut Vec<Line>,
+    text: &str,
+    _ts: &str,
+    expanded: bool,
+    width: usize,
+) {
     let total = text.lines().count();
     let (shown_text, hidden) = if total > LONG_MSG_THRESHOLD && !expanded {
         let head: String = text
@@ -287,11 +318,18 @@ fn tool_arg_summary(name: &str, args: &str) -> String {
         return String::new();
     }
     let _ = name; // key order below is already a superset of the webui's
-    // Deliberately omits `code`/`command`/`data` — the chat header
-    // must never inline raw code, shell commands, or JSON blobs.
+                  // Deliberately omits `code`/`command`/`data` — the chat header
+                  // must never inline raw code, shell commands, or JSON blobs.
     const KEYS: &[&str] = &[
-        "file_path", "path", "pattern", "url", "name", "prompt",
-        "question", "query", "goal",
+        "file_path",
+        "path",
+        "pattern",
+        "url",
+        "name",
+        "prompt",
+        "question",
+        "query",
+        "goal",
     ];
     for key in KEYS {
         if let Some(val) = extract_json_string(args, key) {
@@ -349,12 +387,30 @@ fn unescape(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             match bytes[i + 1] {
-                b'"' => { out.push('"'); i += 2; }
-                b'\\' => { out.push('\\'); i += 2; }
-                b'n' => { out.push('\n'); i += 2; }
-                b't' => { out.push('\t'); i += 2; }
-                b'r' => { out.push('\r'); i += 2; }
-                b'/' => { out.push('/'); i += 2; }
+                b'"' => {
+                    out.push('"');
+                    i += 2;
+                }
+                b'\\' => {
+                    out.push('\\');
+                    i += 2;
+                }
+                b'n' => {
+                    out.push('\n');
+                    i += 2;
+                }
+                b't' => {
+                    out.push('\t');
+                    i += 2;
+                }
+                b'r' => {
+                    out.push('\r');
+                    i += 2;
+                }
+                b'/' => {
+                    out.push('/');
+                    i += 2;
+                }
                 b'u' if i + 5 < bytes.len() => {
                     let hex = std::str::from_utf8(&bytes[i + 2..i + 6]).unwrap_or("");
                     if let Some(c) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
@@ -362,7 +418,10 @@ fn unescape(s: &str) -> String {
                     }
                     i += 6;
                 }
-                b => { out.push(b as char); i += 2; }
+                b => {
+                    out.push(b as char);
+                    i += 2;
+                }
             }
         } else {
             out.push(bytes[i] as char);
@@ -398,7 +457,9 @@ fn render_tool_call(
     };
 
     let arg_summary = tool_arg_summary(name, args);
-    let name_style = Style::default().fg(status_color).add_modifier(Modifier::BOLD);
+    let name_style = Style::default()
+        .fg(status_color)
+        .add_modifier(Modifier::BOLD);
     let inner_w = width.max(20);
 
     // Simple header line: emoji + name + arg summary + status.
@@ -428,7 +489,17 @@ fn render_tool_call(
             // Otherwise the raw text has no markdown markers and renders as
             // a plain paragraph, which is visually indistinguishable from
             // the old raw-text display.
-            let code_tools = ["write", "read_file", "edit", "patch", "bash", "code_run", "grep", "ast_grep_replace", "glob"];
+            let code_tools = [
+                "write",
+                "read_file",
+                "edit",
+                "patch",
+                "bash",
+                "code_run",
+                "grep",
+                "ast_grep_replace",
+                "glob",
+            ];
             let is_code = code_tools.contains(&name);
             let md_source = if is_code {
                 format!("```\n{}\n```", result)
@@ -445,7 +516,10 @@ fn render_tool_call(
             }
             if total > shown {
                 lines.push(Line::from(Span::styled(
-                    format!("    ··· {} more lines ···  [Space to collapse]", total - shown),
+                    format!(
+                        "    ··· {} more lines ···  [Space to collapse]",
+                        total - shown
+                    ),
                     MUTED_FG,
                 )));
             }
@@ -454,13 +528,22 @@ fn render_tool_call(
         let first = result.lines().next().unwrap_or("").trim();
         let preview = truncate_inline(first, inner_w.saturating_sub(4));
         if first.is_empty() {
-            lines.push(Line::from(Span::styled("    (empty)".to_string(), MUTED_FG)));
+            lines.push(Line::from(Span::styled(
+                "    (empty)".to_string(),
+                MUTED_FG,
+            )));
         } else {
-            lines.push(Line::from(Span::styled(format!("    {}", preview), MUTED_FG)));
+            lines.push(Line::from(Span::styled(
+                format!("    {}", preview),
+                MUTED_FG,
+            )));
         }
         if result_lines > 1 {
             lines.push(Line::from(Span::styled(
-                format!("    ··· {} more lines ···  [Space to expand]", result_lines - 1),
+                format!(
+                    "    ··· {} more lines ···  [Space to expand]",
+                    result_lines - 1
+                ),
                 MUTED_FG,
             )));
         }
@@ -511,7 +594,10 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .map(|sp| sp.content.as_ref())
             .collect();
-        assert!(flat.contains("[+"), "long message should produce a fold hint");
+        assert!(
+            flat.contains("[+"),
+            "long message should produce a fold hint"
+        );
         // Lines beyond the preview window must NOT be in the flat output.
         assert!(!flat.contains(&format!("line {}", LONG_MSG_THRESHOLD + 4)));
     }
@@ -536,8 +622,14 @@ mod tests {
         assert!(flat.contains("✓"));
         assert!(!flat.contains("┌─"), "no box border on collapsed card");
         assert!(!flat.contains("└─"), "no box border on collapsed card");
-        assert!(flat.contains("line1"), "collapsed card should preview the first line");
-        assert!(flat.contains("··· 2 more lines"), "collapsed card should show fold hint");
+        assert!(
+            flat.contains("line1"),
+            "collapsed card should preview the first line"
+        );
+        assert!(
+            flat.contains("··· 2 more lines"),
+            "collapsed card should show fold hint"
+        );
     }
 
     #[test]
@@ -603,9 +695,17 @@ mod tests {
     #[test]
     fn fold_pair_keeps_summary_header_and_body_together() {
         let items = vec![
-            ChatItem::SummaryHeader { content: s("plan"), expanded: false },
-            ChatItem::SummaryBody { content: s("full plan body") },
-            ChatItem::UserMessage { content: s("hi"), ts: s("00:00:00") },
+            ChatItem::SummaryHeader {
+                content: s("plan"),
+                expanded: false,
+            },
+            ChatItem::SummaryBody {
+                content: s("full plan body"),
+            },
+            ChatItem::UserMessage {
+                content: s("hi"),
+                ts: s("00:00:00"),
+            },
         ];
         let lines = build_lines(&items, 80);
         let flat: String = lines

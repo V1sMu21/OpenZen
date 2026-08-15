@@ -5,7 +5,9 @@
 
 use async_trait::async_trait;
 use oz_core::handler::{Handler, WorkingMemory};
-use oz_core_types::{MockResponse, MockToolCall, StepOutcome, ToolContext, ToolDefinition, ToolResultItem};
+use oz_core_types::{
+    MockResponse, MockToolCall, StepOutcome, ToolContext, ToolDefinition, ToolResultItem,
+};
 
 use crate::registry::ToolRegistry;
 
@@ -19,7 +21,11 @@ pub struct ToolRegistryHandler {
 impl ToolRegistryHandler {
     pub fn new(registry: ToolRegistry) -> Self {
         let definitions = registry.to_schema("en");
-        ToolRegistryHandler { registry, working: WorkingMemory::default(), definitions }
+        ToolRegistryHandler {
+            registry,
+            working: WorkingMemory::default(),
+            definitions,
+        }
     }
 
     pub fn tool_definitions(&self) -> &[ToolDefinition] {
@@ -79,18 +85,30 @@ mod tests {
     struct PingTool;
     #[async_trait]
     impl ToolHandler for PingTool {
-        fn name(&self) -> String { "ping".to_string() }
-        fn description(&self) -> String { "responds pong".to_string() }
-        fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
-        async fn execute(&self, _a: serde_json::Value, _c: &ToolContext) -> Result<ToolOutput, oz_core_types::ToolError> {
+        fn name(&self) -> String {
+            "ping".to_string()
+        }
+        fn description(&self) -> String {
+            "responds pong".to_string()
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(
+            &self,
+            _a: serde_json::Value,
+            _c: &ToolContext,
+        ) -> Result<ToolOutput, oz_core_types::ToolError> {
             Ok(ToolOutput::success(serde_json::json!({"pong": true})))
         }
     }
 
     fn ctx() -> ToolContext {
         ToolContext {
-            working_dir: "/tmp".into(), assets_dir: "/tmp".into(),
-            script_dir: "/tmp".into(), lang: "en".into(),
+            working_dir: "/tmp".into(),
+            assets_dir: "/tmp".into(),
+            script_dir: "/tmp".into(),
+            lang: "en".into(),
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
@@ -103,7 +121,9 @@ mod tests {
         reg.register(PingTool);
         let mut handler = ToolRegistryHandler::new(reg);
         let resp = oz_core_types::MockResponse::new("");
-        let result = handler.dispatch("ping", serde_json::json!({}), &resp, 0, &ctx()).await;
+        let result = handler
+            .dispatch("ping", serde_json::json!({}), &resp, 0, &ctx())
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().data["pong"], true);
     }
@@ -113,9 +133,15 @@ mod tests {
         let reg = ToolRegistry::new();
         let mut handler = ToolRegistryHandler::new(reg);
         let resp = oz_core_types::MockResponse::new("");
-        let result = handler.dispatch("nope", serde_json::json!({}), &resp, 0, &ctx()).await.unwrap();
+        let result = handler
+            .dispatch("nope", serde_json::json!({}), &resp, 0, &ctx())
+            .await
+            .unwrap();
         let msg = result.next_prompt.unwrap_or_default();
-        assert!(msg.contains("nope"), "unknown tool should include name in error: {msg}");
+        assert!(
+            msg.contains("nope"),
+            "unknown tool should include name in error: {msg}"
+        );
     }
 
     #[tokio::test]

@@ -8,27 +8,28 @@ pub mod code_run;
 pub mod doc_reader;
 pub mod file_ops;
 pub mod handler;
+pub mod harness_refine;
 pub mod long_term;
+pub mod mcp_bridge;
 pub mod no_tool;
 pub mod open_side_panel;
+pub mod plan;
 pub mod registry;
+pub mod schedule_reminder;
+pub mod skill_mcp_search;
+pub mod skill_mcp_write;
+pub mod todoupdate;
+pub mod todowrite;
+pub mod web_execute_js;
 pub mod web_fetch;
 pub mod web_js;
 pub mod web_scan;
 pub mod web_search;
-pub mod web_execute_js;
 pub mod working_mem;
-pub mod harness_refine;
-pub mod skill_mcp_search;
-pub mod mcp_bridge;
-pub mod skill_mcp_write;
-pub mod todowrite;
-pub mod todoupdate;
-pub mod schedule_reminder;
-pub mod plan;
 
 /// Tool handler signature (old-style, closure-based) — all tools return StepOutcome.
-pub type ToolHandler = Arc<dyn Fn(&str, &serde_json::Value, &ToolContext) -> StepOutcome + Send + Sync>;
+pub type ToolHandler =
+    Arc<dyn Fn(&str, &serde_json::Value, &ToolContext) -> StepOutcome + Send + Sync>;
 
 /// Legacy registry — closure-based, kept for backward compatibility.
 pub struct LegacyRegistry {
@@ -44,7 +45,10 @@ impl Default for LegacyRegistry {
 
 impl LegacyRegistry {
     pub fn new() -> Self {
-        LegacyRegistry { handlers: HashMap::new(), definitions: Vec::new() }
+        LegacyRegistry {
+            handlers: HashMap::new(),
+            definitions: Vec::new(),
+        }
     }
 
     pub fn register(&mut self, name: &str, def: ToolDefinition, handler: ToolHandler) {
@@ -71,16 +75,44 @@ impl LegacyRegistry {
         let mut reg = LegacyRegistry::new();
 
         reg.register("code_run", code_run::definition(), code_run::handler());
-        reg.register("read", file_ops::read_definition(), file_ops::read_handler());
-        reg.register("write", file_ops::write_definition(), file_ops::write_handler());
-        reg.register("edit", file_ops::edit_definition(), file_ops::edit_handler());
-        reg.register("patch", file_ops::patch_definition(), file_ops::patch_handler());
-        reg.register("glob", file_ops::glob_definition(), file_ops::glob_handler());
-        reg.register("grep", file_ops::grep_definition(), file_ops::grep_handler());
+        reg.register(
+            "read",
+            file_ops::read_definition(),
+            file_ops::read_handler(),
+        );
+        reg.register(
+            "write",
+            file_ops::write_definition(),
+            file_ops::write_handler(),
+        );
+        reg.register(
+            "edit",
+            file_ops::edit_definition(),
+            file_ops::edit_handler(),
+        );
+        reg.register(
+            "patch",
+            file_ops::patch_definition(),
+            file_ops::patch_handler(),
+        );
+        reg.register(
+            "glob",
+            file_ops::glob_definition(),
+            file_ops::glob_handler(),
+        );
+        reg.register(
+            "grep",
+            file_ops::grep_definition(),
+            file_ops::grep_handler(),
+        );
         reg.register("ls", file_ops::ls_definition(), file_ops::ls_handler());
         reg.register("respond", no_tool::definition(), no_tool::handler());
         reg.register("respond", no_tool::definition(), no_tool::handler());
-        reg.register("schedule_reminder", schedule_reminder::definition(), schedule_reminder::handler());
+        reg.register(
+            "schedule_reminder",
+            schedule_reminder::definition(),
+            schedule_reminder::handler(),
+        );
         reg.register("submit_plan", plan::definition(), plan::handler());
 
         reg
@@ -127,7 +159,8 @@ mod tests {
                 parameters: serde_json::json!({}),
             },
         };
-        let handler: ToolHandler = Arc::new(|_, _, _| StepOutcome::success(serde_json::json!({"ok": true})));
+        let handler: ToolHandler =
+            Arc::new(|_, _, _| StepOutcome::success(serde_json::json!({"ok": true})));
         reg.register("test", def, handler);
         assert!(reg.get("test").is_some());
     }
@@ -183,7 +216,8 @@ mod tests {
                 parameters: serde_json::json!({}),
             },
         };
-        let handler: ToolHandler = Arc::new(|_, _, _| StepOutcome::exit(serde_json::json!({"reason": "done"})));
+        let handler: ToolHandler =
+            Arc::new(|_, _, _| StepOutcome::exit(serde_json::json!({"reason": "done"})));
         reg.register("exit_now", def, handler);
         let result = reg.dispatch("exit_now", &serde_json::json!({}), &make_ctx());
         assert!(result.should_exit);
@@ -221,15 +255,25 @@ mod tests {
                 parameters: serde_json::json!({}),
             },
         };
-        let ok_handler: ToolHandler = Arc::new(|n, _, _| StepOutcome::success(serde_json::json!({"name": n})));
+        let ok_handler: ToolHandler =
+            Arc::new(|n, _, _| StepOutcome::success(serde_json::json!({"name": n})));
         reg.register("a", make_def("a"), ok_handler.clone());
         reg.register("b", make_def("b"), ok_handler.clone());
         reg.register("c", make_def("c"), ok_handler);
 
         assert_eq!(reg.definitions().len(), 3);
-        assert_eq!(reg.dispatch("a", &serde_json::json!({}), &make_ctx()).data["name"], "a");
-        assert_eq!(reg.dispatch("b", &serde_json::json!({}), &make_ctx()).data["name"], "b");
-        assert_eq!(reg.dispatch("c", &serde_json::json!({}), &make_ctx()).data["name"], "c");
+        assert_eq!(
+            reg.dispatch("a", &serde_json::json!({}), &make_ctx()).data["name"],
+            "a"
+        );
+        assert_eq!(
+            reg.dispatch("b", &serde_json::json!({}), &make_ctx()).data["name"],
+            "b"
+        );
+        assert_eq!(
+            reg.dispatch("c", &serde_json::json!({}), &make_ctx()).data["name"],
+            "c"
+        );
     }
 
     #[test]
@@ -252,7 +296,10 @@ mod tests {
     fn test_shared_registry_has_tools() {
         let reg = shared_registry();
         let guard = reg.lock().unwrap();
-        assert!(!guard.definitions().is_empty(), "shared registry should have tools");
+        assert!(
+            !guard.definitions().is_empty(),
+            "shared registry should have tools"
+        );
     }
 }
 
@@ -264,8 +311,10 @@ mod legacy_bridge_tests {
 
     fn ctx() -> oz_core_types::ToolContext {
         oz_core_types::ToolContext {
-            working_dir: "/tmp".into(), assets_dir: "/tmp".into(),
-            script_dir: "/tmp".into(), lang: "en".into(),
+            working_dir: "/tmp".into(),
+            assets_dir: "/tmp".into(),
+            script_dir: "/tmp".into(),
+            lang: "en".into(),
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
@@ -291,7 +340,11 @@ mod legacy_bridge_tests {
             },
         };
         reg.register("read", def, h);
-        let result = reg.dispatch("read", &serde_json::json!({"file_path": "/tmp/oz_test_bridge.txt"}), &ctx());
+        let result = reg.dispatch(
+            "read",
+            &serde_json::json!({"file_path": "/tmp/oz_test_bridge.txt"}),
+            &ctx(),
+        );
         assert!(result.data.is_object() || result.next_prompt.is_some());
     }
 }
@@ -304,8 +357,10 @@ mod integration {
 
     fn ctx() -> ToolContext {
         ToolContext {
-            working_dir: "/tmp".into(), assets_dir: "/tmp".into(),
-            script_dir: "/tmp".into(), lang: "en".into(),
+            working_dir: "/tmp".into(),
+            assets_dir: "/tmp".into(),
+            script_dir: "/tmp".into(),
+            lang: "en".into(),
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
@@ -318,21 +373,29 @@ mod integration {
         let legacy = LegacyRegistry::build_default();
         let new_reg = NewRegistry::build_default();
 
-        let legacy_names: std::collections::BTreeSet<&str> =
-            legacy.definitions().iter().map(|d| d.function.name.as_str()).collect();
-        let new_names: std::collections::BTreeSet<String> =
-            new_reg.names().into_iter().collect();
+        let legacy_names: std::collections::BTreeSet<&str> = legacy
+            .definitions()
+            .iter()
+            .map(|d| d.function.name.as_str())
+            .collect();
+        let new_names: std::collections::BTreeSet<String> = new_reg.names().into_iter().collect();
 
         for name in &legacy_names {
             // Skip tools that may only exist in legacy registry
             if !new_names.contains(*name) {
-                eprintln!("Note: legacy tool '{}' not in new registry (auto mode)", name);
+                eprintln!(
+                    "Note: legacy tool '{}' not in new registry (auto mode)",
+                    name
+                );
                 continue;
             }
         }
-        assert!(new_names.len() > legacy_names.len(),
+        assert!(
+            new_names.len() > legacy_names.len(),
             "new registry should have more tools than legacy (new: {}, legacy: {})",
-            new_names.len(), legacy_names.len());
+            new_names.len(),
+            legacy_names.len()
+        );
     }
 
     /// Each new-style async ToolHandler should produce a valid ToolDefinition.
@@ -355,7 +418,11 @@ mod integration {
         for h in &handlers {
             let schema = h.parameters();
             assert!(schema.is_object(), "{} parameters not an object", h.name());
-            assert!(!h.description().is_empty(), "{} description is empty", h.name());
+            assert!(
+                !h.description().is_empty(),
+                "{} description is empty",
+                h.name()
+            );
             assert!(!h.name().is_empty(), "tool has empty name");
         }
     }
@@ -369,17 +436,24 @@ mod integration {
 
         for legacy_def in legacy.definitions() {
             // Skip backward-compat only legacy items that have no new counterpart
-            let new_def_opt = new_reg.to_schema("en").into_iter().find(|d| {
-                d.function.name == legacy_def.function.name
-            });
+            let new_def_opt = new_reg
+                .to_schema("en")
+                .into_iter()
+                .find(|d| d.function.name == legacy_def.function.name);
             let Some(new_def) = new_def_opt else {
                 continue;
             };
 
-            assert_eq!(legacy_def.function.description, new_def.function.description,
-                "Description mismatch for tool '{}'", legacy_def.function.name);
-            assert_eq!(legacy_def.type_, new_def.type_,
-                "Type mismatch for tool '{}'", legacy_def.function.name);
+            assert_eq!(
+                legacy_def.function.description, new_def.function.description,
+                "Description mismatch for tool '{}'",
+                legacy_def.function.name
+            );
+            assert_eq!(
+                legacy_def.type_, new_def.type_,
+                "Type mismatch for tool '{}'",
+                legacy_def.function.name
+            );
         }
     }
 
@@ -387,10 +461,10 @@ mod integration {
     #[tokio::test]
     async fn test_async_handler_dispatch_through_tokio() {
         let tool = crate::working_mem::WorkingMemTool;
-        let output = tool.execute(
-            serde_json::json!({"key_info": "integration test"}),
-            &ctx(),
-        ).await.unwrap();
+        let output = tool
+            .execute(serde_json::json!({"key_info": "integration test"}), &ctx())
+            .await
+            .unwrap();
 
         assert_eq!(output.data["status"], "ok");
         assert_eq!(output.data["key_info"], "integration test");
@@ -401,18 +475,27 @@ mod integration {
     async fn test_async_handler_variety() {
         // WorkingMemTool
         let wm = crate::working_mem::WorkingMemTool;
-        let r1 = wm.execute(serde_json::json!({"key_info": "a"}), &ctx()).await.unwrap();
+        let r1 = wm
+            .execute(serde_json::json!({"key_info": "a"}), &ctx())
+            .await
+            .unwrap();
         assert_eq!(r1.data["status"], "ok");
 
         // AskUserTool
         let au = crate::ask_user::AskUserTool;
-        let r2 = au.execute(serde_json::json!({"question": "test?"}), &ctx()).await.unwrap();
+        let r2 = au
+            .execute(serde_json::json!({"question": "test?"}), &ctx())
+            .await
+            .unwrap();
         assert_eq!(r2.data["status"], "INTERRUPT");
         assert!(!r2.should_exit); // ask_user must NOT exit — loop resumes with user reply
 
         // NoTool
         let nt = crate::no_tool::NoTool;
-        let r3 = nt.execute(serde_json::json!({"response": "hi"}), &ctx()).await.unwrap();
+        let r3 = nt
+            .execute(serde_json::json!({"response": "hi"}), &ctx())
+            .await
+            .unwrap();
         assert_eq!(r3.data["status"], "ok");
     }
 
@@ -422,7 +505,10 @@ mod integration {
     async fn test_new_registry_dispatch_basic_tool() {
         let mut reg = NewRegistry::new();
         reg.register(crate::no_tool::NoTool);
-        let result = reg.dispatch("respond", serde_json::json!({"response": "ok"}), &ctx()).await.unwrap();
+        let result = reg
+            .dispatch("respond", serde_json::json!({"response": "ok"}), &ctx())
+            .await
+            .unwrap();
         assert_eq!(result.data["status"], "ok");
         assert!(result.should_exit);
     }

@@ -86,8 +86,7 @@ struct PersistWriter {
 impl PersistWriter {
     fn spawn() -> Self {
         let (wake, rx) = mpsc::channel::<()>();
-        let slot: Arc<Mutex<Option<PersistSlot>>> =
-            Arc::new(Mutex::new(None));
+        let slot: Arc<Mutex<Option<PersistSlot>>> = Arc::new(Mutex::new(None));
         let pending = Arc::new(AtomicU64::new(0));
         let worker_slot = Arc::clone(&slot);
         let worker_pending = Arc::clone(&pending);
@@ -121,7 +120,11 @@ impl PersistWriter {
                 }
             })
             .expect("failed to spawn session persist thread");
-        PersistWriter { wake, slot, pending }
+        PersistWriter {
+            wake,
+            slot,
+            pending,
+        }
     }
 
     fn submit(&self, path: PathBuf, sessions: HashMap<String, SessionEntry>) {
@@ -162,7 +165,8 @@ impl SessionStore {
         if self.max_sessions == 0 || self.sessions.len() <= self.max_sessions {
             return;
         }
-        let mut entries: Vec<(String, chrono::DateTime<chrono::Utc>)> = self.sessions
+        let mut entries: Vec<(String, chrono::DateTime<chrono::Utc>)> = self
+            .sessions
             .iter()
             .map(|(id, e)| (id.clone(), e.created_at))
             .collect();
@@ -283,7 +287,13 @@ impl SessionStore {
         self.create_with_project(name, None, None, None)
     }
 
-    pub fn create_with_project(&mut self, name: &str, project_id: Option<&str>, project_name: Option<&str>, working_dir: Option<&str>) -> SessionInfo {
+    pub fn create_with_project(
+        &mut self,
+        name: &str,
+        project_id: Option<&str>,
+        project_name: Option<&str>,
+        working_dir: Option<&str>,
+    ) -> SessionInfo {
         let id = uuid::Uuid::new_v4().to_string();
         self.create_with_id_project(&id, name, project_id, project_name, working_dir);
         let info = self.sessions.get(&id).unwrap().info.clone();
@@ -295,7 +305,14 @@ impl SessionStore {
         self.create_with_id_project(id, name, None, None, None);
     }
 
-    pub fn create_with_id_project(&mut self, id: &str, name: &str, project_id: Option<&str>, project_name: Option<&str>, working_dir: Option<&str>) {
+    pub fn create_with_id_project(
+        &mut self,
+        id: &str,
+        name: &str,
+        project_id: Option<&str>,
+        project_name: Option<&str>,
+        working_dir: Option<&str>,
+    ) {
         let now = chrono::Utc::now();
         let info = SessionInfo {
             id: id.to_string(),

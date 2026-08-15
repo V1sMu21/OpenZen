@@ -1,7 +1,6 @@
 use std::convert::Infallible;
 
 use axum::{
-    Router,
     extract::State,
     http::StatusCode,
     response::{
@@ -9,14 +8,15 @@ use axum::{
         Html, Json,
     },
     routing::{get, post},
+    Router,
 };
 use futures::stream::Stream;
 use futures::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::SharedMcpState;
 use crate::types::JsonRpcMessage;
+use crate::SharedMcpState;
 
 /// Start the SSE-based MCP server on the given port.
 pub async fn serve(state: SharedMcpState, port: u16) -> anyhow::Result<()> {
@@ -27,9 +27,7 @@ pub async fn serve(state: SharedMcpState, port: u16) -> anyhow::Result<()> {
         .route("/tools/call", post(call_tool))
         .route("/sse", get(sse_handler))
         .route("/messages", post(messages_handler))
-        .layer(
-            tower_http::cors::CorsLayer::permissive()
-        )
+        .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
@@ -42,22 +40,22 @@ pub async fn serve(state: SharedMcpState, port: u16) -> anyhow::Result<()> {
 }
 
 async fn index() -> Html<&'static str> {
-    Html(r#"<!DOCTYPE html>
+    Html(
+        r#"<!DOCTYPE html>
 <html><head><title>OpenZen MCP Server</title></head>
 <body><h1>OpenZen MCP Server</h1>
 <p>SSE endpoint: <code>/sse</code></p>
 <p>Messages endpoint: <code>/messages</code></p>
 <p>Tools: <code>/tools</code></p>
-</body></html>"#)
+</body></html>"#,
+    )
 }
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
 }
 
-async fn list_tools(
-    State(state): State<SharedMcpState>,
-) -> Json<serde_json::Value> {
+async fn list_tools(State(state): State<SharedMcpState>) -> Json<serde_json::Value> {
     let state = state.lock().await;
     let tools = state.tool_definitions();
     Json(serde_json::json!({
@@ -98,7 +96,12 @@ async fn sse_handler(
         "type": "endpoint",
         "endpoint": "/messages"
     });
-    let _ = tx.send(format!("data: {}\n\n", serde_json::to_string(&msg).unwrap_or_default())).await;
+    let _ = tx
+        .send(format!(
+            "data: {}\n\n",
+            serde_json::to_string(&msg).unwrap_or_default()
+        ))
+        .await;
 
     tokio::spawn(async move {
         loop {
@@ -124,7 +127,10 @@ async fn messages_handler(
         "tools/list" => {
             let state = state.lock().await;
             let tools = state.tool_definitions();
-            Ok(Json(JsonRpcMessage::success(id, serde_json::json!({ "tools": tools }))))
+            Ok(Json(JsonRpcMessage::success(
+                id,
+                serde_json::json!({ "tools": tools }),
+            )))
         }
         "tools/call" => {
             let params = msg.params.unwrap_or_default();
@@ -132,14 +138,18 @@ async fn messages_handler(
             let args = params.get("arguments").cloned().unwrap_or_default();
             let state = state.lock().await;
             match state.call_tool(name, args).await {
-                Ok(result) => Ok(Json(JsonRpcMessage::success(id, serde_json::json!({
-                    "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}]
-                })))),
+                Ok(result) => Ok(Json(JsonRpcMessage::success(
+                    id,
+                    serde_json::json!({
+                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}]
+                    }),
+                ))),
                 Err(e) => Ok(Json(JsonRpcMessage::error(id, -1, e))),
             }
         }
-        "initialize" => {
-            Ok(Json(JsonRpcMessage::success(id, serde_json::json!({
+        "initialize" => Ok(Json(JsonRpcMessage::success(
+            id,
+            serde_json::json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
                     "tools": {}
@@ -148,13 +158,13 @@ async fn messages_handler(
                     "name": "openzen",
                     "version": "0.1.0"
                 }
-            }))))
-        }
-        "ping" => {
-            Ok(Json(JsonRpcMessage::success(id, serde_json::json!({}))))
-        }
-        _ => {
-            Ok(Json(JsonRpcMessage::error(id, -32601, format!("method not found: {method}"))))
-        }
+            }),
+        ))),
+        "ping" => Ok(Json(JsonRpcMessage::success(id, serde_json::json!({})))),
+        _ => Ok(Json(JsonRpcMessage::error(
+            id,
+            -32601,
+            format!("method not found: {method}"),
+        ))),
     }
 }

@@ -74,7 +74,8 @@ struct TrustStoreInner {
 
 impl TrustStore {
     pub fn new(path: Option<PathBuf>) -> Self {
-        let entries = path.as_ref()
+        let entries = path
+            .as_ref()
             .and_then(Self::load_from_disk)
             .unwrap_or_default();
         TrustStore {
@@ -99,13 +100,13 @@ impl TrustStore {
         }
 
         match inner.entries.get(key) {
-            Some(entry) if entry.level == TrustLevel::Blocked => {
-                TrustDecision::Blocked(format!(
-                    "Operation `{tool}` with pattern `{pattern}` is permanently blocked",
-                ))
-            }
-            Some(entry) if entry.level == TrustLevel::GlobalTrust
-                       || entry.level == TrustLevel::WorkspaceTrust => {
+            Some(entry) if entry.level == TrustLevel::Blocked => TrustDecision::Blocked(format!(
+                "Operation `{tool}` with pattern `{pattern}` is permanently blocked",
+            )),
+            Some(entry)
+                if entry.level == TrustLevel::GlobalTrust
+                    || entry.level == TrustLevel::WorkspaceTrust =>
+            {
                 TrustDecision::Allowed
             }
             Some(entry) if entry.level == TrustLevel::SessionTrust => {
@@ -138,16 +139,19 @@ impl TrustStore {
             return;
         }
 
-        let entry = inner.entries.entry(key.clone()).or_insert_with(|| TrustEntry {
-            tool: tool.to_string(),
-            pattern: pattern.to_string(),
-            level: TrustLevel::AlwaysAsk,
-            approved_count: 0,
-            denied_count: 0,
-            last_approved: None,
-            last_denied: None,
-            created_at: Utc::now(),
-        });
+        let entry = inner
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| TrustEntry {
+                tool: tool.to_string(),
+                pattern: pattern.to_string(),
+                level: TrustLevel::AlwaysAsk,
+                approved_count: 0,
+                denied_count: 0,
+                last_approved: None,
+                last_denied: None,
+                created_at: Utc::now(),
+            });
 
         entry.approved_count += 1;
         entry.last_approved = Some(Utc::now());
@@ -194,7 +198,8 @@ impl TrustStore {
                     entry.level = TrustLevel::Blocked;
                     tracing::warn!(
                         "[safety] auto-blocked `{tool}/{pattern}` after {count} denials",
-                        tool = tool, pattern = pattern,
+                        tool = tool,
+                        pattern = pattern,
                         count = DENIAL_AUTO_BLOCK_COUNT
                     );
                 }
@@ -226,7 +231,10 @@ impl TrustStore {
 
     pub fn unblock(&self, tool: &str, pattern: &str) {
         let mut inner = self.inner.write().unwrap();
-        if let Some(entry) = inner.entries.get_mut(&(tool.to_string(), pattern.to_string())) {
+        if let Some(entry) = inner
+            .entries
+            .get_mut(&(tool.to_string(), pattern.to_string()))
+        {
             entry.level = TrustLevel::AlwaysAsk;
             entry.denied_count = 0;
         }
@@ -244,7 +252,8 @@ impl TrustStore {
                         entry.level = TrustLevel::SessionTrust;
                         tracing::info!(
                             "[safety] decayed `{}/{}` to SessionTrust (inactive)",
-                            entry.tool, entry.pattern
+                            entry.tool,
+                            entry.pattern
                         );
                     }
                 }
@@ -256,7 +265,9 @@ impl TrustStore {
 
     pub fn list_trusted(&self) -> Vec<(String, String, TrustLevel)> {
         let inner = self.inner.read().unwrap();
-        inner.entries.iter()
+        inner
+            .entries
+            .iter()
             .filter(|(_, e)| e.level != TrustLevel::Blocked && e.level != TrustLevel::AlwaysAsk)
             .map(|((t, p), e)| (t.clone(), p.clone(), e.level.clone()))
             .collect()
@@ -264,7 +275,9 @@ impl TrustStore {
 
     pub fn list_blocked(&self) -> Vec<(String, String)> {
         let inner = self.inner.read().unwrap();
-        inner.entries.iter()
+        inner
+            .entries
+            .iter()
             .filter(|(_, e)| e.level == TrustLevel::Blocked)
             .map(|((t, p), _)| (t.clone(), p.clone()))
             .collect()
@@ -273,8 +286,14 @@ impl TrustStore {
     pub(crate) fn maybe_save(&self) {
         if let Some(ref path) = self.path {
             let inner = self.inner.read().unwrap();
-            let entries: Vec<TrustEntry> = inner.entries.values()
-                .filter(|e| e.level == TrustLevel::WorkspaceTrust || e.level == TrustLevel::GlobalTrust || e.level == TrustLevel::Blocked)
+            let entries: Vec<TrustEntry> = inner
+                .entries
+                .values()
+                .filter(|e| {
+                    e.level == TrustLevel::WorkspaceTrust
+                        || e.level == TrustLevel::GlobalTrust
+                        || e.level == TrustLevel::Blocked
+                })
                 .cloned()
                 .collect();
             drop(inner);
@@ -285,7 +304,9 @@ impl TrustStore {
     fn load_from_disk(path: &PathBuf) -> Option<HashMap<(String, String), TrustEntry>> {
         let data = std::fs::read_to_string(path).ok()?;
         let file: TrustFile = serde_json::from_str(&data).ok()?;
-        let entries: HashMap<_, _> = file.entries.into_iter()
+        let entries: HashMap<_, _> = file
+            .entries
+            .into_iter()
             .map(|e| ((e.tool.clone(), e.pattern.clone()), e))
             .collect();
         Some(entries)

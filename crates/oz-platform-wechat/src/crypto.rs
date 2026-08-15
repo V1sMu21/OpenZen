@@ -1,6 +1,6 @@
-use aes::Aes128;
-use aes::cipher::{BlockEncrypt, KeyInit};
 use aes::cipher::generic_array::GenericArray;
+use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::Aes128;
 
 pub fn aes_ecb_encrypt(data: &[u8], key: &[u8]) -> Vec<u8> {
     let key = GenericArray::from_slice(&key[..16]);
@@ -35,4 +35,3 @@ fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
     padded.extend(std::iter::repeat_n(pad_len as u8, pad_len));
     padded
 }
-

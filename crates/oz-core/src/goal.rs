@@ -23,7 +23,11 @@ pub struct VerifySpec {
 
 impl VerifySpec {
     pub fn new(command: impl Into<String>) -> Self {
-        VerifySpec { command: command.into(), timeout_secs: 60, retries: 3 }
+        VerifySpec {
+            command: command.into(),
+            timeout_secs: 60,
+            retries: 3,
+        }
     }
 }
 
@@ -48,10 +52,7 @@ pub struct GoalOutcome {
 }
 
 /// Run the verification command in `working_dir`. Returns (passed, output).
-pub async fn run_verify(
-    spec: &VerifySpec,
-    working_dir: &str,
-) -> (bool, String) {
+pub async fn run_verify(spec: &VerifySpec, working_dir: &str) -> (bool, String) {
     let dir = Path::new(working_dir);
     let out = match tokio::time::timeout(
         Duration::from_secs(spec.timeout_secs.max(1)),
@@ -116,7 +117,12 @@ where
         .await;
 
         if spec.gates.is_empty() {
-            return GoalOutcome { attempts, success: true, last_verify_output: String::new(), per_gate: Vec::new() };
+            return GoalOutcome {
+                attempts,
+                success: true,
+                last_verify_output: String::new(),
+                per_gate: Vec::new(),
+            };
         }
 
         // Run gates in order; a gate may retry within the round (retries), and
@@ -142,11 +148,21 @@ where
         }
 
         if all_passed {
-            return GoalOutcome { attempts, success: true, last_verify_output: last_output, per_gate };
+            return GoalOutcome {
+                attempts,
+                success: true,
+                last_verify_output: last_output,
+                per_gate,
+            };
         }
         feedback = truncate(&last_output, 4000);
         if attempts >= spec.max_attempts.max(1) {
-            return GoalOutcome { attempts, success: false, last_verify_output: last_output, per_gate };
+            return GoalOutcome {
+                attempts,
+                success: false,
+                last_verify_output: last_output,
+                per_gate,
+            };
         }
     }
 }
@@ -217,7 +233,9 @@ mod tests {
 
     impl StubHandler {
         fn new() -> Self {
-            StubHandler { working: crate::WorkingMemory::default() }
+            StubHandler {
+                working: crate::WorkingMemory::default(),
+            }
         }
     }
 

@@ -30,8 +30,15 @@ impl Default for RefineTrigger {
 /// Result of a refinement attempt.
 #[derive(Debug, Clone)]
 pub enum RefineResult {
-    Refined { name: String, old_version: u32, new_version: u32 },
-    Skipped { name: String, reason: String },
+    Refined {
+        name: String,
+        old_version: u32,
+        new_version: u32,
+    },
+    Skipped {
+        name: String,
+        reason: String,
+    },
 }
 
 /// Analyzes existing knowledge and proposes improvements via LLM.
@@ -39,7 +46,12 @@ pub struct Refiner;
 
 impl Refiner {
     /// Check if a skill should be refined based on trigger conditions.
-    pub fn should_refine(success_count: u32, quality: f32, version: u32, trigger: &RefineTrigger) -> bool {
+    pub fn should_refine(
+        success_count: u32,
+        quality: f32,
+        version: u32,
+        trigger: &RefineTrigger,
+    ) -> bool {
         version < trigger.max_refinements
             && (success_count > 0 && success_count.is_multiple_of(trigger.every_n_uses)
                 || quality < trigger.min_quality)
@@ -53,10 +65,12 @@ impl Refiner {
     ) -> Result<RefineResult, LlmError> {
         let skill = match store.skills.get(skill_name).cloned() {
             Some(s) => s,
-            None => return Ok(RefineResult::Skipped {
-                name: skill_name.to_string(),
-                reason: "skill not found".into(),
-            }),
+            None => {
+                return Ok(RefineResult::Skipped {
+                    name: skill_name.to_string(),
+                    reason: "skill not found".into(),
+                })
+            }
         };
 
         let trigger = RefineTrigger::default();
@@ -75,7 +89,9 @@ impl Refiner {
         let prompt = Self::build_refine_prompt(&skill);
 
         let messages = vec![
-            Message::system("You are a knowledge refinement expert. Improve the given skill definition."),
+            Message::system(
+                "You are a knowledge refinement expert. Improve the given skill definition.",
+            ),
             Message::user(&prompt),
         ];
 
@@ -96,9 +112,10 @@ impl Refiner {
         updated.metadata.bump_version();
 
         let new_version = updated.metadata.version;
-        store.skills.register(updated).map_err(|e| {
-            LlmError::Custom(format!("Failed to save refined skill: {}", e))
-        })?;
+        store
+            .skills
+            .register(updated)
+            .map_err(|e| LlmError::Custom(format!("Failed to save refined skill: {}", e)))?;
 
         Ok(RefineResult::Refined {
             name: skill_name.to_string(),
@@ -112,11 +129,26 @@ impl Refiner {
         let mut prompt = String::new();
         prompt.push_str("Improve the following skill definition based on its usage history.\n\n");
 
-        prompt.push_str(&format!("**Current Version:** v{}\n", skill.metadata.version));
-        prompt.push_str(&format!("**Success Count:** {}\n", skill.metadata.success_count));
-        prompt.push_str(&format!("**Failure Count:** {}\n", skill.metadata.failure_count));
-        prompt.push_str(&format!("**Current Quality Score:** {:.2}\n", skill.metadata.quality_score));
-        prompt.push_str(&format!("**Average Completion Turns:** {:.1}\n\n", skill.metadata.avg_completion_turns));
+        prompt.push_str(&format!(
+            "**Current Version:** v{}\n",
+            skill.metadata.version
+        ));
+        prompt.push_str(&format!(
+            "**Success Count:** {}\n",
+            skill.metadata.success_count
+        ));
+        prompt.push_str(&format!(
+            "**Failure Count:** {}\n",
+            skill.metadata.failure_count
+        ));
+        prompt.push_str(&format!(
+            "**Current Quality Score:** {:.2}\n",
+            skill.metadata.quality_score
+        ));
+        prompt.push_str(&format!(
+            "**Average Completion Turns:** {:.1}\n\n",
+            skill.metadata.avg_completion_turns
+        ));
 
         prompt.push_str("**Current SKILL.md:**\n");
         prompt.push_str("```markdown\n");
@@ -124,7 +156,9 @@ impl Refiner {
         prompt.push_str("\n```\n\n");
 
         prompt.push_str("**Instructions:**\n");
-        prompt.push_str("1. Keep the same general structure (# name — description, Tags, ## sections).\n");
+        prompt.push_str(
+            "1. Keep the same general structure (# name — description, Tags, ## sections).\n",
+        );
         prompt.push_str("2. Add missing steps, clarify ambiguous instructions.\n");
         prompt.push_str("3. Remove unnecessary or outdated steps.\n");
         prompt.push_str("4. If the procedure is already optimal, return it unchanged.\n");

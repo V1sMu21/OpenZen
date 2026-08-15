@@ -21,7 +21,9 @@ pub struct ServerConfig {
     pub env: std::collections::HashMap<String, String>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// Top-level servers.toml structure.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -51,17 +53,24 @@ impl McpDiscovery {
             return Ok(0);
         }
 
-        let content = std::fs::read_to_string(&self.config_path)
-            .map_err(|e| McpError::Config(format!("Failed to read {}: {}", self.config_path.display(), e)))?;
+        let content = std::fs::read_to_string(&self.config_path).map_err(|e| {
+            McpError::Config(format!(
+                "Failed to read {}: {}",
+                self.config_path.display(),
+                e
+            ))
+        })?;
 
-        let config: ServersToml = toml::from_str(&content)
-            .map_err(|e| McpError::Config(format!("Failed to parse {}: {}", self.config_path.display(), e)))?;
+        let config: ServersToml = toml::from_str(&content).map_err(|e| {
+            McpError::Config(format!(
+                "Failed to parse {}: {}",
+                self.config_path.display(),
+                e
+            ))
+        })?;
 
         let count = config.servers.len();
-        self.servers = config.servers
-            .into_iter()
-            .filter(|s| s.enabled)
-            .collect();
+        self.servers = config.servers.into_iter().filter(|s| s.enabled).collect();
 
         Ok(count)
     }
@@ -140,12 +149,16 @@ enabled = false
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("servers.toml");
 
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
 [[servers]]
 name = "playwright"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-playwright"]
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let mut discovery = McpDiscovery::new(&path);
         let count = discovery.load().unwrap();
@@ -176,11 +189,15 @@ args = ["-y", "@modelcontextprotocol/server-playwright"]
     fn test_find_server() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("servers.toml");
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
 [[servers]]
 name = "my-server"
 command = "echo"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let mut discovery = McpDiscovery::new(&path);
         discovery.load().unwrap();

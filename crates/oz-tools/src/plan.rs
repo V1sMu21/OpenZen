@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use oz_core_types::{ToolContext, ToolError, ToolOutput, ToolDefinition, ToolFunction};
+use oz_core_types::{ToolContext, ToolDefinition, ToolError, ToolFunction, ToolOutput};
 
 use crate::registry::ToolHandler;
 
@@ -43,7 +43,9 @@ pub struct SubmitPlanTool;
 
 #[async_trait]
 impl ToolHandler for SubmitPlanTool {
-    fn name(&self) -> String { "submit_plan".to_string() }
+    fn name(&self) -> String {
+        "submit_plan".to_string()
+    }
     fn description(&self) -> String {
         "Submit the execution plan for a complex task BEFORE writing files. \
          goal + steps[]; the steps become pending todos that gate the final respond. \
@@ -73,7 +75,11 @@ impl ToolHandler for SubmitPlanTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let goal = args["goal"].as_str().unwrap_or("").to_string();
         let steps: Vec<String> = args["steps"]
             .as_array()
@@ -97,7 +103,10 @@ impl ToolHandler for SubmitPlanTool {
                 "goal": goal,
                 "step_count": steps.len(),
             }),
-            format!("\n[submit_plan] plan recorded: {} step(s) → todos (pending)", steps.len()),
+            format!(
+                "\n[submit_plan] plan recorded: {} step(s) → todos (pending)",
+                steps.len()
+            ),
         ))
     }
 }

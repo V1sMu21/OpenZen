@@ -11,7 +11,7 @@ const BLOCKED_COMMANDS: &[&str] = &[
     "rm -r",
     "mkfs",
     "dd if=",
-    ":(){ :|:& };:",   // fork bomb
+    ":(){ :|:& };:", // fork bomb
     "> /dev/sda",
     "> /dev/nvme",
     "> /dev/hd",
@@ -49,16 +49,23 @@ fn is_command_blocked(code: &str) -> Option<&'static str> {
             return Some(blocked);
         }
     }
-    BLOCKED_PYTHON.iter().find(|&blocked| code.contains(blocked)).map(|v| v as _)
+    BLOCKED_PYTHON
+        .iter()
+        .find(|&blocked| code.contains(blocked))
+        .map(|v| v as _)
 }
 
 pub struct CodeRunTool;
 
 #[async_trait]
 impl ToolHandler for CodeRunTool {
-    fn name(&self) -> String { "code_run".to_string() }
+    fn name(&self) -> String {
+        "code_run".to_string()
+    }
 
-    fn description(&self) -> String { "Execute shell commands or python code (type: bash|python). Contract: on failure do NOT blind-retry — change approach or ask_user. Independent read-only commands may run concurrently; writes last. Long-running tasks: launch with nohup in the background and poll.".to_string() }
+    fn description(&self) -> String {
+        "Execute shell commands or python code (type: bash|python). Contract: on failure do NOT blind-retry — change approach or ask_user. Independent read-only commands may run concurrently; writes last. Long-running tasks: launch with nohup in the background and poll.".to_string()
+    }
 
     fn description_zh(&self) -> String {
         "执行 shell 命令或 python 代码（type: bash|python）。契约：失败勿盲目重试——换路径或 ask_user；无依赖的只读命令可并发执行，写操作放最后；长任务用 nohup 后台启动并轮询结果。".to_string()
@@ -101,14 +108,17 @@ impl ToolHandler for CodeRunTool {
         }
 
         if let Some(blocked) = is_command_blocked(code) {
-            return Ok(ToolOutput::bad_json(
-                format!("code_run: blocked dangerous pattern `{blocked}`. Operation denied for security.")
-            ));
+            return Ok(ToolOutput::bad_json(format!(
+                "code_run: blocked dangerous pattern `{blocked}`. Operation denied for security."
+            )));
         }
 
         let code_type = args.get("type").and_then(|v| v.as_str()).unwrap_or("bash");
         let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(60);
-        let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("inline");
+        let mode = args
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("inline");
         let start = Instant::now();
 
         let result = match code_type {
@@ -123,7 +133,15 @@ impl ToolHandler for CodeRunTool {
             // RPC mode: write full output to temp file, return only a file reference
             let output_dir = std::env::temp_dir().join("oz_rpc");
             std::fs::create_dir_all(&output_dir).ok();
-            let filename = format!("code_run_{}_{}.json", chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f"), uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x"));
+            let filename = format!(
+                "code_run_{}_{}.json",
+                chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f"),
+                uuid::Uuid::new_v4()
+                    .to_string()
+                    .split('-')
+                    .next()
+                    .unwrap_or("x")
+            );
             let output_path = output_dir.join(&filename);
 
             if let Ok(json) = serde_json::to_string_pretty(&result) {
@@ -142,7 +160,10 @@ impl ToolHandler for CodeRunTool {
                     .unwrap_or_default(),
             });
 
-            let prompt = format!("\n[code_run:RPC] exit={exit_code} ({elapsed:.1}s) output written to {}", output_path.display());
+            let prompt = format!(
+                "\n[code_run:RPC] exit={exit_code} ({elapsed:.1}s) output written to {}",
+                output_path.display()
+            );
             Ok(ToolOutput::success_with_prompt(summary, prompt))
         } else {
             // Inline mode: return full output in context (original behavior)
@@ -201,9 +222,11 @@ impl CodeRunTool {
         let full_code = format!("{header}{code}");
         tokio::fs::write(&script_path, &full_code)
             .await
-            .map_err(|e| ToolError::Custom(format!(
-                "failed to write temp script: {e}. Check disk space and /tmp permissions."
-            )))?;
+            .map_err(|e| {
+                ToolError::Custom(format!(
+                    "failed to write temp script: {e}. Check disk space and /tmp permissions."
+                ))
+            })?;
 
         let python = if cfg!(target_os = "windows") {
             "python"
@@ -246,7 +269,8 @@ pub fn handler() -> super::ToolHandler {
         let ctx = ctx.clone();
         let tool = tool.clone();
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        let result = rt.block_on(tool.execute(args, &ctx))
+        let result = rt
+            .block_on(tool.execute(args, &ctx))
             .unwrap_or_else(|e| ToolOutput::bad_json(e.to_string()));
         StepOutcome {
             data: result.data,
@@ -296,7 +320,10 @@ mod tests {
     #[tokio::test]
     async fn test_empty_args_bad_json() {
         let tool = CodeRunTool;
-        let result = tool.execute(serde_json::json!({}), &make_ctx()).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({}), &make_ctx())
+            .await
+            .unwrap();
         assert!(result.next_prompt.unwrap().contains("missing"));
     }
 
@@ -325,7 +352,10 @@ mod tests {
     async fn test_python_execution() {
         let tool = CodeRunTool;
         let result = tool
-            .execute(serde_json::json!({"code": "print('hello from python')", "type": "python"}), &make_ctx())
+            .execute(
+                serde_json::json!({"code": "print('hello from python')", "type": "python"}),
+                &make_ctx(),
+            )
             .await;
         // python3 might not be available in all environments; just check it doesn't panic
         if let Ok(r) = result {
@@ -333,12 +363,12 @@ mod tests {
             if !stdout.contains("hello") {
                 // Python not available — that's OK
                 assert!(r.data["exit_code"] != 0 || stdout.contains("hello"));
+            }
         }
     }
-}
 
-#[linkme::distributed_slice(crate::registry::TOOL_FACTORIES)]
-fn register_code_run(reg: &mut crate::registry::ToolRegistry) {
-    reg.register(crate::code_run::CodeRunTool);
-}
+    #[linkme::distributed_slice(crate::registry::TOOL_FACTORIES)]
+    fn register_code_run(reg: &mut crate::registry::ToolRegistry) {
+        reg.register(crate::code_run::CodeRunTool);
+    }
 }

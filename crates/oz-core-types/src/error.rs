@@ -45,9 +45,7 @@ pub enum LlmError {
 impl LlmError {
     pub fn is_retryable(&self) -> bool {
         match self {
-            LlmError::HttpError { status, .. } => {
-                *status > 400 && *status != 401 && *status != 403
-            }
+            LlmError::HttpError { status, .. } => *status > 400 && *status != 401 && *status != 403,
             LlmError::RequestFailed(_) => true,
             LlmError::StreamError(_) => true,
             _ => false,
@@ -89,11 +87,15 @@ pub enum ConfigError {
 }
 
 impl From<String> for AgentError {
-    fn from(s: String) -> Self { AgentError::Custom(s) }
+    fn from(s: String) -> Self {
+        AgentError::Custom(s)
+    }
 }
 
 impl From<&str> for AgentError {
-    fn from(s: &str) -> Self { AgentError::Custom(s.into()) }
+    fn from(s: &str) -> Self {
+        AgentError::Custom(s.into())
+    }
 }
 
 #[cfg(test)]
@@ -104,61 +106,91 @@ mod tests {
 
     #[test]
     fn is_retryable_399_not_retryable() {
-        let err = LlmError::HttpError { status: 399, body: "ok".into() };
+        let err = LlmError::HttpError {
+            status: 399,
+            body: "ok".into(),
+        };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn is_retryable_400_not_retryable() {
-        let err = LlmError::HttpError { status: 400, body: "bad request".into() };
+        let err = LlmError::HttpError {
+            status: 400,
+            body: "bad request".into(),
+        };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn is_retryable_401_not_retryable() {
-        let err = LlmError::HttpError { status: 401, body: "unauthorized".into() };
+        let err = LlmError::HttpError {
+            status: 401,
+            body: "unauthorized".into(),
+        };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn is_retryable_403_not_retryable() {
-        let err = LlmError::HttpError { status: 403, body: "forbidden".into() };
+        let err = LlmError::HttpError {
+            status: 403,
+            body: "forbidden".into(),
+        };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn is_retryable_404_is_retryable() {
-        let err = LlmError::HttpError { status: 404, body: "not found".into() };
+        let err = LlmError::HttpError {
+            status: 404,
+            body: "not found".into(),
+        };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn is_retryable_429_is_retryable() {
-        let err = LlmError::HttpError { status: 429, body: "too many requests".into() };
+        let err = LlmError::HttpError {
+            status: 429,
+            body: "too many requests".into(),
+        };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn is_retryable_500_is_retryable() {
-        let err = LlmError::HttpError { status: 500, body: "internal error".into() };
+        let err = LlmError::HttpError {
+            status: 500,
+            body: "internal error".into(),
+        };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn is_retryable_502_is_retryable() {
-        let err = LlmError::HttpError { status: 502, body: "bad gateway".into() };
+        let err = LlmError::HttpError {
+            status: 502,
+            body: "bad gateway".into(),
+        };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn is_retryable_503_is_retryable() {
-        let err = LlmError::HttpError { status: 503, body: "unavailable".into() };
+        let err = LlmError::HttpError {
+            status: 503,
+            body: "unavailable".into(),
+        };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn is_retryable_0_not_retryable() {
-        let err = LlmError::HttpError { status: 0, body: "edge".into() };
+        let err = LlmError::HttpError {
+            status: 0,
+            body: "edge".into(),
+        };
         assert!(!err.is_retryable());
     }
 
@@ -287,7 +319,10 @@ mod tests {
 
     #[test]
     fn llm_error_http_error_display() {
-        let err = LlmError::HttpError { status: 500, body: "server error".into() };
+        let err = LlmError::HttpError {
+            status: 500,
+            body: "server error".into(),
+        };
         let msg = err.to_string();
         assert!(msg.contains("HTTP error"));
         assert!(msg.contains("500"));

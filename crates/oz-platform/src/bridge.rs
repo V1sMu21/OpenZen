@@ -41,7 +41,7 @@ pub struct AgentBridge {
 }
 
 impl AgentBridge {
-#[allow(clippy::field_reassign_with_default)]
+    #[allow(clippy::field_reassign_with_default)]
     pub async fn send_message(
         &self,
         session_id: &str,
@@ -204,7 +204,10 @@ impl AgentBridge {
             )
             .await;
 
-            eprintln!("[platform] agent loop finished: exit_reason={}, turn={}", outcome.exit_reason, outcome.turn);
+            eprintln!(
+                "[platform] agent loop finished: exit_reason={}, turn={}",
+                outcome.exit_reason, outcome.turn
+            );
 
             // Send FinishMessage so platform adapters (Feishu, Telegram, etc.)
             // can finalize their streaming cards. The TUI does this in its own

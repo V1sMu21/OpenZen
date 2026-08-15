@@ -8,9 +8,12 @@ pub struct SkillMcpSearchTool;
 
 #[async_trait]
 impl ToolHandler for SkillMcpSearchTool {
-    fn name(&self) -> String { "skill_mcp_search".to_string() }
+    fn name(&self) -> String {
+        "skill_mcp_search".to_string()
+    }
     fn description(&self) -> String {
-        "Search the skill/MCP registry for relevant skills, SOPs, and facts matching a query.".to_string()
+        "Search the skill/MCP registry for relevant skills, SOPs, and facts matching a query."
+            .to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
@@ -30,10 +33,16 @@ impl ToolHandler for SkillMcpSearchTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let query = args["query"].as_str().unwrap_or("").trim().to_string();
         let max = args["max_results"].as_u64().unwrap_or(5) as usize;
-        let skill_mcp_dir = ctx.skill_mcp_dir.as_deref()
+        let skill_mcp_dir = ctx
+            .skill_mcp_dir
+            .as_deref()
             .unwrap_or_else(|| &ctx.working_dir);
 
         let store = SkillMcpStore::new(
@@ -47,23 +56,45 @@ impl ToolHandler for SkillMcpSearchTool {
         // that case we fall back to listing all active skills so the
         // user actually gets an answer instead of an empty result.
         let vague_list_triggers = [
-            "installed", "available", "list", "all", "show", "what", "which",
-            "have", "loaded", "registered", "available", "exists", "exist",
-            "skill", "skills", "mcp", "tools",
+            "installed",
+            "available",
+            "list",
+            "all",
+            "show",
+            "what",
+            "which",
+            "have",
+            "loaded",
+            "registered",
+            "available",
+            "exists",
+            "exist",
+            "skill",
+            "skills",
+            "mcp",
+            "tools",
         ];
         let lower = query.to_lowercase();
         let is_vague = query.is_empty()
-            || query.split_whitespace().any(|t| vague_list_triggers.contains(&t))
+            || query
+                .split_whitespace()
+                .any(|t| vague_list_triggers.contains(&t))
             || lower.contains("what skill")
             || lower.contains("which skill")
             || lower.contains("show me")
             || lower.contains("list all");
 
         if is_vague {
-            let all_skills: Vec<&Skill> = store.skills.list().iter()
+            let all_skills: Vec<&Skill> = store
+                .skills
+                .list()
+                .iter()
                 .filter(|s| s.metadata.is_active())
                 .collect();
-            let all_sops = store.sops.all().iter()
+            let all_sops = store
+                .sops
+                .all()
+                .iter()
                 .filter(|s| s.metadata.is_active())
                 .collect::<Vec<_>>();
 
@@ -128,7 +159,10 @@ impl ToolHandler for SkillMcpSearchTool {
         let mut results = Vec::new();
 
         // P2-7: FTS5 memory backend — search distilled facts/insights too.
-        let fts_memory = oz_memory::MemoryFts::open(&std::path::PathBuf::from(skill_mcp_dir).join("memory_fts.sqlite")).ok();
+        let fts_memory = oz_memory::MemoryFts::open(
+            &std::path::PathBuf::from(skill_mcp_dir).join("memory_fts.sqlite"),
+        )
+        .ok();
         let fts_hits = fts_memory
             .as_ref()
             .and_then(|f| f.search(&query, max).ok())
@@ -167,12 +201,19 @@ impl ToolHandler for SkillMcpSearchTool {
         let prompt = if results.is_empty() {
             "\n[skill_mcp_search] No matching skill or SOP found.".to_string()
         } else {
-            let mut p = format!("\n[skill_mcp_search] Found {} results. Full content loaded below:\n\n", results.len());
+            let mut p = format!(
+                "\n[skill_mcp_search] Found {} results. Full content loaded below:\n\n",
+                results.len()
+            );
             for (i, r) in results.iter().enumerate() {
                 let kind = r["type"].as_str().unwrap_or("?");
                 let name = r["name"].as_str().unwrap_or("?");
                 let desc = r["description"].as_str().unwrap_or("");
-                p.push_str(&format!("--- Result {}/{} [{kind}] **{name}** — {desc} ---\n\n", i+1, results.len()));
+                p.push_str(&format!(
+                    "--- Result {}/{} [{kind}] **{name}** — {desc} ---\n\n",
+                    i + 1,
+                    results.len()
+                ));
             }
             // Append full skill content for matched skills
             for skill in skills.iter().take(max) {
@@ -180,7 +221,8 @@ impl ToolHandler for SkillMcpSearchTool {
                 // Guard: cap at ~3000 chars to prevent runaway tokens from huge skills
                 let max_chars = 3000;
                 let body: String = if snippet.len() > max_chars {
-                    let trunc_at = snippet.char_indices()
+                    let trunc_at = snippet
+                        .char_indices()
                         .nth(max_chars)
                         .map(|(i, _)| i)
                         .unwrap_or(snippet.len());
@@ -212,7 +254,9 @@ pub struct SkillMcpListTool;
 
 #[async_trait]
 impl ToolHandler for SkillMcpListTool {
-    fn name(&self) -> String { "skill_mcp_list".to_string() }
+    fn name(&self) -> String {
+        "skill_mcp_list".to_string()
+    }
     fn description(&self) -> String {
         "List all available skills and SOPs in the skill/MCP registry.".to_string()
     }
@@ -231,9 +275,15 @@ impl ToolHandler for SkillMcpListTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let category = args["category"].as_str().unwrap_or("all");
-        let skill_mcp_dir = ctx.skill_mcp_dir.as_deref()
+        let skill_mcp_dir = ctx
+            .skill_mcp_dir
+            .as_deref()
             .unwrap_or_else(|| &ctx.working_dir);
 
         let store = SkillMcpStore::new(
@@ -335,7 +385,9 @@ mod tests {
     fn setup_test_skill(ctx: &ToolContext) {
         let store = SkillMcpStore::new(
             &std::path::PathBuf::from(&ctx.working_dir),
-            Some(std::path::PathBuf::from(ctx.skill_mcp_dir.as_deref().unwrap_or(""))),
+            Some(std::path::PathBuf::from(
+                ctx.skill_mcp_dir.as_deref().unwrap_or(""),
+            )),
         );
         // Create a test skill via file
         let skills_dir = store.base_dir().join("skills").join("test_search_skill");
@@ -353,7 +405,10 @@ mod tests {
         // Empty query should now return "ok" + fallback list, not the
         // old "empty_query" status (which left the user with an
         // unhelpful empty result when asking "what's installed?").
-        let result = SkillMcpSearchTool.execute(serde_json::json!({"query": ""}), &c).await.unwrap();
+        let result = SkillMcpSearchTool
+            .execute(serde_json::json!({"query": ""}), &c)
+            .await
+            .unwrap();
         assert_eq!(result.data["status"], "ok");
         assert_eq!(result.data["fallback"], "list_all");
         assert!(result.data["total"].as_u64().unwrap() >= 1);
@@ -367,10 +422,10 @@ mod tests {
         // name contains "installed", so the old code returned zero
         // results and the user saw "no skills found" even though we
         // have one.
-        let result = SkillMcpSearchTool.execute(
-            serde_json::json!({"query": "installed"}),
-            &c,
-        ).await.unwrap();
+        let result = SkillMcpSearchTool
+            .execute(serde_json::json!({"query": "installed"}), &c)
+            .await
+            .unwrap();
         assert_eq!(result.data["status"], "ok");
         assert!(result.data["total"].as_u64().unwrap() >= 1);
     }
@@ -379,10 +434,10 @@ mod tests {
     async fn test_skill_mcp_search_with_skill() {
         let c = ctx();
         setup_test_skill(&c);
-        let result = SkillMcpSearchTool.execute(
-            serde_json::json!({"query": "search"}),
-            &c,
-        ).await.unwrap();
+        let result = SkillMcpSearchTool
+            .execute(serde_json::json!({"query": "search"}), &c)
+            .await
+            .unwrap();
         assert_eq!(result.data["status"], "ok");
     }
 
@@ -390,17 +445,25 @@ mod tests {
     async fn test_skill_mcp_search_fts_memory_backend() {
         let c = ctx();
         setup_test_skill(&c);
-        let fts_path = std::path::PathBuf::from(c.skill_mcp_dir.as_deref().unwrap()).join("memory_fts.sqlite");
+        let fts_path =
+            std::path::PathBuf::from(c.skill_mcp_dir.as_deref().unwrap()).join("memory_fts.sqlite");
         let fts = oz_memory::MemoryFts::open(&fts_path).unwrap();
-        fts.insert("", "fact", "deployment uses port 8001 for the kanban backend").unwrap();
+        fts.insert(
+            "",
+            "fact",
+            "deployment uses port 8001 for the kanban backend",
+        )
+        .unwrap();
         drop(fts);
-        let result = SkillMcpSearchTool.execute(
-            serde_json::json!({"query": "deployment"}),
-            &c,
-        ).await.unwrap();
+        let result = SkillMcpSearchTool
+            .execute(serde_json::json!({"query": "deployment"}), &c)
+            .await
+            .unwrap();
         let results = result.data["results"].as_array().unwrap();
         assert!(
-            results.iter().any(|r| r["type"] == "memory" && r["category"] == "fact"),
+            results
+                .iter()
+                .any(|r| r["type"] == "memory" && r["category"] == "fact"),
             "FTS memory backend must surface indexed facts, got: {results:?}"
         );
     }
@@ -408,7 +471,10 @@ mod tests {
     #[tokio::test]
     async fn test_skill_mcp_list_empty() {
         let c = ctx();
-        let result = SkillMcpListTool.execute(serde_json::json!({}), &c).await.unwrap();
+        let result = SkillMcpListTool
+            .execute(serde_json::json!({}), &c)
+            .await
+            .unwrap();
         assert_eq!(result.data["total"], 0);
     }
 
@@ -416,10 +482,10 @@ mod tests {
     async fn test_skill_mcp_list_with_skill() {
         let c = ctx();
         setup_test_skill(&c);
-        let result = SkillMcpListTool.execute(
-            serde_json::json!({"category": "skills"}),
-            &c,
-        ).await.unwrap();
+        let result = SkillMcpListTool
+            .execute(serde_json::json!({"category": "skills"}), &c)
+            .await
+            .unwrap();
         assert!(result.data["total"].as_u64().unwrap() > 0);
     }
 }

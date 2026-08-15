@@ -1,10 +1,12 @@
 use std::sync::Mutex;
 
-use oz_core_types::{ContentBlock, LlmError, Message, StreamEvent, TokenUsage, ToolDefinition};
 use oz_config::SessionConfig;
+use oz_core_types::{ContentBlock, LlmError, Message, StreamEvent, TokenUsage, ToolDefinition};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::message_format::{fix_messages, drop_unsigned_thinking, ensure_thinking_blocks, openai_tools_to_claude};
+use crate::message_format::{
+    drop_unsigned_thinking, ensure_thinking_blocks, fix_messages, openai_tools_to_claude,
+};
 use crate::retry::retry_with_backoff;
 use crate::session::Session;
 use crate::stream::parse_claude_sse;
@@ -34,25 +36,43 @@ impl NativeClaudeSession {
 
 #[async_trait::async_trait]
 impl Session for NativeClaudeSession {
-    fn config(&self) -> &SessionConfig { &self.config }
-    fn history(&self) -> &Mutex<Vec<Message>> { &self.history }
-    fn history_mut(&self) -> &Mutex<Vec<Message>> { &self.history }
-    fn set_system(&mut self, system: String) { self.system = Some(system); }
-    fn set_tools(&mut self, tools: Vec<ToolDefinition>) { self.tools = Some(tools); }
+    fn config(&self) -> &SessionConfig {
+        &self.config
+    }
+    fn history(&self) -> &Mutex<Vec<Message>> {
+        &self.history
+    }
+    fn history_mut(&self) -> &Mutex<Vec<Message>> {
+        &self.history
+    }
+    fn set_system(&mut self, system: String) {
+        self.system = Some(system);
+    }
+    fn set_tools(&mut self, tools: Vec<ToolDefinition>) {
+        self.tools = Some(tools);
+    }
 
-    async fn raw_ask(&self, messages: &[Message]) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
+    async fn raw_ask(
+        &self,
+        messages: &[Message],
+    ) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
         let mut messages = fix_messages(messages);
         messages = drop_unsigned_thinking(&messages);
         messages = ensure_thinking_blocks(&messages, &self.config.model);
 
         let max_tokens = self.config.max_tokens.unwrap_or(8192);
-        let url = format!("{}/v1/messages?beta=true", self.config.apibase.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/messages?beta=true",
+            self.config.apibase.trim_end_matches('/')
+        );
         let model = self.config.model.clone();
 
-        let beta_parts = ["claude-code-20250219",
+        let beta_parts = [
+            "claude-code-20250219",
             "interleaved-thinking-2025-05-14",
             "redact-thinking-2026-02-12",
-            "prompt-caching-scope-2026-01-05"];
+            "prompt-caching-scope-2026-01-05",
+        ];
 
         let cfg_clone = self.config.clone();
         let tools = self.tools.clone();
@@ -152,13 +172,18 @@ impl Session for NativeClaudeSession {
         messages = ensure_thinking_blocks(&messages, &self.config.model);
 
         let max_tokens = self.config.max_tokens.unwrap_or(8192);
-        let url = format!("{}/v1/messages?beta=true", self.config.apibase.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/messages?beta=true",
+            self.config.apibase.trim_end_matches('/')
+        );
         let model = self.config.model.clone();
 
-        let beta_parts = ["claude-code-20250219",
+        let beta_parts = [
+            "claude-code-20250219",
             "interleaved-thinking-2025-05-14",
             "redact-thinking-2026-02-12",
-            "prompt-caching-scope-2026-01-05"];
+            "prompt-caching-scope-2026-01-05",
+        ];
 
         let cfg_clone = self.config.clone();
         let tools = self.tools.clone();
@@ -253,25 +278,37 @@ impl Session for NativeClaudeSession {
 
     async fn ask(&self, prompt: &str) -> Result<Vec<ContentBlock>, LlmError> {
         let raw_messages = {
-            let mut history = self.history.lock().map_err(|e| LlmError::Custom(e.to_string()))?;
+            let mut history = self
+                .history
+                .lock()
+                .map_err(|e| LlmError::Custom(e.to_string()))?;
             history.push(Message::user(prompt));
             if history.len() > 5 {
                 crate::retry::trim_history(&mut history, self.config.context_win);
             }
-            history.iter().map(|m| Message {
-                role: m.role,
-                content: m.content.clone(),
-                tool_results: None,
-            }).collect::<Vec<_>>()
+            history
+                .iter()
+                .map(|m| Message {
+                    role: m.role,
+                    content: m.content.clone(),
+                    tool_results: None,
+                })
+                .collect::<Vec<_>>()
         };
         let (blocks, _usage) = self.raw_ask(&raw_messages).await?;
         if !blocks.is_empty() {
-            let has_error = blocks.first().map(|b| match b {
-                ContentBlock::Text { text, .. } => text.starts_with("!!!Error:"),
-                _ => false,
-            }).unwrap_or(false);
+            let has_error = blocks
+                .first()
+                .map(|b| match b {
+                    ContentBlock::Text { text, .. } => text.starts_with("!!!Error:"),
+                    _ => false,
+                })
+                .unwrap_or(false);
             if !has_error {
-                let mut history = self.history.lock().map_err(|e| LlmError::Custom(e.to_string()))?;
+                let mut history = self
+                    .history
+                    .lock()
+                    .map_err(|e| LlmError::Custom(e.to_string()))?;
                 history.push(Message::assistant_with_blocks(blocks.clone()));
             }
         }
@@ -279,10 +316,13 @@ impl Session for NativeClaudeSession {
     }
 
     fn format_messages(&self, messages: &[Message]) -> Vec<serde_json::Value> {
-        let mut result: Vec<serde_json::Value> = messages.iter().map(|m| {
-            serde_json::json!({"role": m.role.as_str(), "content": m.content})
-        }).collect();
-        let user_idxs: Vec<usize> = result.iter().enumerate()
+        let mut result: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::json!({"role": m.role.as_str(), "content": m.content}))
+            .collect();
+        let user_idxs: Vec<usize> = result
+            .iter()
+            .enumerate()
             .filter(|(_, m)| m["role"] == "user")
             .map(|(i, _)| i)
             .collect();

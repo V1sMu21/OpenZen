@@ -51,7 +51,10 @@ impl Sop {
                 }
             })
             .unwrap_or_else(|| {
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
                 (stem.to_string(), String::new())
             });
 
@@ -71,7 +74,8 @@ impl Sop {
 
         let content_body: String = lines
             .iter()
-            .filter(|l| !l.to_lowercase().starts_with("tags:")).copied()
+            .filter(|l| !l.to_lowercase().starts_with("tags:"))
+            .copied()
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -184,12 +188,17 @@ impl SopStore {
         let safe_name: String = sop
             .name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let path = self.storage_dir.join(format!("{}.md", safe_name));
         let md = sop.to_markdown();
-        std::fs::write(&path, &md)
-            .map_err(|e| format!("Failed to write SOP: {e}"))?;
+        std::fs::write(&path, &md).map_err(|e| format!("Failed to write SOP: {e}"))?;
         Ok(())
     }
 
@@ -239,7 +248,8 @@ impl SopStore {
             return String::new();
         }
 
-        let mut snippet = String::from("\n\n## 🔴 EXECUTION ORDER — perform these steps with tools NOW\n\n");
+        let mut snippet =
+            String::from("\n\n## 🔴 EXECUTION ORDER — perform these steps with tools NOW\n\n");
         snippet.push_str("The following SOP matches your task. You MUST execute every step using your tools — do NOT describe the procedure, perform each action.\n\n");
 
         for sop in matched.iter().take(max_sops) {
@@ -497,7 +507,10 @@ Use web_search when you need to find current information.
 
         let mut store = SopStore::new(dir.clone());
         let sequence = vec![
-            ("read".to_string(), serde_json::json!({"path": "/etc/hosts"})),
+            (
+                "read".to_string(),
+                serde_json::json!({"path": "/etc/hosts"}),
+            ),
             (
                 "grep".to_string(),
                 serde_json::json!({"pattern": "localhost"}),

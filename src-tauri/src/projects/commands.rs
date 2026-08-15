@@ -30,14 +30,12 @@ pub fn add_project(
         return Err("Project already exists at this path".to_string());
     }
 
-    let project_name = name
-        .filter(|n| !n.trim().is_empty())
-        .unwrap_or_else(|| {
-            Path::new(&canonical)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "Untitled".to_string())
-        });
+    let project_name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
+        Path::new(&canonical)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Untitled".to_string())
+    });
 
     let record = ProjectRecord {
         id: uuid::Uuid::new_v4().to_string(),
@@ -52,16 +50,20 @@ pub fn add_project(
 
     store::save_projects(&projects_snapshot)?;
 
-    let _ = app_handle.emit("project:added", serde_json::to_value(&record).unwrap_or_default());
+    let _ = app_handle.emit(
+        "project:added",
+        serde_json::to_value(&record).unwrap_or_default(),
+    );
 
-    debug_log(&format!("add_project: id={} name={} path={}", record.id, record.name, root_path));
+    debug_log(&format!(
+        "add_project: id={} name={} path={}",
+        record.id, record.name, root_path
+    ));
     Ok(record)
 }
 
 #[tauri::command]
-pub fn list_projects(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<serde_json::Value>, String> {
+pub fn list_projects(state: State<'_, Arc<AppState>>) -> Result<Vec<serde_json::Value>, String> {
     let projects = lock_poison_guard(&state.projects).clone();
     let sessions = lock_poison_guard(&state.sessions);
 
@@ -142,7 +144,10 @@ pub fn rename_project(
         serde_json::json!({ "project_id": project_id, "new_name": new_name }),
     );
 
-    debug_log(&format!("rename_project: id={} new_name={}", project_id, new_name));
+    debug_log(&format!(
+        "rename_project: id={} new_name={}",
+        project_id, new_name
+    ));
     Ok(())
 }
 
@@ -227,18 +232,42 @@ pub mod tests {
             root_path: "/a".into(),
             created_at: "".into(),
         }];
-        assert_eq!(resolve_name_collision_for_test(&records, "test"), "test (2)");
+        assert_eq!(
+            resolve_name_collision_for_test(&records, "test"),
+            "test (2)"
+        );
     }
 
     #[test]
     fn test_resolve_name_collision_multiple_collisions() {
         let mut records = vec![
-            ProjectRecord { id: "1".into(), name: "test".into(), root_path: "/a".into(), created_at: "".into() },
-            ProjectRecord { id: "2".into(), name: "test (2)".into(), root_path: "/b".into(), created_at: "".into() },
+            ProjectRecord {
+                id: "1".into(),
+                name: "test".into(),
+                root_path: "/a".into(),
+                created_at: "".into(),
+            },
+            ProjectRecord {
+                id: "2".into(),
+                name: "test (2)".into(),
+                root_path: "/b".into(),
+                created_at: "".into(),
+            },
         ];
-        assert_eq!(resolve_name_collision_for_test(&records, "test"), "test (3)");
+        assert_eq!(
+            resolve_name_collision_for_test(&records, "test"),
+            "test (3)"
+        );
 
-        records.push(ProjectRecord { id: "3".into(), name: "test (3)".into(), root_path: "/c".into(), created_at: "".into() });
-        assert_eq!(resolve_name_collision_for_test(&records, "test"), "test (4)");
+        records.push(ProjectRecord {
+            id: "3".into(),
+            name: "test (3)".into(),
+            root_path: "/c".into(),
+            created_at: "".into(),
+        });
+        assert_eq!(
+            resolve_name_collision_for_test(&records, "test"),
+            "test (4)"
+        );
     }
 }

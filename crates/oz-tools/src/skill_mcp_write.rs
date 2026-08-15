@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 use oz_core_types::{ToolContext, ToolError, ToolOutput};
-use oz_skill_mcp::SkillMcpStore;
 use oz_skill_mcp::skill::Skill;
+use oz_skill_mcp::SkillMcpStore;
 
 use crate::registry::ToolHandler;
 
@@ -13,7 +13,9 @@ pub struct SkillMcpStoreTool;
 
 #[async_trait]
 impl ToolHandler for SkillMcpStoreTool {
-    fn name(&self) -> String { "skill_mcp_store".to_string() }
+    fn name(&self) -> String {
+        "skill_mcp_store".to_string()
+    }
     fn description(&self) -> String {
         "Store a new fact, skill, or SOP into the skill/MCP registry. Use this to remember important information.".to_string()
     }
@@ -48,14 +50,22 @@ impl ToolHandler for SkillMcpStoreTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let category = args["category"].as_str().unwrap_or("fact");
         let name = args["name"].as_str().unwrap_or("unnamed");
         let content = args["content"].as_str().unwrap_or("");
         let description = args["description"].as_str().unwrap_or("");
         let tags: Vec<String> = args["tags"]
             .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let skill_mcp_dir = ctx.skill_mcp_dir.as_deref().unwrap_or(&ctx.working_dir);
@@ -69,10 +79,13 @@ impl ToolHandler for SkillMcpStoreTool {
                 let skill_md = if content.starts_with('#') {
                     content.to_string()
                 } else {
-                    format!("# {} — {}\nTags: {}\n\n{}\n",
-                        name, description,
+                    format!(
+                        "# {} — {}\nTags: {}\n\n{}\n",
+                        name,
+                        description,
                         tags.join(", "),
-                        content)
+                        content
+                    )
                 };
 
                 let skill = Skill {
@@ -86,26 +99,37 @@ impl ToolHandler for SkillMcpStoreTool {
                     quality: 0.5,
                 };
 
-                store.skills.register(skill).map_err(|e| ToolError::Custom(e.to_string()))?;
+                store
+                    .skills
+                    .register(skill)
+                    .map_err(|e| ToolError::Custom(e.to_string()))?;
 
                 Ok(ToolOutput::success_with_prompt(
                     serde_json::json!({"status": "stored", "category": "skill", "name": name}),
-                    format!("\n[skill_mcp_store] Skill '{}' stored in skill/MCP registry.", name),
+                    format!(
+                        "\n[skill_mcp_store] Skill '{}' stored in skill/MCP registry.",
+                        name
+                    ),
                 ))
             }
             "sop" => {
                 let tools: Vec<(String, serde_json::Value)> = Vec::new();
-                let sop = store.crystallise_sop(name, description, &tools, None)
+                let sop = store
+                    .crystallise_sop(name, description, &tools, None)
                     .map_err(|e| ToolError::Custom(e.to_string()))?;
 
                 Ok(ToolOutput::success_with_prompt(
                     serde_json::json!({"status": "stored", "category": "sop", "name": sop.name}),
-                    format!("\n[skill_mcp_store] SOP '{}' stored in skill/MCP registry.", name),
+                    format!(
+                        "\n[skill_mcp_store] SOP '{}' stored in skill/MCP registry.",
+                        name
+                    ),
                 ))
             }
             _ => {
                 // Fact
-                store.distill_memory(name, &oz_core_types::SkillMcpType::Fact)
+                store
+                    .distill_memory(name, &oz_core_types::SkillMcpType::Fact)
                     .await
                     .map_err(|e| ToolError::Custom(e.to_string()))?;
 
@@ -122,9 +146,12 @@ pub struct SkillMcpRefineTool;
 
 #[async_trait]
 impl ToolHandler for SkillMcpRefineTool {
-    fn name(&self) -> String { "skill_mcp_refine".to_string() }
+    fn name(&self) -> String {
+        "skill_mcp_refine".to_string()
+    }
     fn description(&self) -> String {
-        "Refine an existing skill or SOP in the skill/MCP registry based on recent usage.".to_string()
+        "Refine an existing skill or SOP in the skill/MCP registry based on recent usage."
+            .to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
@@ -143,7 +170,11 @@ impl ToolHandler for SkillMcpRefineTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
         let name = args["name"].as_str().unwrap_or("");
         if name.is_empty() {
             return Ok(ToolOutput::success_with_prompt(
@@ -164,13 +195,17 @@ impl ToolHandler for SkillMcpRefineTool {
             let mut updated = skill.clone();
             updated.metadata.record_success(0);
             if !feedback.is_empty() {
-                updated.content.push_str(&format!("\n\n## Refinement Feedback\n{}\n", feedback));
+                updated
+                    .content
+                    .push_str(&format!("\n\n## Refinement Feedback\n{}\n", feedback));
             }
             let mut mutable_store = SkillMcpStore::new(
                 &std::path::PathBuf::from(&ctx.working_dir),
                 Some(std::path::PathBuf::from(skill_mcp_dir)),
             );
-            mutable_store.skills.register(updated)
+            mutable_store
+                .skills
+                .register(updated)
                 .map_err(|e| ToolError::Custom(e.to_string()))?;
 
             return Ok(ToolOutput::success_with_prompt(
@@ -186,7 +221,8 @@ impl ToolHandler for SkillMcpRefineTool {
                 &std::path::PathBuf::from(&ctx.working_dir),
                 Some(std::path::PathBuf::from(skill_mcp_dir)),
             );
-            mutable_store.record_sop_success(name, 0)
+            mutable_store
+                .record_sop_success(name, 0)
                 .map_err(|e| ToolError::Custom(e.to_string()))?;
 
             return Ok(ToolOutput::success_with_prompt(
@@ -197,7 +233,10 @@ impl ToolHandler for SkillMcpRefineTool {
 
         Ok(ToolOutput::success_with_prompt(
             serde_json::json!({"status": "not_found", "name": name}),
-            format!("\n[skill_mcp_refine] No skill or SOP named '{}' found.", name),
+            format!(
+                "\n[skill_mcp_refine] No skill or SOP named '{}' found.",
+                name
+            ),
         ))
     }
 }
@@ -234,26 +273,29 @@ mod tests {
     #[tokio::test]
     async fn test_skill_mcp_store_skill() {
         let c = ctx();
-        let result = SkillMcpStoreTool.execute(
-            serde_json::json!({
-                "category": "skill",
-                "name": "test_skill",
-                "content": "# test_skill — Test\nTags: test\n\n## Procedure\n1. Step\n",
-                "description": "A test skill",
-                "tags": ["test"]
-            }),
-            &c,
-        ).await.unwrap();
+        let result = SkillMcpStoreTool
+            .execute(
+                serde_json::json!({
+                    "category": "skill",
+                    "name": "test_skill",
+                    "content": "# test_skill — Test\nTags: test\n\n## Procedure\n1. Step\n",
+                    "description": "A test skill",
+                    "tags": ["test"]
+                }),
+                &c,
+            )
+            .await
+            .unwrap();
         assert_eq!(result.data["status"], "stored");
     }
 
     #[tokio::test]
     async fn test_skill_mcp_refine_not_found() {
         let c = ctx();
-        let result = SkillMcpRefineTool.execute(
-            serde_json::json!({"name": "nonexistent"}),
-            &c,
-        ).await.unwrap();
+        let result = SkillMcpRefineTool
+            .execute(serde_json::json!({"name": "nonexistent"}), &c)
+            .await
+            .unwrap();
         assert_eq!(result.data["status"], "not_found");
     }
 }

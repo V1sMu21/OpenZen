@@ -71,8 +71,7 @@ impl HarnessState {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
         }
-        let json =
-            serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
         let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
         std::fs::write(&tmp, &json).map_err(|e| format!("write: {e}"))?;
         if let Err(e) = std::fs::rename(&tmp, &path) {
@@ -191,16 +190,18 @@ impl HarnessState {
                     .iter_mut()
                     .find(|e| Some(e.id.as_str()) == rec.entry_id.as_deref())
                     .ok_or_else(|| "rollback: entry no longer exists".to_string())?;
-                let before: HarnessEntry = serde_json::from_str(rec.before.as_deref().unwrap_or_default())
-                    .map_err(|_| "rollback: corrupt before snapshot".to_string())?;
+                let before: HarnessEntry =
+                    serde_json::from_str(rec.before.as_deref().unwrap_or_default())
+                        .map_err(|_| "rollback: corrupt before snapshot".to_string())?;
                 *entry = before;
                 self.refinements.remove(pos);
                 Ok(())
             }
             (Some(_), None) => {
                 // Delete: restore the removed entry.
-                let before: HarnessEntry = serde_json::from_str(rec.before.as_deref().unwrap_or_default())
-                    .map_err(|_| "rollback: corrupt before snapshot".to_string())?;
+                let before: HarnessEntry =
+                    serde_json::from_str(rec.before.as_deref().unwrap_or_default())
+                        .map_err(|_| "rollback: corrupt before snapshot".to_string())?;
                 self.entries.push(before);
                 self.refinements.remove(pos);
                 Ok(())
@@ -291,7 +292,15 @@ mod tests {
     #[test]
     fn test_refine_create_and_persist() {
         let dir = tmp_dir("create");
-        let rec = refine(&dir, HarnessKind::Memory, "retry flaky tests twice", "seen 3 flakes this session", "observed pattern", "upsert").unwrap();
+        let rec = refine(
+            &dir,
+            HarnessKind::Memory,
+            "retry flaky tests twice",
+            "seen 3 flakes this session",
+            "observed pattern",
+            "upsert",
+        )
+        .unwrap();
         assert!(rec.before.is_none());
         assert!(rec.after.is_some());
         let state = HarnessState::load(&dir);
@@ -304,10 +313,29 @@ mod tests {
     #[test]
     fn test_refine_update_records_before() {
         let dir = tmp_dir("update");
-        refine(&dir, HarnessKind::SkillNote, "use flag -X", "worked once", "test", "upsert").unwrap();
-        let rec = refine(&dir, HarnessKind::SkillNote, "use flag -X", "worked 5 times", "updated", "upsert").unwrap();
+        refine(
+            &dir,
+            HarnessKind::SkillNote,
+            "use flag -X",
+            "worked once",
+            "test",
+            "upsert",
+        )
+        .unwrap();
+        let rec = refine(
+            &dir,
+            HarnessKind::SkillNote,
+            "use flag -X",
+            "worked 5 times",
+            "updated",
+            "upsert",
+        )
+        .unwrap();
         assert!(
-            rec.before.as_deref().unwrap_or_default().contains("use flag -X"),
+            rec.before
+                .as_deref()
+                .unwrap_or_default()
+                .contains("use flag -X"),
             "before snapshot must capture the prior entry"
         );
         let state = HarnessState::load(&dir);
@@ -319,19 +347,46 @@ mod tests {
     #[test]
     fn test_rollback_create_removes_entry() {
         let dir = tmp_dir("rb-create");
-        let rec = refine(&dir, HarnessKind::Memory, "temp note", "evidence here", "test", "upsert").unwrap();
+        let rec = refine(
+            &dir,
+            HarnessKind::Memory,
+            "temp note",
+            "evidence here",
+            "test",
+            "upsert",
+        )
+        .unwrap();
         assert_eq!(HarnessState::load(&dir).entries.len(), 1);
         rollback(&dir, &rec.id).unwrap();
         let state = HarnessState::load(&dir);
         assert!(state.entries.is_empty());
-        assert!(state.refinements.is_empty(), "rolled-back record must be removed");
+        assert!(
+            state.refinements.is_empty(),
+            "rolled-back record must be removed"
+        );
     }
 
     #[test]
     fn test_rollback_update_restores_before() {
         let dir = tmp_dir("rb-update");
-        refine(&dir, HarnessKind::SkillNote, "v1 content", "e1", "t", "upsert").unwrap();
-        let rec = refine(&dir, HarnessKind::SkillNote, "v1 content", "e2", "t", "upsert").unwrap();
+        refine(
+            &dir,
+            HarnessKind::SkillNote,
+            "v1 content",
+            "e1",
+            "t",
+            "upsert",
+        )
+        .unwrap();
+        let rec = refine(
+            &dir,
+            HarnessKind::SkillNote,
+            "v1 content",
+            "e2",
+            "t",
+            "upsert",
+        )
+        .unwrap();
         rollback(&dir, &rec.id).unwrap();
         let state = HarnessState::load(&dir);
         assert_eq!(state.entries.len(), 1);
@@ -341,8 +396,24 @@ mod tests {
     #[test]
     fn test_delete_and_rollback_restores() {
         let dir = tmp_dir("delete");
-        refine(&dir, HarnessKind::Memory, "obsolete note", "e1", "t", "upsert").unwrap();
-        let rec = refine(&dir, HarnessKind::Memory, "obsolete note", "e1", "cleanup", "delete").unwrap();
+        refine(
+            &dir,
+            HarnessKind::Memory,
+            "obsolete note",
+            "e1",
+            "t",
+            "upsert",
+        )
+        .unwrap();
+        let rec = refine(
+            &dir,
+            HarnessKind::Memory,
+            "obsolete note",
+            "e1",
+            "cleanup",
+            "delete",
+        )
+        .unwrap();
         assert!(HarnessState::load(&dir).entries.is_empty());
         rollback(&dir, &rec.id).unwrap();
         let state = HarnessState::load(&dir);

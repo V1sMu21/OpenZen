@@ -5,7 +5,8 @@ use base64::Engine;
 
 pub fn read_document(path: &str, start: usize, count: usize) -> Result<serde_json::Value, String> {
     let p = Path::new(path);
-    let ext = p.extension()
+    let ext = p
+        .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
@@ -34,7 +35,10 @@ pub fn is_image(path: &str) -> bool {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp")
+    matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp"
+    )
 }
 
 pub fn media_type_for(ext: &str) -> &'static str {
@@ -50,8 +54,7 @@ pub fn media_type_for(ext: &str) -> &'static str {
 }
 
 pub fn read_image_base64(path: &str) -> Result<String, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("cannot read image: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read image: {e}"))?;
 
     let ext = Path::new(path)
         .extension()
@@ -79,16 +82,16 @@ fn slice_lines(text: &str, start: usize, count: usize) -> serde_json::Value {
 
 fn read_pdf(path: &str, start: usize, count: usize) -> Result<serde_json::Value, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read PDF: {e}"))?;
-    let text = pdf_extract::extract_text_from_mem(&bytes)
-        .map_err(|e| format!("PDF parse error: {e}"))?;
+    let text =
+        pdf_extract::extract_text_from_mem(&bytes).map_err(|e| format!("PDF parse error: {e}"))?;
     Ok(slice_lines(&text, start, count))
 }
 
 fn read_xlsx(path: &str, start: usize, count: usize) -> Result<serde_json::Value, String> {
     use calamine::{open_workbook, Reader, Xlsx};
 
-    let mut workbook: Xlsx<_> = open_workbook(path)
-        .map_err(|e| format!("cannot open Excel file: {e}"))?;
+    let mut workbook: Xlsx<_> =
+        open_workbook(path).map_err(|e| format!("cannot open Excel file: {e}"))?;
 
     let sheet_names = workbook.sheet_names().to_vec();
     let mut output = String::new();
@@ -105,7 +108,8 @@ fn read_xlsx(path: &str, start: usize, count: usize) -> Result<serde_json::Value
                 if col_count == 0 {
                     col_count = row.len();
                 }
-                let cells: Vec<String> = row.iter()
+                let cells: Vec<String> = row
+                    .iter()
                     .map(|c| c.to_string().trim().to_string())
                     .collect();
 
@@ -136,16 +140,17 @@ fn read_xlsx(path: &str, start: usize, count: usize) -> Result<serde_json::Value
 }
 
 fn read_docx(path: &str, start: usize, count: usize) -> Result<serde_json::Value, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("cannot open DOCX: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("cannot open DOCX: {e}"))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| format!("cannot read DOCX (not a valid ZIP): {e}"))?;
 
     let mut doc_xml = String::new();
     {
-        let mut entry = archive.by_name("word/document.xml")
+        let mut entry = archive
+            .by_name("word/document.xml")
             .map_err(|_| "DOCX missing word/document.xml".to_string())?;
-        entry.read_to_string(&mut doc_xml)
+        entry
+            .read_to_string(&mut doc_xml)
             .map_err(|e| format!("cannot read document.xml: {e}"))?;
     }
 
@@ -154,8 +159,8 @@ fn read_docx(path: &str, start: usize, count: usize) -> Result<serde_json::Value
 }
 
 fn extract_docx_text(xml: &str) -> String {
-    use quick_xml::Reader;
     use quick_xml::events::Event;
+    use quick_xml::Reader;
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -184,12 +189,11 @@ fn extract_docx_text(xml: &str) -> String {
                     }
                 }
             }
-            Ok(Event::Text(ref e))
-                if in_paragraph => {
-                    if let Ok(t) = e.unescape() {
-                        para_text.push_str(&t);
-                    }
+            Ok(Event::Text(ref e)) if in_paragraph => {
+                if let Ok(t) = e.unescape() {
+                    para_text.push_str(&t);
                 }
+            }
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
@@ -201,8 +205,7 @@ fn extract_docx_text(xml: &str) -> String {
 }
 
 fn read_pptx(path: &str, start: usize, count: usize) -> Result<serde_json::Value, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("cannot open PPTX: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("cannot open PPTX: {e}"))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| format!("cannot read PPTX (not a valid ZIP): {e}"))?;
 
@@ -216,7 +219,8 @@ fn read_pptx(path: &str, start: usize, count: usize) -> Result<serde_json::Value
 
         match archive.by_name(&entry_name) {
             Ok(mut entry) => {
-                entry.read_to_string(&mut slide_xml)
+                entry
+                    .read_to_string(&mut slide_xml)
                     .map_err(|e| format!("cannot read {entry_name}: {e}"))?;
             }
             Err(_) => break,
@@ -239,8 +243,8 @@ fn read_pptx(path: &str, start: usize, count: usize) -> Result<serde_json::Value
 }
 
 fn extract_pptx_slide_text(xml: &str) -> String {
-    use quick_xml::Reader;
     use quick_xml::events::Event;
+    use quick_xml::Reader;
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);

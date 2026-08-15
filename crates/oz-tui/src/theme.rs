@@ -96,29 +96,45 @@ impl Theme {
     pub fn from_config(cfg: &ThemeConfig) -> Self {
         let mut t = THEME_DARK.clone();
         if let Some(ref s) = cfg.user_fg {
-            if let Some(c) = parse_hex(s) { t.user_fg = Some(c); }
+            if let Some(c) = parse_hex(s) {
+                t.user_fg = Some(c);
+            }
         }
         if let Some(ref s) = cfg.agent_fg {
-            if let Some(c) = parse_hex(s) { t.agent_fg = Some(c); }
+            if let Some(c) = parse_hex(s) {
+                t.agent_fg = Some(c);
+            }
         }
         if let Some(ref s) = cfg.muted_fg {
-            if let Some(c) = parse_hex(s) { t.muted_fg = Some(c); }
+            if let Some(c) = parse_hex(s) {
+                t.muted_fg = Some(c);
+            }
         }
         if let Some(ref s) = cfg.accent_fg {
-            if let Some(c) = parse_hex(s) { t.accent_fg = Some(c); }
+            if let Some(c) = parse_hex(s) {
+                t.accent_fg = Some(c);
+            }
         }
         if let Some(ref s) = cfg.highlight_fg {
-            if let Some(c) = parse_hex(s) { t.highlight_fg = Some(c); }
+            if let Some(c) = parse_hex(s) {
+                t.highlight_fg = Some(c);
+            }
         }
         t
     }
 
-    pub fn light() -> Self { THEME_LIGHT.clone() }
-    pub fn dark() -> Self { THEME_DARK.clone() }
+    pub fn light() -> Self {
+        THEME_LIGHT.clone()
+    }
+    pub fn dark() -> Self {
+        THEME_DARK.clone()
+    }
 }
 
 impl Default for Theme {
-    fn default() -> Self { THEME_DARK.clone() }
+    fn default() -> Self {
+        THEME_DARK.clone()
+    }
 }
 
 const fn unwrap_color(opt: Option<Color>, default: Color) -> Color {
@@ -131,7 +147,9 @@ const fn unwrap_color(opt: Option<Color>, default: Color) -> Color {
 fn parse_hex(s: &str) -> Option<Color> {
     let s = s.trim();
     let hex = s.strip_prefix('#').unwrap_or(s);
-    if hex.len() != 6 { return None; }
+    if hex.len() != 6 {
+        return None;
+    }
     let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
     let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
