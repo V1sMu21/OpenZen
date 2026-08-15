@@ -821,6 +821,11 @@ where
                 // stream error) retries the same turn up to
                 // max_llm_error_retries instead of terminating the whole
                 // long task. Each attempt rebuilds the stream future.
+                // `pending_spec` collects guard-approved tool calls that
+                // arrived while the model was still streaming; entries
+                // from a failed attempt are dropped on retry so a tool the
+                // final response never references is never executed.
+                let mut pending_spec: Vec<(String, String, serde_json::Value)> = Vec::new();
                 let result: Result<MockResponse, oz_core_types::LlmError> = loop {
                     let (spec_tx, mut spec_rx) = tokio::sync::mpsc::unbounded_channel();
                     let stream_fut = client.stream_chat(&messages, tools, tx.clone(), Some(spec_tx));
@@ -868,12 +873,20 @@ where
                                             args: args.clone(),
                                         });
                                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&args) {
-                                            let empty = MockResponse::new("");
-                                            if let Ok(Ok(outcome)) = tokio::time::timeout(
-                                                Duration::from_secs(5),
-                                                handler_ref.dispatch(&name, parsed, &empty, 0, ctx),
-                                            ).await {
-                                                cache.lock().unwrap().insert(cache_id, Ok(outcome));
+                                            // Gate speculative execution with the
+                                            // exact same guard Phase 2 applies —
+                                            // tools needing approval or blocked are
+                                            // left for Phase 2 instead of running
+                                            // ahead of the user's decision.
+                                            let allowed = match (&config.safety_guard, &config.approval_handler) {
+                                                (Some(guard), Some(_)) => matches!(
+                                                    guard.check(&name, &parsed),
+                                                    oz_safety::TrustDecision::Allowed
+                                                ),
+                                                _ => true,
+                                            };
+                                            if allowed {
+                                                pending_spec.push((cache_id, name, parsed));
                                             }
                                         }
                                     }
@@ -918,11 +931,14 @@ where
                                 "LLM stream {} (attempt {consecutive_llm_errors}/{max_llm_error_retries}), retrying turn {turn}: {e}",
                                 if is_timeout { "timeout" } else { "error" }
                             ));
+                            // Drop tool calls queued by the failed attempt —
+                            // the retry's response is the source of truth.
+                            pending_spec.clear();
                             backoff_or_stop(stop_signal, consecutive_llm_errors).await;
                         }
                     }
                 };
-                match result {
+                let response = match result {
                     Ok(resp) => resp,
                     Err(e) => {
                         tracing::error!("LLM stream chat error: {e}");
@@ -933,7 +949,27 @@ where
                             data: Some(serde_json::json!({"error": e.to_string()})),
                         };
                     }
+                };
+                // Speculative pre-execution phase: dispatch the guard-approved
+                // tool calls now that the stream finished, so Phase 2 finds
+                // their results cached and skips re-execution. A dispatch that
+                // misses its 5s budget is recorded as an error in the cache —
+                // Phase 2 then reports the failure instead of running the same
+                // side effect a second time.
+                for (cache_id, name, parsed) in pending_spec {
+                    let empty = MockResponse::new("");
+                    let outcome = match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        handler_ref.dispatch(&name, parsed, &empty, 0, ctx),
+                    ).await {
+                        Ok(res) => res,
+                        Err(_) => Err(ToolError::Custom(
+                            "speculative execution timed out; skipped".into(),
+                        )),
+                    };
+                    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(cache_id, outcome);
                 }
+                response
             }
             None => {
                 let resp = client.chat(&messages, tools).await;
