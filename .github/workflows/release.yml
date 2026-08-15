@@ -14,19 +14,13 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # 测试闸门: 发布前强制全绿（与 ci.yml 的 test job 相同配置）
+  # 测试闸门: 发布前强制全绿（macOS 与运行环境一致）
   test:
     name: Test gate
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-      - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - name: cargo test
         run: cargo test --workspace -- --test-threads=1
 
@@ -44,8 +38,6 @@ jobs:
           cache-dependency-path: frontends/package-lock.json
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
 
       - name: Build frontend
         working-directory: frontends
