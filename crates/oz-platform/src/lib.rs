@@ -39,7 +39,9 @@ pub use config::PlatformConfig;
 ///    It receives a `PlatformContext` containing the `AgentBridge` for interacting
 ///    with openzen's agent loop.
 /// 3. `stop()` is called on graceful shutdown.
-/// 4. `health()` is polled periodically to detect stale connections.
+/// 4. If `start()` returns or panics, the registry supervisor restarts the
+///    adapter with exponential backoff (5s→60s) — a channel never stays
+///    offline because of one failure.
 #[async_trait]
 pub trait PlatformAdapter: Send + Sync {
     /// Unique identifier: "telegram", "feishu", "wechat", "qq"
