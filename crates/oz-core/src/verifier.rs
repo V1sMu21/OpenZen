@@ -26,7 +26,15 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(&path);
-        if file_exists_recursive(Path::new(working_dir), basename, 5) {
+        // The recursive scan reads directories synchronously — run it on
+        // the blocking pool so the agent loop thread is not stalled.
+        let scan_dir = std::path::PathBuf::from(working_dir);
+        let scan_name = basename.to_string();
+        let found =
+            tokio::task::spawn_blocking(move || file_exists_recursive(&scan_dir, &scan_name, 5))
+                .await
+                .unwrap_or(false);
+        if found {
             return VerifyResult::Passed;
         }
         return VerifyResult::Failed(format!(

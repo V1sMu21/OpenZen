@@ -347,6 +347,39 @@ pub fn save_checkpoint_persist(dir: &Path, session_id: &str, cp: &LoopCheckpoint
     save_loop_checkpoint_impl(dir, session_id, cp, false);
 }
 
+/// Async wrapper for the git metadata snapshot: spawns git subprocesses on
+/// the blocking pool instead of stalling the runtime thread (and with it
+/// every parallel tool dispatch and stream event).
+pub async fn git_snapshot_async(
+    base_dir: &Path,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let dir = base_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || git_snapshot(&dir))
+        .await
+        .unwrap_or((None, None, None))
+}
+
+/// Async wrapper: checkpoint serialization + file write run off the
+/// runtime thread.
+pub async fn save_checkpoint_persist_async(dir: &Path, session_id: &str, cp: LoopCheckpoint) {
+    let dir = dir.to_path_buf();
+    let session_id = session_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        save_checkpoint_persist(&dir, &session_id, &cp);
+    })
+    .await;
+}
+
+/// Async wrapper for the periodic loop checkpoint write.
+pub async fn save_loop_checkpoint_async(dir: &Path, session_id: &str, cp: LoopCheckpoint) {
+    let dir = dir.to_path_buf();
+    let session_id = session_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        save_loop_checkpoint(&dir, &session_id, &cp);
+    })
+    .await;
+}
+
 /// Load the latest loop checkpoint for a given session.
 pub fn load_latest_loop_checkpoint(dir: &Path, session_id: &str) -> Option<LoopCheckpoint> {
     let safe_session = sanitize_session_id(session_id);

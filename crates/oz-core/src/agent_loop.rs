@@ -24,6 +24,46 @@ fn next_block_id(prefix: &str) -> String {
     format!("{prefix}{n}")
 }
 
+/// Save a stop-path checkpoint without blocking the runtime thread: git
+/// metadata and the full JSON write run on the blocking pool. Ensures all
+/// stop paths (top of loop, LLM stream cancel, ask_user wait) persist
+/// state for /resume.
+#[allow(clippy::too_many_arguments)]
+async fn save_stop_checkpoint_async(
+    config: &LoopConfig,
+    turn: u32,
+    exit: &str,
+    messages: &[Message],
+    history_info: &[String],
+    full_response: &str,
+    full_thinking: &str,
+    todos: &[oz_core_types::TodoItem],
+) {
+    if config.session_id.is_empty() {
+        return;
+    }
+    let cp_dir = crate::checkpoint::checkpoint_dir(std::path::Path::new(&config.working_dir));
+    let (git_sha, git_branch, git_origin_url) =
+        crate::checkpoint::git_snapshot_async(std::path::Path::new(&config.working_dir)).await;
+    let cp = crate::checkpoint::LoopCheckpoint {
+        turn,
+        timestamp: chrono::Utc::now().timestamp() as f64,
+        messages: messages.to_vec(),
+        history_info: history_info.to_vec(),
+        full_response: full_response.to_string(),
+        exit_reason: Some(exit.to_string()),
+        session_id: Some(config.session_id.clone()),
+        plan: crate::checkpoint::plan_from_todos(todos),
+        todos: todos.to_vec(),
+        interventions: vec![],
+        full_thinking: Some(full_thinking.to_string()),
+        git_sha,
+        git_branch,
+        git_origin_url,
+    };
+    crate::checkpoint::save_checkpoint_persist_async(&cp_dir, &config.session_id, cp).await;
+}
+
 /// Sleep for the exponential backoff delay of a failed LLM attempt,
 /// aborting early when the stop signal fires (stop must stay responsive).
 /// `consecutive` is the 1-based consecutive-error count.
@@ -231,9 +271,9 @@ pub fn extract_tool_calls(response: &MockResponse) -> Vec<oz_core_types::MockToo
 /// live in the system prompt (so the system prompt stays byte-stable and
 /// keeps the omlx prefix-cache chain intact). Injected as a prefix of the
 /// first user message, mirroring Claude Code's dynamic-reminder pattern.
-fn build_system_reminder(working_dir: &str, session_id: &str) -> String {
+async fn build_system_reminder(working_dir: &str, session_id: &str) -> String {
     let (git_sha, git_branch, _origin) =
-        crate::checkpoint::git_snapshot(std::path::Path::new(working_dir));
+        crate::checkpoint::git_snapshot_async(std::path::Path::new(working_dir)).await;
     let date = chrono::Local::now().format("%Y-%m-%d");
     let mut block =
         format!("<system-reminder>\nToday's date: {date}\nWorking directory: {working_dir}\n");
@@ -310,7 +350,7 @@ where
     // Dynamic context (date/cwd/git) goes in a `<system-reminder>` prefix on
     // the first user message — never in the system prompt — so the system
     // block stays byte-stable for prefix caching.
-    let reminder = build_system_reminder(&config.working_dir, &config.session_id);
+    let reminder = build_system_reminder(&config.working_dir, &config.session_id).await;
     // P2-8: compile diagnostics ride inside the reminder block when enabled.
     let reminder = if config.include_diagnostics {
         match crate::diagnostics::collect_diagnostics_block(&config.working_dir).await {
@@ -388,7 +428,7 @@ where
 
     // Session rollout recorder (U4): mirrors all stream events to a JSONL file.
     let (git_sha, git_branch, _git_origin) =
-        crate::checkpoint::git_snapshot(std::path::Path::new(&config.working_dir));
+        crate::checkpoint::git_snapshot_async(std::path::Path::new(&config.working_dir)).await;
     let mut rollout: Option<crate::rollout::RolloutRecorder> =
         config.rollout_dir.as_ref().and_then(|dir| {
             let meta = crate::rollout::RolloutMeta {
@@ -400,41 +440,6 @@ where
             };
             crate::rollout::RolloutRecorder::create(std::path::Path::new(dir), &meta).ok()
         });
-
-    // Helper: save a loop checkpoint before exiting due to user stop.
-    // Ensures all stop paths (top of loop, LLM stream cancel, ask_user wait)
-    // persist state for /resume.
-    let save_stop_checkpoint = |turn: u32,
-                                exit: &str,
-                                messages: &[Message],
-                                history_info: &[String],
-                                full_response: &str,
-                                full_thinking: &str,
-                                todos: &[oz_core_types::TodoItem]| {
-        if !config.session_id.is_empty() {
-            let cp_dir =
-                crate::checkpoint::checkpoint_dir(std::path::Path::new(&config.working_dir));
-            let (git_sha, git_branch, git_origin_url) =
-                crate::checkpoint::git_snapshot(std::path::Path::new(&config.working_dir));
-            let cp = crate::checkpoint::LoopCheckpoint {
-                turn,
-                timestamp: chrono::Utc::now().timestamp() as f64,
-                messages: messages.to_vec(),
-                history_info: history_info.to_vec(),
-                full_response: full_response.to_string(),
-                exit_reason: Some(exit.to_string()),
-                session_id: Some(config.session_id.clone()),
-                plan: crate::checkpoint::plan_from_todos(todos),
-                todos: todos.to_vec(),
-                interventions: vec![],
-                full_thinking: Some(full_thinking.to_string()),
-                git_sha,
-                git_branch,
-                git_origin_url,
-            };
-            crate::checkpoint::save_checkpoint_persist(&cp_dir, &config.session_id, &cp);
-        }
-    };
 
     meter::record_session();
 
@@ -550,7 +555,8 @@ where
     'turn: while turn < config.max_turns {
         if stop_signal.load(Ordering::Relaxed) {
             tracing::info!("Stop signal received, saving checkpoint and exiting agent loop");
-            save_stop_checkpoint(
+            save_stop_checkpoint_async(
+                config,
                 turn,
                 "stopped_by_user",
                 &messages,
@@ -558,7 +564,8 @@ where
                 &full_response,
                 &full_thinking,
                 &handler.working().todos,
-            );
+            )
+            .await;
             transition_state(
                 handler,
                 AgentState::Done("stopped_by_user".into()),
@@ -607,7 +614,8 @@ where
                     crate::checkpoint::InterventionKind::Pause
                 ) {
                     tracing::info!("Pause intervention received, saving checkpoint and stopping");
-                    save_stop_checkpoint(
+                    save_stop_checkpoint_async(
+                        config,
                         turn,
                         "paused_by_user",
                         &messages,
@@ -615,7 +623,8 @@ where
                         &full_response,
                         &full_thinking,
                         &handler.working().todos,
-                    );
+                    )
+                    .await;
                     transition_state(
                         handler,
                         AgentState::Done("paused_by_user".into()),
@@ -915,7 +924,7 @@ where
                         tokio::select! {
                             _ = &mut cancel_fut => {
                                 tracing::info!("Stop signal received during LLM stream, saving checkpoint and aborting");
-                                save_stop_checkpoint(turn, "stopped_by_user", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos);
+                                save_stop_checkpoint_async(config, turn, "stopped_by_user", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos).await;
                                 transition_state(handler, AgentState::Done("stopped_by_user".into()), "stop signal during LLM stream");
                                 return LoopOutcome {
                                     turn,
@@ -964,7 +973,7 @@ where
                             }
                             _ = &mut stream_hang_timeout => {
                                 tracing::warn!("LLM stream produced no terminal event for {}s", hang_timeout_secs);
-                                save_stop_checkpoint(turn, "llm_timeout", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos);
+                                save_stop_checkpoint_async(config, turn, "llm_timeout", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos).await;
                                 break Err(oz_core_types::LlmError::StreamError(format!(
                                     "stream timed out after {hang_timeout_secs}s"
                                 )));
@@ -2210,7 +2219,8 @@ where
             };
 
             if exit_reason.is_some() {
-                save_stop_checkpoint(
+                save_stop_checkpoint_async(
+                    config,
                     turn,
                     "stopped_by_user",
                     &messages,
@@ -2218,7 +2228,8 @@ where
                     &full_response,
                     &full_thinking,
                     &handler.working().todos,
-                );
+                )
+                .await;
                 transition_state(
                     handler,
                     AgentState::Done(exit_reason.clone().unwrap()),
@@ -2697,7 +2708,8 @@ where
             let cp_dir =
                 std::path::PathBuf::from(config.checkpoint_dir.as_deref().unwrap_or("checkpoints"));
             let (git_sha, git_branch, git_origin_url) =
-                crate::checkpoint::git_snapshot(std::path::Path::new(&config.working_dir));
+                crate::checkpoint::git_snapshot_async(std::path::Path::new(&config.working_dir))
+                    .await;
             let cp = crate::checkpoint::LoopCheckpoint {
                 turn,
                 timestamp: chrono::Utc::now().timestamp() as f64,
@@ -2714,7 +2726,7 @@ where
                 git_branch,
                 git_origin_url,
             };
-            crate::checkpoint::save_loop_checkpoint(&cp_dir, &config.session_id, &cp);
+            crate::checkpoint::save_loop_checkpoint_async(&cp_dir, &config.session_id, cp).await;
         }
 
         let guard_msg = handler.working().sensorium.detect_loop();
@@ -2743,7 +2755,8 @@ where
         // meaningful tool output, force-exit with a save point.
         if consecutive_empty_turns >= 10 {
             tracing::warn!("{consecutive_empty_turns} consecutive turns with no tool calls — LLM appears stuck, exiting");
-            save_stop_checkpoint(
+            save_stop_checkpoint_async(
+                config,
                 turn,
                 "llm_stuck",
                 &messages,
@@ -2751,7 +2764,8 @@ where
                 &full_response,
                 &full_thinking,
                 &handler.working().todos,
-            );
+            )
+            .await;
             transition_state(
                 handler,
                 AgentState::Done("llm_stuck".into()),
