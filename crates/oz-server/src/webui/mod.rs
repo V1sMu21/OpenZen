@@ -711,6 +711,38 @@ async fn handle_chat(
     }
 }
 
+/// Cap the largest stream-event payloads (tool outputs, errors) so a long
+/// run keeps bounded memory. Aligns with the 100KB cap applied when
+/// session messages are persisted.
+fn truncate_stream_event(event: oz_core_types::StreamEvent) -> oz_core_types::StreamEvent {
+    const MAX_EVENT_FIELD_CHARS: usize = 100_000;
+    let cap_chars = |s: &str| -> String {
+        if s.chars().count() <= MAX_EVENT_FIELD_CHARS {
+            s.to_string()
+        } else {
+            let mut out: String = s.chars().take(MAX_EVENT_FIELD_CHARS).collect();
+            out.push('…');
+            out
+        }
+    };
+    use oz_core_types::StreamEvent as E;
+    match event {
+        E::ToolOutputAvailable {
+            tool_call_id,
+            name,
+            output,
+        } => E::ToolOutputAvailable {
+            tool_call_id,
+            name,
+            output: cap_chars(&output),
+        },
+        E::Error { message } => E::Error {
+            message: cap_chars(&message),
+        },
+        other => other,
+    }
+}
+
 /// Run the agent loop for a session, broadcasting events via SSE.
 /// Returns the full response text if available.
 #[allow(clippy::too_many_arguments, clippy::field_reassign_with_default)]
@@ -903,6 +935,7 @@ async fn run_agent_for_session(
         let start_for_collector = start_ms.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
+                let event = truncate_stream_event(event);
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)

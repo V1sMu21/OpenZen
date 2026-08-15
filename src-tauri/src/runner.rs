@@ -35,6 +35,30 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
+/// Cap the largest stream-event payloads (tool outputs, errors) so a run
+/// that dumps megabytes of logs/files keeps bounded memory instead of
+/// holding it all until the run ends. Aligns with the 100KB cap applied
+/// when session messages are persisted.
+fn truncate_stream_event(event: oz_core_types::StreamEvent) -> oz_core_types::StreamEvent {
+    const MAX_EVENT_FIELD_CHARS: usize = 100_000;
+    use oz_core_types::StreamEvent as E;
+    match event {
+        E::ToolOutputAvailable {
+            tool_call_id,
+            name,
+            output,
+        } => E::ToolOutputAvailable {
+            tool_call_id,
+            name,
+            output: truncate_chars(&output, MAX_EVENT_FIELD_CHARS),
+        },
+        E::Error { message } => E::Error {
+            message: truncate_chars(&message, MAX_EVENT_FIELD_CHARS),
+        },
+        other => other,
+    }
+}
+
 /// Distills session transcripts into the skill/MCP knowledge store in the
 /// background (U3). Kept in the Tauri layer because it owns the store path.
 struct McpMemoryDistiller {
@@ -785,6 +809,7 @@ pub async fn run_agent_for_session(
         let lang_for_collector = ctx.lang.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
+                let event = truncate_stream_event(event);
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
