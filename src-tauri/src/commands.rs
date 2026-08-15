@@ -1335,11 +1335,8 @@ async fn generate_compact_summary(state: &AppState, template: &str) -> Option<St
                     .find(|(_, s)| s.model == *name)
                     .map(|(_, s)| s)
             });
-            if let Some(sc) = found {
-                (name.clone(), sc.clone())
-            } else {
-                return None;
-            }
+            let sc = found?;
+            (name.clone(), sc.clone())
         } else {
             let name = cfg.default_session.as_deref().unwrap_or("claude_sonnet");
             (name.to_string(), cfg.get(name)?.clone())
