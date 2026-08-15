@@ -44,7 +44,11 @@ impl Scheduler {
 
     /// Start all registered tasks. Each runs in its own `tokio::spawn` with
     /// `tokio::time::interval`. Missed ticks are skipped (not burst).
-    pub async fn run(self) {
+    ///
+    /// `ctx` must carry the real data paths (sessions file, trust store,
+    /// skill/MCP dir) — the built-in tasks silently no-op with the default
+    /// context, so 7x24 maintenance would never actually run.
+    pub async fn run(self, ctx: TaskContext) {
         let shutdown = self.shutdown.clone();
         let mut handles = Vec::new();
 
@@ -52,6 +56,7 @@ impl Scheduler {
             let name = task.name().to_string();
             let interval = task.interval();
             let shutdown = shutdown.clone();
+            let task_ctx = ctx.clone();
 
             tracing::info!("[scheduler] starting task `{name}` every {interval:?}");
 
@@ -63,7 +68,7 @@ impl Scheduler {
                     tokio::select! {
                         _ = timer.tick() => {
                             if shutdown.load(Ordering::Relaxed) { break; }
-                            match task.execute(&TaskContext::default()).await {
+                            match task.execute(&task_ctx).await {
                                 Ok(()) => tracing::debug!("[scheduler] `{name}` ok"),
                                 Err(e) => tracing::warn!("[scheduler] `{name}` failed: {e}"),
                             }

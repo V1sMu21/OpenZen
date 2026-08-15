@@ -806,7 +806,21 @@ pub fn run() {
                 }
             });
 
-            tauri::async_runtime::spawn(scheduler.run());
+            // Maintenance tasks must see the real data paths — with the
+            // default context SessionCleanup looks for sessions.json under
+            // "./" and TrustDecay never runs at all.
+            let task_ctx = oz_scheduler::TaskContext {
+                working_dir: Some(data_dir().to_string_lossy().to_string()),
+                skill_mcp_dir: state.skill_mcp_dir.clone(),
+                trust_path: Some(
+                    data_dir()
+                        .join("openzen")
+                        .join("trust.json")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            };
+            tauri::async_runtime::spawn(scheduler.run(task_ctx));
 
             let (reminder_tx, mut reminder_rx) = tokio::sync::mpsc::unbounded_channel::<oz_core_types::Reminder>();
             *lock_poison_guard(&state.reminder_tx) = Some(reminder_tx.clone());

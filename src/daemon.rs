@@ -84,7 +84,25 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
     if config.dir.join(oz_skill_mcp::SKILL_MCP_DIR).exists() {
         scheduler.register(Box::new(oz_scheduler::SkillMcpScan::default()));
     }
-    tokio::spawn(scheduler.run());
+    let task_ctx = oz_scheduler::TaskContext {
+        working_dir: Some(config.dir.to_string_lossy().to_string()),
+        skill_mcp_dir: Some(
+            config
+                .dir
+                .join(oz_skill_mcp::SKILL_MCP_DIR)
+                .to_string_lossy()
+                .to_string(),
+        ),
+        trust_path: Some(
+            config
+                .dir
+                .join("openzen")
+                .join("trust.json")
+                .to_string_lossy()
+                .to_string(),
+        ),
+    };
+    tokio::spawn(scheduler.run(task_ctx));
 
     // Write PID file if requested
     if let Some(ref pid_path) = config.pid_file {
