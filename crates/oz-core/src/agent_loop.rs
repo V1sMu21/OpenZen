@@ -102,14 +102,14 @@ fn process_tool_outcome(
     _full_response: &mut String,
     exit_reason: &mut Option<String>,
     _config: &LoopConfig,
-    pending_ask_user: &mut Option<PendingAskUser>,
+    pending_ask_user: &mut Vec<PendingAskUser>,
 ) {
     match outcome {
         Ok(oc) => {
             if oc.data.get("status").and_then(|v| v.as_str()) == Some("INTERRUPT")
                 && oc.data.get("intent").and_then(|v| v.as_str()) == Some("HUMAN_INTERVENTION")
             {
-                *pending_ask_user = Some(PendingAskUser {
+                pending_ask_user.push(PendingAskUser {
                     tool_use_id: tid.to_string(),
                     tool_call_id: tc_id.to_string(),
                     tool_name: tool_name.to_string(),
@@ -547,7 +547,7 @@ where
     let mut verify_fail_counts: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
 
-    while turn < config.max_turns {
+    'turn: while turn < config.max_turns {
         if stop_signal.load(Ordering::Relaxed) {
             tracing::info!("Stop signal received, saving checkpoint and exiting agent loop");
             save_stop_checkpoint(
@@ -1281,7 +1281,7 @@ where
 
         let mut tool_results: Vec<ToolResultItem> = Vec::new();
         let mut next_prompts: Vec<String> = Vec::new();
-        let mut pending_ask_user: Option<PendingAskUser> = None;
+        let mut pending_ask_user: Vec<PendingAskUser> = Vec::new();
         // P1 plan approval: plan submitted by submit_plan, awaiting the
         // user's approve/modify decision (consumed in the ask_user pause).
         let mut pending_plan: Option<(String, Vec<String>)> = None;
@@ -1838,7 +1838,7 @@ where
                             .unwrap_or_default();
                         if !goal.is_empty() && !steps.is_empty() {
                             pending_plan = Some((goal.clone(), steps.clone()));
-                            pending_ask_user = Some(PendingAskUser {
+                            pending_ask_user.push(PendingAskUser {
                                 tool_use_id: m.tid.clone(),
                                 tool_call_id: m.tc_id.clone(),
                                 tool_name: "submit_plan".to_string(),
@@ -2107,7 +2107,11 @@ where
         // ── ask_user pause ──────────────────────────────────────
         // The user's reply is a tool_result for the same tool_use id,
         // not a brand-new user message — the LLM resumes the same run.
-        if let Some(pending) = pending_ask_user.take() {
+        // Multiple ask_user calls in one turn are answered in order, so
+        // every tool_use gets its own tool_result instead of the last
+        // one silently overwriting the rest.
+        while !pending_ask_user.is_empty() {
+            let pending = pending_ask_user.remove(0);
             // Broadcast the prompt BEFORE waiting so the UI shows the
             // dialog as soon as the tool finishes, not only after reply.
             if let Some(ref tx) = config.event_tx {
@@ -2191,7 +2195,7 @@ where
                     AgentState::Done(exit_reason.clone().unwrap()),
                     "stopped while waiting for ask_user",
                 );
-                break;
+                break 'turn;
             }
 
             // submit_plan approval gate: approve → create todos + plan
