@@ -1,7 +1,7 @@
 mod client;
 mod crypto;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -52,7 +52,14 @@ impl PlatformAdapter for WechatAdapter {
         );
 
         let counter_path = ctx.working_dir.join("openzen").join("wechat_counters.json");
-        let mut seen_ids: HashSet<String> = HashSet::new();
+        // Persistent dedup: messages replayed by the WeChat server after a
+        // crash/restart must not trigger duplicate agent runs.
+        let dedup_path = ctx
+            .working_dir
+            .join("openzen")
+            .join("wechat_seen_msg_ids.json");
+        let mut seen_ids: std::collections::VecDeque<String> =
+            oz_platform::load_seen_msg_ids(&dedup_path);
         // Shared with spawned agent tasks: per-user counters and the
         // per-user "task running" gate must be consistent across them.
         let counters: Arc<tokio::sync::Mutex<HashMap<String, u32>>> = Arc::new(
@@ -76,10 +83,11 @@ impl PlatformAdapter for WechatAdapter {
                         if seen_ids.contains(&msg_id) {
                             continue;
                         }
-                        seen_ids.insert(msg_id);
+                        seen_ids.push_back(msg_id);
                         if seen_ids.len() > 5000 {
-                            seen_ids.clear();
+                            seen_ids.pop_front();
                         }
+                        oz_platform::save_seen_msg_ids(&dedup_path, &seen_ids);
 
                         let text = WxBotClient::extract_text(msg);
                         let uid = msg
@@ -110,7 +118,19 @@ impl PlatformAdapter for WechatAdapter {
                             };
                             let Some((reply, sid)) = result else { continue };
                             let _ = bot.send_text(uid, &reply, ctx_token).await;
-                            if text.to_lowercase().starts_with("/new") {
+                            let op = text
+                                .split_whitespace()
+                                .next()
+                                .map(|s| s.to_lowercase())
+                                .unwrap_or_default();
+                            if op == "/stop" || op == "/abort" {
+                                // /stop must actually stop the running session —
+                                // never start a new agent run with the command
+                                // text as its prompt.
+                                agent.stop_session(&sid);
+                                continue;
+                            }
+                            if op == "/new" {
                                 // /new just resets the session — don't run agent
                                 continue;
                             }
