@@ -11,6 +11,11 @@ use tokio::task::JoinHandle;
 
 use crate::{PlatformError, FILE_HINT};
 
+/// Per-session slot the ask_user tool waits on for the user's reply.
+pub type AskUserSlot = Arc<Mutex<Option<String>>>;
+/// Session id → ask_user reply slot.
+pub type AskUserRxs = Arc<Mutex<HashMap<String, AskUserSlot>>>;
+
 /// Poison-resistant mutex helper — a panic while a lock is held must
 /// degrade to a single failed operation, never take the whole IM channel
 /// down (matches the Tauri-side lock_poison_guard pattern).
@@ -31,11 +36,12 @@ pub struct AgentBridge {
     pub script_dir: String,
     pub locale: Arc<Mutex<String>>,
     pub approval_handler: Arc<Mutex<Option<Arc<dyn oz_safety::ApprovalHandler>>>>,
-    pub ask_user_rxs: Arc<Mutex<HashMap<String, Arc<Mutex<Option<String>>>>>>,
+    pub ask_user_rxs: AskUserRxs,
     pub skill_mcp_dir: Option<String>,
 }
 
 impl AgentBridge {
+#[allow(clippy::field_reassign_with_default)]
     pub async fn send_message(
         &self,
         session_id: &str,

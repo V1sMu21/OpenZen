@@ -45,8 +45,8 @@ pub fn definition() -> ToolDefinition {
     ToolDefinition {
         type_: "function".into(),
         function: ToolFunction {
-            name: t.name().into(),
-            description: t.description().into(),
+            name: t.name(),
+            description: t.description(),
             parameters: t.parameters(),
         },
     }

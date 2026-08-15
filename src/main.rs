@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -449,7 +449,7 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-fn resolve_path(path: &PathBuf, base: &PathBuf) -> String {
+fn resolve_path(path: &Path, base: &Path) -> String {
     if path.is_absolute() {
         path.to_string_lossy().to_string()
     } else if path.exists() {
@@ -480,7 +480,7 @@ fn build_session(
 
             // Choose sessions to mix: use llm_nos if specified, otherwise all
             let indices: Vec<usize> = if let Some(ref nos) = config.llm_nos {
-                nos.iter().map(|i| *i).collect()
+                nos.to_vec()
             } else {
                 (0..session_list.len()).collect()
             };
@@ -517,14 +517,15 @@ fn build_session(
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::field_reassign_with_default)]
 async fn run_ask(
     prompt: &str,
     sess_config: &SessionConfig,
     sess_type: SessionType,
     max_turns: u32,
-    assets_dir: &PathBuf,
-    working_dir: &PathBuf,
-    config_path: &PathBuf,
+    assets_dir: &Path,
+    working_dir: &Path,
+    config_path: &Path,
     sop_dir: Option<PathBuf>,
     plugin_dir: Option<PathBuf>,
     skill_mcp_dir: Option<PathBuf>,
@@ -673,11 +674,11 @@ async fn run_reflect(
     goal: Option<String>,
     budget: f64,
     autonomous: bool,
-    working_dir: &PathBuf,
+    working_dir: &Path,
 ) -> anyhow::Result<()> {
     use oz_reflect::ReflectRunner;
 
-    let mut runner = ReflectRunner::new(working_dir.clone());
+    let mut runner = ReflectRunner::new(working_dir.to_path_buf());
 
     if let Some(goal_text) = goal {
         let goal_module = oz_reflect::goal_mode::GoalModeModule::new(working_dir, budget);

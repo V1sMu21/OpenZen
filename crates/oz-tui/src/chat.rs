@@ -64,11 +64,7 @@ fn build_scroll_indicator(scroll: usize, max_scroll: usize, viewport_h: usize) -
     let shown_start = effective + 1;
     let shown_end = (effective + viewport_h).min(max_scroll + viewport_h);
     let total_approx = max_scroll + viewport_h;
-    let pct = if total_approx == 0 {
-        0
-    } else {
-        (shown_start * 100) / total_approx
-    };
+    let pct = (shown_start * 100).checked_div(total_approx).unwrap_or(0);
     format!("↑ {}–{} {}%", shown_start, shown_end, pct)
 }
 
@@ -383,6 +379,7 @@ fn unescape(s: &str) -> String {
 /// call and which belong to the surrounding chat. Collapsed state
 /// shows the summary line plus a one-line result preview if any;
 /// expanded state shows the full result up to a hard line cap.
+#[allow(clippy::too_many_arguments)]
 fn render_tool_call(
     lines: &mut Vec<Line>,
     name: &str,

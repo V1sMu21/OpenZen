@@ -48,8 +48,8 @@ const INTERNAL_TAGS: &[&str] = &[
 /// `<tag…/>` self-closing. Returns:
 ///   - `Some((None, start, tag_name))` for an open-tag form, OR
 ///   - `Some((Some(end), start, tag_name))` for a self-closing form,
-/// where `end` is the byte offset just past the `/>` so the caller
-/// can skip it.
+///     where `end` is the byte offset just past the `/>` so the caller
+///     can skip it.
 fn find_next_internal_tag(text: &str) -> Option<(Option<usize>, usize, String)> {
     let bytes = text.as_bytes();
     let mut best: Option<(usize, usize, String, bool)> = None; // (start, open_tag_len, name, is_self_closing)
@@ -74,7 +74,7 @@ fn find_next_internal_tag(text: &str) -> Option<(Option<usize>, usize, String)> 
                         // Self-closing if the char before `>` is `/`
                         let is_self_closing = bytes.get(close_abs.wrapping_sub(1)) == Some(&b'/');
                         let start = abs;
-                        if best.as_ref().map_or(true, |(b, _, _, _)| start < *b) {
+                        if best.as_ref().is_none_or(|(b, _, _, _)| start < *b) {
                             best = Some((start, close_abs + 1 - start, tag.to_string(), is_self_closing));
                         }
                         break;
@@ -130,7 +130,7 @@ fn find_any_close_tag(text: &str) -> Option<(usize, String)> {
     for tag in INTERNAL_TAGS {
         let needle = format!("</{}>", tag.to_ascii_lowercase());
         if let Some(p) = lower.find(&needle) {
-            if best.as_ref().map_or(true, |(b, _)| p < *b) {
+            if best.as_ref().is_none_or(|(b, _)| p < *b) {
                 best = Some((p, tag.to_string()));
             }
         }
@@ -370,7 +370,7 @@ pub async fn parse_claude_sse(
                     if let Some(u) = evt["usage"].as_object() {
                         let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                         let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let current = usage.unwrap_or(TokenUsage::default());
+                        let current = usage.unwrap_or_default();
                         usage = Some(TokenUsage {
                             input_tokens: if input > 0 { input } else { current.input_tokens },
                             output_tokens: if output > 0 { output } else { current.output_tokens },

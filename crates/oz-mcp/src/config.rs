@@ -83,7 +83,7 @@ impl McpDiscovery {
         }
 
         if let Some(parent) = self.config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| McpError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(McpError::Io)?;
         }
 
         let default = r#"# MCP Server Configuration
@@ -105,7 +105,7 @@ enabled = false
 auto_start = true
 "#;
 
-        std::fs::write(&self.config_path, default).map_err(|e| McpError::Io(e))?;
+        std::fs::write(&self.config_path, default).map_err(McpError::Io)?;
         Ok(())
     }
 }

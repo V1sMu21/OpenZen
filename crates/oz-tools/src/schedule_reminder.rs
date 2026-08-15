@@ -8,8 +8,8 @@ pub fn definition() -> ToolDefinition {
     ToolDefinition {
         type_: "function".into(),
         function: ToolFunction {
-            name: tool.name().into(),
-            description: tool.description().into(),
+            name: tool.name(),
+            description: tool.description(),
             parameters: tool.parameters(),
         },
     }
@@ -77,10 +77,10 @@ impl ToolHandler for ScheduleReminderTool {
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let delay_secs = args["delay_seconds"].as_u64().unwrap_or(60).max(5).min(3600);
+        let delay_secs = args["delay_seconds"].as_u64().unwrap_or(60).clamp(5, 3600);
         let message = args["message"].as_str().unwrap_or("").to_string();
         let repeat_count = args["repeat_count"].as_u64().unwrap_or(0).min(10) as u32;
-        let repeat_interval = args["repeat_interval_seconds"].as_u64().unwrap_or(delay_secs).max(5).min(3600);
+        let repeat_interval = args["repeat_interval_seconds"].as_u64().unwrap_or(delay_secs).clamp(5, 3600);
 
         if message.is_empty() {
             return Err(ToolError::Custom("schedule_reminder requires a non-empty message".into()));
@@ -96,7 +96,6 @@ impl ToolHandler for ScheduleReminderTool {
         // process-global that concurrent sessions overwrote.
         let session_id = ctx.session_id.clone();
 
-        let tx_exists = REMINDER_TX.get().is_some();
 
         let reminder = Reminder {
             session_id,
@@ -130,7 +129,7 @@ impl ToolHandler for ScheduleReminderTool {
                     "repeat_count": repeat_count,
                     "repeat_interval_seconds": repeat_interval,
                 }),
-                &format!("\n[schedule_reminder] {status_msg}"),
+                format!("\n[schedule_reminder] {status_msg}"),
             ))
         } else {
             Err(ToolError::Custom("schedule_reminder is not available in this environment (no reminder channel)".into()))

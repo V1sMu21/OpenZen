@@ -11,12 +11,9 @@
 //! Supported variables:
 //! - `{model}`        — current model name
 //! - `{session}`      — current session name (or "—" if none)
-//! - `{agent}`        — current agent name (empty if none; reserved
-//!                      for Phase 3 Agent work mode)
-//! - `{role}`         — current role (empty if none; reserved for
-//!                      Phase 3)
-//! - `{rag}`          — current RAG label (empty if none; reserved
-//!                      for Phase 1.3)
+//! - `{agent}`        — current agent name (empty if none; reserved for Phase 3 Agent work mode)
+//! - `{role}`         — current role (empty if none; reserved for Phase 3)
+//! - `{rag}`          — current RAG label (empty if none; reserved for Phase 1.3)
 //! - `{consume_tokens}` — total tokens consumed this turn
 //! - `{consume_percent}` — context window usage %
 //!

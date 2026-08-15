@@ -53,7 +53,7 @@ impl ToolHandler for LongTermTool {
 
                 Ok(ToolOutput::success_with_prompt(
                     serde_json::json!({"status": "memorized", "category": "sop"}),
-                    format!("\n[long_term] SOP stored in .skill_mcp/sops/"),
+                    "\n[long_term] SOP stored in .skill_mcp/sops/".to_string(),
                 ))
             }
             "history" => {
@@ -62,7 +62,7 @@ impl ToolHandler for LongTermTool {
 
                 Ok(ToolOutput::success_with_prompt(
                     serde_json::json!({"status": "memorized", "category": "history"}),
-                    format!("\n[long_term] Session archived in .skill_mcp/sessions/"),
+                    "\n[long_term] Session archived in .skill_mcp/sessions/".to_string(),
                 ))
             }
             _ => {
@@ -71,7 +71,7 @@ impl ToolHandler for LongTermTool {
 
                 Ok(ToolOutput::success_with_prompt(
                     serde_json::json!({"status": "memorized", "category": "fact"}),
-                    format!("\n[long_term] Fact stored in .skill_mcp/facts/"),
+                    "\n[long_term] Fact stored in .skill_mcp/facts/".to_string(),
                 ))
             }
         }

@@ -231,7 +231,7 @@ impl ConsolidationEngine {
         }
 
         let mut removed = 0usize;
-        for (_key, group_ids) in &groups {
+        for group_ids in groups.values() {
             for extra in group_ids.iter().skip(1) {
                 l2.remove(*extra);
                 removed += 1;

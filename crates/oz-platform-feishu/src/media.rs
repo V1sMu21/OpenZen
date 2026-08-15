@@ -38,23 +38,3 @@ pub async fn send_local_file(
     }
 }
 
-pub fn is_image_file(file_path: &str) -> bool {
-    Path::new(file_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| IMAGE_EXTS.contains(&e.to_lowercase().as_str()))
-        .unwrap_or(false)
-}
-
-pub fn file_type_label(file_path: &str) -> &str {
-    let ext = Path::new(file_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if IMAGE_EXTS.contains(&ext.as_str()) {
-        "image"
-    } else {
-        "file"
-    }
-}

@@ -31,6 +31,7 @@ pub type StreamRx = mpsc::UnboundedReceiver<StreamEvent>;
 ///
 /// Returns the receiver the UI should poll, and the stop signal
 /// used to cancel the loop if the user presses 's'.
+#[allow(clippy::field_reassign_with_default)]
 pub fn spawn_agent_loop(
     app: &App,
     prompt: String,
@@ -363,11 +364,10 @@ pub async fn handle_key(
                 app.pending_ask_user = None;
                 app.status = "ask_user dismissed".into();
             }
-            KeyCode::Up => {
-                if app.cmd_selected > 0 {
+            KeyCode::Up
+                if app.cmd_selected > 0 => {
                     app.cmd_selected -= 1;
                 }
-            }
             KeyCode::Down => {
                 if let Some((_, cands)) = app.pending_ask_user.clone() {
                     if app.cmd_selected + 1 < cands.len() {
@@ -524,8 +524,8 @@ pub async fn handle_key(
                     app.cmd_suggestions.clear();
                     app.status = "Resume typing...".into();
                 }
-                KeyCode::Tab if app.cmd_mode => {
-                    if !app.cmd_suggestions.is_empty() {
+                KeyCode::Tab if app.cmd_mode
+                    && !app.cmd_suggestions.is_empty() => {
                         let sel = app
                             .cmd_selected
                             .min(app.cmd_suggestions.len().saturating_sub(1));
@@ -533,17 +533,14 @@ pub async fn handle_key(
                         app.input = format!("/{} ", completion);
                         app.cmd_suggestions.clear();
                     }
-                }
-                KeyCode::Up if app.cmd_mode && !app.cmd_suggestions.is_empty() => {
-                    if app.cmd_selected > 0 {
+                KeyCode::Up if app.cmd_mode && !app.cmd_suggestions.is_empty()
+                    && app.cmd_selected > 0 => {
                         app.cmd_selected -= 1;
                     }
-                }
-                KeyCode::Down if app.cmd_mode && !app.cmd_suggestions.is_empty() => {
-                    if app.cmd_selected + 1 < app.cmd_suggestions.len() {
+                KeyCode::Down if app.cmd_mode && !app.cmd_suggestions.is_empty()
+                    && app.cmd_selected + 1 < app.cmd_suggestions.len() => {
                         app.cmd_selected += 1;
                     }
-                }
                 KeyCode::Up => {
                     recall_history(app, history, true);
                 }

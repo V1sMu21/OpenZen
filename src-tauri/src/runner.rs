@@ -206,8 +206,7 @@ fn build_history_messages(messages: &[serde_json::Value]) -> Vec<Message> {
                     // the tool_use ↔ tool_result pairing is restored.
                     let legacy_tool_use_blocks: Vec<serde_json::Value> = if !has_tool_uses {
                         let mut acc = Vec::new();
-                        for j in (i + 1)..slice.len() {
-                            let nm = &slice[j];
+                        for nm in &slice[i + 1..] {
                             if nm.get("role").and_then(|v| v.as_str()) != Some("tool") {
                                 break;
                             }
@@ -229,7 +228,7 @@ fn build_history_messages(messages: &[serde_json::Value]) -> Vec<Message> {
                     };
 
                     let blocks_to_emit = tool_use_blocks
-                        .map(|arr| arr.iter().cloned().collect::<Vec<_>>())
+                        .map(|arr| arr.to_vec())
                         .unwrap_or(legacy_tool_use_blocks);
 
                     if blocks_to_emit.is_empty() {
@@ -334,6 +333,7 @@ fn build_history_messages(messages: &[serde_json::Value]) -> Vec<Message> {
     out
 }
 
+#[allow(clippy::field_reassign_with_default)]
 pub async fn run_agent_for_session(
     app: &AppHandle,
     state: &Arc<AppState>,
@@ -354,7 +354,7 @@ pub async fn run_agent_for_session(
     let profile = load_profile();
     let session_name = model_name
         .or(profile.default_model.as_deref())
-        .or_else(|| cfg.default_session.as_deref())
+        .or(cfg.default_session.as_deref())
         .unwrap_or("claude_sonnet");
     let sess_config = cfg
         .get(session_name)
@@ -764,7 +764,7 @@ pub async fn run_agent_for_session(
         let slot = ask_rxs
             .entry(session_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(None)));
-        *lock_poison_guard(&slot) = None;
+        *lock_poison_guard(slot) = None;
         loop_config.ask_user_rx = Some(slot.clone());
     }
 
@@ -920,7 +920,7 @@ pub async fn run_agent_for_session(
         if let Some(s) = store.get_mut(session_id) {
             s.status = SessionStatus::Idle;
             {
-                let has_events = lock_poison_guard(&collected_events).len() > 0;
+                let has_events = !lock_poison_guard(&collected_events).is_empty();
                 let full = full_response.as_deref().unwrap_or("");
                 // When the agent is stopped mid-stream, full_response
                 // may be empty even though the UI already rendered text

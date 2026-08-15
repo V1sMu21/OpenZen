@@ -105,7 +105,7 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
 
 /// Add cache_control markers for Anthropic models via OAI-compatible relay.
 /// Matches Python _stamp_oai_cache_markers
-pub fn stamp_oai_cache_markers(messages: &mut Vec<serde_json::Value>, model: &str) {
+pub fn stamp_oai_cache_markers(messages: &mut [serde_json::Value], model: &str) {
     let ml = model.to_lowercase();
     if !ml.contains("claude") && !ml.contains("anthropic") {
         return;

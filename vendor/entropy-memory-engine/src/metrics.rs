@@ -237,7 +237,7 @@ impl MonitoredMemoryStore {
         let result = self.store.recall_by_text(text, k);
         let elapsed = start.elapsed().as_nanos() as u64;
         // Text search primarily hits L2 (semantic) — record as L2
-        if result.as_ref().map_or(false, |r| !r.is_empty()) {
+        if result.as_ref().is_ok_and(|r| !r.is_empty()) {
             self.metrics.record_l2_hit(elapsed);
         } else {
             self.metrics.record_l2_miss(elapsed);
@@ -255,7 +255,7 @@ impl MonitoredMemoryStore {
         let start = std::time::Instant::now();
         let result = self.store.recall(query, k);
         let elapsed = start.elapsed().as_nanos() as u64;
-        if result.as_ref().map_or(false, |r| !r.is_empty()) {
+        if result.as_ref().is_ok_and(|r| !r.is_empty()) {
             self.metrics.record_l2_hit(elapsed);
         } else {
             self.metrics.record_l2_miss(elapsed);

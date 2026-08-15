@@ -85,7 +85,7 @@ impl L1Cache {
                 sdr: sdr_cfg,
                 wal: wal_cfg.clone(),
             },
-            primary: Arc::new(DashMap::with_capacity_and_hasher(capacity, hasher.clone())),
+            primary: Arc::new(DashMap::with_capacity_and_hasher(capacity, hasher)),
             alias: Arc::new(DashMap::with_hasher(hasher)),
             attention_lru: Arc::new(AttentionLRU::new(alru_cfg)),
             moka,
@@ -123,7 +123,7 @@ impl L1Cache {
 
             self.primary.insert(id, memory_arc.clone());
             self.moka.insert(id, memory_arc.clone());
-            self.attention_lru.record_insertion(&*memory_arc.read());
+            self.attention_lru.record_insertion(&memory_arc.read());
 
             if let Some(ref alias) = memory_arc.read().alias.clone() {
                 let mut ids = self
@@ -188,7 +188,7 @@ impl L1Cache {
 
         self.primary.insert(memory_id, memory_arc.clone());
         self.moka.insert(memory_id, memory_arc.clone());
-        self.attention_lru.record_insertion(&*memory_arc.read());
+        self.attention_lru.record_insertion(&memory_arc.read());
 
         if let Some(ref a) = memory_arc.read().alias.clone() {
             let mut ids = self
@@ -212,7 +212,7 @@ impl L1Cache {
         let cnt = self
             .insert_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if cnt % 100 == 0 {
+        if cnt.is_multiple_of(100) {
             self.maintenance();
         }
 
@@ -243,8 +243,8 @@ impl L1Cache {
             }
         }
 
-        if query.embedding().is_some() {
-            if self.sdr.is_enabled() {
+        if query.embedding().is_some()
+            && self.sdr.is_enabled() {
                 let sdr_results = self.sdr.search(query).ok().unwrap_or_default();
                 if let Some(&(id, _)) = sdr_results.first() {
                     if let Some(cached) = self.get_by_id_fast(id) {
@@ -253,7 +253,6 @@ impl L1Cache {
                     }
                 }
             }
-        }
 
         if let Some(text) = query.text() {
             if self.sdr.is_enabled() {

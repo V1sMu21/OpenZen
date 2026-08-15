@@ -41,7 +41,7 @@ impl Refiner {
     /// Check if a skill should be refined based on trigger conditions.
     pub fn should_refine(success_count: u32, quality: f32, version: u32, trigger: &RefineTrigger) -> bool {
         version < trigger.max_refinements
-            && (success_count > 0 && success_count % trigger.every_n_uses == 0
+            && (success_count > 0 && success_count.is_multiple_of(trigger.every_n_uses)
                 || quality < trigger.min_quality)
     }
 

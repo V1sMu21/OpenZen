@@ -9,6 +9,12 @@ pub struct L2Storage {
     subject_index: RwLock<HashMap<String, Vec<u64>>>,
 }
 
+impl Default for L2Storage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl L2Storage {
     pub fn new() -> Self {
         Self {
@@ -31,7 +37,7 @@ impl L2Storage {
             self.subject_index
                 .write()
                 .entry(fact.subject.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(id);
         }
         self.memories.write().insert(id, memory);

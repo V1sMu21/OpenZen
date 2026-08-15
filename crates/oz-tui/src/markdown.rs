@@ -114,6 +114,7 @@ fn strip_unwanted_tags(s: &str) -> String {
 // ── Block model ──
 
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 enum Block {
     Paragraph(String),
     Heading { level: u8, text: String },

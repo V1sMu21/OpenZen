@@ -22,6 +22,7 @@ use oz_platform::{AgentBridge, PlatformAdapter, PlatformContext, PlatformRegistr
 /// Scan `config_path` for `[platforms.*]` sections, create adapters for
 /// every enabled platform, and start them.  This is the single entry-point
 /// that lets the rest of the app be platform-agnostic.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub async fn discover_and_start_platforms(
     config_path: &str,
     working_dir: &str,
@@ -122,7 +123,7 @@ use std::path::PathBuf;
 
 pub async fn handle_platform_command(
     action: &crate::PlatformAction,
-    config_path: &PathBuf,
+    config_path: &Path,
 ) -> anyhow::Result<()> {
     match action {
         crate::PlatformAction::Add { name, app_id, app_secret, bot_token, model, allowed_users, proxy } => {
@@ -189,8 +190,8 @@ pub async fn handle_platform_command(
     }
 }
 
-fn resolve_config_path(cli_config: &PathBuf) -> PathBuf {
-    if cli_config.exists() { return cli_config.clone(); }
+fn resolve_config_path(cli_config: &Path) -> PathBuf {
+    if cli_config.exists() { return cli_config.to_path_buf(); }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let candidates = [
         PathBuf::from("config/mykey.toml"),

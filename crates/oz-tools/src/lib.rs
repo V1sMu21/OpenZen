@@ -36,6 +36,12 @@ pub struct LegacyRegistry {
     definitions: Vec<ToolDefinition>,
 }
 
+impl Default for LegacyRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LegacyRegistry {
     pub fn new() -> Self {
         LegacyRegistry { handlers: HashMap::new(), definitions: Vec::new() }

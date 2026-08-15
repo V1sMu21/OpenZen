@@ -7,6 +7,12 @@ use crate::registry::ToolHandler;
 
 pub struct WebExecuteJsTool { browser: Mutex<Option<BrowserClient>> }
 
+impl Default for WebExecuteJsTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebExecuteJsTool {
     pub fn new() -> Self { WebExecuteJsTool { browser: Mutex::new(None) } }
     pub fn set_browser(&self, client: BrowserClient) { *self.browser.lock().unwrap() = Some(client); }
@@ -53,6 +59,12 @@ impl ToolHandler for WebExecuteJsTool {
 }
 
 pub struct WebListTabsTool { browser: Mutex<Option<BrowserClient>> }
+
+impl Default for WebListTabsTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl WebListTabsTool {
     pub fn new() -> Self { WebListTabsTool { browser: Mutex::new(None) } }

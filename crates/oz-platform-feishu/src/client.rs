@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -79,14 +79,6 @@ struct FileUploadResponse {
 pub struct WsEndpointData {
     #[serde(rename = "URL")]
     pub url: Option<String>,
-    #[serde(rename = "ClientConfig")]
-    pub client_config: Option<WsClientConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct WsClientConfig {
-    #[serde(rename = "PingInterval")]
-    pub ping_interval: Option<i64>,
 }
 
 impl FeishuClient {
@@ -259,44 +251,6 @@ impl FeishuClient {
         }
     }
 
-    pub async fn download_image(
-        &self,
-        message_id: &str,
-        image_key: &str,
-    ) -> Result<(Vec<u8>, String), String> {
-        let token = self.get_token().await?;
-        let url = format!(
-            "{FEISHU_API_BASE}/im/v1/messages/{message_id}/resources/{image_key}?type=image"
-        );
-
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .map_err(|e| format!("download_image network error: {e}"))?;
-
-        if !resp.status().is_success() {
-            return Err(format!("download_image HTTP {}", resp.status()));
-        }
-
-        let filename = resp
-            .headers()
-            .get("content-disposition")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.split("filename=").nth(1))
-            .map(|s| s.trim_matches('"').to_string())
-            .unwrap_or_else(|| "image.jpg".into());
-
-        let data = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("download_image read error: {e}"))?;
-
-        Ok((data.to_vec(), filename))
-    }
-
     pub async fn send_raw(
         &self,
         receive_id: &str,
@@ -412,14 +366,7 @@ impl FeishuClient {
                 .and_then(|d| d.get("URL").or_else(|| d.get("url")))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let ping_interval = result.get("data")
-                .and_then(|d| d.get("ClientConfig").or_else(|| d.get("client_config")))
-                .and_then(|c| c.get("PingInterval").or_else(|| c.get("ping_interval")))
-                .and_then(|v| v.as_i64());
-            Ok(WsEndpointData {
-                url,
-                client_config: Some(WsClientConfig { ping_interval }),
-            })
+            Ok(WsEndpointData { url })
         } else {
             let msg = result.get("msg").and_then(|v| v.as_str()).unwrap_or("unknown");
             Err(format!("get_ws_endpoint failed: {code} {msg}"))

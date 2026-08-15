@@ -127,9 +127,11 @@ pub fn measure_usage(messages: &[Message]) -> UsageStats {
 }
 
 pub fn measure_usage_with_ratio(messages: &[Message], stored_ratio: Option<f64>) -> UsageStats {
-    let mut stats = UsageStats::default();
-    stats.message_count = messages.len();
-    stats.token_ratio = stored_ratio.unwrap_or(0.0);
+    let mut stats = UsageStats {
+        message_count: messages.len(),
+        token_ratio: stored_ratio.unwrap_or(0.0),
+        ..UsageStats::default()
+    };
 
     for msg in messages {
         for block in &msg.content {
@@ -156,7 +158,7 @@ fn content_block_len(block: &ContentBlock) -> usize {
             oz_core_types::ContentContainer::Text(t) => t.len(),
             oz_core_types::ContentContainer::Blocks(bs) => bs
                 .iter()
-                .map(|b| content_block_len(b))
+                .map(content_block_len)
                 .sum(),
         },
         _ => 0,
@@ -167,7 +169,7 @@ fn content_block_len(block: &ContentBlock) -> usize {
 /// appear in the preceding assistant message. Convert orphans to
 /// plain text so the LLM API doesn't reject them with
 /// "missing field tool_call_id".
-fn repair_orphaned_tool_results(messages: &mut Vec<Message>) {
+fn repair_orphaned_tool_results(messages: &mut [Message]) {
     let mut i = 0;
     while i < messages.len() {
         let msg = &messages[i];
@@ -202,7 +204,7 @@ fn repair_orphaned_tool_results(messages: &mut Vec<Message>) {
                             }).collect::<Vec<_>>().join("\n")
                         }
                     };
-                    *block = ContentBlock::text(&format!("[compressed tool output]: {text}"));
+                    *block = ContentBlock::text(format!("[compressed tool output]: {text}"));
                     repaired = true;
                 }
             }
@@ -282,8 +284,8 @@ pub fn compress_messages(
     let keep_recent = 2;
     let sys_offset = messages.iter().take_while(|m| m.role == Role::System).count();
     let trim_end = messages.len().saturating_sub(keep_recent);
-    for i in sys_offset..trim_end {
-        saved += trim_message_content(&mut messages[i], config, &stats);
+    for msg in &mut messages[sys_offset..trim_end] {
+        saved += trim_message_content(msg, config, &stats);
     }
 
     // Phase 3: If still over target, drop the oldest turns. Keep the
@@ -305,7 +307,7 @@ pub fn compress_messages(
     } else {
         messages.len() // fewer turns than the tail → nothing to drop
     };
-    let mut drop_start = sys_offset;
+    let drop_start = sys_offset;
     let mut removed: usize = 0;
     while drop_start < keep_start
         && messages.len() > drop_start + config.min_messages
@@ -348,7 +350,7 @@ fn trim_message_content(msg: &mut Message, config: &CompressionConfig, stats: &U
     };
     let char_budget = stats.tokens_to_chars(token_budget);
 
-    let original_len: usize = msg.content.iter().map(|b| content_block_len(b)).sum();
+    let original_len: usize = msg.content.iter().map(content_block_len).sum();
     if original_len <= char_budget {
         return 0;
     }
@@ -380,7 +382,7 @@ fn trim_message_content(msg: &mut Message, config: &CompressionConfig, stats: &U
 }
 
 /// Compress tool result content by truncating verbose outputs.
-fn compress_tool_results(messages: &mut Vec<Message>, budget: usize) -> usize {
+fn compress_tool_results(messages: &mut [Message], budget: usize) -> usize {
     let mut saved = 0;
     let mut accumulated = 0usize;
 
@@ -398,7 +400,7 @@ fn compress_tool_results(messages: &mut Vec<Message>, budget: usize) -> usize {
                     oz_core_types::ContentContainer::Text(t) => t.len(),
                     oz_core_types::ContentContainer::Blocks(bs) => bs
                         .iter()
-                        .map(|b| content_block_len(b))
+                        .map(content_block_len)
                         .sum(),
                 };
 
@@ -407,7 +409,7 @@ fn compress_tool_results(messages: &mut Vec<Message>, budget: usize) -> usize {
                     oz_core_types::ContentContainer::Text(t) => t.len(),
                     oz_core_types::ContentContainer::Blocks(bs) => bs
                         .iter()
-                        .map(|b| content_block_len(b))
+                        .map(content_block_len)
                         .sum(),
                 };
 
@@ -458,7 +460,7 @@ fn truncate_content(
             let mut used = 0usize;
             for block in bs {
                 if used >= budget {
-                    new_blocks.push(ContentBlock::text(&format!(
+                    new_blocks.push(ContentBlock::text(format!(
                         "[... {} more blocks truncated]",
                         bs.len() - new_blocks.len()
                     )));
@@ -513,7 +515,7 @@ fn sanitize_leading_message(msg: &mut Message) {
             _ => None,
         })
         .collect();
-    msg.content = vec![ContentBlock::text(&texts.join("\n"))];
+    msg.content = vec![ContentBlock::text(texts.join("\n"))];
 }
 
 /// Emergency compression — applies aggressive trimming immediately when
@@ -534,7 +536,7 @@ pub fn emergency_compress(
 
     let snapshot_before: Vec<serde_json::Value> = messages
         .iter()
-        .filter_map(|m| serde_json::to_value(&m).ok())
+        .filter_map(|m| serde_json::to_value(m).ok())
         .collect();
     let before_count = messages.len();
 
@@ -564,7 +566,7 @@ pub fn emergency_compress(
         let inject_at = messages.iter().position(|m| {
             m.role == Role::User || m.role == Role::Assistant
         }).unwrap_or(0);
-        messages.insert(inject_at, Message::system(&format!(
+        messages.insert(inject_at, Message::system(format!(
             "[Compression summary (emergency)]: {template}"
         )));
     }
@@ -662,7 +664,7 @@ impl CompressionService {
 /// ── Progressive merge helpers ──
 /// Used by `CompressionService::spawn_summary` to handle prompts too
 /// large for a single summary-model call.
-
+///
 /// Split text into paragraph-aligned chunks ≤ `max_chunk` chars each.
 fn split_into_chunks(text: &str, max_chunk: usize) -> Vec<String> {
     let mut chunks: Vec<String> = Vec::new();
@@ -733,7 +735,7 @@ async fn call_summary_llm(
          ### Recent Actions — last 2-3 tool calls and results\n\
          ### User Messages — clarifications, feedback, new instructions"
     };
-    let prompt = Message::user(&format!("{instruction}\n\n---\n\n{content}"));
+    let prompt = Message::user(format!("{instruction}\n\n---\n\n{content}"));
     let mut sc = oz_llm::NativeToolClient::new(backend);
     match tokio::time::timeout(
         std::time::Duration::from_secs(secs),
@@ -1049,7 +1051,7 @@ pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) 
                     && (lower.contains("error") || lower.contains("failed")
                         || lower.contains("exception") || lower.contains("traceback"))
                 {
-                    recent_errors.push(truncate_safe(&result_text, 220));
+                    recent_errors.push(truncate_safe(result_text, 220));
                 }
                 if !result_text.is_empty() && result_text != "written" && result_text != "ok" {
                     // Only add non-trivial results to actions
@@ -1074,7 +1076,7 @@ pub fn build_compression_summary(removed_messages: &[Value], working_dir: &str) 
     if !files.is_empty() {
         // Dedup and limit
         let mut seen = std::collections::HashSet::new();
-        let unique: Vec<&String> = files.iter().filter(|f| seen.insert(f.clone())).collect();
+        let unique: Vec<&String> = files.iter().filter(|f| seen.insert(*f)).collect();
         let limited = if unique.len() > 30 { &unique[..30] } else { &unique };
         parts.push(format!("## Files\n{}", limited.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")));
     }

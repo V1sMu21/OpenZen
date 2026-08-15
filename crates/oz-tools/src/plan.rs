@@ -8,8 +8,8 @@ pub fn definition() -> ToolDefinition {
     ToolDefinition {
         type_: "function".into(),
         function: ToolFunction {
-            name: tool.name().into(),
-            description: tool.description().into(),
+            name: tool.name(),
+            description: tool.description(),
             parameters: tool.parameters(),
         },
     }
@@ -97,7 +97,7 @@ impl ToolHandler for SubmitPlanTool {
                 "goal": goal,
                 "step_count": steps.len(),
             }),
-            &format!("\n[submit_plan] plan recorded: {} step(s) → todos (pending)", steps.len()),
+            format!("\n[submit_plan] plan recorded: {} step(s) → todos (pending)", steps.len()),
         ))
     }
 }

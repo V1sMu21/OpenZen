@@ -46,7 +46,7 @@ impl LlmError {
     pub fn is_retryable(&self) -> bool {
         match self {
             LlmError::HttpError { status, .. } => {
-                *status >= 400 && *status != 400 && *status != 401 && *status != 403
+                *status > 400 && *status != 401 && *status != 403
             }
             LlmError::RequestFailed(_) => true,
             LlmError::StreamError(_) => true,

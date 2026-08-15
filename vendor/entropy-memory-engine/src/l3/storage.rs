@@ -96,7 +96,7 @@ impl LogWriter {
             }
             // No handle available; truncate via the path instead.
             None => {
-                if fs::write(path, &[]).is_err() {
+                if fs::write(path, []).is_err() {
                     return;
                 }
             }
@@ -180,7 +180,7 @@ impl L3Storage {
                     .write()
                     .unwrap()
                     .entry(fact.subject.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(id);
             }
             self.memories.write().unwrap().insert(id, memory);
@@ -314,7 +314,7 @@ impl L3Storage {
     /// True when a compaction is due per the configured policy.
     fn compaction_due(&self) -> bool {
         let mutations = self.mutations.fetch_add(1, Ordering::Relaxed) + 1;
-        mutations % self.config.compact_interval == 0
+        mutations.is_multiple_of(self.config.compact_interval)
     }
 
     fn maybe_compact(&self) {
@@ -406,7 +406,7 @@ impl L3Storage {
             if let MemoryContent::Fact(ref fact) = mem.content {
                 subject_index
                     .entry(fact.subject.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(*id);
             }
         }

@@ -72,20 +72,20 @@ impl SmartRouterSession {
         router
     }
 
-    fn pick(&self, prompt: &str, tools: &[ToolDefinition]) -> &Box<dyn Session> {
+    fn pick(&self, prompt: &str, tools: &[ToolDefinition]) -> &dyn Session {
         let lower = prompt.to_lowercase();
         for (pattern, session) in &self.route_rules {
             if lower.contains(&pattern.to_lowercase()) {
                 tracing::info!("[SmartRouter] route rule match '{}' -> {}", pattern, session.model());
-                return session;
+                return &**session;
             }
         }
         if estimate_complexity(prompt, tools) == Complexity::Simple {
             self.cheap_count.fetch_add(1, Ordering::Relaxed);
-            &self.cheap
+            &*self.cheap
         } else {
             self.flagship_count.fetch_add(1, Ordering::Relaxed);
-            &self.flagship
+            &*self.flagship
         }
     }
 

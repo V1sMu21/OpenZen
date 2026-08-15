@@ -72,9 +72,11 @@ pub struct SessionStore {
 /// collapses into a single disk write, and serialisation never blocks the
 /// IPC thread. Stores built with `SessionStore::new()` (no path, e.g. in
 /// tests) keep the old synchronous write path.
+type PersistSlot = (PathBuf, HashMap<String, SessionEntry>);
+
 struct PersistWriter {
     wake: Sender<()>,
-    slot: Arc<Mutex<Option<(PathBuf, HashMap<String, SessionEntry>)>>>,
+    slot: Arc<Mutex<Option<PersistSlot>>>,
     /// Snapshots submitted but not yet written (or discarded). `reload()`
     /// must skip while this is non-zero: the on-disk file is older than
     /// memory in that window and reloading would clobber newer state.
@@ -84,7 +86,7 @@ struct PersistWriter {
 impl PersistWriter {
     fn spawn() -> Self {
         let (wake, rx) = mpsc::channel::<()>();
-        let slot: Arc<Mutex<Option<(PathBuf, HashMap<String, SessionEntry>)>>> =
+        let slot: Arc<Mutex<Option<PersistSlot>>> =
             Arc::new(Mutex::new(None));
         let pending = Arc::new(AtomicU64::new(0));
         let worker_slot = Arc::clone(&slot);
@@ -126,6 +128,12 @@ impl PersistWriter {
         *self.slot.lock().unwrap() = Some((path, sessions));
         self.pending.fetch_add(1, Ordering::SeqCst);
         let _ = self.wake.send(());
+    }
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

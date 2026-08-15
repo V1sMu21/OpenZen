@@ -177,10 +177,8 @@ impl Message {
 
     /// Mark last user block with cache_control: ephemeral (Claude prompt caching).
     pub fn mark_cache_control(&mut self) {
-        if let Some(last) = self.content.last_mut() {
-            if let ContentBlock::Text { ref mut cache_control, .. } = last {
-                let _ = cache_control.insert(CacheControl { type_: "ephemeral".into() });
-            }
+        if let Some(ContentBlock::Text { ref mut cache_control, .. }) = self.content.last_mut() {
+            let _ = cache_control.insert(CacheControl { type_: "ephemeral".into() });
         }
     }
 }

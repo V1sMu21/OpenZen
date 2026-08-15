@@ -87,7 +87,7 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
     let doc_keywords = ["document", "文档", "spec", "说明", "readme"];
     if doc_keywords.iter().any(|k| content.to_lowercase().contains(k)) {
         // Try to find a recently created .md or .txt file in working_dir
-        if let Some(_path) = find_recent_doc(&working_dir.to_string()) {
+        if let Some(_path) = find_recent_doc(working_dir) {
             return VerifyResult::Passed;
         }
         return VerifyResult::Failed(
@@ -220,11 +220,10 @@ fn file_exists_recursive(dir: &Path, target: &str, max_depth: u32) -> bool {
             if file_exists_recursive(&path, target, max_depth - 1) {
                 return true;
             }
-        } else if path.is_file() {
-            if path.file_name().map(|n| n.to_string_lossy() == target).unwrap_or(false) {
+        } else if path.is_file()
+            && path.file_name().map(|n| n.to_string_lossy() == target).unwrap_or(false) {
                 return true;
             }
-        }
     }
     false
 }

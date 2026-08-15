@@ -49,28 +49,14 @@ struct QrStatusResponse {
 #[derive(Debug, Deserialize)]
 struct UpdatesResponse {
     errcode: Option<i32>,
-    errmsg: Option<String>,
     get_updates_buf: Option<String>,
     msgs: Option<Vec<serde_json::Value>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SendMessageResponse {
-    errcode: Option<i32>,
-    errmsg: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GetConfigResponse {
-    typing_ticket: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GetUploadUrlResponse {
     upload_param: Option<String>,
     upload_full_url: Option<String>,
-    thumb_upload_param: Option<String>,
-    thumb_upload_full_url: Option<String>,
 }
 
 impl WxBotClient {
@@ -269,41 +255,6 @@ impl WxBotClient {
         Ok(())
     }
 
-    pub async fn send_typing(
-        &self,
-        to_user_id: &str,
-        typing_ticket: &str,
-       cancel: bool,
-    ) -> Result<(), String> {
-        let body = serde_json::json!({
-            "ilink_user_id": to_user_id,
-            "typing_ticket": typing_ticket,
-            "status": if cancel { 2 } else { 1 },
-            "base_info": { "channel_version": "2.1.10" },
-        });
-        self.post("ilink/bot/sendtyping", &body, Some(10)).await?;
-        Ok(())
-    }
-
-    pub async fn get_typing_ticket(
-        &self,
-        to_user_id: &str,
-        context_token: &str,
-    ) -> Result<String, String> {
-        let mut payload = serde_json::json!({
-            "ilink_user_id": to_user_id,
-        });
-        if !context_token.is_empty() {
-            payload["context_token"] = serde_json::Value::String(context_token.to_string());
-        }
-
-        let data = self
-            .post("ilink/bot/getconfig", &payload, Some(10))
-            .await?;
-        let result: GetConfigResponse = serde_json::from_value(data)
-            .map_err(|e| format!("getconfig parse error: {e}"))?;
-        Ok(result.typing_ticket.unwrap_or_default())
-    }
 
     pub async fn send_image(
         &self,
@@ -341,7 +292,7 @@ impl WxBotClient {
         let ciphertext_size = ((raw.len() / 16) + 1) * 16;
 
         let md5 = format!("{:x}", md5::compute(&raw));
-        let mut body = serde_json::json!({
+        let body = serde_json::json!({
             "filekey": filekey,
             "media_type": media_type,
             "to_user_id": to_user_id,
@@ -419,7 +370,7 @@ impl WxBotClient {
             item["len"] = serde_json::Value::String(raw.len().to_string());
         }
 
-        let mut msg_body = serde_json::json!({
+        let msg_body = serde_json::json!({
             "msg": {
                 "from_user_id": "",
                 "to_user_id": to_user_id,
@@ -471,7 +422,7 @@ impl WxBotClient {
     }
 
     fn build_headers(&self) -> reqwest::header::HeaderMap {
-        use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT};
+        use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(

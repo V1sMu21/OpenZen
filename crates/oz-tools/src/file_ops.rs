@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use async_trait::async_trait;
-use oz_core_types::{ImageRef, ToolContext, ToolDefinition, ToolError, ToolFunction, ToolOutput};
+use oz_core_types::{ToolContext, ToolDefinition, ToolError, ToolFunction, ToolOutput};
 
 use crate::registry::ToolHandler;
 
@@ -513,8 +513,8 @@ fn def_for(t: &dyn ToolHandler) -> ToolDefinition {
     ToolDefinition {
         type_: "function".into(),
         function: ToolFunction {
-            name: t.name().into(),
-            description: t.description().into(),
+            name: t.name(),
+            description: t.description(),
             parameters: t.parameters(),
         },
     }

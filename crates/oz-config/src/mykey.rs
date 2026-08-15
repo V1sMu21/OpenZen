@@ -62,14 +62,13 @@ fn default_context_win() -> usize {
 /// API mode for OpenAI-compatible endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ApiMode {
+    #[default]
     ChatCompletions,
     Responses,
 }
 
-impl Default for ApiMode {
-    fn default() -> Self { ApiMode::ChatCompletions }
-}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MyKeyConfig {

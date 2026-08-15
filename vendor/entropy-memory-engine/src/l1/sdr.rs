@@ -111,7 +111,7 @@ impl SDRCache {
     }
 
     fn text_to_hypervector(&self, text: &str) -> Vec<u64> {
-        let n_words = (self.config.dimension + 63) / 64;
+        let n_words = self.config.dimension.div_ceil(64);
         let mut hv = vec![0u64; n_words];
 
         for chunk in text.as_bytes().chunks(8) {

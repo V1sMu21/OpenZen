@@ -170,12 +170,10 @@ impl StalenessChecker {
             }
             // For sops: remove the .md file
             if category == "sops" {
-                for entry in std::fs::read_dir(parent).unwrap_or_else(|_| std::fs::read_dir(".").unwrap()) {
-                    if let Ok(entry) = entry {
-                        let path = entry.path();
-                        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                            let _ = std::fs::remove_file(&path);
-                        }
+                for entry in std::fs::read_dir(parent).unwrap_or_else(|_| std::fs::read_dir(".").unwrap()).flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                        let _ = std::fs::remove_file(&path);
                     }
                 }
             }
@@ -190,11 +188,10 @@ impl StalenessChecker {
 
         if auto_remove {
             for item in &items {
-                if matches!(item.recommendation, StaleAction::Remove) {
-                    if self.remove_artifact(&item.category, &item.name).is_ok() {
+                if matches!(item.recommendation, StaleAction::Remove)
+                    && self.remove_artifact(&item.category, &item.name).is_ok() {
                         removed += 1;
                     }
-                }
             }
         }
 

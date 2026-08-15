@@ -62,6 +62,7 @@ impl Default for DaemonConfig {
 }
 
 impl DaemonConfig {
+    #[allow(clippy::type_complexity)]
     pub fn new_command_channel() -> (watch::Sender<Option<DaemonCommand>>, Arc<Mutex<watch::Receiver<Option<DaemonCommand>>>>) {
         let (cmd_tx, cmd_rx) = watch::channel(None);
         (cmd_tx, Arc::new(Mutex::new(cmd_rx)))
@@ -80,7 +81,6 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
     if config.dir.join(oz_skill_mcp::SKILL_MCP_DIR).exists() {
         scheduler.register(Box::new(oz_scheduler::SkillMcpScan::default()));
     }
-    let shutdown = scheduler.shutdown_signal();
     tokio::spawn(scheduler.run());
 
     // Write PID file if requested

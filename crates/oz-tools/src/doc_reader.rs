@@ -97,11 +97,11 @@ fn read_xlsx(path: &str, start: usize, count: usize) -> Result<serde_json::Value
         if let Ok(range) = workbook.worksheet_range(sheet_name) {
             output.push_str(&format!("\n## Sheet: {sheet_name}\n\n"));
 
-            let mut rows_iter = range.rows();
+            let rows_iter = range.rows();
             let mut is_first = true;
             let mut col_count = 0;
 
-            while let Some(row) = rows_iter.next() {
+            for row in rows_iter {
                 if col_count == 0 {
                     col_count = row.len();
                 }
@@ -113,7 +113,7 @@ fn read_xlsx(path: &str, start: usize, count: usize) -> Result<serde_json::Value
                     output.push_str("| ");
                     output.push_str(&cells.join(" | "));
                     output.push_str(" |\n");
-                    output.push_str("|");
+                    output.push('|');
                     for _ in 0..col_count {
                         output.push_str(" --- |");
                     }
@@ -168,12 +168,9 @@ fn extract_docx_text(xml: &str) -> String {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                match name.as_str() {
-                    "w:p" => {
-                        in_paragraph = true;
-                        para_text.clear();
-                    }
-                    _ => {}
+                if name.as_str() == "w:p" {
+                    in_paragraph = true;
+                    para_text.clear();
                 }
             }
             Ok(Event::End(ref e)) => {
@@ -187,13 +184,12 @@ fn extract_docx_text(xml: &str) -> String {
                     }
                 }
             }
-            Ok(Event::Text(ref e)) => {
-                if in_paragraph {
+            Ok(Event::Text(ref e))
+                if in_paragraph => {
                     if let Ok(t) = e.unescape() {
                         para_text.push_str(&t);
                     }
                 }
-            }
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}

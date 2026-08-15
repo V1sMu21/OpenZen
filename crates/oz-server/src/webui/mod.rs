@@ -274,7 +274,7 @@ fn reconstruct_assistant_turn(
         match evt_type {
             "text_start" => {
                 if let Some(id) = ev.get("id").and_then(|v| v.as_str()) {
-                    text_acc.entry(id.to_string()).or_insert_with(String::new);
+                    text_acc.entry(id.to_string()).or_default();
                 }
             }
             "text_delta" => {
@@ -293,7 +293,7 @@ fn reconstruct_assistant_turn(
             }
             "reasoning_start" => {
                 if let Some(id) = ev.get("id").and_then(|v| v.as_str()) {
-                    reasoning_acc.entry(id.to_string()).or_insert_with(String::new);
+                    reasoning_acc.entry(id.to_string()).or_default();
                 }
             }
             "reasoning_delta" => {
@@ -680,6 +680,7 @@ async fn handle_chat(
 
 /// Run the agent loop for a session, broadcasting events via SSE.
 /// Returns the full response text if available.
+#[allow(clippy::too_many_arguments, clippy::field_reassign_with_default)]
 async fn run_agent_for_session(
     state: &AppState,
     session_id: &str,
@@ -710,7 +711,7 @@ async fn run_agent_for_session(
 
     // Use default session, or the one specified by model_name
     let session_name = model_name
-        .or_else(|| cfg.default_session.as_deref())
+        .or(cfg.default_session.as_deref())
         .unwrap_or("claude_sonnet");
     let sess_config = cfg.get(session_name)
         .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found in config"))?;
@@ -1175,7 +1176,7 @@ async fn run_agent_for_session(
                     }
                     if let Some(tools) = data.get("tool_calls").and_then(|v| v.as_array()) {
                         if !tools.is_empty() {
-                            let arr: Vec<serde_json::Value> = tools.iter().cloned().collect();
+                            let arr: Vec<serde_json::Value> = tools.to_vec();
                             msg["toolCalls"] = serde_json::Value::Array(arr);
                         }
                     }
@@ -1554,7 +1555,7 @@ async fn handle_compress(
             };
             if let Some(backend) = backend {
                 let mut client = oz_llm::NativeToolClient::new(backend);
-                let prompt = Message::user(&format!(
+                let prompt = Message::user(format!(
                     "Summarize what was discussed in these conversation fragments \
                      in ONE short sentence (max 30 words). Do NOT re-execute or \
                      continue the conversation.\n\n{summary}"
@@ -1619,7 +1620,7 @@ async fn handle_regenerate(
             .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Session {id} not found")))?;
         let msgs = &mut session.messages;
         // Pop last assistant message
-        while msgs.last().map_or(false, |m| m.get("role").and_then(|v| v.as_str()) == Some("assistant")) {
+        while msgs.last().is_some_and(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant")) {
             msgs.pop();
         }
         // Pop last user message and save it

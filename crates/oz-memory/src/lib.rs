@@ -86,7 +86,7 @@ impl MemorySystem {
         for entry in std::fs::read_dir(&self.memory_dir).map_err(MemoryError::Io)? {
             let entry = entry.map_err(MemoryError::Io)?;
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "md" || e == "txt") {
+            if path.extension().is_some_and(|e| e == "md" || e == "txt") {
                 let fname = path.file_name().unwrap_or_default().to_string_lossy();
                 if fname != "global_mem_insight.txt" && fname != "global_mem.txt" {
                     sops.push(path);

@@ -296,7 +296,7 @@ impl MemoryLayer for MemoryRouter {
 
     fn could_contain(&self, query: &Query) -> bool {
         if query.hash_key().is_some() {
-            return self.l1.len() > 0 || self.l2.len() > 0 || self.l3.len() > 0;
+            return !self.l1.is_empty() || self.l2.len() > 0 || self.l3.len() > 0;
         }
         if query.text().is_some() {
             return self.l2.len() > 0 || self.l3.len() > 0;

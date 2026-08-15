@@ -85,7 +85,7 @@ impl Session for OaiSession {
                             .bearer_auth(&cfg.apikey)
                             .json(&payload)
                             .send().await
-                            .map_err(|e| LlmError::RequestFailed(e))?;
+                            .map_err(LlmError::RequestFailed)?;
                         let status = resp.status().as_u16();
                         if status >= 400 {
                             let body = resp.text().await.unwrap_or_default();
@@ -146,7 +146,7 @@ impl Session for OaiSession {
                             .bearer_auth(&cfg.apikey)
                             .json(&payload)
                             .send().await
-                            .map_err(|e| LlmError::RequestFailed(e))?;
+                            .map_err(LlmError::RequestFailed)?;
                         let status = resp.status().as_u16();
                         if status >= 400 {
                             let body = resp.text().await.unwrap_or_default();

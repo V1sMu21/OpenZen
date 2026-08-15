@@ -20,7 +20,7 @@ pub struct NativeClaudeSession {
 
 impl NativeClaudeSession {
     pub fn new(config: SessionConfig) -> Self {
-        let device_id = format!("{}{}", uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
+        let device_id = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         NativeClaudeSession {
             config,
             history: Mutex::new(Vec::new()),
@@ -49,12 +49,10 @@ impl Session for NativeClaudeSession {
         let url = format!("{}/v1/messages?beta=true", self.config.apibase.trim_end_matches('/'));
         let model = self.config.model.clone();
 
-        let beta_parts = vec![
-            "claude-code-20250219",
+        let beta_parts = ["claude-code-20250219",
             "interleaved-thinking-2025-05-14",
             "redact-thinking-2026-02-12",
-            "prompt-caching-scope-2026-01-05",
-        ];
+            "prompt-caching-scope-2026-01-05"];
 
         let cfg_clone = self.config.clone();
         let tools = self.tools.clone();
@@ -130,7 +128,7 @@ impl Session for NativeClaudeSession {
 
                     let client = crate::build_http_client(&cfg.apibase, 600);
                     let resp = client.post(&url).headers(headers).json(&payload).send().await
-                        .map_err(|e| LlmError::RequestFailed(e))?;
+                        .map_err(LlmError::RequestFailed)?;
                     let status = resp.status().as_u16();
                     if status >= 400 {
                         let body = resp.text().await.unwrap_or_default();
@@ -157,12 +155,10 @@ impl Session for NativeClaudeSession {
         let url = format!("{}/v1/messages?beta=true", self.config.apibase.trim_end_matches('/'));
         let model = self.config.model.clone();
 
-        let beta_parts = vec![
-            "claude-code-20250219",
+        let beta_parts = ["claude-code-20250219",
             "interleaved-thinking-2025-05-14",
             "redact-thinking-2026-02-12",
-            "prompt-caching-scope-2026-01-05",
-        ];
+            "prompt-caching-scope-2026-01-05"];
 
         let cfg_clone = self.config.clone();
         let tools = self.tools.clone();
@@ -241,7 +237,7 @@ impl Session for NativeClaudeSession {
 
                     let client = crate::build_http_client(&cfg.apibase, 600);
                     let resp = client.post(&url).headers(headers).json(&payload).send().await
-                        .map_err(|e| LlmError::RequestFailed(e))?;
+                        .map_err(LlmError::RequestFailed)?;
                     let status = resp.status().as_u16();
                     if status >= 400 {
                         let body = resp.text().await.unwrap_or_default();

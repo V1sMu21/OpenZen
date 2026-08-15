@@ -435,7 +435,7 @@ impl ReflectionEngine {
 
     fn rebuild_narrative(&self) {
         let since = self.soul.read().unwrap().narrative.last_rebuilt_nanos;
-        let narrative = self.narrative.build(&self.store.router().l3(), since);
+        let narrative = self.narrative.build(self.store.router().l3(), since);
         let mut soul = self.soul.write().unwrap();
         if !narrative.chapters.is_empty() {
             soul.narrative = narrative;

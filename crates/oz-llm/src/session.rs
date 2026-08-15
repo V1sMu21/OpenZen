@@ -37,8 +37,8 @@ pub trait Session: Send + Sync {
         let mut reasoning_id: Option<String> = None;
         for block in &blocks {
             match block {
-                ContentBlock::Text { text, .. } => {
-                    if !text.is_empty() {
+                ContentBlock::Text { text, .. }
+                    if !text.is_empty() => {
                         if text_id.is_none() {
                             let id = format!("t_fallback_{}", uuid::Uuid::new_v4());
                             let _ = event_tx.send(StreamEvent::TextStart { id: id.clone() });
@@ -51,9 +51,8 @@ pub trait Session: Send + Sync {
                             });
                         }
                     }
-                }
-                ContentBlock::Thinking { thinking, .. } => {
-                    if !thinking.is_empty() {
+                ContentBlock::Thinking { thinking, .. }
+                    if !thinking.is_empty() => {
                         if reasoning_id.is_none() {
                             let id = format!("r_fallback_{}", uuid::Uuid::new_v4());
                             let _ = event_tx.send(StreamEvent::ReasoningStart { id: id.clone() });
@@ -66,7 +65,6 @@ pub trait Session: Send + Sync {
                             });
                         }
                     }
-                }
                 _ => {}
             }
         }

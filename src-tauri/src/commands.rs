@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use oz_config::mykey::{MyKeyConfig, SessionType};
 use oz_core_types::{LlmClient, Message};
-use oz_llm;
 use oz_server::webui::sessions::{SessionInfo, SessionStatus, SessionStore};
 use oz_server::webui::sse_bus::SseEvent;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -523,7 +522,7 @@ fn checkpoint_messages_to_store(
                     "id": tid,
                 }));
             }
-            for (i, tu) in tool_uses.iter().enumerate() {
+            for tu in tool_uses.iter() {
                 let tc_id = tu.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let name = tu.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let input = tu.get("input").unwrap_or(&serde_json::Value::Null);
@@ -886,7 +885,7 @@ pub async fn send_message(
             }
             let _ = app_clone.emit(
                 "sse_event",
-                serde_json::to_value(&SseEvent::error(&session_id_clone, &e.to_string()))
+                serde_json::to_value(SseEvent::error(&session_id_clone, &e.to_string()))
                     .unwrap_or_default(),
             );
         }
@@ -954,7 +953,7 @@ pub async fn regenerate(
             debug_log(&format!("regenerate agent error: {e}"));
             let _ = app_clone.emit(
                 "sse_event",
-                serde_json::to_value(&SseEvent::error(&sid, &e.to_string())).unwrap_or_default(),
+                serde_json::to_value(SseEvent::error(&sid, &e.to_string())).unwrap_or_default(),
             );
         }
         let my_id = tokio::task::try_id();
@@ -1046,7 +1045,7 @@ pub async fn resume_session(
             debug_log(&format!("resume_agent error: {e}"));
             let _ = app_clone.emit(
                 "sse_event",
-                serde_json::to_value(&SseEvent::error(&sid, &e.to_string())).unwrap_or_default(),
+                serde_json::to_value(SseEvent::error(&sid, &e.to_string())).unwrap_or_default(),
             );
         }
         let my_id = tokio::task::try_id();
@@ -1094,7 +1093,7 @@ pub fn ask_user_response(
     *lock_poison_guard(&slot) = Some(response);
     let _ = app_handle.emit(
         "sse_event",
-        serde_json::to_value(&SseEvent::system(
+        serde_json::to_value(SseEvent::system(
             &session_id,
             "ask_user reply received; agent resuming the same run",
         ))
@@ -1347,7 +1346,7 @@ async fn generate_compact_summary(state: &AppState, template: &str) -> Option<St
         _ => return None,
     };
     let mut client = oz_llm::NativeToolClient::new(backend);
-    let prompt = Message::user(&format!(
+    let prompt = Message::user(format!(
         "Summarize what was discussed in these conversation fragments \
          in ONE short sentence (max 30 words). Do NOT re-execute or \
          continue the conversation.\n\n{template}"
@@ -1391,6 +1390,7 @@ pub fn set_locale(
 
 /// Add or update a messaging platform configuration in mykey.toml.
 /// Agent calls this once with credentials — no TOML editing needed.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn add_platform(
     state: State<'_, Arc<AppState>>,

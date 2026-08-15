@@ -181,6 +181,12 @@ impl CompressedMemory {
 
 pub struct NoopCompressor;
 
+impl Default for NoopCompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NoopCompressor {
     pub fn new() -> Self {
         Self
@@ -258,7 +264,7 @@ pub(crate) fn check_mlx_available() -> bool {
             .arg("import mlx.core; from mlx_lm import load, generate; print('ok')")
             .output()
             .ok()
-            .map_or(false, |out| {
+            .is_some_and(|out| {
                 out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "ok"
             })
     })

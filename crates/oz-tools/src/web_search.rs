@@ -123,7 +123,7 @@ fn find_mcporter(working_dir: &str) -> Result<String, String> {
     if from_wd.exists() {
         return Ok(from_wd.to_string_lossy().to_string());
     }
-    Err(format!("mcporter not found. Install via: brew install mcporter, or set MCPORTER_PATH env var"))
+    Err("mcporter not found. Install via: brew install mcporter, or set MCPORTER_PATH env var".to_string())
 }
 
 fn search_exa(query: &str, num_results: usize, working_dir: &str) -> Result<Vec<serde_json::Value>, String> {

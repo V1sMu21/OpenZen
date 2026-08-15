@@ -112,10 +112,7 @@ pub async fn run_tui(
         if let Some(raw) = cfg.tui.right_prompt {
             app.right_prompt = Some(crate::template::PromptTemplate::new(raw));
         }
-        match cfg.tui.theme.as_deref() {
-            Some("light") => app.theme = crate::theme::Theme::light(),
-            _ => {}
-        }
+        if let Some("light") = cfg.tui.theme.as_deref() { app.theme = crate::theme::Theme::light() }
         let cfg_ref = crate::theme::ThemeConfig {
             user_fg: cfg.tui.theme_overrides.user_fg,
             agent_fg: cfg.tui.theme_overrides.agent_fg,

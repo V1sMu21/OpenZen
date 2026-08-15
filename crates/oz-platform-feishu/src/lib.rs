@@ -162,7 +162,7 @@ impl FeishuAdapter {
                     // drops it mid-task.
                     let ack = crate::frame::encode_ack_frame(frame.method);
                     if let Err(e) = write
-                        .send(tokio_tungstenite::tungstenite::Message::Binary(ack.into()))
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(ack))
                         .await
                     {
                         return Err(format!("ping ack error: {e}"));
@@ -268,12 +268,11 @@ async fn process_event(
             .and_then(|v| v.as_str()).unwrap_or("")
     };
 
-    if sender_type.is_empty() || sender_type != "user" {
-        if !sender_type.is_empty() {
+    if (sender_type.is_empty() || sender_type != "user")
+        && !sender_type.is_empty() {
             eprintln!("[feishu:{instance_id}] skip non-user message: sender_type={sender_type}, sender_id={sender_id}");
             return;
         }
-    }
 
     if !bot_open_id.is_empty() && sender_id == bot_open_id {
         return;
@@ -469,6 +468,7 @@ async fn stream_to_feishu_card(
 
 /// Handle a slash-command. Returns the session_id to use for this message,
 /// or None if the command was fully handled and no agent should be started.
+#[allow(clippy::too_many_arguments)]
 async fn handle_feishu_command(
     agent: &Arc<AgentBridge>,
     client: &FeishuClient,
@@ -520,7 +520,3 @@ async fn handle_feishu_command(
     }
 }
 
-fn base64_url_encode(input: &str) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input.as_bytes())
-}

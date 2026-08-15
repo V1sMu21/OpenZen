@@ -71,8 +71,7 @@ impl Sop {
 
         let content_body: String = lines
             .iter()
-            .filter(|l| !l.to_lowercase().starts_with("tags:"))
-            .map(|l| *l)
+            .filter(|l| !l.to_lowercase().starts_with("tags:")).copied()
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -228,7 +227,7 @@ impl SopStore {
                 terms.iter().any(|t| haystack.contains(t))
             })
             .collect();
-        results.sort_by(|a, b| b.success_count.cmp(&a.success_count));
+        results.sort_by_key(|r| std::cmp::Reverse(r.success_count));
         results
     }
 
@@ -265,6 +264,11 @@ impl SopStore {
     /// Number of registered SOPs.
     pub fn len(&self) -> usize {
         self.sops.len()
+    }
+
+    /// Whether no SOPs are registered.
+    pub fn is_empty(&self) -> bool {
+        self.sops.is_empty()
     }
 
     /// Get a SOP by name.

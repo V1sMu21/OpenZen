@@ -157,8 +157,8 @@ fn read_i32_from_bytes(data: &[u8]) -> i32 {
     let mut value: u64 = 0;
     let mut shift = 0;
     let total = data.len().min(10);
-    for i in 0..total {
-        value |= ((data[i] & 0x7f) as u64) << shift;
+    for &b in &data[..total] {
+        value |= ((b & 0x7f) as u64) << shift;
         shift += 7;
     }
     value as i32
@@ -176,7 +176,7 @@ fn write_varint(value: u64, buf: &mut Vec<u8>) {
 }
 
 fn write_field_varint(field_num: u32, value: i32, buf: &mut Vec<u8>) {
-    let tag = (field_num << 3) | 0; // wire_type 0 = varint
+    let tag = field_num << 3; // wire_type 0 = varint
     write_varint(tag as u64, buf);
     write_varint(value as u64, buf);
 }

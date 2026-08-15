@@ -26,6 +26,7 @@ pub struct MmapWal {
 
 impl MmapWal {
     /// Create or open a WAL for the given session.
+    #[allow(clippy::suspicious_open_options)] // read-modify-write, not truncate
     pub fn open(dir: &Path, session_id: &str) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let safe = sanitize_session_id(session_id);
@@ -402,7 +403,7 @@ pub fn list_session_checkpoints(dir: &Path, session_id: &str) -> Vec<CheckpointM
 
     let mut metas: Vec<CheckpointMeta> = Vec::new();
     for path in &paths {
-        if let Some(data) = std::fs::read_to_string(path).ok() {
+        if let Ok(data) = std::fs::read_to_string(path) {
             if let Ok(cp) = serde_json::from_str::<LoopCheckpoint>(&data) {
                 let filename = path.file_name()
                     .and_then(|n| n.to_str())
@@ -420,7 +421,7 @@ pub fn list_session_checkpoints(dir: &Path, session_id: &str) -> Vec<CheckpointM
         }
     }
 
-    metas.sort_by(|a, b| a.turn.cmp(&b.turn));
+    metas.sort_by_key(|a| a.turn);
     metas
 }
 
@@ -430,7 +431,7 @@ pub fn list_all_checkpoints(dir: &Path) -> Vec<CheckpointMeta> {
     let mut metas: Vec<CheckpointMeta> = Vec::new();
 
     for path in &paths {
-        if let Some(data) = std::fs::read_to_string(path).ok() {
+        if let Ok(data) = std::fs::read_to_string(path) {
             if let Ok(cp) = serde_json::from_str::<LoopCheckpoint>(&data) {
                 let filename = path.file_name()
                     .and_then(|n| n.to_str())
@@ -448,7 +449,7 @@ pub fn list_all_checkpoints(dir: &Path) -> Vec<CheckpointMeta> {
         }
     }
 
-    metas.sort_by(|a, b| a.turn.cmp(&b.turn));
+    metas.sort_by_key(|a| a.turn);
     metas
 }
 

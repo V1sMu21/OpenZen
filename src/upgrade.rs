@@ -339,10 +339,8 @@ pub async fn perform_upgrade(config: &UpgradeConfig) -> UpgradeResult {
 
 /// Find an available port starting from the given one.
 fn pick_available_port(start: u16) -> Option<u16> {
-    for port in start..=start + 100 {
-        if is_port_available(port) {
-            return Some(port);
-        }
+    if let Some(port) = (start..=start + 100).find(|&p| is_port_available(p)) {
+        return Some(port);
     }
     None
 }

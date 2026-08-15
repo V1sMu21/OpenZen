@@ -45,7 +45,7 @@ fn read_wasm_string(memory: &Memory, store: &Store<()>, ptr: i32) -> Result<Stri
     loop {
         let mut buf = [0u8; 1];
         memory
-            .read(&*store, addr, &mut buf)
+            .read(store, addr, &mut buf)
             .map_err(|e| PluginError::StringRead(e.to_string()))?;
         if buf[0] == 0 {
             break;
@@ -57,10 +57,10 @@ fn read_wasm_string(memory: &Memory, store: &Store<()>, ptr: i32) -> Result<Stri
 }
 
 fn ensure_memory_size(memory: &mut Memory, store: &mut Store<()>, needed: u64) -> Result<(), PluginError> {
-    let current_size = memory.size(&*store) as u64 * WASM_PAGE_SIZE;
+    let current_size = memory.size(&*store) * WASM_PAGE_SIZE;
     if needed > current_size {
-        let pages_needed = (needed + WASM_PAGE_SIZE - 1) / WASM_PAGE_SIZE;
-        let grow_by = pages_needed - memory.size(&*store) as u64;
+        let pages_needed = needed.div_ceil(WASM_PAGE_SIZE);
+        let grow_by = pages_needed - memory.size(&*store);
         memory.grow(&mut *store, grow_by).map_err(|e| {
             PluginError::Runtime(format!("Failed to grow memory: {e}"))
         })?;

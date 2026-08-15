@@ -1,11 +1,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum TaskPriority {
+    #[default]
     Critical,
     Low,
 }
 
-impl Default for TaskPriority {
-    fn default() -> Self {
-        TaskPriority::Critical
-    }
-}

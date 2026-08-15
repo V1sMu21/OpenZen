@@ -14,6 +14,12 @@ pub struct PlatformRegistry {
     shutdown: Arc<AtomicBool>,
 }
 
+impl Default for PlatformRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PlatformRegistry {
     pub fn new() -> Self {
         PlatformRegistry {
@@ -40,7 +46,7 @@ impl PlatformRegistry {
     /// reset to 5s after 5 minutes of healthy uptime) instead of taking
     /// the channel offline until the whole app restarts. 7x24 safety net.
     pub fn start_all(&mut self, ctx: PlatformContext) {
-        for adapter in self.adapters.values().cloned() {
+        for adapter in self.adapters.values() {
             let ctx_clone = ctx.clone();
             let adapter_clone = adapter.clone();
             let shutdown = self.shutdown.clone();

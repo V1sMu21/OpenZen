@@ -91,7 +91,7 @@ impl Session for ClaudeSession {
                         .json(&payload)
                         .send()
                         .await
-                        .map_err(|e| LlmError::RequestFailed(e))?;
+                        .map_err(LlmError::RequestFailed)?;
 
                     let status = resp.status().as_u16();
                     if status >= 400 {

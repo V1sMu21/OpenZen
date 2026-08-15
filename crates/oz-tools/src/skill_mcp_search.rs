@@ -175,7 +175,7 @@ impl ToolHandler for SkillMcpSearchTool {
                 p.push_str(&format!("--- Result {}/{} [{kind}] **{name}** — {desc} ---\n\n", i+1, results.len()));
             }
             // Append full skill content for matched skills
-            for (i, skill) in skills.iter().take(max).enumerate() {
+            for skill in skills.iter().take(max) {
                 let snippet = skill.to_full_content();
                 // Guard: cap at ~3000 chars to prevent runaway tokens from huge skills
                 let max_chars = 3000;

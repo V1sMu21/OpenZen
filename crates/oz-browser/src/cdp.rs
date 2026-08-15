@@ -244,13 +244,13 @@ impl CdpClient {
         }
         {
             let mut w = write.lock().await;
-            w.send(Message::Text(msg.to_string().into()))
+            w.send(Message::Text(msg.to_string()))
                 .await
                 .map_err(|e| ToolError::Custom(format!("CDP send error: {e}")))?;
         }
         let result = rx.await
             .map_err(|_| ToolError::Custom("CDP response channel closed".into()))?
-            .map_err(|e| ToolError::Custom(e))?;
+            .map_err(ToolError::Custom)?;
         Ok(result)
     }
 

@@ -97,7 +97,7 @@ impl Sop {
         // Remove the first heading line from content to avoid duplication
         let body = if let Some(first_newline) = self.content.find('\n') {
             let remaining = &self.content[first_newline + 1..];
-            if remaining.starts_with('\n') { &remaining[1..] } else { remaining }
+            remaining.strip_prefix('\n').unwrap_or(remaining)
         } else {
             &self.content
         };

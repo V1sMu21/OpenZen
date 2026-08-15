@@ -109,6 +109,7 @@ pub struct ErmeRuntime {
 /// Storage lands in `{base_dir}/memory_erme/erme_memory.bin` (sibling of the
 /// legacy `memory/` tree). Returns `None` on failure so the app degrades to
 /// the file backend instead of crashing at startup.
+#[allow(clippy::field_reassign_with_default)]
 fn init_erme_store(
     base_dir: &std::path::Path,
     idle_interval_secs: u64,
@@ -137,7 +138,6 @@ fn init_erme_store(
         budget: BudgetConfig {
             daily_token_limit: 256_000,
             annual_storage_limit: 50_000_000,
-            ..Default::default()
         },
         compression_max_chars: 400,
         ..Default::default()
@@ -257,11 +257,9 @@ fn load_locale() -> String {
     // rather than hardcoding "zh" which confuses non-Chinese users.
     #[cfg(target_os = "macos")]
     {
-        std::env::var("LANG")
+        if std::env::var("LANG")
             .unwrap_or_default()
-            .starts_with("zh")
-            .then(|| "zh".to_string())
-            .unwrap_or_else(|| "en".to_string())
+            .starts_with("zh") { "zh".to_string() } else { "en".to_string() }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -833,7 +831,7 @@ pub fn run() {
                                     let message = reminder.message.clone();
                                     let app = lock_poison_guard(&state_for_reminders.app_handle).clone();
                                     if let Some(app) = app {
-                                        let _ = app.emit("sse_event", serde_json::to_value(&SseEvent::system(
+                                        let _ = app.emit("sse_event", serde_json::to_value(SseEvent::system(
                                             &session_id, &format!("[Reminder] {}", message),
                                         )).unwrap_or_default());
                                         // Structured event so the right-rail
@@ -883,7 +881,7 @@ pub fn run() {
                                     let message = reminder.message.clone();
                                     let app = lock_poison_guard(&state_for_reminders.app_handle).clone();
                                     if let Some(app) = app {
-                                        let _ = app.emit("sse_event", serde_json::to_value(&SseEvent::system(
+                                        let _ = app.emit("sse_event", serde_json::to_value(SseEvent::system(
                                             &session_id, &format!("[Reminder] {}", message),
                                         )).unwrap_or_default());
                                         // Structured event so the right-rail

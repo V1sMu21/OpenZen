@@ -205,7 +205,7 @@ pub async fn handle(app: &mut App, input: &str) {
                             app.system_prompt = inst.clone();
                         }
                         app.add_system(&format!("Agent set to: {}.", agent.name));
-                        if !agent.config.use_tools.as_ref().map_or(true, |s| s.is_empty()) {
+                        if !agent.config.use_tools.as_ref().is_none_or(|s| s.is_empty()) {
                             app.add_system(&format!("  Tools: {}", agent.config.use_tools.unwrap_or_default()));
                         }
                         if !agent.config.documents.is_empty() {

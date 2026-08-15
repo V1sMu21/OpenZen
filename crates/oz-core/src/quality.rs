@@ -537,7 +537,7 @@ pub fn find_unresolved_suspicion(
 
 /// Split text into sentences (Chinese/English punctuation + newlines).
 fn split_sentences(text: &str) -> Vec<&str> {
-    text.split(|c: char| matches!(c, '。' | '！' | '？' | '；' | '\n' | '.' | '!' | '?' | ';'))
+    text.split(['。', '！', '？', '；', '\n', '.', '!', '?', ';'])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty() && s.chars().count() > 3)
         .collect()

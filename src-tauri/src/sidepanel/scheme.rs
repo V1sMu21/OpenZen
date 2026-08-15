@@ -12,7 +12,7 @@
 //! `open_artifact` (via `AppState.html_roots`).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, UriSchemeContext};
 use tauri::http::{Response, StatusCode};
@@ -40,7 +40,7 @@ fn handle_request(
         return error_response(StatusCode::NOT_FOUND, "not found");
     };
 
-    if !is_allowed(&ctx.app_handle(), &canonical) {
+    if !is_allowed(ctx.app_handle(), &canonical) {
         eprintln!(
             "[sidepanel::scheme] ozfile denied: {}",
             canonical.display()
@@ -92,5 +92,3 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Vec<u8>> {
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
-/// Whitelist roots for `ozfile://`. Populated by `open_artifact` for html files.
-pub type HtmlRoots = Mutex<Vec<PathBuf>>;

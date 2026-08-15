@@ -269,6 +269,7 @@ pub struct LoopConfig {
     /// Optional callback for operational logs (compression, stalls).
     /// Writes to the platform-specific log file so monitors can see it.
     /// None = logs go to stderr only.
+    #[allow(clippy::type_complexity)]
     pub log_fn: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
     /// LLM stream timeout in seconds. Local models need more time for
     /// prefill; cloud models are faster. Default: 300 (5 min).

@@ -45,7 +45,7 @@ impl ToolHandler for TodoWriteTool {
                 "content": content,
                 "priority": priority,
             }),
-            &format!("\n[todowrite] created {:?} todo: {content}", priority),
+            format!("\n[todowrite] created {:?} todo: {content}", priority),
         ))
     }
 }

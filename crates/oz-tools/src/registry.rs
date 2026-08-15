@@ -76,7 +76,7 @@ impl ToolRegistry {
                 type_: "function".into(),
                 function: ToolFunction {
                     name: name.clone(),
-                    description: if is_zh { t.description_zh() } else { t.description() }.into(),
+                    description: if is_zh { t.description_zh() } else { t.description() },
                     parameters: t.parameters(),
                 },
             })

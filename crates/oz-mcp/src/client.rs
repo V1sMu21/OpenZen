@@ -29,7 +29,6 @@ pub struct McpClient {
     stdin: Option<ChildStdin>,
     stdout: Option<BufReader<ChildStdout>>,
     next_id: u64,
-    server_info: Option<ServerInfo>,
     tools: Vec<McpTool>,
 }
 
@@ -43,7 +42,6 @@ impl McpClient {
             stdin: None,
             stdout: None,
             next_id: 1,
-            server_info: None,
             tools: Vec::new(),
         }
     }

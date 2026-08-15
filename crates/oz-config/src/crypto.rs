@@ -4,7 +4,6 @@
 //! The key is derived from hostname + username via SHA-256.
 //! This provides obfuscation-level protection without additional dependencies.
 
-use std::io::Write;
 use std::path::Path;
 
 /// Derive a symmetric key from machine identity.
@@ -21,7 +20,7 @@ fn machine_key() -> [u8; 32] {
     // Expand to 32 bytes via repeated hashing
     let mut key = [0u8; 32];
     for i in 0..4 {
-        let val = ((h1 >> (i * 16)) ^ (h1.wrapping_mul((i + 1) as u64))) as u64;
+        let val = (h1 >> (i * 16)) ^ (h1.wrapping_mul((i + 1) as u64));
         key[i * 8..(i + 1) * 8].copy_from_slice(&val.to_le_bytes());
     }
     key
@@ -71,7 +70,7 @@ pub fn encrypt_config(path: &Path) -> std::io::Result<()> {
         tracing::info!("Encrypted config saved to {}", enc_path.display());
     } else {
         tracing::warn!("Failed to write encrypted config");
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "encryption failed"));
+        return Err(std::io::Error::other("encryption failed"));
     }
 
     Ok(())

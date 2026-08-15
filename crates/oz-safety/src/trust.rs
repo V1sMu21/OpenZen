@@ -75,7 +75,7 @@ struct TrustStoreInner {
 impl TrustStore {
     pub fn new(path: Option<PathBuf>) -> Self {
         let entries = path.as_ref()
-            .and_then(|p| Self::load_from_disk(p))
+            .and_then(Self::load_from_disk)
             .unwrap_or_default();
         TrustStore {
             inner: Arc::new(RwLock::new(TrustStoreInner {
@@ -190,7 +190,7 @@ impl TrustStore {
         if entry.denied_count >= DENIAL_AUTO_BLOCK_COUNT {
             if let Some(last) = entry.last_denied {
                 let elapsed = Utc::now().signed_duration_since(last);
-                if elapsed.num_seconds().abs() as u64 <= DENIAL_AUTO_BLOCK_WINDOW.as_secs() {
+                if elapsed.num_seconds().unsigned_abs() <= DENIAL_AUTO_BLOCK_WINDOW.as_secs() {
                     entry.level = TrustLevel::Blocked;
                     tracing::warn!(
                         "[safety] auto-blocked `{tool}/{pattern}` after {count} denials",

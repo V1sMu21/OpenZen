@@ -179,12 +179,12 @@ impl MemoryStore {
         if self.consolidation.config().auto_dedup_on_store && !text.is_empty() {
             let similar = self
                 .consolidation
-                .find_similar_in_l2(&self.router.l2(), &text);
+                .find_similar_in_l2(self.router.l2(), &text);
             if similar.len() >= self.consolidation.config().min_merge_group {
                 let similar_ids: Vec<u64> = similar.into_iter().map(|(id, _)| id).collect();
                 let merged = self.consolidation.merge_into_l3(
-                    &self.router.l2(),
-                    &self.router.l3(),
+                    self.router.l2(),
+                    self.router.l3(),
                     &similar_ids,
                 )?;
                 if let Some(merged_id) = merged {
@@ -348,7 +348,7 @@ impl MemoryStore {
         self.counters.consolidations.fetch_add(1, Ordering::Relaxed);
         let result = self
             .consolidation
-            .consolidate(&self.router.l2(), &self.router.l3());
+            .consolidate(self.router.l2(), self.router.l3());
         self.last_consolidation.store(
             crate::core::now_nanos(),
             std::sync::atomic::Ordering::Relaxed,
@@ -364,7 +364,7 @@ impl MemoryStore {
         self.counters.consolidations.fetch_add(1, Ordering::Relaxed);
         let result = self
             .consolidation
-            .consolidate_recursive(&self.router.l2(), &self.router.l3());
+            .consolidate_recursive(self.router.l2(), self.router.l3());
         self.last_consolidation.store(
             crate::core::now_nanos(),
             std::sync::atomic::Ordering::Relaxed,
@@ -380,10 +380,10 @@ impl MemoryStore {
     pub fn forget_below_importance(&self, threshold: f32) -> (usize, usize) {
         let l2 = self
             .consolidation
-            .forget_below_importance_l2(&self.router.l2(), threshold);
+            .forget_below_importance_l2(self.router.l2(), threshold);
         let l3 = self
             .consolidation
-            .forget_below_importance_l3(&self.router.l3(), threshold);
+            .forget_below_importance_l3(self.router.l3(), threshold);
         (l2, l3)
     }
 
@@ -392,10 +392,10 @@ impl MemoryStore {
     pub fn forget_older_than(&self, ttl_nanos: i64) -> (usize, usize) {
         let l2 = self
             .consolidation
-            .forget_older_than_l2(&self.router.l2(), ttl_nanos);
+            .forget_older_than_l2(self.router.l2(), ttl_nanos);
         let l3 = self
             .consolidation
-            .forget_older_than_l3(&self.router.l3(), ttl_nanos);
+            .forget_older_than_l3(self.router.l3(), ttl_nanos);
         (l2, l3)
     }
 

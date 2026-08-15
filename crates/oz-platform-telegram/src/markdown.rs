@@ -156,8 +156,8 @@ fn is_special_char(c: char) -> bool {
 
 fn count_consecutive(chars: &[char], start: usize, target: char) -> usize {
     let mut count = 0;
-    for i in start..chars.len() {
-        if chars[i] == target {
+    for &c in &chars[start..] {
+        if c == target {
             count += 1;
         } else {
             break;
@@ -167,8 +167,8 @@ fn count_consecutive(chars: &[char], start: usize, target: char) -> usize {
 }
 
 fn find_line_end_or(chars: &[char], start: usize, delimiter: char) -> usize {
-    for i in start..chars.len() {
-        if chars[i] == delimiter {
+    for (i, &c) in chars.iter().enumerate().skip(start) {
+        if c == delimiter {
             return i;
         }
     }
@@ -176,8 +176,8 @@ fn find_line_end_or(chars: &[char], start: usize, delimiter: char) -> usize {
 }
 
 fn find_matching(chars: &[char], start: usize, target: char) -> usize {
-    for i in start..chars.len() {
-        if chars[i] == target {
+    for (i, &c) in chars.iter().enumerate().skip(start) {
+        if c == target {
             return i;
         }
     }

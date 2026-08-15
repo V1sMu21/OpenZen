@@ -82,6 +82,7 @@ struct ToolCallMeta {
 /// or setting `exit_reason`. The agent loop then waits on `ask_user_rx`
 /// and synthesizes a `tool_result` for the same tool_use id, so the same
 /// run continues after the user answers.
+#[allow(clippy::too_many_arguments)]
 fn process_tool_outcome(
     outcome: Result<StepOutcome, oz_core_types::ToolError>,
     tool_name: &str,
@@ -283,6 +284,7 @@ async fn wait_for_summary(
 ///             outcome = handler.dispatch(tool_name, args, response)
 ///             if outcome.should_exit: break
 /// ```
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop<C>(
     client: &mut C,
     system_prompt: String,
@@ -367,11 +369,11 @@ where
     let mut total_input_tokens: u64 = 0;
     let mut total_output_tokens: u64 = 0;
     let mut last_turn_input_tokens: u64 = 0;
-    let mut last_turn_output_tokens: u64 = 0;
+    let mut last_turn_output_tokens: u64;
     // Pairs with last_turn_input_tokens: lets pre-exit/post-tool checks
     // project the real tokens ratio onto grown contexts (stale token
     // count alone cannot see single-turn context explosions).
-    let mut last_turn_input_chars: u64 = 0;
+    let mut last_turn_input_chars: u64;
     let mut exit_reason: Option<String> = None;
     let mut last_todo_summary_turn: u32 = 0;
     let mut last_todo_snapshot: String = String::new();
@@ -469,7 +471,7 @@ where
     let mut sop_store = if skill_mcp_store.is_none() {
         config.sop_dir.as_ref().map(|dir| {
             let store = SopStore::new(std::path::PathBuf::from(dir));
-            if store.len() > 0 && config.verbose {
+            if !store.is_empty() && config.verbose {
                 tracing::info!("Loaded {} SOP(s) from {}", store.len(), dir);
             }
             store
@@ -479,7 +481,7 @@ where
     };
 
     if let Some(ref store) = sop_store {
-        if store.len() > 0 {
+        if !store.is_empty() {
             let sop_snippet = store.build_prompt_snippet(&user_input, 3);
             if !sop_snippet.is_empty() {
                 messages.insert(0, Message::system(&sop_snippet));
@@ -588,8 +590,8 @@ where
                 context_window: config.context_win,
                 turn,
                 message_count: messages.len(),
-                total_input_tokens: total_input_tokens,
-                total_output_tokens: total_output_tokens,
+                total_input_tokens,
+                total_output_tokens,
             };
             let _ = r.write(&ev);
         }
@@ -602,7 +604,7 @@ where
 
             let snapshot_before: Vec<serde_json::Value> = messages
                 .iter()
-                .filter_map(|m| serde_json::to_value(&m).ok())
+                .filter_map(|m| serde_json::to_value(m).ok())
                 .collect();
 
             // Phase 3 removes messages AFTER the system prompts (the
@@ -662,7 +664,7 @@ where
                 // prompt + tools + messages). The after-side projects the
                 // same basis by the chars ratio — chars strictly shrank after
                 // a successful compress, so before > after holds without cap.
-                let before_tokens = est_tokens.max(1) as usize;
+                let before_tokens = est_tokens.max(1);
                 let after_tokens = if stats_before.total_chars > 0 {
                     (before_tokens as f64 * stats_after.total_chars as f64
                         / stats_before.total_chars as f64).round() as usize
@@ -691,7 +693,7 @@ where
                         current_tokens: after_tokens as u64,
                         output_tokens: 0,
                         context_window: config.context_win,
-                        turn: turn,
+                        turn,
                         message_count: messages.len(),
                         total_input_tokens,
                         total_output_tokens,
@@ -781,7 +783,7 @@ where
                         m.role == oz_core_types::Role::User
                             || m.role == oz_core_types::Role::Assistant
                     }).unwrap_or(0);
-                    messages.insert(inject_at, Message::system(&format!(
+                    messages.insert(inject_at, Message::system(format!(
                         "[Compression summary]: {summary_text}"
                     )));
                 }
@@ -1112,7 +1114,7 @@ where
                         ).await;
                         if !matched.is_empty() {
                             let mut blocks = Vec::new();
-                            blocks.push(ContentBlock::text(&format!(
+                            blocks.push(ContentBlock::text(format!(
                                 "<system-reminder>Detected intent without tool calls — matched skill/SOP context injected below:</system-reminder>\n{matched}"
                             )));
                             messages.push(Message::user_with_blocks(blocks));
@@ -1257,7 +1259,6 @@ where
                     }
                     let cancel = cancel.clone();
                     let sem = sem.clone();
-                    let handler_ref = handler_ref;
                     let resp = &response;
                     let cx = ctx;
                     let cfg = config;
@@ -1471,7 +1472,7 @@ where
                         // working memory so the frontend card shows text.
                         let enriched = if tool_name == "todoupdate" {
                             let mut d = data.clone();
-                            if d.get("content").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()) {
+                            if d.get("content").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty()) {
                                 if let Some(id) = d.get("todo_id").and_then(|v| v.as_str()) {
                                     let wm = handler.working();
                                     if let Some(t) = wm.todos.iter().find(|t| t.id == id) {
@@ -1536,7 +1537,7 @@ where
         for (ii, tool_name, outcome) in &parallel_results {
             let meta = &tool_meta[*ii];
             process_tool_outcome(
-                outcome.clone(), &tool_name, &meta.tid, &meta.tc_id, *ii, &mut tool_results,
+                outcome.clone(), tool_name, &meta.tid, &meta.tc_id, *ii, &mut tool_results,
                 &mut next_prompts, &mut full_response, &mut exit_reason, config,
                 &mut pending_ask_user,
             );
@@ -1672,7 +1673,7 @@ where
                                 t.status = status;
                                 dirty = true;
                                 if is_in_progress {
-                                    t.in_progress_since_turn = Some(turn as u32);
+                                    t.in_progress_since_turn = Some(turn);
                                 } else {
                                     t.in_progress_since_turn = None;
                                 }
@@ -1724,7 +1725,7 @@ where
                         .map(|t| {
                             let stall = if t.status == "in_progress" {
                                 t.in_progress_since_turn
-                                    .map(|s| format!(" ({} turns)", (turn as u32).saturating_sub(s)))
+                                    .map(|s| format!(" ({} turns)", turn.saturating_sub(s)))
                                     .unwrap_or_default()
                             } else {
                                 String::new()
@@ -1897,7 +1898,6 @@ where
                                 });
                             }
                         }
-                        drop(wm);
                         next_prompts.push(if ctx.lang == "zh" {
                             "计划已确认。按步骤执行，每步用 todoupdate 标记状态，清单全 completed 后 respond。".to_string()
                         } else {
@@ -2214,7 +2214,7 @@ where
                             "Pre-exit compression: {} chars / {} msgs → compressing before agent exits",
                             pre_exit_stats.total_chars, messages.len()
                         );
-                        let snapshot: Vec<_> = messages.iter().filter_map(|m| serde_json::to_value(&m).ok()).collect();
+                        let snapshot: Vec<_> = messages.iter().filter_map(|m| serde_json::to_value(m).ok()).collect();
                         let emergency_win = if comp_config.trigger_pct > 0 {
                             comp_config.hard_max_tokens * 100 / comp_config.trigger_pct as usize
                         } else {
@@ -2240,7 +2240,7 @@ where
                                 m.role == oz_core_types::Role::User
                                     || m.role == oz_core_types::Role::Assistant
                             }).unwrap_or(0);
-                            messages.insert(inject_at, Message::system(&format!(
+                            messages.insert(inject_at, Message::system(format!(
                                 "[Compression summary]: {summary_text}"
                             )));
                         }
@@ -2255,7 +2255,7 @@ where
         transition_state(handler, AgentState::Idle, "turn complete, ready for next");
 
         // Save loop checkpoint periodically
-        if config.checkpoint_interval > 0 && turn % config.checkpoint_interval == 0 && !config.session_id.is_empty() {
+        if config.checkpoint_interval > 0 && turn.is_multiple_of(config.checkpoint_interval) && !config.session_id.is_empty() {
             let cp_dir = std::path::PathBuf::from(
                 config.checkpoint_dir.as_deref().unwrap_or("checkpoints")
             );
@@ -2426,7 +2426,7 @@ where
                 );
                 let before_chars = post_tool_stats.total_chars;
                 let before_count = messages.len();
-                let snapshot: Vec<_> = messages.iter().filter_map(|m| serde_json::to_value(&m).ok()).collect();
+                let snapshot: Vec<_> = messages.iter().filter_map(|m| serde_json::to_value(m).ok()).collect();
                 // P0: The emergency flag means we've exceeded hard_max_tokens
                 // (80K by default), but compress_messages targets
                 // context_win * trigger_pct% (e.g. 256K * 80% = 205K). At
@@ -2493,14 +2493,14 @@ where
                         m.role == oz_core_types::Role::User
                             || m.role == oz_core_types::Role::Assistant
                     }).unwrap_or(0);
-                    messages.insert(inject_at, Message::system(&format!(
+                    messages.insert(inject_at, Message::system(format!(
                         "[Compression summary]: {summary_text}"
                     )));
                 }
             }
         }
 
-        if turn % 10 == 0 {
+        if turn.is_multiple_of(10) {
             let _danger = DANGER_LOOP_MSG.replace("{turn}", &turn.to_string());
         }
     }

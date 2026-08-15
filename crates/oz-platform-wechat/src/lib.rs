@@ -104,7 +104,7 @@ impl PlatformAdapter for WechatAdapter {
                         if text.starts_with('/') {
                             let result = {
                                 let mut c = counters.lock().await;
-                                let r = handle_wechat_command(uid, &text, &mut *c);
+                                let r = handle_wechat_command(uid, &text, &mut c);
                                 oz_platform::save_platform_counters(&counter_path, &c);
                                 r
                             };
@@ -174,6 +174,7 @@ impl PlatformAdapter for WechatAdapter {
 /// Spawn an agent run for one WeChat message and stream the result back.
 /// Returns immediately — the long-poll loop must never block on a full
 /// agent run, otherwise one user's long task stalls every other user.
+#[allow(clippy::too_many_arguments)]
 fn spawn_wechat_agent(
     agent: &Arc<AgentBridge>,
     bot: WxBotClient,

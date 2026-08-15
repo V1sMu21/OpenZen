@@ -42,6 +42,12 @@ pub struct TimeGraph {
     next_edge_id: RwLock<u64>,
 }
 
+impl Default for TimeGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TimeGraph {
     pub fn new() -> Self {
         Self {
@@ -108,12 +114,12 @@ impl TimeGraph {
         self.outgoing
             .write()
             .entry(source)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(idx);
         self.incoming
             .write()
             .entry(target)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(idx);
     }
 
@@ -322,8 +328,8 @@ impl TimeGraph {
         outgoing.clear();
         incoming.clear();
         for (i, edge) in edges.iter().enumerate() {
-            outgoing.entry(edge.source).or_insert_with(Vec::new).push(i);
-            incoming.entry(edge.target).or_insert_with(Vec::new).push(i);
+            outgoing.entry(edge.source).or_default().push(i);
+            incoming.entry(edge.target).or_default().push(i);
         }
     }
 
