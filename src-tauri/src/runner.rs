@@ -653,15 +653,28 @@ pub async fn run_agent_for_session(
         std::sync::Arc::new(oz_core::memory_job::MemoryJobScheduler::new(distiller));
     // The 30s drain tick is aborted when the run finishes — previously it
     // outlived the run and leaked one interval task per send/regenerate/resume.
+    // RAII: the tick must also die when the agent loop panics, otherwise the
+    // crashed run leaks an interval task that keeps the memory scheduler
+    // (and the whole ERME store) resident forever.
+    struct MemoryTickGuard {
+        handle: tokio::task::JoinHandle<()>,
+    }
+    impl Drop for MemoryTickGuard {
+        fn drop(&mut self) {
+            self.handle.abort();
+        }
+    }
     let memory_tick_handle = {
         let scheduler = std::sync::Arc::clone(&memory_scheduler);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-            loop {
-                tick.tick().await;
-                scheduler.drain().await;
-            }
-        })
+        MemoryTickGuard {
+            handle: tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    tick.tick().await;
+                    scheduler.drain().await;
+                }
+            }),
+        }
     };
     loop_config.memory_scheduler = Some(std::sync::Arc::clone(&memory_scheduler));
     loop_config.checkpoint_interval = 3; // save every 3 turns
@@ -889,7 +902,7 @@ pub async fn run_agent_for_session(
 
     // Drain any final memory jobs, then stop the 30s drain tick task.
     memory_scheduler.drain().await;
-    memory_tick_handle.abort();
+    drop(memory_tick_handle);
     {
         let err_msg = outcome
             .data

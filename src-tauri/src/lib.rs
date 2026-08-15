@@ -21,15 +21,65 @@ mod sidepanel;
 
 const SESSION_STATE_FILE: &str = "openzen/sessions.json";
 
+/// Size-based rotation for the debug log so a 7x24 run can't grow
+/// openzen.log without bound. Keeps openzen.log + one rotated copy.
+const MAX_DEBUG_LOG_BYTES: u64 = 20 * 1024 * 1024;
+
+struct DebugLogWriter {
+    path: PathBuf,
+    file: Option<std::io::BufWriter<std::fs::File>>,
+    written: u64,
+}
+
+impl DebugLogWriter {
+    fn write(&mut self, msg: &str) {
+        use std::io::Write as _;
+        let line = format!(
+            "[{}] [openzen] {}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            msg.trim_end()
+        );
+        if self.file.is_none() || self.written + line.len() as u64 > MAX_DEBUG_LOG_BYTES {
+            self.rotate();
+        }
+        if let Some(f) = self.file.as_mut() {
+            if f.write_all(line.as_bytes()).is_ok() {
+                self.written += line.len() as u64;
+            }
+        }
+    }
+
+    fn rotate(&mut self) {
+        self.file = None;
+        let _ = std::fs::remove_file(self.path.with_extension("log.1"));
+        let _ = std::fs::rename(&self.path, self.path.with_extension("log.1"));
+        self.file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .ok()
+            .map(std::io::BufWriter::new);
+        self.written = 0;
+    }
+}
+
+static DEBUG_LOG_WRITER: std::sync::OnceLock<std::sync::Mutex<DebugLogWriter>> =
+    std::sync::OnceLock::new();
+
 pub(crate) fn debug_log(msg: &str) {
-    let log_dir = data_dir().join("logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join("openzen.log"))
-    {
-        let _ = writeln!(f, "[openzen] {}", msg);
+    // One shared buffered writer for the whole process — the previous
+    // per-line open/append/close also serialized on the FS on the hot path.
+    let writer = DEBUG_LOG_WRITER.get_or_init(|| {
+        let log_dir = data_dir().join("logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        std::sync::Mutex::new(DebugLogWriter {
+            path: log_dir.join("openzen.log"),
+            file: None,
+            written: 0,
+        })
+    });
+    if let Ok(mut w) = writer.lock() {
+        w.write(msg);
     }
 }
 
