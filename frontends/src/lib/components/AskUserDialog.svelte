@@ -104,6 +104,7 @@
     aria-labelledby="ask-question"
     bind:this={dialogEl}
     onkeydown={trapFocus}
+    tabindex="-1"
   >
     <div class="ask-header">
       <span class="ask-icon" aria-hidden="true">?</span>

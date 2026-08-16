@@ -225,7 +225,12 @@ function hashMarkdownText(text: string): number {
   return hash >>> 0;
 }
 
-export function renderMarkdown(text: string, opts?: { highlight?: boolean }): string {
+export function renderMarkdown(
+  text: string,
+  opts?: { highlight?: boolean; mathVersion?: boolean },
+): string {
+  // `mathVersion` is not read: callers pass $mathReady so the expression
+  // becomes reactive to the lazy KaTeX load and re-renders once it lands.
   if (!text) return "";
   const highlight = opts?.highlight !== false;
   const originalText = text;
