@@ -14,12 +14,15 @@ use crate::client::WxBotClient;
 
 pub struct WechatAdapter {
     default_model: Option<String>,
+    /// Long-poll state reported by the loop and read by health().
+    conn: Arc<oz_platform::ConnectionHealth>,
 }
 
 impl WechatAdapter {
     pub fn new(config: &PlatformConfig) -> Self {
         WechatAdapter {
             default_model: config.default_model.clone(),
+            conn: oz_platform::ConnectionHealth::shared(),
         }
     }
 }
@@ -37,6 +40,7 @@ impl PlatformAdapter for WechatAdapter {
     async fn start(&self, ctx: PlatformContext) -> Result<(), PlatformError> {
         let agent = ctx.agent.clone();
         let default_model = self.default_model.clone();
+        let conn = self.conn.clone();
 
         let mut bot = WxBotClient::new();
         if !bot.is_logged_in() {
@@ -68,9 +72,12 @@ impl PlatformAdapter for WechatAdapter {
         let running: Arc<tokio::sync::Mutex<HashMap<String, bool>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
+        conn.report_connected();
         loop {
             match bot.get_updates(30).await {
                 Ok(msgs) => {
+                    // Every completed long-poll proves the loop is alive.
+                    conn.report_activity();
                     for msg in &msgs {
                         if !WxBotClient::is_user_msg(msg) {
                             continue;
@@ -185,6 +192,7 @@ impl PlatformAdapter for WechatAdapter {
                     }
                 }
                 Err(e) => {
+                    conn.report_disconnected();
                     if !e.contains("timeout") && !e.contains("Timeout") {
                         tracing::warn!("[wechat] get_updates error: {e}, retrying...");
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -199,7 +207,16 @@ impl PlatformAdapter for WechatAdapter {
     }
 
     async fn health(&self) -> PlatformHealth {
-        PlatformHealth::healthy()
+        // Stale window: the long-poll cycle is ~30s (+ processing); no
+        // completed poll for 5 minutes means the loop is wedged.
+        let (connected, last) = self.conn.snapshot(300);
+        if connected {
+            PlatformHealth::healthy()
+        } else {
+            PlatformHealth::disconnected(format!(
+                "long-poll loop not progressing (last activity unix-secs: {last:?})"
+            ))
+        }
     }
 }
 

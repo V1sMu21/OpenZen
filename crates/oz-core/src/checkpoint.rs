@@ -167,8 +167,9 @@ impl MmapWal {
 const MAX_WAL_RECORDS: usize = 8;
 
 fn wal_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, MmapWal>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, MmapWal>>> =
-        std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, MmapWal>>,
+    > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -181,9 +182,7 @@ fn wal_key(dir: &Path, session_id: &str) -> String {
 /// the JSON path.
 pub fn append_checkpoint_wal(dir: &Path, session_id: &str, cp: &LoopCheckpoint) {
     let key = wal_key(dir, session_id);
-    let mut cache = wal_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut cache = wal_cache().lock().unwrap_or_else(|e| e.into_inner());
     // Health check the cached handle: a replaced/deleted file underneath
     // us (compaction from another path, user cleanup) invalidates the map.
     if let Some(wal) = cache.get(&key) {
@@ -244,9 +243,7 @@ pub fn append_checkpoint_wal(dir: &Path, session_id: &str, cp: &LoopCheckpoint) 
 pub fn read_latest_checkpoint_wal(dir: &Path, session_id: &str) -> Option<LoopCheckpoint> {
     // Reuse the cached handle when present, otherwise open read-only
     // (without inserting) to avoid pinning maps for read-only callers.
-    let cache = wal_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let cache = wal_cache().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(wal) = cache.get(&wal_key(dir, session_id)) {
         return wal.latest();
     }

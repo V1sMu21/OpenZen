@@ -22,6 +22,9 @@ pub struct FeishuAdapter {
     allowed_users: Option<Vec<String>>,
     default_model: Option<String>,
     running_tasks: Arc<Mutex<std::collections::HashMap<String, bool>>>,
+    /// WS connection state, reported by the read loop and read by
+    /// health() (polled + logged by the registry supervisor).
+    conn: Arc<oz_platform::ConnectionHealth>,
 }
 
 impl FeishuAdapter {
@@ -43,6 +46,7 @@ impl FeishuAdapter {
             allowed_users: config.allowed_users.clone(),
             default_model: config.default_model.clone(),
             running_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            conn: oz_platform::ConnectionHealth::shared(),
         })
     }
 }
@@ -66,6 +70,7 @@ impl PlatformAdapter for FeishuAdapter {
         let allowed = self.allowed_users.clone();
         let default_model = self.default_model.clone();
         let running_tasks = self.running_tasks.clone();
+        let conn = self.conn.clone();
 
         let instance_id = &self.instance_id;
         tracing::info!(
@@ -79,12 +84,14 @@ impl PlatformAdapter for FeishuAdapter {
 
         loop {
             tracing::info!("[feishu:{instance_id}] connecting to WebSocket...");
+            conn.report_disconnected();
             match Self::connect_websocket(
                 &agent,
                 &client,
                 &allowed,
                 &default_model,
                 &running_tasks,
+                &conn,
                 instance_id,
                 &ctx.working_dir,
             )
@@ -112,17 +119,29 @@ impl PlatformAdapter for FeishuAdapter {
     }
 
     async fn health(&self) -> PlatformHealth {
-        PlatformHealth::healthy()
+        // Stale window: the feishu gateway sends pings; no inbound frame
+        // for 10 minutes means the socket is wedged even if not closed.
+        let (connected, last) = self.conn.snapshot(600);
+        if connected {
+            PlatformHealth::healthy()
+        } else {
+            PlatformHealth::disconnected(format!(
+                "websocket not receiving (last activity unix-secs: {:?})",
+                last
+            ))
+        }
     }
 }
 
 impl FeishuAdapter {
+    #[allow(clippy::too_many_arguments)] // loop-shared handles, one per concern
     async fn connect_websocket(
         agent: &Arc<AgentBridge>,
         client: &Arc<FeishuClient>,
         allowed: &Option<Vec<String>>,
         default_model: &Option<String>,
         running_tasks: &Arc<Mutex<std::collections::HashMap<String, bool>>>,
+        conn: &Arc<oz_platform::ConnectionHealth>,
         instance_id: &str,
         working_dir: &std::path::Path,
     ) -> Result<(), String> {
@@ -149,6 +168,7 @@ impl FeishuAdapter {
             .map_err(|e| format!("WebSocket connect error: {e}"))?;
 
         let (mut write, mut read) = ws_stream.split();
+        conn.report_connected();
         tracing::info!("[feishu:{instance_id}] WebSocket connected, waiting for events...");
 
         // Persistent dedup: survive restarts so old messages replayed
@@ -166,6 +186,9 @@ impl FeishuAdapter {
 
         while let Some(msg) = read.next().await {
             let msg = msg.map_err(|e| format!("WebSocket read error: {e}"))?;
+            // Every inbound frame (including gateway pings) proves the
+            // socket is alive — health() staleness is derived from this.
+            conn.report_activity();
             if msg.is_close() {
                 tracing::info!("[feishu:{instance_id}] WebSocket closed by server");
                 return Ok(());

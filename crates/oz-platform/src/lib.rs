@@ -104,6 +104,62 @@ impl PlatformHealth {
     }
 }
 
+/// Shared connection state that adapters report into and `health()`
+/// reads: the registry's health poll logs transitions, so a wedged
+/// channel becomes visible instead of silently reporting healthy.
+///
+/// `last_activity` uses unix seconds; adapters stamp it on every
+/// successful poll / received WS message.
+#[derive(Default)]
+pub struct ConnectionHealth {
+    connected: std::sync::atomic::AtomicBool,
+    last_activity: std::sync::Mutex<Option<i64>>,
+}
+
+impl ConnectionHealth {
+    pub fn shared() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    pub fn report_connected(&self) {
+        self.connected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.report_activity();
+    }
+
+    pub fn report_disconnected(&self) {
+        self.connected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn report_activity(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        *self.last_activity.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
+    }
+
+    /// (connected, seconds since last activity). Staleness above
+    /// `stale_after_secs` downgrades a nominally-open connection.
+    pub fn snapshot(&self, stale_after_secs: i64) -> (bool, Option<i64>) {
+        let connected = self.connected.load(std::sync::atomic::Ordering::Relaxed);
+        let last = *self.last_activity.lock().unwrap_or_else(|e| e.into_inner());
+        if connected {
+            if let Some(t) = last {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                if now.saturating_sub(t) > stale_after_secs {
+                    return (false, last);
+                }
+            }
+        }
+        (connected, last)
+    }
+}
+
 // ── Errors ──
 
 #[derive(Debug, thiserror::Error)]

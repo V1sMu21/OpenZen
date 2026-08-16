@@ -14,6 +14,8 @@ pub struct TelegramAdapter {
     token: String,
     allowed_users: Option<Vec<i64>>,
     default_model: Option<String>,
+    /// Poll state reported by the repl loop and read by health().
+    conn: std::sync::Arc<oz_platform::ConnectionHealth>,
 }
 
 impl TelegramAdapter {
@@ -30,6 +32,7 @@ impl TelegramAdapter {
             token,
             allowed_users,
             default_model: config.default_model.clone(),
+            conn: oz_platform::ConnectionHealth::shared(),
         })
     }
 }
@@ -46,18 +49,23 @@ impl PlatformAdapter for TelegramAdapter {
 
     async fn start(&self, ctx: PlatformContext) -> Result<(), PlatformError> {
         let mut retry_delay = std::time::Duration::from_secs(10);
+        let conn = self.conn.clone();
         loop {
             let agent = ctx.agent.clone();
             let allowed = self.allowed_users.clone();
             let default_model = self.default_model.clone();
+            let conn_for_repl = conn.clone();
             let bot = Bot::new(&self.token);
 
             tracing::info!("[telegram] bot starting (retry_delay={:?})...", retry_delay);
+            conn.report_connected();
 
             teloxide::repl(bot, move |bot: Bot, msg: Message| {
                 let agent = agent.clone();
                 let allowed = allowed.clone();
                 let default_model = default_model.clone();
+                // Every dispatched update proves the poll stream is alive.
+                conn_for_repl.report_activity();
                 async move {
                     let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
                     if let Some(ref allowed) = allowed {
@@ -122,6 +130,7 @@ impl PlatformAdapter for TelegramAdapter {
             })
             .await;
 
+            conn.report_disconnected();
             tracing::warn!(
                 "[telegram] disconnected, reconnecting in {:?}...",
                 retry_delay
@@ -137,7 +146,17 @@ impl PlatformAdapter for TelegramAdapter {
     }
 
     async fn health(&self) -> PlatformHealth {
-        PlatformHealth::healthy()
+        // The connected flag (repl exited = disconnected) is the
+        // authoritative signal; staleness is lenient because an idle bot
+        // legitimately receives no updates.
+        let (connected, last) = self.conn.snapshot(1800);
+        if connected {
+            PlatformHealth::healthy()
+        } else {
+            PlatformHealth::disconnected(format!(
+                "repl loop exited (last activity unix-secs: {last:?})"
+            ))
+        }
     }
 }
 

@@ -544,31 +544,36 @@ pub async fn run_agent_for_session(
                     // (hash embeddings) can miss while trigram keyword search
                     // over the crystallized knowledge base (facts/insights)
                     // still finds relevant rows.
-                    let fts_context: Option<String> = (|| async {
-                        let dir = state.skill_mcp_dir.as_deref()?;
-                        let fts = oz_memory::MemoryFts::open(
-                            &std::path::Path::new(dir).join("memory_fts.sqlite"),
-                        )
-                        .ok()?;
-                        let q = query_for_fts.clone();
-                        let hits = tokio::task::spawn_blocking(move || fts.search(&q, 5))
-                            .await
-                            .ok()?
+                    let fts_context: Option<String> = {
+                        async fn fts_fallback(state: &AppState, query: &str) -> Option<String> {
+                            let dir = state.skill_mcp_dir.as_deref()?;
+                            let fts = oz_memory::MemoryFts::open(
+                                &std::path::Path::new(dir).join("memory_fts.sqlite"),
+                            )
                             .ok()?;
-                        if hits.is_empty() {
-                            return None;
+                            let q = query.to_string();
+                            let hits = tokio::task::spawn_blocking(move || fts.search(&q, 5))
+                                .await
+                                .ok()?
+                                .ok()?;
+                            if hits.is_empty() {
+                                return None;
+                            }
+                            debug_log(&format!(
+                                "ERME recall empty; FTS fallback matched {} entries",
+                                hits.len()
+                            ));
+                            let mut buf = String::new();
+                            for hit in hits {
+                                buf.push_str(&format!(
+                                    "- [fts/{}] {}\n",
+                                    hit.category, hit.content
+                                ));
+                            }
+                            Some(buf)
                         }
-                        debug_log(&format!(
-                            "ERME recall empty; FTS fallback matched {} entries",
-                            hits.len()
-                        ));
-                        let mut buf = String::new();
-                        for hit in hits {
-                            buf.push_str(&format!("- [fts/{}] {}\n", hit.category, hit.content));
-                        }
-                        Some(buf)
-                    })()
-                    .await;
+                        fts_fallback(state, &query_for_fts).await
+                    };
                     match fts_context {
                         Some(ctx) => ctx,
                         None => {

@@ -68,7 +68,14 @@ impl WxBotClient {
             bot_id: None,
             updates_buf: String::new(),
             token_path,
-            http: reqwest::Client::new(),
+            // Global timeouts: a hung request used to block the poll loop
+            // forever (no supervisor restart, no health signal — the
+            // channel went dark until process restart).
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(65))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         };
         client.load_token();
         client
