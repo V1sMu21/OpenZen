@@ -7,7 +7,7 @@
   import { projects } from "./lib/stores/projects";
   import { chat } from "./lib/stores/chat";
   import { connectSSE, heartbeat } from "./lib/stores/sse";
-  import { formatTokenCount } from "./lib/stores/types";
+  import { formatTokenCount, type Message } from "./lib/stores/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import ChatMessage from "./lib/components/ChatMessage.svelte";
   import ChatInput from "./lib/components/ChatInput.svelte";
@@ -149,24 +149,49 @@
     return last.role === "assistant" && !last.streaming ? last.id : null;
   });
 
-  let visibleMessages = $derived.by(() =>
-    $chat.messages.filter((m) => {
-      if (m.role === "system") return false;
-      // Keep streaming messages (bubble needs to render live) and
-      // assistant messages with parts (tool cards etc.) even if content is empty.
-      if (m.streaming) return true;
-      if (m.role === "assistant" && (m.parts?.length || m.streamEvents?.length)) return true;
-      const c = (m.content ?? "").trim();
-      if (c === "") return false;
-      // Filter bare JSON tool-result stubs (e.g. {"status":"written"})
-      if (c.startsWith("{") && c.endsWith("}") && c.length < 80) {
-        try { const o = JSON.parse(c); if (Object.keys(o).every((k) => typeof o[k] === "string" && o[k].length < 200)) return false; } catch {}
-      }
-      return true;
-    })
-  );
+  // ── Incremental derived caches (T3.2) ─────────────────────────────
+  // Streaming deltas still notify the legacy store once per rAF frame,
+  // but the messages array and every historical message object now keep
+  // their identity (see chat.ts T3.1). These caches turn that notification
+  // into an O(1) identity check instead of re-filtering/re-summing the
+  // whole conversation on every frame.
 
-  function aggregateTokens(messages: typeof $chat.messages): { in: number; out: number } {
+  function visibleMessageFilter(m: Message): boolean {
+    if (m.role === "system") return false;
+    // Keep streaming messages (bubble needs to render live) and
+    // assistant messages with parts (tool cards etc.) even if content is empty.
+    if (m.streaming) return true;
+    if (m.role === "assistant" && (m.parts?.length || m.streamEvents?.length)) return true;
+    const c = (m.content ?? "").trim();
+    if (c === "") return false;
+    // Filter bare JSON tool-result stubs (e.g. {"status":"written"})
+    if (c.startsWith("{") && c.endsWith("}") && c.length < 80) {
+      try { const o = JSON.parse(c); if (Object.keys(o).every((k) => typeof o[k] === "string" && o[k].length < 200)) return false; } catch {}
+    }
+    return true;
+  }
+
+  type VisibleMessagesCache = {
+    source: Message[];
+    last: Message | undefined;
+    value: Message[];
+  };
+  let visibleMessagesCache: VisibleMessagesCache | null = null;
+  let visibleMessages = $derived.by(() => {
+    const msgs = $chat.messages;
+    const last = msgs[msgs.length - 1];
+    // Historical messages are immutable once finalized and the array is
+    // append-only during streaming, so array identity + last-message
+    // identity is a complete cache key for visibility.
+    if (visibleMessagesCache && visibleMessagesCache.source === msgs && visibleMessagesCache.last === last) {
+      return visibleMessagesCache.value;
+    }
+    const value = msgs.filter(visibleMessageFilter);
+    visibleMessagesCache = { source: msgs, last, value };
+    return value;
+  });
+
+  function aggregateTokens(messages: readonly Message[]): { in: number; out: number } {
     let inTotal = 0;
     let outTotal = 0;
     for (const m of messages) {
@@ -175,9 +200,41 @@
     }
     return { in: inTotal, out: outTotal };
   }
-  // Memoize the token sum — it's read in the template (model bar) and
-  // would otherwise recompute on every ChatMessage re-render.
-  let tokenTotals = $derived(aggregateTokens($chat.messages));
+
+  type TokenTotalsCache = {
+    source: Message[];
+    last: Message | undefined;
+    lastTokensIn: number | undefined;
+    lastTokensOut: number | undefined;
+    value: { in: number; out: number };
+  };
+  let tokenTotalsCache: TokenTotalsCache | null = null;
+  // Token totals only change when a message is appended/replaced or when
+  // the last message's token fields are updated by data_context_usage.
+  // During ordinary text streaming, neither happens, so we keep the
+  // previous sum instead of rescanning the conversation each frame.
+  let tokenTotals = $derived.by(() => {
+    const msgs = $chat.messages;
+    const last = msgs[msgs.length - 1];
+    if (
+      tokenTotalsCache
+      && tokenTotalsCache.source === msgs
+      && tokenTotalsCache.last === last
+      && tokenTotalsCache.lastTokensIn === last?.tokensIn
+      && tokenTotalsCache.lastTokensOut === last?.tokensOut
+    ) {
+      return tokenTotalsCache.value;
+    }
+    const value = aggregateTokens(msgs);
+    tokenTotalsCache = {
+      source: msgs,
+      last,
+      lastTokensIn: last?.tokensIn,
+      lastTokensOut: last?.tokensOut,
+      value,
+    };
+    return value;
+  });
 
   // 标题栏运行状态指示: 待确认(ask_user 阻塞中) > 运行中 > 完成.
   // 信号全部来自现有 chat store, 无需后端改动.
