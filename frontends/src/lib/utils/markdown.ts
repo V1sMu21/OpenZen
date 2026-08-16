@@ -112,6 +112,14 @@ function buildKeywordRegex(word: string): RegExp {
   return new RegExp(`\\b${escapeRegExp(word)}\\b`, "gi");
 }
 
+// Keyword regexes are compiled once at module load. `applyKeywordHighlights`
+// used to call `buildKeywordRegex` for every keyword on every render —
+// ~80 `RegExp` constructions per markdown pass.
+type CompiledKeywordRule = { regex: RegExp; cls: string };
+const COMPILED_KEYWORD_RULES: CompiledKeywordRule[] = KEYWORD_HIGHLIGHTS.map(
+  ([word, cls]) => ({ regex: buildKeywordRegex(word), cls }),
+);
+
 /**
  * Wrap keyword matches in colored spans. Protected regions (code blocks,
  * inline code, links, KaTeX, images) are split out untouched; only plain
@@ -125,8 +133,8 @@ function applyKeywordHighlights(html: string): string {
     .split(HL_PROTECTED)
     .map((seg, i) => {
       if (i % 2 === 1) return seg;
-      for (const [word, cls] of KEYWORD_HIGHLIGHTS) {
-        seg = seg.replace(buildKeywordRegex(word), (m: string, neg: string, kw: string) => {
+      for (const { regex, cls } of COMPILED_KEYWORD_RULES) {
+        seg = seg.replace(regex, (m: string, neg: string, kw: string) => {
           if (neg) return m;
           tokens.push(`<span class="${cls}">${kw}</span>`);
           return `%%KWPH${tokens.length - 1}%%`;
@@ -138,8 +146,40 @@ function applyKeywordHighlights(html: string): string {
   return html.replace(/%%KWPH(\d+)%%/g, (_m: string, idx: string) => tokens[parseInt(idx, 10)] ?? "");
 }
 
+// ── Rendered-HTML cache (T3.3) ─────────────────────────────────────
+// Markdown rendering is deterministic per (text, highlight) pair.
+// Historical assistant bubbles can re-render on unrelated store updates,
+// so cache recent outputs keyed by a cheap hash of the source text. The
+// cache is intentionally small and verifies the full text on hit, so a
+// hash collision can only cost a miss, never a wrong render.
+const MARKDOWN_CACHE_MAX = 256;
+
+interface MarkdownCacheEntry {
+  text: string;
+  highlight: boolean;
+  html: string;
+}
+
+const markdownRenderCache = new Map<number, MarkdownCacheEntry>();
+
+function hashMarkdownText(text: string): number {
+  // FNV-1a — fast, good enough for a verifying cache key.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
 export function renderMarkdown(text: string, opts?: { highlight?: boolean }): string {
   if (!text) return "";
+  const highlight = opts?.highlight !== false;
+  const hash = hashMarkdownText(text);
+  const cached = markdownRenderCache.get(hash);
+  if (cached && cached.text === text && cached.highlight === highlight) {
+    return cached.html;
+  }
 
   // Strip internal model-output tags that should never render. The
   // stream parser usually routes these to the reasoning channel, but
@@ -318,6 +358,13 @@ export function renderMarkdown(text: string, opts?: { highlight?: boolean }): st
     })
     .join("");
   html = html.replace(/%%PH(\d+)%%/g, (_m: string, idx: string) => placeholders[parseInt(idx)] ?? "");
+
+  if (markdownRenderCache.size >= MARKDOWN_CACHE_MAX) {
+    // Drop the oldest insertion (Map preserves insertion order).
+    const oldestKey = markdownRenderCache.keys().next().value;
+    if (oldestKey !== undefined) markdownRenderCache.delete(oldestKey);
+  }
+  markdownRenderCache.set(hash, { text, highlight, html });
 
   return html;
 }
