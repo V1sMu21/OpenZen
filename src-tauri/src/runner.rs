@@ -365,6 +365,16 @@ pub async fn run_agent_for_session(
     model_name: Option<&str>,
     resume: bool,
 ) -> anyhow::Result<()> {
+    // Mark user activity so the ERME idle soul cycle yields while the
+    // user is actively conversing (it would otherwise compete for
+    // MLX/CPU mid-conversation).
+    state.last_user_activity.store(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     // Resolve config through the same fallback chain as the ERME backend
     // gate (AppState::new) so both always agree on the active config.
     let config_path = crate::resolve_config_path(&state.config_path);

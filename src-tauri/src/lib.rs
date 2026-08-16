@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use oz_core_types::ToolContext;
@@ -162,6 +162,7 @@ pub struct ErmeRuntime {
 fn init_erme_store(
     base_dir: &std::path::Path,
     idle_interval_secs: u64,
+    last_user_activity: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Option<Arc<ErmeRuntime>> {
     use entropy_memory_engine::consolidation::ConsolidationConfig;
     use entropy_memory_engine::l0::soul::{SoulHandle, SoulModel};
@@ -293,6 +294,9 @@ fn init_erme_store(
     let observer = Arc::new(orchestrator.observer().clone());
     let mut reflection_cfg = ReflectionConfig::default();
     reflection_cfg.idle_interval_secs = idle_interval_secs;
+    let reality_anchor = std::sync::Arc::new(
+        entropy_memory_engine::phase4::RealityAnchor::new(),
+    );
     let reflection = Arc::new(
         ReflectionEngine::new(
             Arc::clone(&soul),
@@ -302,6 +306,10 @@ fn init_erme_store(
             reflection_cfg,
         )
         .with_rambling(Arc::clone(&rambling))
+        // Without an anchor, high-sss rambling conjectures entered
+        // self_portrait unverified — the anchor gates them against
+        // persisted memories first.
+        .with_reality_anchor(std::sync::Arc::clone(&reality_anchor))
         .with_persist_path(soul_path),
     );
     store.attach_soul(Arc::clone(&reflection));
@@ -314,10 +322,24 @@ fn init_erme_store(
     {
         let reflection = Arc::clone(&reflection);
         let orchestrator = Arc::clone(&orchestrator);
+        let last_user_activity = std::sync::Arc::clone(&last_user_activity);
         std::thread::Builder::new()
             .name("erme-idle-cycle".into())
             .spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_secs(idle_interval_secs));
+                // Skip the soul cycle while the user is actively
+                // conversing: it competes with the main agent for
+                // MLX/CPU and mid-conversation is not "idle".
+                let last = last_user_activity.load(std::sync::atomic::Ordering::Relaxed);
+                if last > 0 {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if now.saturating_sub(last) < idle_interval_secs {
+                        continue;
+                    }
+                }
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // Drain the event queue first: portrait/relationship
                     // updates (UserStatement, MemoryStored, …) only happen
@@ -508,6 +530,9 @@ pub struct AppState {
     /// Scheduler shutdown flag — set by graceful exit so maintenance tasks
     /// stop cleanly instead of racing the teardown.
     pub scheduler_shutdown: std::sync::Mutex<Option<Arc<AtomicBool>>>,
+    /// Unix-seconds timestamp of the last user message; the ERME idle
+    /// cycle skips itself while the user is actively conversing.
+    pub last_user_activity: Arc<AtomicU64>,
     pub intervention_queues: Mutex<
         HashMap<
             String,
@@ -577,8 +602,9 @@ impl AppState {
             .as_ref()
             .and_then(|c| c.erme_idle_interval_secs)
             .unwrap_or(300);
+        let last_user_activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let erme_store = if memory_backend == "erme" {
-            init_erme_store(&data_root, erme_idle_secs)
+            init_erme_store(&data_root, erme_idle_secs, std::sync::Arc::clone(&last_user_activity))
         } else {
             tracing::info!("memory_backend = \"file\": ERME store not built (set memory_backend = \"erme\" to enable)");
             None
@@ -619,11 +645,15 @@ impl AppState {
                 .find(|p| p.is_dir())
                 .map(|p| p.to_string_lossy().to_string()),
             projects: Mutex::new(projects::store::load_projects()),
-            crystallization_enabled: AtomicBool::new(false),
+            // Crystallization (skill/SOP/fact distillation) on by default:
+            // with it off, the three-layer memory design only ever ran the
+            // ERME semantic layer and user facts never accumulated.
+            crystallization_enabled: AtomicBool::new(true),
             full_access: Arc::new(AtomicBool::new(false)),
             erme_store,
             platform_registry: std::sync::Mutex::new(None),
             scheduler_shutdown: std::sync::Mutex::new(None),
+            last_user_activity,
             intervention_queues: Mutex::new(HashMap::new()),
             session_windows: Arc::new(Mutex::new(HashMap::new())),
         }
