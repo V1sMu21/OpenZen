@@ -161,14 +161,14 @@ fn process_tool_outcome(
                 *exit_reason = Some("EXITED".into());
                 tool_results.push(ToolResultItem {
                     tool_use_id: tid.to_string(),
-                    content: serde_json::to_string(&oc.data).unwrap_or_default(),
+                    content: tool_result_content(&oc.data),
                     images: oc.images.clone(),
                 });
                 return;
             }
             tool_results.push(ToolResultItem {
                 tool_use_id: tid.to_string(),
-                content: serde_json::to_string(&oc.data).unwrap_or_default(),
+                content: tool_result_content(&oc.data),
                 images: oc.images.clone(),
             });
             if let Some(np) = oc.next_prompt {
@@ -187,6 +187,21 @@ fn process_tool_outcome(
             next_prompts.push(err_msg);
         }
     }
+}
+
+/// Serialize a tool outcome into the tool_result content that enters the
+/// LLM context, capped at 100K chars (head+tail). The SSE/persistence
+/// layers already cap at the same budget, but the context path had no
+/// cap at all: one `cat big.log` in code_run inline mode returned full
+/// stdout into messages — context explosion plus an emergency-compression
+/// LLM call to recover.
+fn tool_result_content(data: &serde_json::Value) -> String {
+    const MAX_TOOL_RESULT_CTX_CHARS: usize = 100_000;
+    let serialized = serde_json::to_string(data).unwrap_or_default();
+    if serialized.len() <= MAX_TOOL_RESULT_CTX_CHARS {
+        return serialized;
+    }
+    smart_format(&serialized, MAX_TOOL_RESULT_CTX_CHARS)
 }
 
 /// Truncate text to a readable length, showing start and end with "..." in between.
