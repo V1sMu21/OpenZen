@@ -205,8 +205,16 @@ async function checkHealth(): Promise<boolean> {
   }
   try {
     const res = await fetch("/api/health");
+    // Mirror the Tauri branch: without writing the store, the backend
+    // indicator stayed red forever in HTTP mode.
+    heartbeat.update((h) => ({
+      ...h,
+      connected: res.ok,
+      lastPing: Date.now(),
+    }));
     return res.ok;
   } catch {
+    heartbeat.update((h) => ({ ...h, connected: false, lastPing: Date.now() }));
     return false;
   }
 }

@@ -62,10 +62,49 @@
       chat.dismissAskUser();
     }
   }
+
+  // Focus trap: aria-modal declared a modal, but Tab could escape to the
+  // background page. Wrap focus inside the dialog and return it to the
+  // chat input when the dialog closes.
+  let dialogEl: HTMLElement | undefined = $state();
+
+  function trapFocus(e: KeyboardEvent) {
+    if (e.key !== "Tab" || !dialogEl) return;
+    const focusables = Array.from(
+      dialogEl.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === dialogEl)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  $effect(() => {
+    const chatInput = document.querySelector<HTMLElement>(".input-area textarea");
+    return () => {
+      chatInput?.focus();
+    };
+  });
 </script>
 
 <div class="ask-backdrop" onclick={onBackdropClick} role="presentation">
-  <div class="ask-dialog" role="dialog" aria-modal="true" aria-labelledby="ask-question">
+  <div
+    class="ask-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="ask-question"
+    bind:this={dialogEl}
+    onkeydown={trapFocus}
+  >
     <div class="ask-header">
       <span class="ask-icon" aria-hidden="true">?</span>
       <div class="ask-title-block">

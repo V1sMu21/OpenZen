@@ -25,7 +25,7 @@
   --color-ink: #e4ddca;
   --color-body: #b8b0a3;
   --color-muted: #7a7366;
-  --color-dim: #8a8170; /* WCAG AA: ≥4.5:1 on canvas/surface */
+  --color-dim: #918875; /* WCAG AA: ≥4.5:1 on canvas/surface/elevated */
 
   /* Borders — 青调发丝线 */
   --color-hairline: rgba(147, 195, 214, 0.12);
@@ -129,8 +129,10 @@ html.theme-light {
   --color-accent-soft: rgba(79, 142, 168, 0.05);
   --color-ink: #2c2820;
   --color-body: #5c564a;
-  --color-muted: #8a8275;
-  --color-dim: #b0a99e;
+  /* Light theme: previous values were ~1.9:1 / 3.2:1 on the light
+     canvas — far below WCAG AA. */
+  --color-muted: #6f6a5e;
+  --color-dim: #5f594e;
   --color-hairline: rgba(79, 142, 168, 0.16);
   --color-hairline-strong: rgba(79, 142, 168, 0.28);
   --color-code-bg: #e8e3d8;
