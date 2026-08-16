@@ -32,12 +32,18 @@ struct DebugLogWriter {
 
 impl DebugLogWriter {
     fn write(&mut self, msg: &str) {
-        use std::io::Write as _;
         let line = format!(
             "[{}] [openzen] {}\n",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
             msg.trim_end()
         );
+        self.write_raw(&line);
+    }
+
+    /// Append a pre-formatted line (tracing events already carry level
+    /// and timestamp) under the same size-based rotation.
+    fn write_raw(&mut self, line: &str) {
+        use std::io::Write as _;
         if self.file.is_none() || self.written + line.len() as u64 > MAX_DEBUG_LOG_BYTES {
             self.rotate();
         }
@@ -64,6 +70,48 @@ impl DebugLogWriter {
 
 static DEBUG_LOG_WRITER: std::sync::OnceLock<std::sync::Mutex<DebugLogWriter>> =
     std::sync::OnceLock::new();
+
+/// Routes tracing events into the same size-rotated file as debug_log so
+/// 7x24 log output is persisted AND bounded (stderr is invisible in a GUI
+/// app and grew unbounded where redirected).
+struct RotatedLogMakeWriter;
+
+struct RotatedLogWriter;
+
+impl std::io::Write for RotatedLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(buf);
+        if !text.trim().is_empty() {
+            rotated_log_append(&text);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RotatedLogMakeWriter {
+    type Writer = RotatedLogWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        RotatedLogWriter
+    }
+}
+
+fn rotated_log_append(line: &str) {
+    let writer = DEBUG_LOG_WRITER.get_or_init(|| {
+        let log_dir = data_dir().join("logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        std::sync::Mutex::new(DebugLogWriter {
+            path: log_dir.join("openzen.log"),
+            file: None,
+            written: 0,
+        })
+    });
+    if let Ok(mut w) = writer.lock() {
+        w.write_raw(line);
+    }
+}
 
 pub(crate) fn debug_log(msg: &str) {
     // One shared buffered writer for the whole process — the previous
@@ -767,7 +815,7 @@ static SHUTDOWN_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
 /// Each step is best-effort: a stuck step must not block exit forever.
 fn graceful_shutdown(state: &AppState) {
     use std::time::Duration;
-    eprintln!("[openzen] graceful shutdown: stopping agents…");
+    tracing::info!("[openzen] graceful shutdown: stopping agents…");
     {
         let signals = lock_poison_guard(&state.stop_signals);
         for sig in signals.values() {
@@ -799,21 +847,26 @@ fn graceful_shutdown(state: &AppState) {
     }
     // In-flight agent finalization persists through the sessions store;
     // give it a moment, then flush and wait for the persist worker.
-    eprintln!("[openzen] graceful shutdown: flushing sessions…");
+    tracing::info!("[openzen] graceful shutdown: flushing sessions…");
     std::thread::sleep(Duration::from_millis(500));
     {
         let store = lock_poison_guard(&state.sessions);
         store.save();
         store.wait_persisted(Duration::from_secs(3));
     }
-    eprintln!("[openzen] graceful shutdown complete");
+    tracing::info!("[openzen] graceful shutdown complete");
 }
 
 pub fn run() {
-    // Initialize tracing so agent loop / LLM errors are visible on stderr.
+    // Initialize tracing into the size-rotated log file (stderr is
+    // invisible in a GUI app and grew unbounded where redirected).
     let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(RotatedLogMakeWriter)
+        .with_ansi(false)
+        .try_init();
 
     // Panic hook: log panic location and message before unwinding.
     // With panic="abort", the backtrace is lost; with panic="unwind",
@@ -831,9 +884,9 @@ pub fn run() {
             "unknown payload".into()
         };
         let msg = format!("PANIC at {location}: {payload}");
-        eprintln!("{msg}");
+        tracing::info!("{msg}");
         let bt = std::backtrace::Backtrace::force_capture();
-        eprintln!("{bt}");
+        tracing::info!("{bt}");
         // Also write crash log for post-mortem
         let crash_path = std::path::PathBuf::from("/tmp/openzen-crash.log");
         let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -922,32 +975,32 @@ pub fn run() {
             let state_for_platforms = Arc::clone(&state);
             tokio::spawn(async move {
                 let cfg_path = std::path::Path::new(&state_for_platforms.config_path);
-                eprintln!("[openzen] Platform init: config_path={}", cfg_path.display());
+                tracing::info!("[openzen] Platform init: config_path={}", cfg_path.display());
                 if !cfg_path.exists() {
-                    eprintln!("[openzen] Platform init: config file not found at {}", cfg_path.display());
+                    tracing::info!("[openzen] Platform init: config file not found at {}", cfg_path.display());
                     return;
                 }
                 let raw: toml::Table = match std::fs::read_to_string(cfg_path)
                     .ok()
                     .and_then(|s| {
                         let lines: Vec<&str> = s.lines().filter(|l| l.contains("platforms")).collect();
-                        eprintln!("[openzen] Config lines with 'platforms': {:?}", lines);
+                        tracing::info!("[openzen] Config lines with 'platforms': {:?}", lines);
                         toml::from_str(&s).ok()
                     })
                 {
                     Some(t) => t,
                     None => {
-                        eprintln!("[openzen] Platform init: failed to parse config");
+                        tracing::warn!("[openzen] Platform init: failed to parse config");
                         return;
                     }
                 };
                 let platforms_table = match raw.get("platforms").and_then(|v| v.as_table()) {
                     Some(t) => {
-                        eprintln!("[openzen] Platform init: found {} platform(s): {:?}", t.len(), t.keys().collect::<Vec<_>>());
+                        tracing::info!("[openzen] Platform init: found {} platform(s): {:?}", t.len(), t.keys().collect::<Vec<_>>());
                         t
                     }
                     None => {
-                        eprintln!("[openzen] Platform init: no [platforms] section. Keys present: {:?}", raw.keys().collect::<Vec<_>>());
+                        tracing::info!("[openzen] Platform init: no [platforms] section. Keys present: {:?}", raw.keys().collect::<Vec<_>>());
                         return;
                     }
                 };
@@ -983,25 +1036,25 @@ pub fn run() {
 
                 let mut registry = PlatformRegistry::new();
                 for (name, val) in platforms_table {
-                    eprintln!("[openzen] Platform init: processing '{}'", name);
+                    tracing::info!("[openzen] Platform init: processing '{}'", name);
                     let config: oz_platform::PlatformConfig =
                         match val.clone().try_into() {
                             Ok(c) => c,
                             Err(e) => {
-                                eprintln!("[openzen] Platform '{}' config parse error: {:?}", name, e);
+                                tracing::warn!("[openzen] Platform '{}' config parse error: {:?}", name, e);
                                 continue;
                             }
                         };
                     if !config.enabled {
-                        eprintln!("[openzen] Platform '{}' is disabled, skipping", name);
+                        tracing::info!("[openzen] Platform '{}' is disabled, skipping", name);
                         continue;
                     }
                     let adapter: Option<Arc<dyn PlatformAdapter>> = match name.as_str() {
                         "feishu" => {
                             let result = oz_platform_feishu::FeishuAdapter::new(&config);
                             match &result {
-                                Ok(_) => eprintln!("[openzen] Feishu adapter created OK"),
-                                Err(e) => eprintln!("[openzen] Feishu adapter FAILED: {:?}", e),
+                                Ok(_) => tracing::info!("[openzen] Feishu adapter created OK"),
+                                Err(e) => tracing::warn!("[openzen] Feishu adapter FAILED: {:?}", e),
                             }
                             result.ok().map(|a| Arc::new(a) as Arc<dyn PlatformAdapter>)
                         }
@@ -1014,14 +1067,14 @@ pub fn run() {
                         _ => continue,
                     };
                     if let Some(a) = adapter {
-                        eprintln!("[openzen] Platform '{}' registered", name);
+                        tracing::info!("[openzen] Platform '{}' registered", name);
                         registry.register(a);
                     } else {
-                        eprintln!("[openzen] Platform '{}' adapter creation returned None", name);
+                        tracing::info!("[openzen] Platform '{}' adapter creation returned None", name);
                     }
                 }
                 if !registry.is_empty() {
-                    eprintln!("[openzen] Starting platform adapters...");
+                    tracing::info!("[openzen] Starting platform adapters...");
                     let ctx = PlatformContext {
                         agent: bridge,
                         platform_config: oz_platform::PlatformConfig::default(),
@@ -1033,9 +1086,9 @@ pub fn run() {
                     // Share with the exit path so adapters are stopped on quit.
                     *lock_poison_guard(&state_for_platforms.platform_registry) =
                         Some(Arc::new(registry));
-                    eprintln!("[openzen] Platform adapters started");
+                    tracing::info!("[openzen] Platform adapters started");
                 } else {
-                    eprintln!("[openzen] No platform adapters to start (registry empty)");
+                    tracing::info!("[openzen] No platform adapters to start (registry empty)");
                 }
             });
 
@@ -1069,7 +1122,7 @@ pub fn run() {
             let (reminder_tx, mut reminder_rx) = tokio::sync::mpsc::unbounded_channel::<oz_core_types::Reminder>();
             *lock_poison_guard(&state.reminder_tx) = Some(reminder_tx.clone());
             let set_result = oz_core_types::REMINDER_TX.set(reminder_tx);
-            eprintln!("[reminder] REMINDER_TX.set() ok={}", set_result.is_ok());
+            tracing::info!("[reminder] REMINDER_TX.set() ok={}", set_result.is_ok());
 
             let state_for_reminders = Arc::clone(&state);
             debug_log("reminder checker: starting");

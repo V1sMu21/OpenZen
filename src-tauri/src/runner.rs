@@ -191,11 +191,11 @@ impl oz_core::memory_job::MemoryDistiller for McpMemoryDistiller {
 ///     + names so the protocol pairing is restored.
 fn build_history_messages(messages: &[serde_json::Value]) -> Vec<Message> {
     if messages.is_empty() {
-        eprintln!("[runner::build_history] EMPTY messages array");
+        tracing::info!("[runner::build_history] EMPTY messages array");
         return Vec::new();
     }
     let slice = &messages[..messages.len().saturating_sub(1)];
-    eprintln!(
+    tracing::info!(
         "[runner::build_history] total={} slice_len={}",
         messages.len(),
         slice.len()

@@ -27,7 +27,7 @@ pub fn spawn_terminal(
     shell: Option<String>,
     cwd: Option<String>,
 ) -> Result<String, String> {
-    eprintln!(
+    tracing::info!(
         "[sidepanel::terminal] spawn_terminal called: session_id={}, shell={:?}, cwd={:?}",
         session_id, shell, cwd
     );
@@ -40,19 +40,19 @@ pub fn spawn_terminal(
             .unwrap_or_else(|_| "/".into())
     });
 
-    eprintln!(
+    tracing::info!(
         "[sidepanel::terminal] using shell={}, workdir={}",
         shell_path, workdir
     );
 
     let pty_pair = pty::openpty(None, None).map_err(|e| {
-        eprintln!("[sidepanel::terminal] openpty failed: {e}");
+        tracing::warn!("[sidepanel::terminal] openpty failed: {e}");
         format!("openpty failed: {e}")
     })?;
 
     let master_raw = pty_pair.master.into_raw_fd();
     let slave_raw = pty_pair.slave.into_raw_fd();
-    eprintln!(
+    tracing::info!(
         "[sidepanel::terminal] openpty OK: master_raw={}, slave_raw={}",
         master_raw, slave_raw
     );
@@ -70,7 +70,7 @@ pub fn spawn_terminal(
         libc::ioctl(master_raw, libc::TIOCSWINSZ, &winsize);
     }
 
-    eprintln!("[sidepanel::terminal] spawning shell via Command + pre_exec…");
+    tracing::info!("[sidepanel::terminal] spawning shell via Command + pre_exec…");
     // `Command::spawn` with `pre_exec` still forks internally, but the
     // closure runs in the child right after fork where the process is
     // single-threaded — the correct window for PTY wiring. Argv/env are
@@ -113,26 +113,26 @@ pub fn spawn_terminal(
         Err(e) => {
             let _ = nix::unistd::close(slave_raw);
             let _ = nix::unistd::close(master_raw);
-            eprintln!("[sidepanel::terminal] spawn failed: {e}");
+            tracing::warn!("[sidepanel::terminal] spawn failed: {e}");
             return Err(format!("spawn shell failed: {e}"));
         }
     };
     let _ = nix::unistd::close(slave_raw);
     let pid = child.id();
-    eprintln!(
+    tracing::info!(
         "[sidepanel::terminal] parent PID={} child={} master_raw={}",
         std::process::id(),
         pid,
         master_raw
     );
     {
-        eprintln!("[sidepanel::terminal] STEP: creating master_owned from raw fd");
+        tracing::info!("[sidepanel::terminal] STEP: creating master_owned from raw fd");
         // OwnedFd::from_raw_fd: takes ownership of master_raw, which we
         // obtained via into_raw_fd above — no double-close, fd is owned
         // by this process.
         let master_owned = unsafe { OwnedFd::from_raw_fd(master_raw) };
 
-        eprintln!("[sidepanel::terminal] STEP: building TerminalSession");
+        tracing::info!("[sidepanel::terminal] STEP: building TerminalSession");
         let session = TerminalSession {
             pid,
             master_fd: master_owned,
@@ -142,20 +142,20 @@ pub fn spawn_terminal(
             exit_code: None,
         };
 
-        eprintln!("[sidepanel::terminal] STEP: locking registry to insert session");
+        tracing::info!("[sidepanel::terminal] STEP: locking registry to insert session");
         {
             let mut sessions = crate::lock_poison_guard(&registry);
             sessions.insert(session_id.clone(), session);
         }
-        eprintln!("[sidepanel::terminal] STEP: session inserted, cloning handles");
+        tracing::info!("[sidepanel::terminal] STEP: session inserted, cloning handles");
 
         let app2 = app.clone();
         let reg2 = registry.clone();
         let sid2 = session_id.clone();
 
-        eprintln!("[sidepanel::terminal] STEP: spawning reader std::thread");
+        tracing::info!("[sidepanel::terminal] STEP: spawning reader std::thread");
         std::thread::spawn(move || {
-            eprintln!(
+            tracing::info!(
                 "[sidepanel::terminal] read loop thread STARTED for sid={}, master_raw={}",
                 sid2, master_raw
             );
@@ -164,7 +164,7 @@ pub fn spawn_terminal(
             loop {
                 match nix::unistd::read(master_raw, &mut buf) {
                     Ok(0) => {
-                        eprintln!(
+                        tracing::info!(
                             "[sidepanel::terminal] read returned 0 (EOF) for sid={}",
                             sid2
                         );
@@ -172,7 +172,7 @@ pub fn spawn_terminal(
                     }
                     Ok(n) => {
                         if !any_read {
-                            eprintln!(
+                            tracing::info!(
                                 "[sidepanel::terminal] first read OK: {} bytes for sid={}",
                                 n, sid2
                             );
@@ -186,14 +186,14 @@ pub fn spawn_terminal(
                             }),
                         ) {
                             Ok(_) => {}
-                            Err(e) => eprintln!(
+                            Err(e) => tracing::info!(
                                 "[sidepanel::terminal] emit terminal:data FAILED: sid={}, err={}",
                                 sid2, e
                             ),
                         }
                     }
                     Err(e) => {
-                        eprintln!("[sidepanel::terminal] read error: sid={}, err={}", sid2, e);
+                        tracing::warn!("[sidepanel::terminal] read error: sid={}, err={}", sid2, e);
                         let _ = app2.emit(
                             "terminal:data",
                             serde_json::json!({
@@ -223,7 +223,7 @@ pub fn spawn_terminal(
                 Ok(WaitStatus::Signaled(_, s, _)) => Some(-(s as i32)),
                 _ => None,
             };
-            eprintln!(
+            tracing::info!(
                 "[sidepanel::terminal] read loop EXITED: sid={}, exit_code={:?}",
                 sid2, exit_code
             );
@@ -244,7 +244,7 @@ pub fn spawn_terminal(
             );
         });
 
-        eprintln!(
+        tracing::info!(
                 "[sidepanel::terminal] emitting terminal:created: session_id={}, shell={}, cwd={}, pid={}",
                 session_id, shell_path, workdir, pid
             );

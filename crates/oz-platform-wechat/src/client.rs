@@ -122,8 +122,8 @@ impl WxBotClient {
         let qr_url = body.qrcode_img_content.unwrap_or_default();
 
         if !qr_url.is_empty() {
-            eprintln!("[WeChat] QR code URL: {qr_url}");
-            eprintln!("[WeChat] Opening QR code in browser...");
+            tracing::info!("[WeChat] QR code URL: {qr_url}");
+            tracing::info!("[WeChat] Opening QR code in browser...");
             // Open the QR code URL in the default browser so the user can scan it.
             #[cfg(target_os = "macos")]
             {
@@ -140,7 +140,7 @@ impl WxBotClient {
                     .spawn();
             }
         }
-        eprintln!("[WeChat] QR ID: {qr_id}");
+        tracing::info!("[WeChat] QR ID: {qr_id}");
 
         let mut last_status = String::new();
         loop {
@@ -207,7 +207,7 @@ impl WxBotClient {
 
                 if let Some(errcode) = result.errcode {
                     if errcode != 0 {
-                        eprintln!("[WeChat] get_updates errcode={}", errcode);
+                        tracing::info!("[WeChat] get_updates errcode={}", errcode);
                         if errcode == -14 {
                             self.updates_buf.clear();
                             self.save_token();

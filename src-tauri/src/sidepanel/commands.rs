@@ -15,7 +15,7 @@ use super::terminal;
 pub fn toggle_sidepanel(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<bool, String> {
     let mut sp = lock_poison_guard(&state.sidepanel);
     sp.visible = !sp.visible;
-    eprintln!(
+    tracing::info!(
         "[sidepanel::commands] toggle_sidepanel: visible={}",
         sp.visible
     );
@@ -89,7 +89,7 @@ fn register_and_show(
                     .state::<tauri::scope::Scopes>()
                     .allow_directory(parent, true)
                 {
-                    eprintln!("[sidepanel] allow_directory failed: {e}");
+                    tracing::warn!("[sidepanel] allow_directory failed: {e}");
                 }
                 if !roots.contains(&canonical_parent) {
                     roots.push(canonical_parent.clone());
@@ -97,7 +97,7 @@ fn register_and_show(
                 let mut html_roots = lock_poison_guard(&state.html_roots);
                 html_roots.clear();
                 html_roots.push(canonical_parent.clone());
-                eprintln!(
+                tracing::info!(
                     "[sidepanel::commands] ozfile root: {}",
                     canonical_parent.display()
                 );
@@ -118,7 +118,7 @@ fn register_and_show(
     sp.visible = true;
 
     let payload = serde_json::to_value(&artifact).map_err(|e| e.to_string())?;
-    eprintln!(
+    tracing::info!(
         "[sidepanel::commands] open_artifact emit payload: {}",
         payload
     );
@@ -139,7 +139,7 @@ pub fn open_artifact(
     artifact_path: String,
     artifact_label: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    eprintln!(
+    tracing::info!(
         "[sidepanel::commands] open_artifact called: type={}, path={}, label={:?}",
         artifact_type, artifact_path, artifact_label
     );
@@ -315,7 +315,7 @@ pub async fn spawn_terminal(
     shell: Option<String>,
     cwd: Option<String>,
 ) -> Result<String, String> {
-    eprintln!(
+    tracing::info!(
         "[sidepanel::commands] spawn_terminal COMMAND called: shell={:?} cwd={:?}",
         shell, cwd
     );
@@ -443,7 +443,7 @@ pub fn read_file_bytes(path: String, state: State<'_, Arc<AppState>>) -> Result<
 /// Read a text file's content for code view.
 #[tauri::command]
 pub fn read_file_content(state: State<'_, Arc<AppState>>, path: String) -> Result<String, String> {
-    eprintln!(
+    tracing::info!(
         "[sidepanel::commands] read_file_content called: path={}",
         path
     );

@@ -1680,7 +1680,7 @@ mod tests {
         // Real checkpoint dir for the long-task session.
         let cp_dir = "/Users/macstu/Documents/apps/openzen/tests/longtask/2/openzen/checkpoints";
         if !std::path::Path::new(cp_dir).exists() {
-            eprintln!("skipping: real checkpoint dir not present");
+            tracing::info!("skipping: real checkpoint dir not present");
             return;
         }
         let session_id = "fe54c2c0-4150-4db3-bdf4-086543a1ab1d";

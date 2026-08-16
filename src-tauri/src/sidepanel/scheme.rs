@@ -39,7 +39,7 @@ fn handle_request(
     };
 
     if !is_allowed(ctx.app_handle(), &canonical) {
-        eprintln!("[sidepanel::scheme] ozfile denied: {}", canonical.display());
+        tracing::info!("[sidepanel::scheme] ozfile denied: {}", canonical.display());
         return error_response(StatusCode::FORBIDDEN, "not allowed");
     }
 

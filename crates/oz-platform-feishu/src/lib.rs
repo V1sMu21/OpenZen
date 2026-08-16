@@ -68,7 +68,7 @@ impl PlatformAdapter for FeishuAdapter {
         let running_tasks = self.running_tasks.clone();
 
         let instance_id = &self.instance_id;
-        eprintln!(
+        tracing::info!(
             "[feishu:{instance_id}] starting bot... app_id={}",
             self.app_id
         );
@@ -78,7 +78,7 @@ impl PlatformAdapter for FeishuAdapter {
         );
 
         loop {
-            eprintln!("[feishu:{instance_id}] connecting to WebSocket...");
+            tracing::info!("[feishu:{instance_id}] connecting to WebSocket...");
             match Self::connect_websocket(
                 &agent,
                 &client,
@@ -91,13 +91,13 @@ impl PlatformAdapter for FeishuAdapter {
             .await
             {
                 Ok(()) => {
-                    eprintln!(
+                    tracing::info!(
                         "[feishu:{instance_id}] WebSocket closed normally, reconnecting in 5s..."
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
                 Err(e) => {
-                    eprintln!(
+                    tracing::info!(
                         "[feishu:{instance_id}] WebSocket error: {e}, reconnecting in 10s..."
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -129,7 +129,7 @@ impl FeishuAdapter {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::connect_async_tls_with_config;
 
-        eprintln!("[feishu:{instance_id}] discovering WebSocket endpoint...");
+        tracing::info!("[feishu:{instance_id}] discovering WebSocket endpoint...");
         let endpoint = client
             .get_ws_endpoint()
             .await
@@ -137,10 +137,10 @@ impl FeishuAdapter {
         let ws_url = endpoint
             .url
             .ok_or_else(|| "no ws url in endpoint response".to_string())?;
-        eprintln!("[feishu:{instance_id}] connecting to WebSocket: {ws_url}");
+        tracing::info!("[feishu:{instance_id}] connecting to WebSocket: {ws_url}");
 
         let bot_open_id = client.get_bot_open_id().await.unwrap_or_default();
-        eprintln!("[feishu:{instance_id}] bot open_id: {bot_open_id}");
+        tracing::info!("[feishu:{instance_id}] bot open_id: {bot_open_id}");
 
         // Feishu endpoints are always wss://. A None connector uses the
         // rustls-webpki-roots defaults from the workspace feature.
@@ -149,7 +149,7 @@ impl FeishuAdapter {
             .map_err(|e| format!("WebSocket connect error: {e}"))?;
 
         let (mut write, mut read) = ws_stream.split();
-        eprintln!("[feishu:{instance_id}] WebSocket connected, waiting for events...");
+        tracing::info!("[feishu:{instance_id}] WebSocket connected, waiting for events...");
 
         // Persistent dedup: survive restarts so old messages replayed
         // by the Feishu server on reconnect don't trigger agent runs.
@@ -167,7 +167,7 @@ impl FeishuAdapter {
         while let Some(msg) = read.next().await {
             let msg = msg.map_err(|e| format!("WebSocket read error: {e}"))?;
             if msg.is_close() {
-                eprintln!("[feishu:{instance_id}] WebSocket closed by server");
+                tracing::info!("[feishu:{instance_id}] WebSocket closed by server");
                 return Ok(());
             }
 
@@ -189,7 +189,7 @@ impl FeishuAdapter {
                     continue;
                 }
                 if hdr_type.to_lowercase() != "event" {
-                    eprintln!(
+                    tracing::info!(
                         "[feishu:{instance_id}] non-event frame: type={hdr_type}, payload_type={}",
                         frame.payload_type
                     );
@@ -209,7 +209,7 @@ impl FeishuAdapter {
                 } else {
                     event_type
                 };
-                eprintln!(
+                tracing::info!(
                     "[feishu:{instance_id}] decoded event: type={event_key}, payload_len={}",
                     payload_bytes.len()
                 );
@@ -234,7 +234,7 @@ impl FeishuAdapter {
                 let text = msg
                     .to_text()
                     .map_err(|e| format!("WebSocket text error: {e}"))?;
-                eprintln!(
+                tracing::info!(
                     "[feishu:{instance_id}] received text event: {}",
                     &text[..text.len().min(200)]
                 );
@@ -298,7 +298,7 @@ async fn process_event(
         .unwrap_or("");
     if !msg_id.is_empty() {
         if seen_msg_ids.contains(&msg_id.to_string()) {
-            eprintln!("[feishu:{instance_id}] skipping duplicate event: msg_id={msg_id}");
+            tracing::info!("[feishu:{instance_id}] skipping duplicate event: msg_id={msg_id}");
             return;
         }
         seen_msg_ids.push_back(msg_id.to_string());
@@ -335,7 +335,7 @@ async fn process_event(
     };
 
     if (sender_type.is_empty() || sender_type != "user") && !sender_type.is_empty() {
-        eprintln!("[feishu:{instance_id}] skip non-user message: sender_type={sender_type}, sender_id={sender_id}");
+        tracing::info!("[feishu:{instance_id}] skip non-user message: sender_type={sender_type}, sender_id={sender_id}");
         return;
     }
 
@@ -449,7 +449,7 @@ async fn process_event(
     let prompt = text.to_string();
     let model = default_model.clone();
 
-    eprintln!(
+    tracing::info!(
         "[feishu:{instance_id}] starting agent for session={sid}, text_len={}",
         prompt.len()
     );
@@ -505,7 +505,7 @@ async fn stream_to_feishu_card(
     let mut buffer = String::new();
 
     while let Some(event) = event_rx.recv().await {
-        eprintln!("[feishu:card] event: {:?}", std::mem::discriminant(&event));
+        tracing::info!("[feishu:card] event: {:?}", std::mem::discriminant(&event));
         match event {
             StreamEvent::TextDelta { text, .. } => {
                 buffer.push_str(&text);

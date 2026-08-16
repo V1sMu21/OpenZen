@@ -371,7 +371,7 @@ impl FeishuClient {
             .text()
             .await
             .map_err(|e| format!("get_ws_endpoint read body: {e}"))?;
-        eprintln!("[feishu] ws endpoint HTTP {status}, body: {body_text}");
+        tracing::info!("[feishu] ws endpoint HTTP {status}, body: {body_text}");
 
         let result: serde_json::Value = serde_json::from_str(&body_text)
             .map_err(|e| format!("get_ws_endpoint parse error: {e}. body was: {body_text}"))?;
@@ -397,7 +397,7 @@ impl FeishuClient {
         let token = match self.get_token().await {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("[feishu] get_bot_open_id: get_token failed: {e}");
+                tracing::warn!("[feishu] get_bot_open_id: get_token failed: {e}");
                 return Err(format!("get_token: {e}"));
             }
         };
@@ -413,7 +413,7 @@ impl FeishuClient {
             .text()
             .await
             .map_err(|e| format!("get_bot_open_id read body: {e}"))?;
-        eprintln!("[feishu] bot/v3/info response: {body_text}");
+        tracing::info!("[feishu] bot/v3/info response: {body_text}");
         let result: serde_json::Value = serde_json::from_str(&body_text)
             .map_err(|e| format!("get_bot_open_id parse error: {e}"))?;
         let code = result.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);

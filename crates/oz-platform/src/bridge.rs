@@ -218,7 +218,7 @@ impl AgentBridge {
             .catch_unwind()
             .await
             .unwrap_or_else(|_| {
-                eprintln!("[platform] agent loop panicked for session {session_id_owned}");
+                tracing::warn!("[platform] agent loop panicked for session {session_id_owned}");
                 LoopOutcome {
                     turn: 0,
                     exit_reason: "agent_loop_panicked".into(),
@@ -226,7 +226,7 @@ impl AgentBridge {
                 }
             });
 
-            eprintln!(
+            tracing::info!(
                 "[platform] agent loop finished: exit_reason={}, turn={}",
                 outcome.exit_reason, outcome.turn
             );
