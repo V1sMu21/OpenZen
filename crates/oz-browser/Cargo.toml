@@ -17,4 +17,3 @@ futures.workspace = true
 futures-util.workspace = true
 async-trait.workspace = true
 tokio-tungstenite.workspace = true
-uuid.workspace = true

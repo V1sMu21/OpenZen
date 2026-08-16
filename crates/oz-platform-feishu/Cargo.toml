@@ -9,7 +9,6 @@ async-trait.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
@@ -18,8 +17,6 @@ reqwest.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 uuid.workspace = true
-base64 = "0.22"
-toml = "0.8"
 
 oz-platform = { path = "../oz-platform" }
 oz-core-types = { path = "../oz-core-types" }
