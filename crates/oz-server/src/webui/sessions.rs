@@ -193,6 +193,28 @@ impl SessionStore {
         }
     }
 
+    /// Remove idle/stopped sessions older than `threshold`, archiving each
+    /// first (same as capacity eviction). Runs in-process against the
+    /// authoritative map — a disk-side cleanup would be resurrected by the
+    /// next save. Returns the number removed.
+    pub fn prune_expired(&mut self, threshold: chrono::DateTime<chrono::Utc>) -> usize {
+        let ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.status != SessionStatus::Running && s.created_at < threshold)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            let json = self.sessions.get(id).and_then(|e| serde_json::to_value(e).ok());
+            self.archive_entry(id, json);
+            self.sessions.remove(id);
+        }
+        if !ids.is_empty() {
+            self.save();
+        }
+        ids.len()
+    }
+
     /// Create a store that auto-loads from and saves to the given file path.
     pub fn persisted(path: PathBuf) -> Self {
         let mut store = SessionStore {

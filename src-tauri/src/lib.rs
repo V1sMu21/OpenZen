@@ -1021,6 +1021,7 @@ pub fn run() {
             // Maintenance tasks must see the real data paths — with the
             // default context SessionCleanup looks for sessions.json under
             // "./" and TrustDecay never runs at all.
+            let pruner_state = Arc::clone(&state);
             let task_ctx = oz_scheduler::TaskContext {
                 working_dir: Some(data_dir().to_string_lossy().to_string()),
                 skill_mcp_dir: state.skill_mcp_dir.clone(),
@@ -1031,6 +1032,16 @@ pub fn run() {
                         .to_string_lossy()
                         .to_string(),
                 ),
+                // In-process pruning: the disk-side path edits sessions.json
+                // directly, which the next AppState save would resurrect.
+                session_pruner: Some(oz_scheduler::task::SessionPruner(
+                    std::sync::Arc::new(move |max_idle_days| {
+                        let threshold =
+                            chrono::Utc::now() - chrono::Duration::days(max_idle_days);
+                        let mut store = lock_poison_guard(&pruner_state.sessions);
+                        store.prune_expired(threshold) as u32
+                    }),
+                )),
             };
             tauri::async_runtime::spawn(scheduler.run(task_ctx));
 

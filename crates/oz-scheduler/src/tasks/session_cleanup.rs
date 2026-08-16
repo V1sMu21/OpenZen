@@ -39,6 +39,18 @@ impl ScheduledTask for SessionCleanup {
     }
 
     async fn execute(&self, ctx: &TaskContext) -> Result<(), TaskError> {
+        // Prefer the in-process pruner when the host app provided one: it
+        // owns the authoritative in-memory session map.
+        if let Some(pruner) = &ctx.session_pruner {
+            let removed = (pruner.0)(self.max_idle_days);
+            if removed > 0 {
+                tracing::info!(
+                    "[scheduler] session_cleanup: pruned {removed} expired sessions (in-process)"
+                );
+            }
+            return Ok(());
+        }
+
         let working_dir = ctx.working_dir.as_deref().unwrap_or(".");
         let sessions_path = PathBuf::from(working_dir)
             .join("openzen")
@@ -71,7 +83,11 @@ impl ScheduledTask for SessionCleanup {
                         .get("status")
                         .and_then(|s| s.as_str())
                         .unwrap_or("idle");
-                    let is_idle = status == "idle" || status == "stopped";
+                    // serde serializes SessionStatus variants capitalized
+                    // ("Idle"/"Stopped") — the old lowercase compare never
+                    // matched, so nothing was ever removed.
+                    let is_idle = status.eq_ignore_ascii_case("idle")
+                        || status.eq_ignore_ascii_case("stopped");
                     match created {
                         Some(d) if d < threshold && is_idle => Some(id.clone()),
                         _ => None,
