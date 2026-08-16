@@ -55,8 +55,9 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
       return;
     }
 
+    const sid = $sessions.currentId;
     await chat.sendMessage(text);
-    await sessions.load();
+    if (sid) sessions.bumpMessageCount(sid, 1);
   }
 
   async function handleCommand(cmd: string) {

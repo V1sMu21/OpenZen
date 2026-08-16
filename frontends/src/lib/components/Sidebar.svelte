@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { sessions } from "../stores/sessions";
   import { projects } from "../stores/projects";
   import ProjectList from "./ProjectList.svelte";
@@ -44,11 +43,6 @@
       filterRef?.focus();
     }
   }
-
-  onMount(() => {
-    sessions.load();
-    projects.loadAll();
-  });
 </script>
 
 <svelte:window onkeydown={handleKeydown} />

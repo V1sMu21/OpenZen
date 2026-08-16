@@ -13,7 +13,13 @@ import { fetchJson } from "./chat";
 
 const BASE = "/api/sessions";
 
-export async function listSessions(projectId?: string): Promise<SessionInfo[]> {
+// Startup currently triggers sessions.load() and projects.loadAll()
+// simultaneously; projects.loadAll previously made one listSessions call
+// per project as well. Coalesce concurrent identical list requests so the
+// startup path issues ONE all-sessions fetch + ONE projects fetch.
+const inflightListSessions = new Map<string, Promise<SessionInfo[]>>();
+
+async function fetchSessionList(projectId?: string): Promise<SessionInfo[]> {
   if (isTauri()) {
     return (await tauriInvoke("list_sessions", { projectId: projectId || null })) ?? [];
   }
@@ -22,6 +28,17 @@ export async function listSessions(projectId?: string): Promise<SessionInfo[]> {
   if (!res.ok) throw new Error(`Failed to list sessions: ${res.status}`);
   const data = await res.json();
   return data.sessions ?? data ?? [];
+}
+
+export function listSessions(projectId?: string): Promise<SessionInfo[]> {
+  const key = projectId ?? "*";
+  const existing = inflightListSessions.get(key);
+  if (existing) return existing;
+  const request = fetchSessionList(projectId).finally(() => {
+    inflightListSessions.delete(key);
+  });
+  inflightListSessions.set(key, request);
+  return request;
 }
 
 export async function createSession(

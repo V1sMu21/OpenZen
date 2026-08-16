@@ -595,8 +595,10 @@
   }
 
   onMount(async () => {
-    // Load session list FIRST to know what exists on the server
-    await sessions.load();
+    // One startup pass for both stores; api/sessions dedupes the
+    // overlapping all-sessions fetch so this is projects + sessions,
+    // not projects + sessions + sessions (the old Sidebar onMount).
+    await Promise.all([sessions.load(), projects.loadAll()]);
 
     // Dedicated session windows (`session-{id}`) bind to their own session.
     // The label is set by open_session_window in Rust — authoritative, does

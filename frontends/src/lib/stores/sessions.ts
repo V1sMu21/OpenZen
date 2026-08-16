@@ -72,6 +72,20 @@ function createSessionStore() {
       return result;
     },
 
+    /** Increment a session's displayed message count locally. Used after
+     *  sendMessage so the sidebar count updates without a full
+     *  list_sessions round-trip on every message. */
+    bumpMessageCount(id: string, delta = 1) {
+      update((s) => ({
+        ...s,
+        sessions: s.sessions.map((ss) =>
+          ss.id === id
+            ? { ...ss, message_count: Math.max(0, ss.message_count + delta) }
+            : ss,
+        ),
+      }));
+    },
+
     async rename(id: string, name: string) {
       await renameSessionApi(id, name);
       update((s) => ({

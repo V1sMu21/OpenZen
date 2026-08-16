@@ -37,13 +37,17 @@ function createProjectStore() {
     async loadAll() {
       update((s) => ({ ...s, loading: true }));
       try {
-        const raw = await listProjects();
-        const projects: ProjectWithSessions[] = await Promise.all(
-          raw.map(async (p) => ({
-            ...p,
-            sessions: await loadSessionsForProject(p.id),
-          })),
-        );
+        // One projects request + one all-sessions request (deduped with
+        // sessions.load() by api/sessions), instead of listProjects +
+        // listSessions per project (N+1).
+        const [raw, allSessions] = await Promise.all([
+          listProjects(),
+          listSessions(),
+        ]);
+        const projects: ProjectWithSessions[] = raw.map((p) => ({
+          ...p,
+          sessions: allSessions.filter((s) => s.project_id === p.id),
+        }));
         update((s) => ({ ...s, projects, loading: false }));
       } catch {
         update((s) => ({ ...s, loading: false }));
