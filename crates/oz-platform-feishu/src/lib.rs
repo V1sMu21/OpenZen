@@ -127,7 +127,7 @@ impl FeishuAdapter {
         working_dir: &std::path::Path,
     ) -> Result<(), String> {
         use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::connect_async_tls_with_config;
 
         eprintln!("[feishu:{instance_id}] discovering WebSocket endpoint...");
         let endpoint = client
@@ -142,7 +142,9 @@ impl FeishuAdapter {
         let bot_open_id = client.get_bot_open_id().await.unwrap_or_default();
         eprintln!("[feishu:{instance_id}] bot open_id: {bot_open_id}");
 
-        let (ws_stream, _) = connect_async(&ws_url)
+        // Feishu endpoints are always wss://. A None connector uses the
+        // rustls-webpki-roots defaults from the workspace feature.
+        let (ws_stream, _) = connect_async_tls_with_config(&ws_url, None, false, None)
             .await
             .map_err(|e| format!("WebSocket connect error: {e}"))?;
 

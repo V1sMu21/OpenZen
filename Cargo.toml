@@ -28,8 +28,8 @@ members = [
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.40", features = ["full"] }
-reqwest = { version = "0.12", features = ["stream", "json", "multipart"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "time", "sync", "fs", "process", "net", "io-util", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
@@ -43,7 +43,7 @@ async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
 tempfile = "3"
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 ratatui = "0.29"
 crossterm = "0.28"
