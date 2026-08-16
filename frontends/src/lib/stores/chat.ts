@@ -93,6 +93,8 @@ export interface ChatState {
    hasMoreMessages?: boolean;
    /** True while a "load earlier" page request is in flight. */
    loadingEarlier?: boolean;
+   /** True while a session page is loading: keep the previous list visible. */
+   loadingSession?: boolean;
 }
 
 // 30 minutes: long enough for a multi-step task with many slow
@@ -377,6 +379,7 @@ function createChatStore() {
       cumulativeOutputTokens: 0,
       hasMoreMessages: state.hasMoreMessages,
       loadingEarlier: false,
+      loadingSession: false,
     });
   }
 
@@ -1258,12 +1261,17 @@ function createChatStore() {
           cumulativeInputTokens: 0,
           cumulativeOutputTokens: 0,
           hasMoreMessages: false,
+          loadingSession: false,
         });
         startProcessingWatchdog();
         return;
       }
       sessionCache.delete(sessionId);
       clearProcessingWatchdog();
+
+      // Keep the previous conversation visible while the next page is in
+      // flight. The UI renders it under a translucent loading veil.
+      update((s) => ({ ...s, loadingSession: true, error: null }));
 
       // Fast path: a fresh idle-session page in the LRU cache paints
       // synchronously; the server round-trip is skipped entirely.
@@ -1285,25 +1293,16 @@ function createChatStore() {
       } catch (err) {
         if (seq !== loadSeq) return; // superseded by a newer load
         console.error("Failed to load session:", err);
-        set({
-          messages: [],
+        // Keep the previous list (do not blank the chat); the error banner
+        // explains that the new session could not be loaded.
+        update((s) => ({
+          ...s,
           isProcessing: false,
           error: `Failed to load session: ${err instanceof Error ? err.message : String(err)}`,
-          modelInfo: null,
-          selectedModel: null,
-          modelList: [],
-          showModelSwitcher: false,
           streamingParts: [],
           pendingAskUser: null,
-          attachments: [],
-          todos: [],
-          reminders: [],
-          compressionNotice: null,
-          cumulativeInputTokens: 0,
-          cumulativeOutputTokens: 0,
-          hasMoreMessages: false,
-          loadingEarlier: false,
-        });
+          loadingSession: false,
+        }));
       }
     },
 

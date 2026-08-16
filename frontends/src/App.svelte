@@ -790,7 +790,7 @@
     </div>
 
     <!-- Chat messages -->
-    <div class="chat-container">
+    <div class="chat-container" class:session-loading={$chat.loadingSession === true}>
       {#if $chat.messages.length === 0}
         <div class="empty-chat">
           <div class="empty-icon">
@@ -879,6 +879,12 @@
       {#if $chat.compressionNotice}
         <div class="compression-banner">
           <span>{$chat.compressionNotice}</span>
+        </div>
+      {/if}
+
+      {#if $chat.loadingSession}
+        <div class="session-loading-veil" aria-busy="true">
+          <span class="session-loading-dot" aria-hidden="true"></span>
         </div>
       {/if}
     </div>
@@ -1084,6 +1090,35 @@
     flex-direction: column;
     padding: 24px 20px 16px;
     gap: 16px;
+    position: relative;
+  }
+
+  /* Session switch skeleton veil (T4.3): the previous conversation stays
+     mounted underneath while the new page loads. */
+  .session-loading-veil {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(20, 18, 14, 0.55);
+    pointer-events: none;
+    z-index: 30;
+  }
+  .chat-container.session-loading > :not(.session-loading-veil) {
+    opacity: 0.55;
+  }
+  .session-loading-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    animation: sessionLoadingPulse 1.1s ease-out infinite;
+  }
+  @keyframes sessionLoadingPulse {
+    0% { opacity: 0.2; transform: scale(0.75); }
+    50% { opacity: 1; transform: scale(1); }
+    100% { opacity: 0.2; transform: scale(0.75); }
   }
 
   .messages-list {
