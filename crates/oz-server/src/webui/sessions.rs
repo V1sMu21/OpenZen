@@ -226,6 +226,18 @@ impl SessionStore {
         self.save_to_disk();
     }
 
+    /// Block until the background persist worker has drained (bounded by
+    /// `timeout`). Used on graceful exit so the final session snapshot is
+    /// on disk before the process terminates.
+    pub fn wait_persisted(&self, timeout: std::time::Duration) {
+        if let Some(ref w) = self.writer {
+            let deadline = std::time::Instant::now() + timeout;
+            while w.pending.load(Ordering::SeqCst) > 0 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+
     /// Reload sessions from disk. Useful when another process or adapter
     /// (e.g. platform bridge) has written to the same persistence file.
     /// Skipped while a background write is in flight — the on-disk file is

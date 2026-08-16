@@ -438,6 +438,13 @@ pub struct AppState {
     /// Long-lived ERME runtime (semantic store + L0 soul layer).
     /// Created once at startup; None when construction failed.
     pub erme_store: Option<Arc<ErmeRuntime>>,
+    /// Platform adapter registry, stored once started so the exit path can
+    /// stop adapters (supervisors killed mid-await would otherwise leave WS
+    /// connections and child processes behind).
+    pub platform_registry: std::sync::Mutex<Option<Arc<PlatformRegistry>>>,
+    /// Scheduler shutdown flag — set by graceful exit so maintenance tasks
+    /// stop cleanly instead of racing the teardown.
+    pub scheduler_shutdown: std::sync::Mutex<Option<Arc<AtomicBool>>>,
     pub intervention_queues: Mutex<
         HashMap<
             String,
@@ -552,6 +559,8 @@ impl AppState {
             crystallization_enabled: AtomicBool::new(false),
             full_access: Arc::new(AtomicBool::new(false)),
             erme_store,
+            platform_registry: std::sync::Mutex::new(None),
+            scheduler_shutdown: std::sync::Mutex::new(None),
             intervention_queues: Mutex::new(HashMap::new()),
             session_windows: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -632,6 +641,59 @@ pub(crate) fn notify_if_unfocused(app: &AppHandle, title: &str, body: &str) {
 // ── Sub-modules ──
 pub(crate) mod commands;
 pub(crate) mod runner;
+
+/// Guards against re-entering the graceful-shutdown path: the cleanup calls
+/// `app.exit()` again when done, which re-fires ExitRequested.
+static SHUTDOWN_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Ordered, time-bounded shutdown so quitting never orphans processes or
+/// loses the final session snapshot:
+/// agents (stop signal → checkpoint recovery) → scheduler → platform
+/// adapters → terminal shells → session store flush.
+/// Each step is best-effort: a stuck step must not block exit forever.
+fn graceful_shutdown(state: &AppState) {
+    use std::time::Duration;
+    eprintln!("[openzen] graceful shutdown: stopping agents…");
+    {
+        let signals = lock_poison_guard(&state.stop_signals);
+        for sig in signals.values() {
+            sig.store(true, Ordering::Relaxed);
+        }
+    }
+    if let Some(flag) = lock_poison_guard(&state.scheduler_shutdown).clone() {
+        flag.store(true, Ordering::Relaxed);
+    }
+    let registry = lock_poison_guard(&state.platform_registry).clone();
+    if let Some(registry) = registry {
+        tauri::async_runtime::block_on(async {
+            let _ = tokio::time::timeout(Duration::from_secs(5), registry.stop_all()).await;
+        });
+    }
+    // Terminal shells: SIGTERM now, background escalation to SIGKILL + reap
+    // is handled by close_terminal itself.
+    {
+        let ids: Vec<String> = lock_poison_guard(&state.terminal_registry)
+            .keys()
+            .cloned()
+            .collect();
+        for id in ids {
+            let _ = crate::sidepanel::terminal::close_terminal(
+                state.terminal_registry.clone(),
+                &id,
+            );
+        }
+    }
+    // In-flight agent finalization persists through the sessions store;
+    // give it a moment, then flush and wait for the persist worker.
+    eprintln!("[openzen] graceful shutdown: flushing sessions…");
+    std::thread::sleep(Duration::from_millis(500));
+    {
+        let store = lock_poison_guard(&state.sessions);
+        store.save();
+        store.wait_persisted(Duration::from_secs(3));
+    }
+    eprintln!("[openzen] graceful shutdown complete");
+}
 
 pub fn run() {
     // Initialize tracing so agent loop / LLM errors are visible on stderr.
@@ -740,6 +802,8 @@ pub fn run() {
                 }
             }
             state.scheduler_started.store(true, Ordering::Relaxed);
+            // Keep the shutdown flag reachable from the exit path.
+            *lock_poison_guard(&state.scheduler_shutdown) = Some(scheduler.shutdown_signal());
 
             let state_for_platforms = Arc::clone(&state);
             tokio::spawn(async move {
@@ -852,6 +916,9 @@ pub fn run() {
                         ),
                     };
                     registry.start_all(ctx);
+                    // Share with the exit path so adapters are stopped on quit.
+                    *lock_poison_guard(&state_for_platforms.platform_registry) =
+                        Some(Arc::new(registry));
                     eprintln!("[openzen] Platform adapters started");
                 } else {
                     eprintln!("[openzen] No platform adapters to start (registry empty)");
@@ -1046,11 +1113,33 @@ commands::get_working_dir_for_session,
             crate::sidepanel::commands::read_file_bytes,
             crate::sidepanel::commands::parse_excel,
             crate::sidepanel::commands::get_git_diff,
-    crate::sidepanel::commands::get_file_info,
-    crate::sidepanel::commands::open_external_file,
+            crate::sidepanel::commands::get_file_info,
+            crate::sidepanel::commands::open_external_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            // Quit paths (tray Quit, app.exit, macOS Cmd+Q) all land here.
+            // Intercept once, run the ordered teardown off the main thread,
+            // then re-request the exit — the second pass is allowed through.
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                if SHUTDOWN_CLEANUP_DONE.swap(true, Ordering::Relaxed) {
+                    return;
+                }
+                api.prevent_exit();
+                let app = app.clone();
+                let code = code.unwrap_or(0);
+                std::thread::Builder::new()
+                    .name("openzen-graceful-shutdown".into())
+                    .spawn(move || {
+                        let state = app.state::<Arc<AppState>>();
+                        graceful_shutdown(&state);
+                        app.exit(code);
+                    })
+                    .expect("failed to spawn graceful shutdown thread");
+            }
+            _ => {}
+        });
 }
 
 #[cfg(test)]
