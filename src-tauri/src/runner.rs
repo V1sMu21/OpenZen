@@ -537,6 +537,35 @@ pub async fn run_agent_for_session(
                     })
                     .unwrap_or_default();
                 if recalls.is_empty() {
+                    // FTS fallback on the ERME read path: the semantic layer
+                    // (hash embeddings) can miss while trigram keyword search
+                    // over the crystallized knowledge base (facts/insights)
+                    // still finds relevant rows.
+                    if let Some(dir) = &state.skill_mcp_dir {
+                        if let Ok(fts) =
+                            oz_memory::MemoryFts::open(std::path::Path::new(dir).join("memory_fts.sqlite").as_path())
+                        {
+                            let q = query.clone();
+                            if let Ok(Ok(hits)) =
+                                tokio::task::spawn_blocking(move || fts.search(&q, 5)).await
+                            {
+                                if !hits.is_empty() {
+                                    debug_log(&format!(
+                                        "ERME recall empty; FTS fallback matched {} entries",
+                                        hits.len()
+                                    ));
+                                    let mut buf = String::new();
+                                    for hit in hits {
+                                        buf.push_str(&format!(
+                                            "- [fts/{}] {}\n",
+                                            hit.category, hit.content
+                                        ));
+                                    }
+                                    return buf;
+                                }
+                            }
+                        }
+                    }
                     debug_log("ERME recall returned 0 memories; falling back to file memory");
                     memory.get_global_memory().await.unwrap_or_default()
                 } else {
