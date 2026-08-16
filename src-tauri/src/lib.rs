@@ -202,6 +202,61 @@ fn init_erme_store(
         },
     ));
 
+    // L2 (HNSW + TimeGraph) is memory-only by design: after every restart
+    // the semantic layer was empty until new writes trickled in, so recall
+    // collapsed to the keyword path. Rebuild it from the persisted L3
+    // snapshot in a background thread (importance-descending, superseded
+    // entries skipped) — startup is not blocked and the index converges.
+    {
+        let store_for_backfill = Arc::clone(&store);
+        std::thread::Builder::new()
+            .name("erme-l2-backfill".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut memories = store_for_backfill
+                        .router()
+                        .l3_engine()
+                        .storage()
+                        .all()
+                        .into_iter()
+                        .filter(|m| m.metadata.superseded_by.is_none())
+                        .collect::<Vec<_>>();
+                memories.sort_by(|a, b| {
+                    b.metadata
+                        .importance
+                        .partial_cmp(&a.metadata.importance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let l2 = store_for_backfill.router().l2_engine();
+                let mut inserted = 0usize;
+                for m in memories {
+                    let input = entropy_memory_engine::core::MemoryInput {
+                        content: m.content.clone(),
+                        importance: m.metadata.importance,
+                        alias: m.alias.clone(),
+                        tags: m.tags.clone(),
+                        layer: entropy_memory_engine::core::LayerId::L2,
+                    };
+                    if l2.insert_with_id(input, m.id).is_ok() {
+                        inserted += 1;
+                    }
+                }
+                inserted
+                }));
+                match result {
+                    Ok(inserted) if inserted > 0 => tracing::info!(
+                        "ERME L2 backfill: {inserted} entries re-indexed in {:.1}s",
+                        started.elapsed().as_secs_f64()
+                    ),
+                    Ok(_) => {}
+                    Err(panic) => tracing::error!("ERME L2 backfill panicked: {panic:?}"),
+                }
+            })
+            .map_err(|e| tracing::error!("failed to spawn ERME L2 backfill thread: {e}"))
+            .ok();
+    }
+
     let conflict_resolver = Arc::new(ConflictResolver::new(l2_engine()));
 
     let quarantine = Arc::new(QuarantineManager::new(

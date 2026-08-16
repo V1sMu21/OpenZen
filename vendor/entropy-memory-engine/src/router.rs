@@ -159,11 +159,7 @@ impl MemoryRouter {
             .collect();
 
         if let Some(text) = query.text() {
-            let query_keywords: Vec<String> = text
-                .split_whitespace()
-                .filter(|w| w.len() >= 4)
-                .map(|w| w.to_lowercase())
-                .collect();
+            let query_keywords: Vec<String> = crate::core::extract_keywords(text);
             if !query_keywords.is_empty() {
                 let l3_results = self.l3.search(text);
                 for mem in l3_results.iter().take(l2_candidates) {

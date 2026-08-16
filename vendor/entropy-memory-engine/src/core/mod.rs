@@ -5,8 +5,8 @@ pub mod types;
 pub use error::{MemoryError, MemoryResult};
 pub use traits::{EvictionPolicy, MemoryLayer};
 pub use types::{
-    generate_memory_id, now_nanos, Fact, KnowledgeSource, LayerId, Memory, MemoryContent,
-    MemoryInput, MemoryMeta, Query,
+    extract_keywords, generate_memory_id, now_nanos, Fact, KnowledgeSource, LayerId, Memory,
+    MemoryContent, MemoryInput, MemoryMeta, Query,
 };
 
 pub fn detect_python() -> &'static str {

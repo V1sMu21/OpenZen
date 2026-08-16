@@ -280,11 +280,7 @@ impl L3Storage {
     }
 
     pub fn search_by_text(&self, query: &str) -> Vec<Memory> {
-        let query_keywords: Vec<String> = query
-            .split_whitespace()
-            .filter(|w| w.len() >= 4)
-            .map(|w| w.to_lowercase())
-            .collect();
+        let query_keywords: Vec<String> = crate::core::extract_keywords(query);
         if query_keywords.is_empty() {
             return Vec::new();
         }

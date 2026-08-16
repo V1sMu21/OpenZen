@@ -421,3 +421,88 @@ impl Query {
         true
     }
 }
+
+/// Extract search keywords from `text` for the L3 keyword path.
+///
+/// Whitespace tokenization alone makes CJK queries useless: a whole
+/// Chinese sentence is one "word" (there are no spaces), so it never
+/// matches stored text. Latin words of >= 4 chars are kept as-is; runs of
+/// CJK characters additionally emit per-character bigrams, which gives
+/// sub-word matching without a segmentation dictionary.
+pub fn extract_keywords(text: &str) -> Vec<String> {
+    fn flush_latin(buf: &mut String, out: &mut Vec<String>) {
+        if buf.chars().count() >= 4 {
+            out.push(buf.to_lowercase());
+        }
+        buf.clear();
+    }
+    fn flush_cjk(buf: &mut Vec<char>, out: &mut Vec<String>) {
+        if buf.is_empty() {
+            return;
+        }
+        if buf.len() == 1 {
+            out.push(buf.iter().collect());
+        } else {
+            for pair in buf.windows(2) {
+                out.push(pair.iter().collect());
+            }
+        }
+        buf.clear();
+    }
+    fn is_cjk(c: char) -> bool {
+        matches!(c as u32,
+            0x4E00..=0x9FFF   // CJK Unified Ideographs
+            | 0x3400..=0x4DBF // Extension A
+            | 0xF900..=0xFAFF // Compatibility Ideographs
+            | 0x3040..=0x30FF // Hiragana + Katakana
+        )
+    }
+
+    let mut keywords: Vec<String> = Vec::new();
+    let mut latin = String::new();
+    let mut cjk: Vec<char> = Vec::new();
+    for ch in text.chars() {
+        if is_cjk(ch) {
+            flush_latin(&mut latin, &mut keywords);
+            cjk.push(ch);
+        } else if ch.is_alphanumeric() {
+            flush_cjk(&mut cjk, &mut keywords);
+            latin.push(ch);
+        } else {
+            flush_latin(&mut latin, &mut keywords);
+            flush_cjk(&mut cjk, &mut keywords);
+        }
+    }
+    flush_latin(&mut latin, &mut keywords);
+    flush_cjk(&mut cjk, &mut keywords);
+    keywords
+}
+
+#[cfg(test)]
+mod keyword_tests {
+    use super::extract_keywords;
+
+    #[test]
+    fn cjk_text_yields_bigrams() {
+        let kws = extract_keywords("用户喜欢的模型是 glm4");
+        assert!(kws.iter().any(|k| k == "用户"), "got {kws:?}");
+        assert!(kws.iter().any(|k| k == "喜欢"), "got {kws:?}");
+        // latin words keep the >= 4 chars rule (parity with old behavior)
+        assert!(kws.contains(&"glm4".to_string()));
+        assert!(!kws.contains(&"是g".to_string()));
+    }
+
+    #[test]
+    fn latin_short_words_dropped() {
+        let kws = extract_keywords("the quick brown fox jumps");
+        assert!(!kws.contains(&"the".to_string()));
+        assert!(kws.contains(&"quick".to_string()));
+        assert!(kws.contains(&"brown".to_string()));
+    }
+
+    #[test]
+    fn empty_and_pure_symbols() {
+        assert!(extract_keywords("").is_empty());
+        assert!(extract_keywords("！！！……——").is_empty());
+    }
+}
