@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import type { Artifact } from "../stores/sidepanel";
   import { invoke } from "@tauri-apps/api/core";
-  import { renderMarkdown } from "../utils/markdown";
+  import { mathReady, renderMarkdown } from "../utils/markdown";
 
   let { artifact } = $props<{ artifact: Artifact }>();
 
@@ -49,7 +49,7 @@
     {:else if loading}
       <div class="md-loading">Loading...</div>
     {:else}
-      <div class="markdown-content">{@html renderMarkdown(raw, { highlight: false })}</div>
+      <div class="markdown-content">{@html renderMarkdown(raw, { highlight: false, mathVersion: $mathReady })}</div>
     {/if}
   </div>
 </div>

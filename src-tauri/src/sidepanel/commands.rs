@@ -430,14 +430,19 @@ fn open_whitelisted(path: &str, state: &AppState, max_bytes: u64) -> Result<std:
     Ok(file)
 }
 
-/// Read a file's binary content as a byte array (for images).
+/// Read a file's binary content. Returns raw bytes via the IPC response
+/// channel — the previous Vec<u8> JSON encoding serialized every byte as a
+/// number (~3-4x size and an extra copy) for multi-MB PDFs.
 #[tauri::command]
-pub fn read_file_bytes(path: String, state: State<'_, Arc<AppState>>) -> Result<Vec<u8>, String> {
+pub fn read_file_bytes(
+    path: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<tauri::ipc::Response, String> {
     let mut file = open_whitelisted(&path, &state, MAX_BYTES_FILE)?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)
         .map_err(|e| format!("Cannot read file: {e}"))?;
-    Ok(buf)
+    Ok(tauri::ipc::Response::new(buf))
 }
 
 /// Read a text file's content for code view.

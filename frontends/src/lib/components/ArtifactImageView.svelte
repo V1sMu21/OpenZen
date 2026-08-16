@@ -54,7 +54,7 @@
     }
 
     try {
-      const bytes = await invoke<number[]>("read_file_bytes", { path: artifact.path });
+      const bytes = await invoke<ArrayBuffer>("read_file_bytes", { path: artifact.path });
       const u8 = new Uint8Array(bytes);
       const mime = mimeFor(artifact.path);
       const b64 = bytesToBase64(u8);

@@ -4,7 +4,7 @@
   import type { UIMessagePart, ToolInvocationPart } from "../stores/parts";
   import { convertStreamEventsToParts } from "../stores/parts";
   import { chat } from "../stores/chat";
-  import { renderMarkdown } from "../utils/markdown";
+  import { mathReady, renderMarkdown } from "../utils/markdown";
   import { tickerState, useTicker } from "../utils/ticker.svelte";
   import StreamingText from "./StreamingText.svelte";
   import ToolCallCard from "./ToolCallCard.svelte";
@@ -482,7 +482,7 @@ import { t, locale, tSync } from "../i18n";
                 <div class="intervention-content">{p.content}</div>
               </div>
             {:else if p.type === "text" && p.text}
-              <div class="markdown-content content-block">{@html renderMarkdown(p.text)}</div>
+              <div class="markdown-content content-block">{@html renderMarkdown(p.text, { mathVersion: $mathReady })}</div>
             {/if}
           </div>
         {/each}
@@ -492,7 +492,7 @@ import { t, locale, tSync } from "../i18n";
           </div>
         {:else if !isLive && message.content && !parts.some((p) => p.type === "text" && p.text)}
           <div class="bubble-content">
-            <div class="markdown-content">{@html renderMarkdown(message.content)}</div>
+            <div class="markdown-content">{@html renderMarkdown(message.content, { mathVersion: $mathReady })}</div>
           </div>
         {/if}
 
@@ -534,7 +534,7 @@ import { t, locale, tSync } from "../i18n";
       {:else}
         <!-- User message -->
         <div class="bubble-content">
-          <div class="markdown-content">{@html renderMarkdown(message.content, { highlight: false })}</div>
+          <div class="markdown-content">{@html renderMarkdown(message.content, { highlight: false, mathVersion: $mathReady })}</div>
         </div>
         {#if message.timestamp}
           <div class="bubble-footer user-footer">

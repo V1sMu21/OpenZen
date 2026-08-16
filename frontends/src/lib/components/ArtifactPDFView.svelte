@@ -24,7 +24,7 @@
 
   async function loadPDF() {
     try {
-      const bytes: number[] = await invoke("read_file_bytes", { path: artifact.path });
+      const bytes: ArrayBuffer = await invoke("read_file_bytes", { path: artifact.path });
       if (disposed) return;
       loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(bytes) });
       pdfDoc = await loadingTask.promise;

@@ -1,4 +1,35 @@
-import katex from "katex";
+// KaTeX (~280KB) is the largest remaining main-bundle dependency and most
+// chat messages contain no math: load it on first use. Renders before the
+// load completes use the plain-text fallback; components re-render once
+// `mathReady` flips (they pass it into renderMarkdown opts to create the
+// reactive dependency).
+import katexCssUrl from "katex/dist/katex.min.css?url";
+import { writable } from "svelte/store";
+
+export const mathReady = writable(false);
+type KatexModule = typeof import("katex")["default"];
+let katexRef: KatexModule | null = null;
+let katexLoading = false;
+
+function ensureKatex() {
+  if (katexRef || katexLoading) return;
+  katexLoading = true;
+  import("katex")
+    .then((mod) => {
+      katexRef = mod.default;
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = katexCssUrl;
+      document.head.appendChild(link);
+      // Cached plain-text math renders must not shadow the real ones.
+      markdownRenderCache.clear();
+      markdownCacheBytes = 0;
+      mathReady.set(true);
+    })
+    .catch(() => {
+      katexLoading = false;
+    });
+}
 
 /**
  * ── Semantic keyword highlighting ─────────────────────────────
@@ -398,8 +429,14 @@ export function renderMarkdown(text: string, opts?: { highlight?: boolean }): st
 }
 
 function renderMath(latex: string, displayMode: boolean): string {
+  if (!katexRef) {
+    ensureKatex();
+    return displayMode
+      ? `<div class="math-block">${escapeHtml(latex)}</div>`
+      : `<span class="math-inline">${escapeHtml(latex)}</span>`;
+  }
   try {
-    return katex.renderToString(latex, {
+    return katexRef.renderToString(latex, {
       displayMode,
       throwOnError: false,
       output: "html",

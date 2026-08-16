@@ -11,7 +11,7 @@
 
   async function loadDocx() {
     try {
-      const bytes: number[] = await invoke("read_file_bytes", { path: artifact.path });
+      const bytes: ArrayBuffer = await invoke("read_file_bytes", { path: artifact.path });
       const mammoth = await import("mammoth");
       const result = await mammoth.convertToHtml({ arrayBuffer: new Uint8Array(bytes).buffer });
       htmlContent = result.value;
