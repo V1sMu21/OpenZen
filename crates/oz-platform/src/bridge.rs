@@ -269,10 +269,7 @@ impl AgentBridge {
             drop(store);
         });
 
-        self.running_agents
-            .lock()
-            .unwrap()
-            .insert(session_id.to_string(), handle);
+        lock(&self.running_agents).insert(session_id.to_string(), handle);
 
         Ok(event_rx)
     }
@@ -289,9 +286,7 @@ impl AgentBridge {
     }
 
     pub fn session_status(&self, session_id: &str) -> SessionStatus {
-        self.sessions
-            .lock()
-            .unwrap()
+        lock(&self.sessions)
             .get(session_id)
             .map(|s| s.status.clone())
             .unwrap_or(SessionStatus::Idle)
