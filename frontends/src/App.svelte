@@ -390,41 +390,45 @@
       });
     };
 
-    // Helper: try to find the .messages-list element. We poll briefly
-    // because the empty-chat → messages-list transition happens AFTER
-    // the first message arrives, and the MutationObserver needs the
-    // element to exist when it's set up.
-    const findMessagesList = (): HTMLElement | null => {
-      return document.querySelector<HTMLElement>('.messages-list');
-    };
+    // Attach the MutationObserver (+ scroll listener) to the current
+    // .messages-list / .messages-scroll pair. The list element is recreated
+    // whenever the empty-chat ↔ messages transition happens (/clear, /new,
+    // first message, session load): the old observer kept the detached DOM
+    // subtree alive and never saw mutations in the new list, silently
+    // degrading auto-scroll to the store-subscription fallback. Re-running
+    // this on every store update re-attaches to the live element.
+    let listObserver: MutationObserver | null = null;
+    let observedList: HTMLElement | null = null;
+    let attachedScroller: HTMLElement | null = null;
 
-    // Set up MutationObserver as soon as .messages-list exists.
-    const setupObserver = () => {
-      const messagesList = findMessagesList();
-      if (!messagesList) {
-        // Try again next frame; the empty chat hasn't been replaced
-        // by the messages list yet.
-        requestAnimationFrame(setupObserver);
-        return;
+    const attachListObserver = () => {
+      const list = document.querySelector<HTMLElement>('.messages-list');
+      if (list === observedList) return;
+      if (listObserver) {
+        listObserver.disconnect();
+        listObserver = null;
       }
+      if (attachedScroller) {
+        attachedScroller.removeEventListener('scroll', handleScroll);
+        attachedScroller = null;
+      }
+      observedList = list;
+      if (!list) return;
 
-      // Attach scroll listener to the scrollable container so we can
-      // detect when the user manually scrolls up (away from bottom).
-      //
-      // IMPORTANT: the scrollable element is `.messages-scroll` (it owns
+      // The scrollable element is `.messages-scroll` (it owns
       // `overflow-y: auto`). Scroll events do not bubble, so a listener
       // on `.chat-container` NEVER fires: `userScrolledUp` would stay
       // `false` forever and every DOM mutation (including expanding a
       // card in an earlier message) would yank the viewport to bottom.
-      const chatContainer = document.querySelector<HTMLElement>('.messages-scroll')
-        ?? messagesList.parentElement ?? null;
-      if (chatContainer) {
-        chatContainer.addEventListener('scroll', handleScroll, { passive: true });
+      const scroller = document.querySelector<HTMLElement>('.messages-scroll');
+      if (scroller) {
+        scroller.addEventListener('scroll', handleScroll, { passive: true });
+        attachedScroller = scroller;
       }
       readVirtualScrollMetrics();
       window.addEventListener('resize', readVirtualScrollMetrics, { passive: true });
 
-      const observer = new MutationObserver(() => {
+      listObserver = new MutationObserver(() => {
         // Only auto-scroll if the user hasn't scrolled up manually.
         // Card expansion inside earlier messages triggers DOM mutations
         // (subtree childList) but should NOT yank the viewport away.
@@ -432,7 +436,7 @@
           scrollToBottom();
         }
       });
-      observer.observe(messagesList, {
+      listObserver.observe(list, {
         childList: true,    // new <ChatMessage> nodes
         subtree: true,      // children inside ChatMessage (streaming text, etc.)
         characterData: true, // text content changes
@@ -442,6 +446,15 @@
       userScrolledUp = false;
       scrollToBottom();
     };
+
+    // Initial attach: the list may not exist yet (empty chat); retry on
+    // the next frames until it does, same as before.
+    const setupObserver = () => {
+      attachListObserver();
+      if (observedList === null) {
+        requestAnimationFrame(setupObserver);
+      }
+    };
     setupObserver();
 
     // Also subscribe to the chat store for changes that don't cause
@@ -449,6 +462,8 @@
     // updates that are coalesced). The MutationObserver handles the
     // common case, but the store subscription is a safety net.
     const unsub = chat.subscribe((s) => {
+      // Re-attach if the list element was recreated since last update.
+      attachListObserver();
       const count = s.messages.length;
       let streamingTextLen = 0;
       if (s.isProcessing) {
@@ -480,11 +495,15 @@
     return () => {
       unsub();
       window.removeEventListener('resize', readVirtualScrollMetrics);
-      // Remove scroll listener
-      const chatContainer = document.querySelector<HTMLElement>('.messages-scroll');
-      if (chatContainer) {
-        chatContainer.removeEventListener('scroll', handleScroll);
+      if (listObserver) {
+        listObserver.disconnect();
+        listObserver = null;
       }
+      if (attachedScroller) {
+        attachedScroller.removeEventListener('scroll', handleScroll);
+        attachedScroller = null;
+      }
+      observedList = null;
     };
   });
 
