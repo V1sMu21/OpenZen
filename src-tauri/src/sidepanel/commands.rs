@@ -141,7 +141,9 @@ pub fn open_artifact(
 ) -> Result<serde_json::Value, String> {
     tracing::info!(
         "[sidepanel::commands] open_artifact called: type={}, path={}, label={:?}",
-        artifact_type, artifact_path, artifact_label
+        artifact_type,
+        artifact_path,
+        artifact_label
     );
 
     let resolved_path = if artifact_type != "terminal" {
@@ -317,7 +319,8 @@ pub async fn spawn_terminal(
 ) -> Result<String, String> {
     tracing::info!(
         "[sidepanel::commands] spawn_terminal COMMAND called: shell={:?} cwd={:?}",
-        shell, cwd
+        shell,
+        cwd
     );
     let session_id = uuid::Uuid::new_v4().to_string();
     let id = session_id.clone();

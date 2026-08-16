@@ -65,8 +65,7 @@ impl PlatformRegistry {
                     // Bound a wedged health() probe so the poll itself
                     // cannot hang.
                     let probe = health_adapter.health();
-                    let healthy = match tokio::time::timeout(Duration::from_secs(10), probe).await
-                    {
+                    let healthy = match tokio::time::timeout(Duration::from_secs(10), probe).await {
                         Ok(h) => h.connected,
                         Err(_) => false,
                     };

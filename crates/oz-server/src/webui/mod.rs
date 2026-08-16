@@ -755,7 +755,11 @@ fn truncate_bytes_char_safe(s: &str, max_bytes: usize) -> Option<String> {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    Some(format!("{}... [truncated {} bytes]", &s[..end], s.len() - end))
+    Some(format!(
+        "{}... [truncated {} bytes]",
+        &s[..end],
+        s.len() - end
+    ))
 }
 
 /// Run the agent loop for a session, broadcasting events via SSE.

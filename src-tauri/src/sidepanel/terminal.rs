@@ -29,7 +29,9 @@ pub fn spawn_terminal(
 ) -> Result<String, String> {
     tracing::info!(
         "[sidepanel::terminal] spawn_terminal called: session_id={}, shell={:?}, cwd={:?}",
-        session_id, shell, cwd
+        session_id,
+        shell,
+        cwd
     );
 
     let shell_path =
@@ -42,7 +44,8 @@ pub fn spawn_terminal(
 
     tracing::info!(
         "[sidepanel::terminal] using shell={}, workdir={}",
-        shell_path, workdir
+        shell_path,
+        workdir
     );
 
     let pty_pair = pty::openpty(None, None).map_err(|e| {
@@ -54,7 +57,8 @@ pub fn spawn_terminal(
     let slave_raw = pty_pair.slave.into_raw_fd();
     tracing::info!(
         "[sidepanel::terminal] openpty OK: master_raw={}, slave_raw={}",
-        master_raw, slave_raw
+        master_raw,
+        slave_raw
     );
 
     let winsize = libc::winsize {
@@ -157,7 +161,8 @@ pub fn spawn_terminal(
         std::thread::spawn(move || {
             tracing::info!(
                 "[sidepanel::terminal] read loop thread STARTED for sid={}, master_raw={}",
-                sid2, master_raw
+                sid2,
+                master_raw
             );
             let mut buf = [0u8; 4096];
             let mut any_read = false;
@@ -174,7 +179,8 @@ pub fn spawn_terminal(
                         if !any_read {
                             tracing::info!(
                                 "[sidepanel::terminal] first read OK: {} bytes for sid={}",
-                                n, sid2
+                                n,
+                                sid2
                             );
                             any_read = true;
                         }
@@ -188,7 +194,8 @@ pub fn spawn_terminal(
                             Ok(_) => {}
                             Err(e) => tracing::info!(
                                 "[sidepanel::terminal] emit terminal:data FAILED: sid={}, err={}",
-                                sid2, e
+                                sid2,
+                                e
                             ),
                         }
                     }
@@ -225,7 +232,8 @@ pub fn spawn_terminal(
             };
             tracing::info!(
                 "[sidepanel::terminal] read loop EXITED: sid={}, exit_code={:?}",
-                sid2, exit_code
+                sid2,
+                exit_code
             );
 
             {

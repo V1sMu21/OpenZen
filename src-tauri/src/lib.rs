@@ -271,27 +271,27 @@ fn init_erme_store(
                         .into_iter()
                         .filter(|m| m.metadata.superseded_by.is_none())
                         .collect::<Vec<_>>();
-                memories.sort_by(|a, b| {
-                    b.metadata
-                        .importance
-                        .partial_cmp(&a.metadata.importance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                let l2 = store_for_backfill.router().l2_engine();
-                let mut inserted = 0usize;
-                for m in memories {
-                    let input = entropy_memory_engine::core::MemoryInput {
-                        content: m.content.clone(),
-                        importance: m.metadata.importance,
-                        alias: m.alias.clone(),
-                        tags: m.tags.clone(),
-                        layer: entropy_memory_engine::core::LayerId::L2,
-                    };
-                    if l2.insert_with_id(input, m.id).is_ok() {
-                        inserted += 1;
+                    memories.sort_by(|a, b| {
+                        b.metadata
+                            .importance
+                            .partial_cmp(&a.metadata.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let l2 = store_for_backfill.router().l2_engine();
+                    let mut inserted = 0usize;
+                    for m in memories {
+                        let input = entropy_memory_engine::core::MemoryInput {
+                            content: m.content.clone(),
+                            importance: m.metadata.importance,
+                            alias: m.alias.clone(),
+                            tags: m.tags.clone(),
+                            layer: entropy_memory_engine::core::LayerId::L2,
+                        };
+                        if l2.insert_with_id(input, m.id).is_ok() {
+                            inserted += 1;
+                        }
                     }
-                }
-                inserted
+                    inserted
                 }));
                 match result {
                     Ok(inserted) if inserted > 0 => tracing::info!(
@@ -342,9 +342,7 @@ fn init_erme_store(
     let observer = Arc::new(orchestrator.observer().clone());
     let mut reflection_cfg = ReflectionConfig::default();
     reflection_cfg.idle_interval_secs = idle_interval_secs;
-    let reality_anchor = std::sync::Arc::new(
-        entropy_memory_engine::phase4::RealityAnchor::new(),
-    );
+    let reality_anchor = std::sync::Arc::new(entropy_memory_engine::phase4::RealityAnchor::new());
     let reflection = Arc::new(
         ReflectionEngine::new(
             Arc::clone(&soul),
@@ -673,7 +671,11 @@ impl AppState {
             .unwrap_or(300);
         let last_user_activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let erme_store = if memory_backend == "erme" {
-            init_erme_store(&data_root, erme_idle_secs, std::sync::Arc::clone(&last_user_activity))
+            init_erme_store(
+                &data_root,
+                erme_idle_secs,
+                std::sync::Arc::clone(&last_user_activity),
+            )
         } else {
             tracing::info!("memory_backend = \"file\": ERME store not built (set memory_backend = \"erme\" to enable)");
             None
@@ -839,10 +841,8 @@ fn graceful_shutdown(state: &AppState) {
             .cloned()
             .collect();
         for id in ids {
-            let _ = crate::sidepanel::terminal::close_terminal(
-                state.terminal_registry.clone(),
-                &id,
-            );
+            let _ =
+                crate::sidepanel::terminal::close_terminal(state.terminal_registry.clone(), &id);
         }
     }
     // In-flight agent finalization persists through the sessions store;
@@ -1296,11 +1296,11 @@ commands::get_working_dir_for_session,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| match event {
+        .run(|app, event| {
             // Quit paths (tray Quit, app.exit, macOS Cmd+Q) all land here.
             // Intercept once, run the ordered teardown off the main thread,
             // then re-request the exit — the second pass is allowed through.
-            tauri::RunEvent::ExitRequested { code, api, .. } => {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
                 if SHUTDOWN_CLEANUP_DONE.swap(true, Ordering::Relaxed) {
                     return;
                 }
@@ -1316,7 +1316,6 @@ commands::get_working_dir_for_session,
                     })
                     .expect("failed to spawn graceful shutdown thread");
             }
-            _ => {}
         });
 }
 

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use oz_core_types::{ContentBlock, LlmError, Message, StreamEvent, TokenUsage, ToolDefinition};
@@ -36,10 +36,7 @@ impl MixinSession {
     }
 
     fn pick(&self) -> usize {
-        let (cur, switched_at) = *self
-            .failover
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let (cur, switched_at) = *self.failover.lock().unwrap_or_else(|e| e.into_inner());
         if cur != 0 && switched_at.elapsed().as_secs_f64() > self.spring_back_secs {
             0 // spring back to primary
         } else {
@@ -152,10 +149,8 @@ impl Session for MixinSession {
                     return Ok(result);
                 }
                 Err(e) => {
-                    let safe_to_failover = matches!(
-                        e,
-                        LlmError::RequestFailed(_) | LlmError::HttpError { .. }
-                    );
+                    let safe_to_failover =
+                        matches!(e, LlmError::RequestFailed(_) | LlmError::HttpError { .. });
                     if !safe_to_failover || attempt == self.retries {
                         return Err(e);
                     }
@@ -223,15 +218,13 @@ mod tests {
     struct FakeSession {
         fail_times: usize,
         calls: std::sync::atomic::AtomicUsize,
-        model_name: String,
     }
 
     impl FakeSession {
-        fn named(name: &str, fail_times: usize) -> Box<dyn Session> {
+        fn named(_name: &str, fail_times: usize) -> Box<dyn Session> {
             Box::new(FakeSession {
                 fail_times,
                 calls: std::sync::atomic::AtomicUsize::new(0),
-                model_name: name.to_string(),
             })
         }
     }
@@ -275,7 +268,10 @@ mod tests {
     async fn failover_is_sticky() {
         // Primary always fails, secondary always works.
         let mixin = MixinSession::new(
-            vec![FakeSession::named("primary", 100), FakeSession::named("backup", 0)],
+            vec![
+                FakeSession::named("primary", 100),
+                FakeSession::named("backup", 0),
+            ],
             None,
             Some(3),
             Some(0.0),
@@ -291,7 +287,10 @@ mod tests {
     #[tokio::test]
     async fn spring_back_to_primary() {
         let mixin = MixinSession::new(
-            vec![FakeSession::named("primary", 0), FakeSession::named("backup", 0)],
+            vec![
+                FakeSession::named("primary", 0),
+                FakeSession::named("backup", 0),
+            ],
             None,
             Some(3),
             Some(0.0),

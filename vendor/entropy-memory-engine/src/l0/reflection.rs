@@ -564,7 +564,7 @@ mod tests {
                 .store(MemoryInput::new(MemoryContent::Fact(Fact::new(
                     "user",
                     "dislikes",
-                    &format!("coffee variant {}", i),
+                    format!("coffee variant {}", i),
                 ))))
                 .unwrap();
             engine.notify(ReflectionEvent::MemoryStored {

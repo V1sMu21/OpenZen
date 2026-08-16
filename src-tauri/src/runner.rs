@@ -1159,8 +1159,8 @@ pub async fn run_agent_for_session(
                             if !seen_ids.insert(id_str.to_string()) {
                                 return None;
                             }
-                            let input: serde_json::Value = serde_json::from_str(args)
-                                .unwrap_or(serde_json::Value::Null);
+                            let input: serde_json::Value =
+                                serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
                             Some(serde_json::json!({
                                 "id": id_str,
                                 "name": name,

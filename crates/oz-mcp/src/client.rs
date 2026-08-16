@@ -106,7 +106,8 @@ impl McpClient {
         let init_params = self.initialize_params()?;
         let handshake = async {
             self.send_request("initialize", Some(init_params)).await?;
-            self.send_notification("notifications/initialized", None).await?;
+            self.send_notification("notifications/initialized", None)
+                .await?;
             self.list_tools().await
         };
         match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {

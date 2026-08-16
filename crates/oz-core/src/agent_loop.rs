@@ -1094,13 +1094,11 @@ where
                 // Same retry/backoff semantics as the streaming path: a
                 // single transient failure used to terminate the whole
                 // run here.
-                let mut chat_resp: Option<_> = None;
-                loop {
+                let chat_resp = loop {
                     match client.chat(&messages, tools).await {
                         Ok(resp) => {
                             consecutive_llm_errors = 0;
-                            chat_resp = Some(resp);
-                            break;
+                            break resp;
                         }
                         Err(e) => {
                             tracing::error!("LLM chat error: {e}");
@@ -1125,8 +1123,8 @@ where
                             backoff_or_stop(stop_signal, consecutive_llm_errors).await;
                         }
                     }
-                }
-                chat_resp.expect("loop breaks only after success or return")
+                };
+                chat_resp
             }
         };
 
@@ -1437,7 +1435,7 @@ where
                 let handler_ref: &dyn Handler = &*handler;
                 let cancel = cancel_flag.clone();
                 let sem = semaphore.clone();
-                let global_sem = global_sem.clone();
+                let global_sem: &tokio::sync::Semaphore = global_sem;
 
                 let spec_cache_for_phase2 = spec_cache.clone();
                 let futures: Vec<_> = tool_meta
@@ -1464,7 +1462,6 @@ where
                         }
                         let cancel = cancel.clone();
                         let sem = sem.clone();
-                        let global_sem = global_sem.clone();
                         let resp = &response;
                         let cx = ctx;
                         let cfg = config;

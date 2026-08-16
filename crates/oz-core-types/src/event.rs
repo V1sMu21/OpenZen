@@ -190,7 +190,10 @@ pub fn append_coalesced(buf: &mut Vec<StreamEvent>, event: StreamEvent) -> bool 
                 tool_call_id: prev_id,
                 delta: prev,
             }),
-            StreamEvent::ToolInputDelta { tool_call_id, delta },
+            StreamEvent::ToolInputDelta {
+                tool_call_id,
+                delta,
+            },
         ) if prev_id == tool_call_id => {
             prev.push_str(delta);
             true

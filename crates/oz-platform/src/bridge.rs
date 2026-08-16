@@ -228,7 +228,8 @@ impl AgentBridge {
 
             tracing::info!(
                 "[platform] agent loop finished: exit_reason={}, turn={}",
-                outcome.exit_reason, outcome.turn
+                outcome.exit_reason,
+                outcome.turn
             );
 
             // Send FinishMessage so platform adapters (Feishu, Telegram, etc.)

@@ -35,16 +35,14 @@ static RE_FUNCTION_STRIP: LazyLock<regex::Regex> = LazyLock::new(|| {
 static RE_JSON_FENCE: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
     regex::Regex::new(r"(?s)```(?:json)?\s*\n?(\{(?:[^{}]|\{[^{}]*\})*\})\s*\n?```").ok()
 });
-static RE_JSON_FENCE_STRIP: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"```(?:json)?\s*\n?\{[^`]*\}\s*\n?```").unwrap()
-});
+static RE_JSON_FENCE_STRIP: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"```(?:json)?\s*\n?\{[^`]*\}\s*\n?```").unwrap());
 static RE_BARE_JSON: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
     regex::Regex::new(
         r#""name"\s*:\s*"([^"]+)"\s*,\s*"(?:arguments|args|parameters)"\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})"#,
     )
     .ok()
 });
-
 
 pub struct NativeToolClient {
     backend: Box<dyn Session>,
@@ -301,7 +299,7 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
                 d
             } else {
                 let mut args = serde_json::Map::new();
-                if let Some(ref param_re) = param_re {
+                if let Some(param_re) = param_re {
                     for pcap in param_re.captures_iter(inner) {
                         let key = pcap
                             .get(1)

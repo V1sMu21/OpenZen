@@ -44,7 +44,8 @@ impl ScheduledTask for TrustDecay {
                     if let Some(arr) = list.as_array() {
                         for p in arr {
                             if let Some(root) = p.get("root_path").and_then(|v| v.as_str()) {
-                                targets.push(PathBuf::from(root).join("openzen").join("trust.json"));
+                                targets
+                                    .push(PathBuf::from(root).join("openzen").join("trust.json"));
                             }
                         }
                     }

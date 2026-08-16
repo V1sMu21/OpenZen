@@ -294,12 +294,7 @@ fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<
 /// (Jaccard) instead of pure recency. Empty or non-matching queries fall
 /// back to the recency order — lessons about the CURRENT task surface
 /// first instead of whatever was updated last.
-pub fn render_context_relevant(
-    dir: &Path,
-    kind: HarnessKind,
-    limit: usize,
-    query: &str,
-) -> String {
+pub fn render_context_relevant(dir: &Path, kind: HarnessKind, limit: usize, query: &str) -> String {
     let state = HarnessState::load(dir);
     let mut entries = state.entries_of(kind);
     if entries.is_empty() {

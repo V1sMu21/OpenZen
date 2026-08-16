@@ -257,7 +257,10 @@ impl SessionStore {
             .map(|(id, _)| id.clone())
             .collect();
         for id in &ids {
-            let json = self.sessions.get(id).and_then(|e| serde_json::to_value(e).ok());
+            let json = self
+                .sessions
+                .get(id)
+                .and_then(|e| serde_json::to_value(e).ok());
             self.archive_entry(id, json);
             self.sessions.remove(id);
         }
@@ -349,10 +352,7 @@ impl SessionStore {
         // Incremental snapshot: re-serialize only entries whose fingerprint
         // changed; everything else shares its cached JSON via Arc. Removed
         // sessions simply drop out of the snapshot/cache.
-        let mut cache = self
-            .persist_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.persist_cache.lock().unwrap_or_else(|e| e.into_inner());
         let mut snapshot: SessionSnapshot = HashMap::with_capacity(self.sessions.len());
         for (id, entry) in &self.sessions {
             let fp = entry_fingerprint(entry);
@@ -365,9 +365,9 @@ impl SessionStore {
             });
             let json = match cached {
                 Some(json) => json,
-                None => Arc::new(
-                    serde_json::to_string(entry).unwrap_or_else(|_| "null".to_string()),
-                ),
+                None => {
+                    Arc::new(serde_json::to_string(entry).unwrap_or_else(|_| "null".to_string()))
+                }
             };
             snapshot.insert(id.clone(), json);
         }
