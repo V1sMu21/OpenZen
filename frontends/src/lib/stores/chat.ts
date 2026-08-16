@@ -510,6 +510,28 @@ function createChatStore() {
     });
   }
 
+  // rAF never fires while the window is hidden/minimized, but Tauri events
+  // keep arriving — a 7x24 background agent run would accumulate every
+  // stream event in pendingStreamEvents without bound. The interval
+  // fallback drains the queue while rAF is stalled; flushing while visible
+  // is harmless (the batch is drained atomically and a redundant rAF tick
+  // no-ops on the empty queue).
+  const STREAM_FLUSH_FALLBACK_MS = 1000;
+  const STREAM_FLUSH_QUEUE_LIMIT = 500;
+  let streamFlushInterval: ReturnType<typeof setInterval> | null = null;
+
+  function ensureStreamFlushFallback() {
+    if (streamFlushInterval !== null) return;
+    streamFlushInterval = setInterval(() => {
+      if (pendingStreamEvents.length === 0) {
+        clearInterval(streamFlushInterval!);
+        streamFlushInterval = null;
+        return;
+      }
+      flushStreamingEvents();
+    }, STREAM_FLUSH_FALLBACK_MS);
+  }
+
   /** Queue a render-only event; coalesce into the next animation frame. */
   function queueStreamEvent(protoEvent: ProtocolV1Event) {
     pendingStreamEvents.push(protoEvent);
@@ -517,9 +539,20 @@ function createChatStore() {
     // window is minimized/occluded, rAF stops firing so flushes pause
     // while events keep arriving — the watchdog must not fire then.
     resetProcessingWatchdog();
+    // Hard cap: never let the queue grow past the limit even if both rAF
+    // and the interval somehow stall.
+    if (pendingStreamEvents.length >= STREAM_FLUSH_QUEUE_LIMIT) {
+      if (streamFlushRaf !== null) {
+        cancelAnimationFrame(streamFlushRaf);
+      }
+      flushStreamingEvents();
+      ensureStreamFlushFallback();
+      return;
+    }
     if (streamFlushRaf === null) {
       streamFlushRaf = requestAnimationFrame(flushStreamingEvents);
     }
+    ensureStreamFlushFallback();
   }
 
   /** Drop queued events + pending rAF (session/reset paths only). */
@@ -527,6 +560,10 @@ function createChatStore() {
     if (streamFlushRaf !== null) {
       cancelAnimationFrame(streamFlushRaf);
       streamFlushRaf = null;
+    }
+    if (streamFlushInterval !== null) {
+      clearInterval(streamFlushInterval);
+      streamFlushInterval = null;
     }
     pendingStreamEvents = [];
   }
