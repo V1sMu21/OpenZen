@@ -163,7 +163,7 @@ fn extract_docx_text(xml: &str) -> String {
     use quick_xml::Reader;
 
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    reader.trim_text(true);
     let mut buf = Vec::new();
     let mut output = String::new();
     let mut in_paragraph = false;
@@ -247,7 +247,7 @@ fn extract_pptx_slide_text(xml: &str) -> String {
     use quick_xml::Reader;
 
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    reader.trim_text(true);
     let mut buf = Vec::new();
     let mut text_parts: Vec<String> = Vec::new();
 
