@@ -234,12 +234,29 @@
 
   async function loadEarlierWithAnchor(anchorId: string | undefined) {
     const scroller = document.querySelector<HTMLElement>(".messages-scroll");
+    const anchorIdxBefore = anchorId
+      ? visibleMessages.findIndex((m) => m.id === anchorId)
+      : -1;
     const anchorBefore = findMessageElement(anchorId);
     const topBefore = anchorBefore?.getBoundingClientRect().top ?? 0;
     await chat.loadEarlierMessages();
     await tick();
+    if (!scroller || !anchorId) return;
+    const anchorIdxAfter = visibleMessages.findIndex((m) => m.id === anchorId);
+    if (anchorIdxAfter < 0 || anchorIdxBefore < 0) return;
+    // Prepended rows shift the anchor's virtual offset while scrollTop
+    // stays ~0, so the render window covers the newly loaded oldest page
+    // and the anchor row is unmounted — DOM-level correction alone can't
+    // find it. First jump scrollTop to the anchor's estimated virtual
+    // offset so the window covers it again, then fine-tune against the
+    // real DOM below.
+    if (anchorIdxAfter !== anchorIdxBefore) {
+      scroller.scrollTop = anchorIdxAfter * VIRTUAL_ROW_ESTIMATE_PX;
+      readVirtualScrollMetrics();
+      await tick();
+    }
     const anchorAfter = findMessageElement(anchorId);
-    if (scroller && anchorBefore && anchorAfter) {
+    if (anchorBefore && anchorAfter) {
       const topAfter = anchorAfter.getBoundingClientRect().top;
       scroller.scrollTop += topAfter - topBefore;
       readVirtualScrollMetrics();
