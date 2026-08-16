@@ -156,7 +156,7 @@ impl ToolHandler for CodeRunTool {
                 "stdout_chars": result["stdout"].as_str().map(|s| s.len()).unwrap_or(0),
                 "stderr_chars": result["stderr"].as_str().map(|s| s.len()).unwrap_or(0),
                 "truncated_preview": result["stdout"].as_str()
-                    .map(|s| if s.len() > 200 { format!("{}... [{} total chars]", &s[..200], s.len()) } else { s.to_string() })
+                    .map(|s| truncate_preview(s, 200))
                     .unwrap_or_default(),
             });
 
@@ -175,48 +175,103 @@ impl ToolHandler for CodeRunTool {
     }
 }
 
+/// Best-effort head preview that never splits a UTF-8 char (raw byte
+/// slicing panics on CJK output).
+fn truncate_preview(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... [{} total chars]", &s[..end], s.len())
+}
+
+/// Removes the temp python script when dropped — including when the
+/// surrounding future is cancelled (tool timeout / user stop), which
+/// previously leaked one ga_*.ai.py per cancelled run into /tmp.
+struct TmpScriptGuard(std::path::PathBuf);
+
+impl Drop for TmpScriptGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Spawn a child with kill-on-drop so that cancelling the surrounding
+/// future (tool timeout, user stop, run abort) never leaves an orphan
+/// `sh`/`python3` behind — a 7x24 agent leaks one process per timeout
+/// otherwise. Returns the collected output.
+async fn run_child_with_timeout(
+    mut command: tokio::process::Command,
+    timeout: u64,
+    what: &str,
+) -> Result<serde_json::Value, ToolError> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let child = command
+        .spawn()
+        .map_err(|e| ToolError::Custom(format!("{what} execution failed: {e}. Verify the command syntax and that required tools are installed.")))?;
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout.max(1)),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(output) => {
+            let output = output.map_err(|e| ToolError::Custom(format!("{what} failed: {e}")))?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let exit_code = output.status.code().unwrap_or(-1);
+            Ok(serde_json::json!({
+                "exit_code": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+            }))
+        }
+        Err(_) => Ok(serde_json::json!({
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": format!("{what} timed out after {timeout}s (process killed)"),
+            "timeout": true,
+        })),
+    }
+}
+
 impl CodeRunTool {
     async fn run_shell(
         &self,
         code: &str,
-        _timeout: u64,
+        timeout: u64,
         ctx: &ToolContext,
     ) -> Result<serde_json::Value, ToolError> {
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(code)
-            .current_dir(&ctx.working_dir)
-            .output()
-            .await
-            .map_err(|e| ToolError::Custom(format!(
-                "code_run execution failed: {e}. Verify the command syntax and that required tools are installed."
-            )))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        let mut result = serde_json::json!({
-            "exit_code": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
-        });
-
-        if !output.status.success() && stderr.len() < 500 && stderr.contains("timed out") {
-            result["timeout"] = serde_json::json!(true);
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(code).current_dir(&ctx.working_dir);
+        let mut result = run_child_with_timeout(cmd, timeout, "code_run").await?;
+        // Preserve the legacy "timed out" heuristic for callers that check it.
+        if result.get("timeout").is_none() {
+            let stderr = result["stderr"].as_str().unwrap_or("");
+            if !stderr.is_empty() && stderr.len() < 500 && stderr.contains("timed out") {
+                result["timeout"] = serde_json::json!(true);
+            }
         }
-
         Ok(result)
     }
 
     async fn run_python(
         &self,
         code: &str,
-        _timeout: u64,
+        timeout: u64,
         ctx: &ToolContext,
     ) -> Result<serde_json::Value, ToolError> {
         let tmp_dir = std::env::temp_dir();
         let script_path = tmp_dir.join(format!("ga_{}.ai.py", uuid::Uuid::new_v4()));
+        let _script_guard = TmpScriptGuard(script_path.clone());
 
         let header = String::new();
         let full_code = format!("{header}{code}");
@@ -234,29 +289,13 @@ impl CodeRunTool {
             "python3"
         };
 
-        let output = tokio::process::Command::new(python)
-            .arg("-X")
+        let mut cmd = tokio::process::Command::new(python);
+        cmd.arg("-X")
             .arg("utf8")
             .arg("-u")
             .arg(&script_path)
-            .current_dir(&ctx.working_dir)
-            .output()
-            .await
-            .map_err(|e| ToolError::Custom(format!(
-                "python execution failed: {e}. Check that python3 is installed and the script syntax is valid."
-            )))?;
-
-        let _ = tokio::fs::remove_file(&script_path).await;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        Ok(serde_json::json!({
-            "exit_code": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
-        }))
+            .current_dir(&ctx.working_dir);
+        run_child_with_timeout(cmd, timeout, "python").await
     }
 }
 
