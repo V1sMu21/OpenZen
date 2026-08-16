@@ -365,7 +365,7 @@ fn init_erme_store(
                         let stats = store_for_maintenance.consolidate_recursive();
                         tracing::info!(
                             "ERME daily consolidation: rounds={} merged={} deduped={} forgotten_l2={} forgotten_l3={}",
-                            stats.rounds,
+                            stats.rounds.len(),
                             stats.total_merged,
                             stats.total_deduped,
                             stats.total_forgotten_l2,
