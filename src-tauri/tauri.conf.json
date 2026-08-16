@@ -7,7 +7,7 @@
     "frontendDist": "../frontends/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "cd ../frontends && npx vite --port 5173",
-    "beforeBuildCommand": "npm run build && cd ../scripts && npm install"
+    "beforeBuildCommand": "cd ../frontends && npm ci && npm run build"
   },
   "app": {
     "windows": [
@@ -17,7 +17,7 @@
         "height": 800,
         "resizable": true,
         "fullscreen": false,
-        "devtools": true
+        "devtools": false
       }
     ],
     "security": {
@@ -35,7 +35,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "dmg"
+    ],
     "icon": [
       "icons/icon.png",
       "icons/icon.icns",
