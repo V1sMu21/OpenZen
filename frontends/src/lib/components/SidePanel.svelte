@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ArtifactEmpty from "./ArtifactEmpty.svelte";
   import ArtifactRenderer from "./ArtifactRenderer.svelte";
   import { sidepanel, type Artifact } from "../stores/sidepanel.svelte";
   import { invoke } from "@tauri-apps/api/core";
@@ -354,19 +355,4 @@
     flex-shrink: 0;
   }
 
-  .sidepanel-placeholder {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: var(--color-body);
-    font-size: 14px;
-  }
-  .sidepanel-placeholder .hint {
-    font-size: 12px;
-    opacity: 0.7;
-    margin-top: 4px;
-    color: var(--color-muted);
-  }
 </style>

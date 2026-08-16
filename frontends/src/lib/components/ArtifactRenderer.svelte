@@ -11,13 +11,13 @@
     artifact: Artifact;
   } = $props();
 
-  type ArtifactRendererComponent = Component<{ artifact: Artifact }>;
+  type ArtifactLoader = () => Promise<{ default: unknown }>;
 
   // Each loader is a dynamic import. Vite splits every renderer into its
   // own chunk, so the heavy dependency graphs (pdfjs-dist, @xterm/xterm,
   // katex via markdown/code views, mammoth) no longer sit in the main
   // bundle. A loader is only evaluated when its renderer is first shown.
-  function loaderFor(kind: string): (() => Promise<{ default: ArtifactRendererComponent }>) | null {
+  function loaderFor(kind: string): ArtifactLoader | null {
     switch (kind) {
       case "html": return () => import("./ArtifactHTMLView.svelte");
       case "terminal": return () => import("./ArtifactTerminal.svelte");
@@ -36,7 +36,7 @@
     }
   }
 
-  let Renderer: ArtifactRendererComponent | null = $state(null);
+  let Renderer: Component | null = $state(null);
   let loadError = $state<string | null>(null);
 
   $effect(() => {
@@ -47,7 +47,7 @@
     if (!loader) return;
     loader()
       .then((mod) => {
-        if (!cancelled) Renderer = mod.default;
+        if (!cancelled) Renderer = mod.default as Component;
       })
       .catch((err) => {
         if (!cancelled) loadError = err instanceof Error ? err.message : String(err);
@@ -59,7 +59,11 @@
 </script>
 
 {#if Renderer}
-  <svelte:component this={Renderer} {artifact} />
+  {#if renderer === "terminal"}
+    <Renderer cwd={artifact.path} />
+  {:else}
+    <Renderer {artifact} />
+  {/if}
 {:else if loadError}
   <div class="sidepanel-placeholder" role="alert">
     <p>📄 {artifact.label}</p>
