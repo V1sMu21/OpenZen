@@ -84,6 +84,14 @@ export function generatePartId(): string {
  *  ignore. */
 type SavedEvent = Record<string, unknown> & { type: string };
 
+// Conversion is deterministic for a given stored event array. Historical
+// sessions call this repeatedly (loadSession, ChatMessage fallback) and
+// legacy event arrays can contain thousands of per-token items, so cache
+// the converted result on the array object itself. The array is treated
+// as immutable persisted data; if a caller ever mutates one, it must not
+// rely on this cache.
+const convertedPartsCache = new WeakMap<SavedEvent[], UIMessagePart[]>();
+
 /** Convert stored stream events → UIMessagePart[] for reading from
  *  disk on page reload. Handles both the legacy item format
  *  (`content`/`thinking`/`tool_call`/`tool_result`) and the new
@@ -92,6 +100,9 @@ type SavedEvent = Record<string, unknown> & { type: string };
 import type { StreamEventItem } from './types';
 
 export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[] {
+  const cached = convertedPartsCache.get(items);
+  if (cached) return cached;
+
   const parts: UIMessagePart[] = [];
   // Track open text/reasoning/tool-invocation blocks by id so we
   // can append deltas to them. Mirrors what `applyProtocolEvent` does
@@ -99,6 +110,32 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
   const textById = new Map<string, TextPart>();
   const reasoningById = new Map<string, ReasoningPart>();
   const toolById = new Map<string, ToolInvocationPart>();
+  // Legacy events used `parts.find(...)` per token; keep O(1) pointers to
+  // the first completed text/reasoning part and the FIFO list of tools
+  // that still need a result instead.
+  let firstDoneText: TextPart | undefined;
+  let firstDoneReasoning: ReasoningPart | undefined;
+  const unpairedTools: ToolInvocationPart[] = [];
+
+  function noteTextPart(part: TextPart) {
+    if (!firstDoneText && part.state === 'done') firstDoneText = part;
+  }
+
+  function noteReasoningPart(part: ReasoningPart) {
+    if (!firstDoneReasoning && part.state === 'done') firstDoneReasoning = part;
+  }
+
+  function noteUnpairedTool(part: ToolInvocationPart) {
+    if (part.result == null && !unpairedTools.includes(part)) {
+      unpairedTools.push(part);
+    }
+  }
+
+  function markToolResult(part: ToolInvocationPart, result: string) {
+    part.result = result;
+    const idx = unpairedTools.indexOf(part);
+    if (idx >= 0) unpairedTools.splice(idx, 1);
+  }
 
   function appendToText(id: string, text: string, durationMs?: number) {
     let part = textById.get(id);
@@ -106,6 +143,7 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
       part = { type: 'text', id, text: '', state: 'done' };
       textById.set(id, part);
       parts.push(part);
+      noteTextPart(part);
     }
     part.text += text;
     if (durationMs !== undefined && durationMs > 0) {
@@ -119,6 +157,7 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
       part = { type: 'reasoning', id, text: '', state: 'done' };
       reasoningById.set(id, part);
       parts.push(part);
+      noteReasoningPart(part);
     }
     part.text += text;
     if (durationMs !== undefined && durationMs > 0) {
@@ -142,6 +181,7 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
       };
       toolById.set(toolCallId, part);
       parts.push(part);
+      noteUnpairedTool(part);
     } else {
       if (name && !part.name) part.name = name;
       if (args !== undefined) part.args = args;
@@ -158,6 +198,7 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
           const part: TextPart = { type: 'text', id, text: '', state: 'done' };
           textById.set(id, part);
           parts.push(part);
+          noteTextPart(part);
         }
         break;
       }
@@ -185,6 +226,7 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
           const part: ReasoningPart = { type: 'reasoning', id, text: '', state: 'done' };
           reasoningById.set(id, part);
           parts.push(part);
+          noteReasoningPart(part);
         }
         break;
       }
@@ -244,7 +286,7 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
         if (tcId) {
           const part = getOrCreateTool(tcId, name);
           part.state = 'output-available';
-          part.result = output;
+          markToolResult(part, output);
           // duration_ms is server-attached; if present, use it as
           // an upper bound on the tool's display duration.
           if (typeof item.duration_ms === 'number' && item.duration_ms > 0) {
@@ -270,11 +312,8 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
         // into a single text part so the DOM doesn't render
         // thousands of empty <p>'s (this used to freeze the page).
         const txt = String((item as StreamEventItem & { text: string }).text ?? '');
-        const existing = parts.find(
-          (p) => p.type === 'text' && p.state === 'done'
-        ) as TextPart | undefined;
-        if (existing) {
-          existing.text += txt;
+        if (firstDoneText) {
+          firstDoneText.text += txt;
         } else {
           const part: TextPart = {
             type: 'text',
@@ -284,17 +323,15 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
           };
           textById.set(part.id, part);
           parts.push(part);
+          noteTextPart(part);
         }
         break;
       }
       case 'token': {
         // Same as `content` but the older chat-mode delta type.
         const txt = String((item as StreamEventItem & { text: string }).text ?? '');
-        const existing = parts.find(
-          (p) => p.type === 'text' && p.state === 'done'
-        ) as TextPart | undefined;
-        if (existing) {
-          existing.text += txt;
+        if (firstDoneText) {
+          firstDoneText.text += txt;
         } else if (txt) {
           const part: TextPart = {
             type: 'text',
@@ -304,6 +341,7 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
           };
           textById.set(part.id, part);
           parts.push(part);
+          noteTextPart(part);
         }
         break;
       }
@@ -313,11 +351,8 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
         // thousands per message; rendering as separate blocks
         // froze the page for tens of seconds.
         const txt = String((item as StreamEventItem & { text: string }).text ?? '');
-        const existing = parts.find(
-          (p) => p.type === 'reasoning' && p.state === 'done'
-        ) as ReasoningPart | undefined;
-        if (existing) {
-          existing.text += txt;
+        if (firstDoneReasoning) {
+          firstDoneReasoning.text += txt;
         } else {
           const part: ReasoningPart = {
             type: 'reasoning',
@@ -327,6 +362,7 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
           };
           reasoningById.set(part.id, part);
           parts.push(part);
+          noteReasoningPart(part);
         }
         break;
       }
@@ -345,17 +381,16 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
         };
         toolById.set(tcId, part);
         parts.push(part);
+        noteUnpairedTool(part);
         break;
       }
       case 'tool_result': {
         // Pair with first unpaired tool_call of same name (FIFO).
         const raw = item as StreamEventItem & { name: string; result: string };
-        for (const p2 of parts) {
-          if (p2.type === 'tool-invocation' && p2.name === raw.name && !p2.result) {
-            p2.result = raw.result;
-            break;
-          }
-        }
+        const target = unpairedTools.find(
+          (p2) => p2.name === raw.name && p2.result == null
+        );
+        if (target) markToolResult(target, raw.result);
         break;
       }
       default:
@@ -394,5 +429,6 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
     } as TextPart;
   }
 
+  convertedPartsCache.set(items, parts);
   return parts;
 }
