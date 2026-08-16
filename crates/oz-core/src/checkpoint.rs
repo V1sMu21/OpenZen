@@ -157,6 +157,104 @@ impl MmapWal {
     }
 }
 
+// ── WAL integration ─────────────────────────────────────────────────
+// The JSON-per-turn files remain the compatibility format; the mmap WAL
+// is the fast authoritative copy for crash recovery. Handles are cached
+// per (dir, session) so checkpoint writes don't reopen/remap per turn,
+// and the WAL compacts itself past a record budget so a 7x24 session
+// can't grow it without bound (each record is a full snapshot).
+
+const MAX_WAL_RECORDS: usize = 8;
+
+fn wal_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, MmapWal>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, MmapWal>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn wal_key(dir: &Path, session_id: &str) -> String {
+    format!("{}::{}", dir.display(), session_id)
+}
+
+/// Append a checkpoint to the session's WAL (compacting first if the
+/// record budget is exceeded). Best-effort: a WAL failure never blocks
+/// the JSON path.
+pub fn append_checkpoint_wal(dir: &Path, session_id: &str, cp: &LoopCheckpoint) {
+    let key = wal_key(dir, session_id);
+    let mut cache = wal_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Health check the cached handle: a replaced/deleted file underneath
+    // us (compaction from another path, user cleanup) invalidates the map.
+    if let Some(wal) = cache.get(&key) {
+        if !wal.path().exists() {
+            cache.remove(&key);
+        }
+    }
+    if cache.get(&key).is_none() {
+        match MmapWal::open(dir, session_id) {
+            Ok(wal) => {
+                cache.insert(key.clone(), wal);
+            }
+            Err(e) => {
+                tracing::warn!("checkpoint WAL open failed for {session_id}: {e}");
+                return;
+            }
+        }
+    }
+    let needs_compact = cache
+        .get(&key)
+        .map(|wal| wal.all().len() >= MAX_WAL_RECORDS)
+        .unwrap_or(false);
+    if needs_compact {
+        // Keep only the newest record: drop the handle, remove the file,
+        // reopen fresh and re-append the latest snapshot.
+        let latest = cache.get(&key).and_then(|wal| wal.latest());
+        if let Some(latest) = latest {
+            let path = cache.get(&key).map(|w| w.path().to_path_buf());
+            cache.remove(&key);
+            if let Some(p) = path {
+                let _ = std::fs::remove_file(&p);
+            }
+            match MmapWal::open(dir, session_id) {
+                Ok(mut wal) => {
+                    if let Err(e) = wal.append(&latest) {
+                        tracing::warn!("checkpoint WAL compact-append failed: {e}");
+                    }
+                    let _ = wal.flush();
+                    cache.insert(key.clone(), wal);
+                }
+                Err(e) => {
+                    tracing::warn!("checkpoint WAL reopen after compact failed: {e}");
+                    return;
+                }
+            }
+        }
+    }
+    if let Some(wal) = cache.get_mut(&key) {
+        if let Err(e) = wal.append(cp) {
+            tracing::warn!("checkpoint WAL append failed for {session_id}: {e}");
+            return;
+        }
+        let _ = wal.flush();
+    }
+}
+
+/// Read the newest checkpoint from the session's WAL, if one exists.
+pub fn read_latest_checkpoint_wal(dir: &Path, session_id: &str) -> Option<LoopCheckpoint> {
+    // Reuse the cached handle when present, otherwise open read-only
+    // (without inserting) to avoid pinning maps for read-only callers.
+    let cache = wal_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(wal) = cache.get(&wal_key(dir, session_id)) {
+        return wal.latest();
+    }
+    drop(cache);
+    let wal = MmapWal::open(dir, session_id).ok()?;
+    wal.latest()
+}
+
 /// Scan from `start` forward to find the first byte after the last
 /// complete record (or `start` if no complete records exist).
 fn scan_records(data: &[u8], start: usize) -> usize {
@@ -340,6 +438,9 @@ fn save_loop_checkpoint_impl(dir: &Path, session_id: &str, cp: &LoopCheckpoint, 
             tracing::warn!("Failed to save loop checkpoint: {e}");
         }
     }
+    // Fast-path copy for crash recovery: an mmap append instead of a
+    // fresh file write + directory scan on resume.
+    append_checkpoint_wal(dir, session_id, cp);
     if cleanup {
         cleanup_session_checkpoints(dir, &safe_session, 5);
     }
@@ -389,9 +490,16 @@ pub fn load_latest_loop_checkpoint(dir: &Path, session_id: &str) -> Option<LoopC
     let prefix = format!("loop_{}_", safe_session);
 
     let checkpoints = collect_checkpoints(dir, Some(&prefix));
-    let latest = checkpoints.last()?;
-    let data = std::fs::read_to_string(latest).ok()?;
-    serde_json::from_str(&data).ok()
+    let file_latest = checkpoints
+        .last()
+        .and_then(|latest| std::fs::read_to_string(latest).ok())
+        .and_then(|data| serde_json::from_str::<LoopCheckpoint>(&data).ok());
+    match (file_latest, read_latest_checkpoint_wal(dir, session_id)) {
+        (Some(f), Some(w)) if w.turn >= f.turn => Some(w),
+        (Some(f), _) => Some(f),
+        (None, Some(w)) => Some(w),
+        (None, None) => None,
+    }
 }
 
 /// Load the best checkpoint for resume: the one with the highest turn
@@ -404,7 +512,9 @@ pub fn load_best_loop_checkpoint(dir: &Path, session_id: &str) -> Option<LoopChe
     let prefix = format!("loop_{}_", safe_session);
     let paths = collect_checkpoints(dir, Some(&prefix));
     if paths.is_empty() {
-        return None;
+        // No JSON files (cleaned up?): the WAL may still hold the newest
+        // snapshot.
+        return read_latest_checkpoint_wal(dir, session_id);
     }
     let mut best: Option<(u32, usize, PathBuf)> = None;
     for path in &paths {
@@ -424,10 +534,25 @@ pub fn load_best_loop_checkpoint(dir: &Path, session_id: &str) -> Option<LoopChe
             }
         }
     }
-    best.and_then(|(_, _, path)| {
+    let file_best = best.and_then(|(_, _, path)| {
         let data = std::fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&data).ok()
-    })
+        serde_json::from_str::<LoopCheckpoint>(&data).ok()
+    });
+    // The WAL is written after the JSON file in the same save call, so a
+    // WAL record with a >= turn is at least as recent (crash between the
+    // two writes leaves the WAL one snapshot ahead).
+    match (file_best, read_latest_checkpoint_wal(dir, session_id)) {
+        (Some(f), Some(w)) => {
+            if w.turn >= f.turn {
+                Some(w)
+            } else {
+                Some(f)
+            }
+        }
+        (Some(f), None) => Some(f),
+        (None, Some(w)) => Some(w),
+        (None, None) => None,
+    }
 }
 
 /// Load a specific checkpoint by turn number.
@@ -1060,5 +1185,85 @@ mod tests {
             "WAL cursor should have advanced past header, cursor={}",
             wal.cursor
         );
+    }
+}
+
+#[cfg(test)]
+mod wal_integration_tests {
+    use super::*;
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("oz-wal-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn cp_for(turn: u32, session: &str) -> LoopCheckpoint {
+        LoopCheckpoint {
+            turn,
+            timestamp: turn as f64,
+            messages: vec![Message::user(format!("turn {turn}"))],
+            history_info: vec![],
+            full_response: format!("resp {turn}"),
+            exit_reason: None,
+            session_id: Some(session.to_string()),
+            plan: Default::default(),
+            todos: vec![],
+            interventions: vec![],
+            full_thinking: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
+        }
+    }
+
+    #[test]
+    fn save_then_load_prefers_wal_latest() {
+        let dir = tmp_dir("roundtrip");
+        let sid = "wal-roundtrip";
+        save_loop_checkpoint(&dir, sid, &cp_for(1, sid));
+        save_loop_checkpoint(&dir, sid, &cp_for(4, sid));
+        let best = load_best_loop_checkpoint(&dir, sid).expect("checkpoint must load");
+        assert_eq!(best.turn, 4);
+        let latest = load_latest_loop_checkpoint(&dir, sid).expect("latest must load");
+        assert_eq!(latest.turn, 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wal_compacts_after_record_budget() {
+        let dir = tmp_dir("compact");
+        let sid = "wal-compact";
+        for turn in 1..=20u32 {
+            save_loop_checkpoint(&dir, sid, &cp_for(turn, sid));
+        }
+        // The WAL must not carry all 20 records: compaction keeps it small.
+        let wal = MmapWal::open(&dir, sid).expect("wal opens");
+        assert!(
+            wal.all().len() <= 10,
+            "expected compacted WAL, got {} records",
+            wal.all().len()
+        );
+        // And the newest snapshot survives.
+        assert_eq!(wal.latest().unwrap().turn, 20);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wal_only_survives_json_cleanup() {
+        let dir = tmp_dir("walonly");
+        let sid = "wal-only";
+        save_loop_checkpoint(&dir, sid, &cp_for(7, sid));
+        // Simulate JSON files being cleaned externally.
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("json") {
+                std::fs::remove_file(&p).unwrap();
+            }
+        }
+        let best = load_best_loop_checkpoint(&dir, sid).expect("wal fallback loads");
+        assert_eq!(best.turn, 7);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
