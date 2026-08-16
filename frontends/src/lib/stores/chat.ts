@@ -1312,7 +1312,7 @@ function createChatStore() {
       if (!sessionId) return;
       const page = sessionPageState.get(sessionId);
       const state = readState();
-      if (!page || !page.hasMore || state.isProcessing) return;
+      if (!page || !page.hasMore || state.isProcessing || state.loadingEarlier) return;
       const offset = page.offset + SESSION_PAGE_SIZE;
       update((s) => ({ ...s, loadingEarlier: true }));
       const seq = loadSeq;

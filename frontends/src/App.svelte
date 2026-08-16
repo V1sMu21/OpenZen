@@ -1101,6 +1101,7 @@
     align-items: center;
     gap: 8px;
     padding: 6px 14px;
+    min-height: 44px;
     border: 1px solid var(--color-hairline);
     border-radius: 999px;
     background: var(--bg-tertiary);
