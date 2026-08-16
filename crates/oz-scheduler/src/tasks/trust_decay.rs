@@ -30,25 +30,44 @@ impl ScheduledTask for TrustDecay {
     }
 
     async fn execute(&self, ctx: &TaskContext) -> Result<(), TaskError> {
-        let trust_path = ctx.trust_path.as_ref().map(PathBuf::from).or_else(|| {
-            ctx.working_dir
-                .as_ref()
-                .map(|wd| PathBuf::from(wd).join("openzen").join("trust.json"))
-        });
+        let working_dir = ctx.working_dir.as_deref().map(PathBuf::from);
 
-        let Some(trust_path) = trust_path else {
-            return Ok(());
-        };
-
-        if !trust_path.exists() {
-            return Ok(());
+        // The runtime reads PER-PROJECT trust stores
+        // ({project_root}/openzen/trust.json); decaying only the
+        // data-dir file never touched an actual decision. Decay every
+        // registered project's store plus the data-dir one.
+        let mut targets: Vec<PathBuf> = Vec::new();
+        if let Some(ref wd) = working_dir {
+            // projects.json lives in the data root next to sessions.
+            if let Ok(raw) = std::fs::read_to_string(wd.join("projects.json")) {
+                if let Ok(list) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(arr) = list.as_array() {
+                        for p in arr {
+                            if let Some(root) = p.get("root_path").and_then(|v| v.as_str()) {
+                                targets.push(PathBuf::from(root).join("openzen").join("trust.json"));
+                            }
+                        }
+                    }
+                }
+            }
+            targets.push(wd.join("openzen").join("trust.json"));
+        }
+        if let Some(tp) = ctx.trust_path.as_ref().map(PathBuf::from) {
+            targets.push(tp);
         }
 
-        let store = oz_safety::TrustStore::new(Some(trust_path));
-        store.decay_expired(self.max_inactive_days);
+        let mut decayed = 0usize;
+        for path in targets {
+            if !path.exists() {
+                continue;
+            }
+            let store = oz_safety::TrustStore::new(Some(path));
+            store.decay_expired(self.max_inactive_days);
+            decayed += 1;
+        }
 
         tracing::info!(
-            "[scheduler] trust_decay: scanned trust store, degraded entries inactive > {} days",
+            "[scheduler] trust_decay: scanned {decayed} trust store(s), degraded entries inactive > {} days",
             self.max_inactive_days
         );
 

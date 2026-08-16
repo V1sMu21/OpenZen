@@ -45,11 +45,42 @@ impl PlatformRegistry {
     /// fails or panics is restarted with exponential backoff (5s→60s,
     /// reset to 5s after 5 minutes of healthy uptime) instead of taking
     /// the channel offline until the whole app restarts. 7x24 safety net.
+    /// Each adapter also gets a health poll: a channel that reports
+    /// unhealthy (without returning) is visible in the logs instead of
+    /// silently wedging.
     pub fn start_all(&mut self, ctx: PlatformContext) {
         for adapter in self.adapters.values() {
             let ctx_clone = ctx.clone();
             let adapter_clone = adapter.clone();
             let shutdown = self.shutdown.clone();
+            let health_adapter = adapter.clone();
+            let health_shutdown = self.shutdown.clone();
+            let health_handle = tokio::spawn(async move {
+                let mut was_healthy = true;
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    if health_shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // Bound a wedged health() probe so the poll itself
+                    // cannot hang.
+                    let probe = health_adapter.health();
+                    let healthy = match tokio::time::timeout(Duration::from_secs(10), probe).await
+                    {
+                        Ok(h) => h.connected,
+                        Err(_) => false,
+                    };
+                    if healthy != was_healthy {
+                        tracing::warn!(
+                            "[platform] adapter {} health transitioned to {}",
+                            health_adapter.name(),
+                            if healthy { "healthy" } else { "UNHEALTHY" }
+                        );
+                        was_healthy = healthy;
+                    }
+                }
+            });
+            self.handles.push(health_handle);
             let handle = tokio::spawn(async move {
                 let mut backoff_secs: u64 = 5;
                 loop {

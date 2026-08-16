@@ -251,6 +251,83 @@ pub fn rollback(dir: &Path, record_id: &str) -> Result<(), String> {
     state.save(dir).map(|_| ())
 }
 
+/// Relevance tokens: lowercase latin words plus individual CJK
+/// characters (cheap, dictionary-free).
+fn relevance_tokens(s: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut latin = String::new();
+    let flush = |latin: &mut String, out: &mut std::collections::HashSet<String>| {
+        if latin.chars().count() >= 3 {
+            out.insert(latin.to_lowercase());
+        }
+        latin.clear();
+    };
+    for ch in s.chars() {
+        let is_cjk = matches!(ch as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF);
+        if is_cjk {
+            flush(&mut latin, &mut out);
+            out.insert(ch.to_string());
+        } else if ch.is_alphanumeric() {
+            latin.push(ch);
+        } else {
+            flush(&mut latin, &mut out);
+        }
+    }
+    flush(&mut latin, &mut out);
+    out
+}
+
+fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(b).count() as f32;
+    let union = (a.len() + b.len()) as f32 - inter;
+    if union <= 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+/// Like `render_context`, but ranks entries by token relevance to `query`
+/// (Jaccard) instead of pure recency. Empty or non-matching queries fall
+/// back to the recency order — lessons about the CURRENT task surface
+/// first instead of whatever was updated last.
+pub fn render_context_relevant(
+    dir: &Path,
+    kind: HarnessKind,
+    limit: usize,
+    query: &str,
+) -> String {
+    let state = HarnessState::load(dir);
+    let mut entries = state.entries_of(kind);
+    if entries.is_empty() {
+        return String::new();
+    }
+    let q_tokens = relevance_tokens(query);
+    if !q_tokens.is_empty() {
+        entries.sort_by(|a, b| {
+            let sa = jaccard(&relevance_tokens(&a.content), &q_tokens);
+            let sb = jaccard(&relevance_tokens(&b.content), &q_tokens);
+            sb.partial_cmp(&sa)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.updated_at.cmp(&a.updated_at))
+        });
+    }
+    let kind_name = match kind {
+        HarnessKind::Memory => "memory",
+        HarnessKind::SkillNote => "skill_note",
+        HarnessKind::SubagentSpec => "subagent_spec",
+    };
+    let mut out = format!("<harness kind=\"{kind_name}\">\n");
+    for e in entries.iter().take(limit) {
+        out.push_str(&format!("- {}\n", e.content));
+    }
+    out.push_str("</harness>");
+    out
+}
+
 /// Render entries as a compact context block (for reminder injection).
 pub fn render_context(dir: &Path, kind: HarnessKind, limit: usize) -> String {
     let state = HarnessState::load(dir);

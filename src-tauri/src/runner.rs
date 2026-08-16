@@ -587,13 +587,42 @@ pub async fn run_agent_for_session(
             }
         }
     }
+    // Claude/OpenAI protocol requires paired
+    // assistant-tool_use ↔ user-tool_result blocks; projecting to
+    // standalone Message::assistant(text) + Message::tool(id,text)
+    // breaks pairing, so the LLM loses prior tool turns between runs.
+    let (user_message, history): (String, Vec<Message>) = if resume {
+        // /resume path: the checkpoint already contains the full message
+        // history (system prompt + all turns). The initial user_message and
+        // history are replaced by the checkpoint in agent_loop anyway, so we
+        // use a placeholder to satisfy the non-empty check below.
+        ("[resume]".to_string(), Vec::new())
+    } else {
+        let store = lock_poison_guard(&state.sessions);
+        let session = store.get(session_id);
+        let user_msg = session
+            .and_then(|s| s.messages.last())
+            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+            .unwrap_or_default()
+            .to_string();
+        let hist = session
+            .map(|s| build_history_messages(&s.messages))
+            .unwrap_or_default();
+        (user_msg, hist)
+    };
+    if user_message.is_empty() {
+        anyhow::bail!("No user message to process");
+    }
+
     // Harness ledger injection: surface model-written, evidence-backed
-    // lessons every turn (a write-only ledger would silently rot).
+    // lessons every turn (a write-only ledger would silently rot), ranked
+    // by relevance to the current user message instead of recency.
     if let Some(harness_dir) = &ctx.harness_dir {
-        let harness_ctx = oz_core::harness::render_context(
+        let harness_ctx = oz_core::harness::render_context_relevant(
             std::path::Path::new(harness_dir),
             oz_core::harness::HarnessKind::Memory,
             8,
+            &user_message,
         );
         if !harness_ctx.is_empty() {
             system_prompt.push_str("\n\n## Persistent Harness Lessons\n\n");
@@ -629,33 +658,6 @@ pub async fn run_agent_for_session(
     if !memory_context.is_empty() {
         system_prompt.push_str("\n\n## Persistent Memory Context\n\n");
         system_prompt.push_str(&memory_context);
-    }
-
-    // Claude/OpenAI protocol requires paired
-    // assistant-tool_use ↔ user-tool_result blocks; projecting to
-    // standalone Message::assistant(text) + Message::tool(id,text)
-    // breaks pairing, so the LLM loses prior tool turns between runs.
-    let (user_message, history): (String, Vec<Message>) = if resume {
-        // /resume path: the checkpoint already contains the full message
-        // history (system prompt + all turns). The initial user_message and
-        // history are replaced by the checkpoint in agent_loop anyway, so we
-        // use a placeholder to satisfy the non-empty check below.
-        ("[resume]".to_string(), Vec::new())
-    } else {
-        let store = lock_poison_guard(&state.sessions);
-        let session = store.get(session_id);
-        let user_msg = session
-            .and_then(|s| s.messages.last())
-            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-            .unwrap_or_default()
-            .to_string();
-        let hist = session
-            .map(|s| build_history_messages(&s.messages))
-            .unwrap_or_default();
-        (user_msg, hist)
-    };
-    if user_message.is_empty() {
-        anyhow::bail!("No user message to process");
     }
 
     let mut loop_config = LoopConfig::default();
