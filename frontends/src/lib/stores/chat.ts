@@ -9,7 +9,7 @@ import { applyProtocolEvent, clearReasoningTimers } from "./protocol-processor";
 import { sessions } from "./sessions";
 import { isTauri, tauriInvoke } from "../api/tauri";
 import { sendMessage as httpSendMessage } from "../api/chat";
-import { stopSession } from "../api/sessions";
+import { stopSession, type SessionPageData } from "../api/sessions";
 
 export interface PendingAskUser {
   question: string;
@@ -89,6 +89,10 @@ export interface ChatState {
    compressionNotice: string | null;
    cumulativeInputTokens: number;
    cumulativeOutputTokens: number;
+   /** Pagination window: true when older persisted messages are available. */
+   hasMoreMessages?: boolean;
+   /** True while a "load earlier" page request is in flight. */
+   loadingEarlier?: boolean;
 }
 
 // 30 minutes: long enough for a multi-step task with many slow
@@ -175,10 +179,266 @@ function createChatStore() {
     modelInfo: ModelInfo | null;
   }>();
 
+  // ── Idle-session view cache (T3.6) ──────────────────────────────
+  // Bounded LRU of the last SESSION_CACHE_MAX fully-loaded session pages.
+  // Switching back to a recent idle session paints synchronously from this
+  // cache (<100ms) instead of waiting on IPC/HTTP + JSON conversion.
+  const SESSION_PAGE_SIZE = 200;
+  const SESSION_VIEW_CACHE_MAX = 4;
+  const SESSION_VIEW_CACHE_TTL_MS = 60 * 60 * 1000; // 1h
+
+  interface SessionViewCacheEntry {
+    at: number;
+    state: {
+      messages: Message[];
+      todos: ChatState['todos'];
+      reminders: ReminderTask[];
+      pendingAskUser: PendingAskUser | null;
+      modelInfo: ModelInfo | null;
+      hasMoreMessages: boolean;
+    };
+  }
+
+  const sessionViewCache = new Map<string, SessionViewCacheEntry>();
+
+  /** Raw-message skip-from-end for the next "load earlier" page. */
+  const sessionPageState = new Map<string, { offset: number; hasMore: boolean }>();
+
+  function touchSessionViewCache(sessionId: string) {
+    const entry = sessionViewCache.get(sessionId);
+    if (!entry) return;
+    sessionViewCache.delete(sessionId);
+    sessionViewCache.set(sessionId, entry); // refresh LRU insertion order
+  }
+
+  function storeSessionViewCache(
+    sessionId: string,
+    state: SessionViewCacheEntry['state'],
+  ) {
+    sessionViewCache.set(sessionId, { at: Date.now(), state });
+    while (sessionViewCache.size > SESSION_VIEW_CACHE_MAX) {
+      const oldestKey = sessionViewCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      sessionViewCache.delete(oldestKey);
+    }
+  }
+
   // Monotonic sequence for loadSession calls: a stale getSession response
   // from a previously-selected session must never overwrite the state of
   // the session the user switched to in the meantime.
   let loadSeq = 0;
+
+  /** Synchronously read the current chat state (subscribe fire-and-read). */
+  function readState(): ChatState {
+    let state: ChatState | null = null;
+    const unsub = subscribe((s) => { state = s; });
+    unsub();
+    return state!;
+  }
+
+  type ServerSessionMessage = {
+    idx?: number;
+    role?: string;
+    content?: string;
+    thinking?: string;
+    timestamp?: string;
+    toolCalls?: Array<{ name: string; arguments: string; result?: string }>;
+    tool_results?: unknown[];
+    streamEvents?: unknown[];
+    parts?: UIMessagePart[];
+    duration?: number;
+    tokensIn?: number;
+    tokensOut?: number;
+    contextTokens?: number;
+    modelInfo?: { model: string; provider: string; contextWindow: number; isLocal: boolean };
+    exitReason?: string;
+    exit_reason?: string;
+    children?: string[];
+  };
+
+  function parseSessionMessages(sessionId: string, raw: ServerSessionMessage[]): Message[] {
+    const messages: Message[] = raw
+      .filter((m) => {
+        const hasText = (m.content?.trim()?.length ?? 0) > 0;
+        const hasToolResults = (m.tool_results?.length ?? 0) > 0;
+        const hasStreamEvents = (m.streamEvents?.length ?? 0) > 0;
+        // User messages with only tool_results (no text) are internal
+        // protocol carriers; skip them in the chat UI.
+        if (m.role === "user" && !hasText && hasToolResults) return false;
+        return hasText || hasToolResults || hasStreamEvents;
+      })
+      .map((m, pageIdx) => {
+        let parts: UIMessagePart[] | undefined;
+        if (m.role === "assistant") {
+          if (m.parts && m.parts.length > 0) {
+            parts = m.parts;
+          } else if (m.streamEvents && m.streamEvents.length > 0) {
+            parts = convertStreamEventsToParts(m.streamEvents as import("./types").StreamEventItem[]);
+          }
+        }
+        // Prefer the server-assigned global idx. It keeps Svelte keys
+        // stable when older pages are prepended later.
+        const globalIdx = typeof m.idx === 'number' ? m.idx : pageIdx;
+        return {
+          id: `${sessionId}-msg-${globalIdx}`,
+          role: (m.role as Message["role"]) || "user",
+          content: m.content || "",
+          thinking: m.thinking,
+          timestamp: m.timestamp || new Date().toISOString(),
+          toolCalls: m.toolCalls as Message["toolCalls"],
+          streamEvents: m.streamEvents as Message["streamEvents"],
+          parts,
+          streaming: false,
+          duration: m.duration,
+          tokensIn: m.tokensIn,
+          tokensOut: m.tokensOut,
+          contextTokens: m.contextTokens,
+          modelInfo: m.modelInfo,
+          exitReason: m.exitReason ?? m.exit_reason,
+          children: m.children ?? [],
+        };
+      });
+
+    // Post-process: convert intervention user messages into cards inside
+    // the preceding assistant message for restart-consistency.
+    for (let i = messages.length - 1; i >= 1; i--) {
+      const msg = messages[i];
+      if (msg.role === "user" && msg.content?.startsWith("[USER INTERVENTION")) {
+        for (let j = i - 1; j >= 0; j--) {
+          if (messages[j].role === "assistant") {
+            const parts = messages[j].parts ?? [];
+            const cleanContent = msg.content!.replace(/^\[USER INTERVENTION.*?\n/, "");
+            parts.push({
+              type: "data",
+              id: `intervention_${messages[j].id}_${i}`,
+              dataType: "user_intervention",
+              content: cleanContent,
+              transient: false,
+            } as UIMessagePart);
+            messages[j] = { ...messages[j], parts };
+            break;
+          }
+        }
+        messages.splice(i, 1);
+      }
+    }
+    return messages;
+  }
+
+  function findPendingAskUserIn(messages: Message[]): PendingAskUser | null {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== "assistant") continue;
+      const parts = m.parts ?? [];
+      for (let j = parts.length - 1; j >= 0; j--) {
+        const p = parts[j];
+        if (p.type !== "tool-invocation") continue;
+        if (p.name !== "ask_user") continue;
+        const raw = p.result ?? "";
+        if (!raw) continue;
+        try {
+          const parsed = JSON.parse(raw);
+          const data = parsed?.data;
+          if (parsed?.intent !== "HUMAN_INTERVENTION" && parsed?.status !== "INTERRUPT") {
+            continue;
+          }
+          if (data && typeof data.question === "string") {
+            return {
+              question: data.question,
+              candidates: Array.isArray(data.candidates) ? data.candidates : [],
+            };
+          }
+        } catch {
+          // not JSON, ignore
+        }
+      }
+      // Only consider the latest assistant turn.
+      break;
+    }
+    return null;
+  }
+
+  function setViewState(sessionId: string, state: SessionViewCacheEntry['state']) {
+    set({
+      messages: state.messages,
+      isProcessing: false,
+      error: null,
+      modelInfo: state.modelInfo,
+      selectedModel: null,
+      modelList: [],
+      showModelSwitcher: false,
+      streamingParts: [],
+      pendingAskUser: state.pendingAskUser,
+      attachments: [],
+      todos: state.todos,
+      reminders: state.reminders,
+      compressionNotice: null,
+      cumulativeInputTokens: 0,
+      cumulativeOutputTokens: 0,
+      hasMoreMessages: state.hasMoreMessages,
+      loadingEarlier: false,
+    });
+  }
+
+  async function applySessionPage(
+    sessionId: string,
+    data: SessionPageData,
+    prepend: boolean,
+    seq: number,
+  ) {
+    const rawMessages = (data.messages ?? []) as ServerSessionMessage[];
+    const messages = parseSessionMessages(sessionId, rawMessages);
+    const serverTodos = (data.todos ?? []) as ChatState['todos'];
+    const hasMore = data.has_more === true;
+    const offset = typeof data.offset === 'number' ? data.offset : 0;
+    const current = readState();
+    const currentSid = get(sessions).currentId;
+
+    if (prepend) {
+      const existingIds = new Set(current.messages.map((m) => m.id));
+      const older = messages.filter((m) => !existingIds.has(m.id));
+      const merged = [...older, ...current.messages];
+      if (seq !== loadSeq || currentSid !== sessionId) {
+        // A stale or background prepend must not paint into whichever
+        // session is visible now, and we no longer have the target
+        // session's cached window to merge with — discard it.
+        return;
+      }
+      set({ ...current, messages: merged, hasMoreMessages: hasMore, loadingEarlier: false });
+      storeSessionViewCache(sessionId, {
+        messages: merged,
+        todos: current.todos,
+        reminders: scanRemindersFromMessages(merged),
+        pendingAskUser: current.pendingAskUser,
+        modelInfo: current.modelInfo,
+        hasMoreMessages: hasMore,
+      });
+    } else {
+      let pendingAskUser: PendingAskUser | null = null;
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg?.role === "assistant" && lastMsg.exitReason === "ASK_USER") {
+        pendingAskUser = findPendingAskUserIn(messages);
+      }
+      const viewState = {
+        messages,
+        todos: serverTodos,
+        reminders: scanRemindersFromMessages(messages),
+        pendingAskUser,
+        modelInfo: null,
+        hasMoreMessages: hasMore,
+      };
+      storeSessionViewCache(sessionId, viewState);
+      if (seq !== loadSeq || currentSid !== sessionId) return;
+      if (current.isProcessing && current.messages.length > 0) {
+        // A run started while this response was in flight; the live state
+        // is newer than the persisted page. Refresh only the cache.
+        return;
+      }
+      setViewState(sessionId, viewState);
+    }
+
+    sessionPageState.set(sessionId, { offset, hasMore });
+  }
 
   /**
    * Wall-clock arrival time of every part, indexed by a stable
@@ -371,7 +631,13 @@ function createChatStore() {
 
     startAssistantMessage() {
       const currentSid = get(sessions).currentId;
-      if (currentSid) sessionCache.delete(currentSid);
+      if (currentSid) {
+        sessionCache.delete(currentSid);
+        // The pre-send page is no longer the truth for this session;
+        // dropping it prevents a fast switch-back from painting the
+        // conversation without the newly-started turn.
+        sessionViewCache.delete(currentSid);
+      }
       startProcessingWatchdog();
       cancelPendingStreamEvents();
       partArrivalTimes.clear();
@@ -524,6 +790,23 @@ function createChatStore() {
       cancelPendingStreamEvents();
       partArrivalTimes.clear();
       partArrivalOrder.length = 0;
+
+      // Refresh the idle view cache with the finalized window so a later
+      // switch-back is instant and correct.
+      if (currentSid) {
+        const snap = readState();
+        if (!snap.isProcessing) {
+          const page = sessionPageState.get(currentSid);
+          storeSessionViewCache(currentSid, {
+            messages: snap.messages,
+            todos: snap.todos,
+            reminders: scanRemindersFromMessages(snap.messages),
+            pendingAskUser: snap.pendingAskUser,
+            modelInfo: snap.modelInfo,
+            hasMoreMessages: page?.hasMore ?? snap.hasMoreMessages ?? false,
+          });
+        }
+      }
     },
 
     setError(err: string) {
@@ -892,7 +1175,7 @@ function createChatStore() {
           const d = event.data as { message?: string; remaining_repeats?: number };
           if (d && typeof d.message === "string") {
             update((s) => {
-              const reminders = s.reminders.map((r) => {
+              const reminders: ReminderTask[] = s.reminders.map((r) => {
                 if (r.title !== d.message) return r;
                 const remaining = typeof d.remaining_repeats === "number"
                   ? d.remaining_repeats
@@ -936,16 +1219,7 @@ function createChatStore() {
     },
 
     saveSessionState(sessionId: string) {
-      const snap = get({ subscribe } as ReturnType<typeof writable<ChatState>>);
-      // Actually need to read current state directly
-      let state: ChatState = {
-        messages: [], isProcessing: false, error: null, modelInfo: null,
-        selectedModel: null, modelList: [], showModelSwitcher: false,
-        streamingParts: [], pendingAskUser: null, attachments: [], todos: [], compressionNotice: null,
-        cumulativeInputTokens: 0, cumulativeOutputTokens: 0,
-      };
-      const unsub = subscribe((s) => { state = s; });
-      unsub();
+      const state = readState();
       if (state.isProcessing && state.messages.length > 0) {
         sessionCache.set(sessionId, {
           messages: state.messages,
@@ -983,128 +1257,31 @@ function createChatStore() {
           compressionNotice: cached.compressionNotice,
           cumulativeInputTokens: 0,
           cumulativeOutputTokens: 0,
+          hasMoreMessages: false,
         });
         startProcessingWatchdog();
         return;
       }
       sessionCache.delete(sessionId);
       clearProcessingWatchdog();
+
+      // Fast path: a fresh idle-session page in the LRU cache paints
+      // synchronously; the server round-trip is skipped entirely.
+      const viewCached = sessionViewCache.get(sessionId);
+      if (viewCached && Date.now() - viewCached.at < SESSION_VIEW_CACHE_TTL_MS) {
+        touchSessionViewCache(sessionId);
+        setViewState(sessionId, viewCached.state);
+        return;
+      }
+
       try {
         const { getSession } = await import("../api/sessions");
-        const data = await getSession(sessionId);
-        // Stale response: the user switched to another session while this
-        // request was in flight — discard instead of painting the wrong
-        // conversation into the current view.
-        if (seq !== loadSeq) return;
-        const serverTodos = (data.todos ?? []) as Array<{id:string;content:string;status:string;priority:string;order:number}>;
-        const serverMessages = (data.messages ?? []) as Array<{
-          role?: string;
-          content?: string;
-          thinking?: string;
-          timestamp?: string;
-          toolCalls?: Array<{ name: string; arguments: string; result?: string }>;
-          tool_results?: unknown[];
-          streamEvents?: unknown[];
-          parts?: UIMessagePart[];
-          duration?: number;
-          tokensIn?: number;
-          tokensOut?: number;
-          contextTokens?: number;
-          modelInfo?: { model: string; provider: string; contextWindow: number; isLocal: boolean };
-          exitReason?: string;
-          exit_reason?: string;
-          children?: string[];
-        }>;
-        const messages: Message[] = serverMessages
-          .filter((m) => {
-            const hasText = (m.content?.trim()?.length ?? 0) > 0;
-            const hasToolResults = (m.tool_results?.length ?? 0) > 0;
-            const hasStreamEvents = (m.streamEvents?.length ?? 0) > 0;
-            // User messages with only tool_results (no text) are internal
-            // protocol carriers; skip them in the chat UI.
-            if (m.role === "user" && !hasText && hasToolResults) return false;
-            return hasText || hasToolResults || hasStreamEvents;
-          })
-          .map((m, idx) => {
-          let parts: UIMessagePart[] | undefined;
-          if (m.role === "assistant") {
-            if (m.parts && m.parts.length > 0) {
-              parts = m.parts;
-            } else if (m.streamEvents && m.streamEvents.length > 0) {
-              parts = convertStreamEventsToParts(m.streamEvents as import("./types").StreamEventItem[]);
-            }
-          }
-          return {
-            id: `${sessionId}-msg-${idx}`,
-            role: (m.role as Message["role"]) || "user",
-            content: m.content || "",
-            thinking: m.thinking,
-            timestamp: m.timestamp || new Date().toISOString(),
-            toolCalls: m.toolCalls as Message["toolCalls"],
-            streamEvents: m.streamEvents as Message["streamEvents"],
-            parts,
-            streaming: false,
-            duration: m.duration,
-            tokensIn: m.tokensIn,
-            tokensOut: m.tokensOut,
-            contextTokens: m.contextTokens,
-            modelInfo: m.modelInfo,
-            exitReason: m.exitReason ?? m.exit_reason,
-            children: m.children ?? [],
-          };
+        const data = await getSession(sessionId, {
+          offset: 0,
+          limit: SESSION_PAGE_SIZE,
         });
-
-        // Post-process: convert intervention user messages into cards inside
-        // the preceding assistant message for restart-consistency.
-        for (let i = messages.length - 1; i >= 1; i--) {
-          const msg = messages[i];
-          if (msg.role === "user" && msg.content?.startsWith("[USER INTERVENTION")) {
-            for (let j = i - 1; j >= 0; j--) {
-              if (messages[j].role === "assistant") {
-                const parts = messages[j].parts ?? [];
-                const cleanContent = msg.content!.replace(/^\[USER INTERVENTION.*?\n/, "");
-                parts.push({
-                  type: "data",
-                  id: `intervention_${i}`,
-                  dataType: "user_intervention",
-                  content: cleanContent,
-                  transient: false,
-                } as UIMessagePart);
-                messages[j] = { ...messages[j], parts };
-                break;
-              }
-            }
-            messages.splice(i, 1);
-          }
-        }
-        let pendingAskUser: PendingAskUser | null = null;
-        const lastMsg = messages[messages.length - 1];
-        if (lastMsg?.role === "assistant" && lastMsg.exitReason === "ASK_USER") {
-          set({ messages, isProcessing: false, error: null, modelInfo: null,
-                selectedModel: null, modelList: [], showModelSwitcher: false,
-                streamingParts: [], pendingAskUser: null, attachments: [], todos: serverTodos,
-                reminders: scanRemindersFromMessages(messages), compressionNotice: null,
-                cumulativeInputTokens: 0, cumulativeOutputTokens: 0 });
-          pendingAskUser = this.findPendingAskUser();
-        }
-
-        set({
-          messages,
-        isProcessing: false,
-        error: null,
-          modelInfo: null,
-          selectedModel: null,
-          modelList: [],
-          showModelSwitcher: false,
-          streamingParts: [],
-          pendingAskUser,
-          attachments: [],
-          todos: serverTodos,
-          reminders: scanRemindersFromMessages(messages),
-          compressionNotice: null,
-          cumulativeInputTokens: 0,
-          cumulativeOutputTokens: 0,
-        });
+        if (seq !== loadSeq) return; // superseded by a newer load
+        await applySessionPage(sessionId, data, false, seq);
       } catch (err) {
         if (seq !== loadSeq) return; // superseded by a newer load
         console.error("Failed to load session:", err);
@@ -1120,17 +1297,60 @@ function createChatStore() {
           pendingAskUser: null,
           attachments: [],
           todos: [],
+          reminders: [],
           compressionNotice: null,
           cumulativeInputTokens: 0,
           cumulativeOutputTokens: 0,
+          hasMoreMessages: false,
+          loadingEarlier: false,
         });
       }
+    },
+
+    async loadEarlierMessages() {
+      const sessionId = get(sessions).currentId;
+      if (!sessionId) return;
+      const page = sessionPageState.get(sessionId);
+      const state = readState();
+      if (!page || !page.hasMore || state.isProcessing) return;
+      const offset = page.offset + SESSION_PAGE_SIZE;
+      update((s) => ({ ...s, loadingEarlier: true }));
+      const seq = loadSeq;
+      try {
+        const { getSession } = await import("../api/sessions");
+        const data = await getSession(sessionId, {
+          offset,
+          limit: SESSION_PAGE_SIZE,
+        });
+        await applySessionPage(sessionId, data, true, seq);
+      } catch (err) {
+        console.warn("Failed to load earlier messages:", err);
+        update((s) => (get(sessions).currentId === sessionId
+          ? { ...s, loadingEarlier: false }
+          : s));
+      }
+    },
+
+    /** A remote session (not currently visible) finished or errored.
+     *  Drop any cached processing snapshot so the next switch fetches
+     *  the finalized page from the backend instead of resurrecting the
+     *  pre-done streaming state. */
+    noteSessionFinished(sessionId: string) {
+      sessionCache.delete(sessionId);
+      sessionViewCache.delete(sessionId);
+      sessionPageState.delete(sessionId);
     },
 
     clearMessages() {
       clearProcessingWatchdog();
       clearReasoningTimers();
       cancelPendingStreamEvents();
+      const currentSid = get(sessions).currentId;
+      if (currentSid) {
+        sessionCache.delete(currentSid);
+        sessionViewCache.delete(currentSid);
+        sessionPageState.delete(currentSid);
+      }
       update((s) => ({
         messages: [],
         isProcessing: false,
@@ -1143,6 +1363,7 @@ function createChatStore() {
         modelList: s.modelList,
         showModelSwitcher: false,
         todos: [],
+        reminders: [],
         compressionNotice: null,
         cumulativeInputTokens: 0,
         cumulativeOutputTokens: 0,

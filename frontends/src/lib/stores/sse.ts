@@ -56,6 +56,12 @@ function handleTauriEvent(raw: { session_id?: string; event_type?: string; data?
   // Filter by current session
   const currentId = get(sessions).currentId;
   if (raw.session_id && currentId && raw.session_id !== currentId) {
+    // A background session finishing is still important: without this,
+    // switching back would resurrect its pre-done streaming snapshot
+    // from the processing cache (T3.6 stale-stream fix).
+    if (raw.event_type === "done" || raw.event_type === "error") {
+      chat.noteSessionFinished(raw.session_id);
+    }
     return;
   }
   if (raw.event_type) {
@@ -98,6 +104,9 @@ function handleSSEEvent(event: MessageEvent) {
     // Filter events by current session to avoid cross-session interference
     const currentId = get(sessions).currentId;
     if (raw.session_id && currentId && raw.session_id !== currentId) {
+      if (raw.event_type === "done" || raw.event_type === "error") {
+        chat.noteSessionFinished(raw.session_id);
+      }
       return;
     }
 

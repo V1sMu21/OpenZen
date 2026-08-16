@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -1477,19 +1477,54 @@ async fn list_agents() -> Json<Vec<serde_json::Value>> {
     }
 }
 
+/// Pagination query for GET /api/sessions/:id.
+///
+/// `offset` counts from the END of the raw message vector: offset=0 is the
+/// newest page (what the chat UI paints first), offset=limit is the next
+/// older page, and so on. Each returned message carries its original `idx`
+/// so the frontend can prepend older pages without remapping keys.
+#[derive(Debug, Deserialize)]
+struct SessionPageQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
 async fn get_session(
     State(state): State<SharedState>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    Query(page): Query<SessionPageQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let sessions = state.sessions.read().await;
     match sessions.get(&id) {
         Some(session) => {
+            let total = session.messages.len();
+            let offset = page.offset.unwrap_or(0).min(total);
+            let end = page
+                .limit
+                .map(|limit| offset.saturating_add(limit).min(total))
+                .unwrap_or(total);
+            let start = total.saturating_sub(end);
+            let page_messages: Vec<serde_json::Value> = session.messages[start..end]
+                .iter()
+                .enumerate()
+                .map(|(page_pos, message)| {
+                    let mut value = message.clone();
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert("idx".to_string(), serde_json::json!(start + page_pos));
+                    }
+                    value
+                })
+                .collect();
             let value = serde_json::json!({
                 "id": session.info.id,
                 "name": session.info.name,
                 "created_at": session.info.created_at,
                 "status": session.status.as_str(),
-                "messages": session.messages,
+                "messages": page_messages,
+                "total_messages": total,
+                "offset": offset,
+                "limit": end - start,
+                "has_more": start > 0,
             });
             Ok(Json(value))
         }

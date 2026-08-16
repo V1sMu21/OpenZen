@@ -343,7 +343,12 @@ pub fn move_session_to_project(
 }
 
 #[tauri::command]
-pub fn get_session(id: String, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+pub fn get_session(
+    id: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    state: State<'_, Arc<AppState>>,
+) -> serde_json::Value {
     let mut store = lock_poison_guard(&state.sessions);
     match store.get(&id) {
         Some(entry) => {
@@ -369,7 +374,45 @@ pub fn get_session(id: String, state: State<'_, Arc<AppState>>) -> serde_json::V
                 // killed mid-task before after_run could save.
                 recover_session_from_checkpoints(&mut store, &id, &wd);
             }
-            serde_json::to_value(store.get(&id)).unwrap_or_default()
+
+            let Some(session) = store.get(&id) else {
+                return serde_json::json!({ "error": "not found" });
+            };
+            let mut value = serde_json::to_value(session).unwrap_or_default();
+
+            // Pagination. `offset` counts from the END of the message
+            // vector (0 = newest page), matching the web endpoint. Each
+            // returned message gets its original `idx` so the frontend
+            // can prepend older pages without changing Svelte keys.
+            let total = value
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if let Some(messages) = value.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                let offset = offset.unwrap_or(0).min(total);
+                let end = limit
+                    .map(|limit| offset.saturating_add(limit).min(total))
+                    .unwrap_or(total);
+                let start = total.saturating_sub(end);
+                let page: Vec<serde_json::Value> = messages[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(page_pos, message)| {
+                        let mut message = message.clone();
+                        if let Some(obj) = message.as_object_mut() {
+                            obj.insert("idx".to_string(), serde_json::json!(start + page_pos));
+                        }
+                        message
+                    })
+                    .collect();
+                *messages = page;
+                value["total_messages"] = serde_json::json!(total);
+                value["offset"] = serde_json::json!(offset);
+                value["limit"] = serde_json::json!(end - start);
+                value["has_more"] = serde_json::json!(start > 0);
+            }
+            value
         }
         None => serde_json::json!({ "error": "not found" }),
     }

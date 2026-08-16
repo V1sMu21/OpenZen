@@ -752,6 +752,18 @@
           <!-- 卷轴天头: 竖排款识 -->
           <span class="vertical-rl qing head-rl">卷 一 · 修 砚 之 录</span>
           <div class="messages-list">
+            {#if $chat.hasMoreMessages}
+              <button
+                class="load-earlier-btn"
+                onclick={() => chat.loadEarlierMessages()}
+                disabled={$chat.loadingEarlier === true}
+              >
+                {#if $chat.loadingEarlier}
+                  <span class="load-earlier-dot" aria-hidden="true"></span>
+                {/if}
+                {$t("message.loadEarlier", "Load earlier messages")}
+              </button>
+            {/if}
             {#each visibleMessages as msg (msg.id)}
               <ChatMessage
                 message={msg}
@@ -1013,6 +1025,41 @@
     flex: 1;
     max-width: 660px;
     min-width: 0;
+  }
+
+  .load-earlier-btn {
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border: 1px solid var(--color-hairline);
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    opacity: 0.85;
+    transition: opacity 0.15s;
+  }
+  .load-earlier-btn:hover {
+    opacity: 1;
+  }
+  .load-earlier-btn:disabled {
+    cursor: default;
+    opacity: 0.55;
+  }
+  .load-earlier-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    animation: loadEarlierPulse 1s ease-out infinite;
+  }
+  @keyframes loadEarlierPulse {
+    0% { opacity: 0.25; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1); }
+    100% { opacity: 0.25; transform: scale(0.8); }
   }
 
   /* 待办侧栏: 固定于会话区右侧空白顶部, 不随消息滚动 */

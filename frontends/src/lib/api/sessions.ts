@@ -39,15 +39,50 @@ export async function createSession(
   return res.json();
 }
 
-export async function getSession(id: string): Promise<any> {
+export interface SessionPageData {
+  id?: string;
+  name?: string;
+  created_at?: string;
+  status?: string;
+  messages?: unknown[];
+  todos?: Array<{ id: string; content: string; status: string; priority: string; order: number }>;
+  total_messages?: number;
+  offset?: number;
+  limit?: number;
+  has_more?: boolean;
+  [key: string]: unknown;
+}
+
+export interface SessionPageOptions {
+  /** Number of raw messages to skip from the END of the session. */
+  offset?: number;
+  /** Maximum raw messages to return. */
+  limit?: number;
+}
+
+export async function getSession(
+  id: string,
+  options?: SessionPageOptions,
+): Promise<SessionPageData> {
+  const offset = options?.offset ?? 0;
+  const limit = options?.limit;
   if (isTauri()) {
-    return await tauriInvoke("get_session", { id });
+    return (await tauriInvoke("get_session", {
+      id,
+      offset: limit == null ? null : offset,
+      limit: limit ?? null,
+    })) as SessionPageData;
   }
-  const res = await fetchJson(`${BASE}/${id}`);
+  const params = new URLSearchParams();
+  if (limit != null) {
+    params.set("offset", String(offset));
+    params.set("limit", String(limit));
+  }
+  const qs = params.toString();
+  const res = await fetchJson(`${BASE}/${id}${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(`Failed to get session: ${res.status}`);
   return res.json();
 }
-
 export async function deleteSession(id: string): Promise<void> {
   if (isTauri()) {
     await tauriInvoke("delete_session", { id });
