@@ -64,6 +64,10 @@ pub struct SessionStore {
     path: Option<PathBuf>,
     max_sessions: usize,
     writer: Option<PersistWriter>,
+    /// Last submitted per-session serializations with their fingerprints
+    /// (interior-mutable: save() takes &self because read-guard callers
+    /// persist through the tokio RwLock).
+    persist_cache: std::sync::Mutex<HashMap<String, (EntryFingerprint, Arc<String>)>>,
 }
 
 /// Background persistence writer. `save()` snapshots the session map and
@@ -72,7 +76,41 @@ pub struct SessionStore {
 /// collapses into a single disk write, and serialisation never blocks the
 /// IPC thread. Stores built with `SessionStore::new()` (no path, e.g. in
 /// tests) keep the old synchronous write path.
-type PersistPayload = (PathBuf, HashMap<String, SessionEntry>);
+/// Per-session serialized JSON, shared between saves: only sessions whose
+/// fingerprint changed since the last snapshot are re-serialized, so a
+/// save costs O(dirty sessions) instead of deep-cloning and re-serializing
+/// the whole ≤500-session map (the dominant CPU spike on every
+/// send/stop/status flip in 7x24 runs).
+type SessionSnapshot = HashMap<String, Arc<String>>;
+type PersistPayload = (PathBuf, SessionSnapshot);
+
+/// Cheap staleness fingerprint. Every current mutation path changes one of
+/// these fields (messages are only ever pushed/truncated/removed — never
+/// edited in place), so a match means the cached serialization is valid.
+#[derive(Clone, PartialEq)]
+struct EntryFingerprint {
+    messages: usize,
+    todos: usize,
+    status: SessionStatus,
+    info_name: String,
+    info_status: String,
+    info_message_count: usize,
+    info_project_id: Option<String>,
+    info_working_dir: Option<String>,
+}
+
+fn entry_fingerprint(e: &SessionEntry) -> EntryFingerprint {
+    EntryFingerprint {
+        messages: e.messages.len(),
+        todos: e.todos.len(),
+        status: e.status.clone(),
+        info_name: e.info.name.clone(),
+        info_status: e.info.status.clone(),
+        info_message_count: e.info.message_count,
+        info_project_id: e.info.project_id.clone(),
+        info_working_dir: e.info.working_dir.clone(),
+    }
+}
 
 struct PersistWriter {
     tx: Sender<PersistPayload>,
@@ -101,10 +139,23 @@ impl PersistWriter {
                         latest = Some(item);
                         worker_pending.fetch_sub(1, Ordering::SeqCst);
                     }
-                    if let Some((path, sessions)) = latest {
-                        if let Ok(json) = serde_json::to_string(&sessions) {
-                            SessionStore::write_atomic(&path, &json);
+                    if let Some((path, snapshot)) = latest {
+                        // Assemble the file from per-session JSON strings.
+                        // Keys are sorted for stable, diff-friendly output.
+                        let mut json = String::with_capacity(4096);
+                        json.push('{');
+                        let mut keys: Vec<&String> = snapshot.keys().collect();
+                        keys.sort();
+                        for (i, k) in keys.iter().enumerate() {
+                            if i > 0 {
+                                json.push(',');
+                            }
+                            json.push_str(&serde_json::to_string(k).unwrap_or_default());
+                            json.push(':');
+                            json.push_str(&snapshot[*k]);
                         }
+                        json.push('}');
+                        SessionStore::write_atomic(&path, &json);
                         worker_pending.fetch_sub(1, Ordering::SeqCst);
                     }
                 }
@@ -113,9 +164,9 @@ impl PersistWriter {
         PersistWriter { tx, pending }
     }
 
-    fn submit(&self, path: PathBuf, sessions: HashMap<String, SessionEntry>) {
+    fn submit(&self, path: PathBuf, snapshot: SessionSnapshot) {
         self.pending.fetch_add(1, Ordering::SeqCst);
-        if self.tx.send((path, sessions)).is_err() {
+        if self.tx.send((path, snapshot)).is_err() {
             // Worker thread is gone; keep the counter honest so reload()
             // can still proceed.
             self.pending.fetch_sub(1, Ordering::SeqCst);
@@ -135,6 +186,7 @@ impl SessionStore {
             sessions: HashMap::new(),
             path: None,
             max_sessions: 0,
+            persist_cache: std::sync::Mutex::new(HashMap::new()),
             writer: None,
         }
     }
@@ -221,6 +273,7 @@ impl SessionStore {
             sessions: HashMap::new(),
             path: Some(path.clone()),
             max_sessions: 0,
+            persist_cache: std::sync::Mutex::new(HashMap::new()),
             writer: Some(PersistWriter::spawn()),
         };
         if let Ok(data) = std::fs::read_to_string(&path) {
@@ -285,13 +338,49 @@ impl SessionStore {
     /// and the disk write happens off the caller's thread; otherwise the
     /// write is synchronous (stores without a path, e.g. in tests).
     fn save_to_disk(&self) {
-        if let Some(ref path) = self.path {
-            if let Some(ref w) = self.writer {
-                w.submit(path.clone(), self.sessions.clone());
-            } else if let Ok(json) = serde_json::to_string(&self.sessions) {
+        let Some(ref path) = self.path else { return };
+        let Some(ref w) = self.writer else {
+            // No background writer (tests): synchronous full snapshot.
+            if let Ok(json) = serde_json::to_string(&self.sessions) {
                 Self::write_atomic(path, &json);
             }
+            return;
+        };
+        // Incremental snapshot: re-serialize only entries whose fingerprint
+        // changed; everything else shares its cached JSON via Arc. Removed
+        // sessions simply drop out of the snapshot/cache.
+        let mut cache = self
+            .persist_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut snapshot: SessionSnapshot = HashMap::with_capacity(self.sessions.len());
+        for (id, entry) in &self.sessions {
+            let fp = entry_fingerprint(entry);
+            let cached: Option<Arc<String>> = cache.get(id).and_then(|(cfp, json)| {
+                if *cfp == fp {
+                    Some(Arc::clone(json))
+                } else {
+                    None
+                }
+            });
+            let json = match cached {
+                Some(json) => json,
+                None => Arc::new(
+                    serde_json::to_string(entry).unwrap_or_else(|_| "null".to_string()),
+                ),
+            };
+            snapshot.insert(id.clone(), json);
         }
+        *cache = snapshot
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    (entry_fingerprint(&self.sessions[k]), Arc::clone(v)),
+                )
+            })
+            .collect();
+        w.submit(path.clone(), snapshot);
     }
 
     /// Atomic tmp-file + rename write. Errors are best-effort by design:
@@ -458,5 +547,94 @@ impl SessionStore {
             .values()
             .filter(|e| e.project_id.as_deref() == Some(project_id))
             .count()
+    }
+}
+
+#[cfg(test)]
+mod incremental_persist_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_reserializes_only_changed_entries() {
+        let dir = std::env::temp_dir().join(format!("oz-sess-incr-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions.json");
+        let mut store = SessionStore::persisted(path.clone());
+        let mut e1 = SessionEntry {
+            info: SessionInfo {
+                id: "s1".into(),
+                name: "one".into(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                status: "idle".into(),
+                message_count: 1,
+                project_id: None,
+                project_name: None,
+                working_dir: None,
+            },
+            status: SessionStatus::Idle,
+            messages: vec![serde_json::json!({"role": "user", "content": "hi"})],
+            created_at: chrono::Utc::now(),
+            project_id: None,
+            working_dir: None,
+            todos: vec![],
+        };
+        let e2 = SessionEntry {
+            info: SessionInfo {
+                id: "s2".into(),
+                name: "two".into(),
+                ..e1.info.clone()
+            },
+            ..e1.clone()
+        };
+        store.sessions.insert("s1".into(), e1.clone());
+        store.sessions.insert("s2".into(), e2.clone());
+        store.save();
+        store.wait_persisted(std::time::Duration::from_secs(2));
+
+        // cache holds both, sharing Arcs
+        {
+            let cache = store
+                .persist_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            assert_eq!(cache.len(), 2);
+        }
+        let arc_s1_before = {
+            let cache = store
+                .persist_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Arc::clone(&cache.get("s1").unwrap().1)
+        };
+
+        // mutate s1 only: bump message count
+        e1.messages.push(serde_json::json!({"role": "assistant"}));
+        e1.info.message_count = 2;
+        store.sessions.insert("s1".into(), e1);
+        store.save();
+        store.wait_persisted(std::time::Duration::from_secs(2));
+
+        let arc_s1_after = {
+            let cache = store
+                .persist_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Arc::clone(&cache.get("s1").unwrap().1)
+        };
+        assert!(
+            !Arc::ptr_eq(&arc_s1_before, &arc_s1_after),
+            "changed entry must be re-serialized"
+        );
+
+        // persisted file parses and contains both sessions
+        let data = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert!(parsed.get("s1").is_some() && parsed.get("s2").is_some());
+        assert_eq!(
+            parsed["s1"]["messages"].as_array().unwrap().len(),
+            2,
+            "file must reflect the mutated entry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
