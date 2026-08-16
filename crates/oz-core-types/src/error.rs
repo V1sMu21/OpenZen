@@ -47,7 +47,12 @@ impl LlmError {
         match self {
             LlmError::HttpError { status, .. } => *status > 400 && *status != 401 && *status != 403,
             LlmError::RequestFailed(_) => true,
-            LlmError::StreamError(_) => true,
+            // Mid-stream failures may have already emitted output; the
+            // provider layer must not silently re-send the full context.
+            // These bubble to the agent loop, which owns turn-level retry
+            // and backoff. Pre-output failures (connection, HTTP status)
+            // remain cheap to retry here.
+            LlmError::StreamError(_) => false,
             _ => false,
         }
     }
@@ -195,9 +200,9 @@ mod tests {
     }
 
     #[test]
-    fn is_retryable_stream_error_retryable() {
+    fn is_retryable_stream_error_not_retryable() {
         let err = LlmError::StreamError("connection lost".into());
-        assert!(err.is_retryable());
+        assert!(!err.is_retryable());
     }
 
     #[test]
