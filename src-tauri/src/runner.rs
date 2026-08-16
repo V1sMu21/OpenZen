@@ -529,6 +529,9 @@ pub async fn run_agent_for_session(
                     );
                 }
                 let store = std::sync::Arc::clone(store);
+                // The recall task consumes `query`; keep a copy for the FTS
+                // fallback below.
+                let query_for_fts = query.clone();
                 let recalls = tokio::task::spawn_blocking(move || store.recall_by_text(&query, 5))
                     .await
                     .unwrap_or_else(|e| {
@@ -541,33 +544,40 @@ pub async fn run_agent_for_session(
                     // (hash embeddings) can miss while trigram keyword search
                     // over the crystallized knowledge base (facts/insights)
                     // still finds relevant rows.
-                    if let Some(dir) = &state.skill_mcp_dir {
-                        if let Ok(fts) =
-                            oz_memory::MemoryFts::open(std::path::Path::new(dir).join("memory_fts.sqlite").as_path())
-                        {
-                            let q = query.clone();
-                            if let Ok(Ok(hits)) =
-                                tokio::task::spawn_blocking(move || fts.search(&q, 5)).await
-                            {
-                                if !hits.is_empty() {
-                                    debug_log(&format!(
-                                        "ERME recall empty; FTS fallback matched {} entries",
-                                        hits.len()
-                                    ));
-                                    let mut buf = String::new();
-                                    for hit in hits {
-                                        buf.push_str(&format!(
-                                            "- [fts/{}] {}\n",
-                                            hit.category, hit.content
-                                        ));
-                                    }
-                                    return buf;
-                                }
-                            }
+                    let fts_context: Option<String> = (|| async {
+                        let dir = state.skill_mcp_dir.as_deref()?;
+                        let fts = oz_memory::MemoryFts::open(
+                            &std::path::Path::new(dir).join("memory_fts.sqlite"),
+                        )
+                        .ok()?;
+                        let q = query_for_fts.clone();
+                        let hits = tokio::task::spawn_blocking(move || fts.search(&q, 5))
+                            .await
+                            .ok()?
+                            .ok()?;
+                        if hits.is_empty() {
+                            return None;
+                        }
+                        debug_log(&format!(
+                            "ERME recall empty; FTS fallback matched {} entries",
+                            hits.len()
+                        ));
+                        let mut buf = String::new();
+                        for hit in hits {
+                            buf.push_str(&format!("- [fts/{}] {}\n", hit.category, hit.content));
+                        }
+                        Some(buf)
+                    })()
+                    .await;
+                    match fts_context {
+                        Some(ctx) => ctx,
+                        None => {
+                            debug_log(
+                                "ERME recall returned 0 memories; falling back to file memory",
+                            );
+                            memory.get_global_memory().await.unwrap_or_default()
                         }
                     }
-                    debug_log("ERME recall returned 0 memories; falling back to file memory");
-                    memory.get_global_memory().await.unwrap_or_default()
                 } else {
                     let mut buf = String::new();
                     for (mem, score, _layer) in &recalls {
