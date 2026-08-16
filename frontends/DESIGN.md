@@ -1,81 +1,73 @@
 ---
-name: OpenZen — Song Celadon
+name: OpenZen — Song Celadon (宋韵天青)
 description: |
-  A Song-dynasty celadon interface for the OpenZen AI assistant. Based on
-  Anthropic Claude's design language, inverted for a dark developer-tool surface.
-  The system anchors on a warm near-black canvas with coral-terracotta accents,
-  editorial serif display headlines, and a clean humanist sans for body/UI.
-  The warmth distinguishes it from cool-blue / slate AI tools.
+  A Song-dynasty Ru-ware celadon interface for OpenZen. The surface is a
+  warm near-black ink night; the only chromatic accent is sky-azure
+  (#93c3d6) — glaze light on celadon. Depth comes exclusively from
+  surface-color shifts and 1px hairlines, never drop shadows. Typography is
+  calligraphic: serif (Songti) for inscriptions, sans (system/PingFang) for
+  body, mono for code.
 ---
 
 ## 1. Visual Theme & Atmosphere
 
-**Warm-dark editorial.** A developer's terminal meets a literary journal. The
-canvas is warm near-black (`#181715`) — not the cool `#0a0a0a` of typical dev
-tools. The coral accent (`#cc785c`) provides brand voltage without screaming.
-Depth comes from surface-color shifts and thin hairlines, not drop shadows.
+**宋韵天青 / Song Celadon.** A craftsman's dark studio: warm ink-night
+canvas, celadon sky-azure as the single functional color, and cinnabar red
+reserved for errors (the seal on a vessel). Light is communicated by glaze
+layers (surface steps), not by shadows.
 
-**Mood:** focused, warm, precise. Feels like a craft workspace at night.
+**Mood:** quiet, focused, precise. A long-running companion, not a flashy
+tool.
 
-**Density:** comfortable. Not sparse, not crowded. Messages breathe.
+**Density:** comfortable. Messages breathe; tool activity is collapsible.
 
 ---
 
 ## 2. Color Palette & Roles
 
 ```css
-/* Surface hierarchy — warm dark */
---canvas:         #181715;  /* page background */
---surface-elevated: #252320;  /* sidebar, cards */
---surface-soft:   #1f1e1b;  /* hover, input bg */
---surface-overlay: #2d2a25;  /* modals, dropdowns */
+/* Surface hierarchy — ink night (darkest → lightest) */
+--color-canvas:          #14120e;  /* page background */
+--color-surface:         #1a1712;  /* panels */
+--color-surface-soft:    #1d1a14;  /* hover, input, tool cards */
+--color-surface-elevated:#221e17;  /* cards, messages */
+--color-surface-overlay: #28231b;  /* modals, dropdowns */
 
-/* Brand */
---primary:        #cc785c;  /* coral — send button, active state */
---primary-hover:  #d4896f;  /* hover state */
---primary-muted:  rgba(204,120,92,0.15);  /* subtle bg */
+/* Brand — 天青 (Ru ware sky azure), the sole chromatic accent */
+--color-primary:         #93c3d6;
+--color-primary-hover:   #b6dbe8;
+--color-primary-muted:   rgba(147, 195, 214, 0.12);
+--color-accent:          #93c3d6;
+--color-accent-soft:     rgba(147, 195, 214, 0.07);
 
-/* Text */
---ink:            #faf9f5;  /* primary text */
---body:           #c4c1b8;  /* secondary text */
---muted:          #8a877d;  /* captions, timestamps */
---dim:            #5e5b52;  /* placeholder, disabled */
+/* Text — rice paper / moon white */
+--color-ink:             #e4ddca;
+--color-body:            #b8b0a3;
+--color-muted:           #7a7366;
+--color-dim:             #8a8170;  /* AA on canvas/surface */
 
-/* Borders */
---hairline:       #2a2824;  /* 1px subtle borders */
---hairline-strong:#3a3731;  /* stronger borders */
+/* Borders — azure-tinted hairlines */
+--color-hairline:        rgba(147, 195, 214, 0.12);
+--color-hairline-strong: rgba(147, 195, 214, 0.22);
 
 /* Semantic */
---success:        #5db872;
---warning:        #d4a017;
---error:          #c64545;
---info:           #5db8a6;
+--color-success:         #7ab3a8;
+--color-warning:         #c4a877;
+--color-error:           #c05a3e;  /* cinnabar seal */
+--color-info:            #93c3d6;
 
 /* Code */
---code-bg:        #11100e;  /* inline code bg */
---code-text:      #e8e2d5;
-```
-
-### Light mode (future)
-```css
---canvas:         #faf9f5;
---ink:            #141413;
---body:           #3d3d3a;
+--color-code-bg:         #0f0d0a;
+--color-code-text:       #e0d9cc;
 ```
 
 ---
 
 ## 3. Typography Rules
 
-**Display/headings:** Use Inter (sans-serif) at weight 600 with tight
-negative letter-spacing. The warmth comes from spacing and color, not
-typeface choice.
-
-**Body:** Inter at weight 400, comfortable line-height (1.55).
-
-**Code:** JetBrains Mono at 14px.
-
-**UI labels:** Inter weight 500, uppercase with positive letter-spacing.
+Three families only: sans for body/UI, serif for inscriptions/titles, mono
+for code. Do not import web fonts in the production document; use local
+system stacks so the desktop app renders identically offline.
 
 | Token | Size | Weight | Line-Height | Letter-Spacing | Use |
 |-------|------|--------|-------------|----------------|-----|
@@ -91,9 +83,12 @@ typeface choice.
 | `code-sm` | 12px | 400 | 1.5 | 0 | Inline code |
 | `button` | 14px | 500 | 1.0 | 0 | Button labels |
 
-**Fallback stack:** `Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
-Roboto, sans-serif` for body/UI. `JetBrains Mono, "SF Mono", "Fira Code",
-monospace` for code.
+**CSS variables in `src/app.css`:**
+`--font-sans` = `-apple-system, BlinkMacSystemFont, "PingFang SC",
+"Noto Sans SC", system-ui, sans-serif`
+`--font-serif` = `"Songti SC", "Noto Serif SC", "Source Han Serif SC", serif`
+`--font-kai` = `"Kaiti SC", "STKaiti", "KaiTi", serif`
+`--font-mono` = `ui-monospace, "SF Mono", Menlo, "Fira Code", monospace`
 
 ---
 
@@ -103,16 +98,16 @@ monospace` for code.
 
 | Variant | Style |
 |---------|-------|
-| **Primary** | Coral fill `--primary`, white text, 8px radius, 10px/20px padding, weight 500. Hover: `--primary-hover`. |
-| **Secondary** | Transparent, 1px `--hairline-strong`, `--ink` text. Hover: border → `--primary`. |
-| **Ghost** | Transparent, `--body` text. Hover: `--ink` text. |
-| **Icon** | 32x32px, transparent, `--body` icon. Hover: bg `--surface-soft`. |
+| **Primary** | Azure fill `var(--color-primary)`, `#14120e` text (dark-on-azure), 8px radius, 10px/20px padding, weight 500. Hover: `--color-primary-hover`. |
+| **Secondary** | Transparent, 1px `var(--color-hairline-strong)`, `var(--color-ink)` text. Hover: border → `var(--color-primary)`. |
+| **Ghost** | Transparent, `var(--color-body)` text. Hover: `var(--color-ink)`. |
+| **Icon** | 32×32px (min 44×44 touch target on touch-capable layouts), transparent, `var(--color-body)` icon. Hover: bg `var(--color-surface-soft)`. |
 
 ### Inputs
 
 | Element | Style |
 |---------|-------|
-| **Text input** | bg `--surface-soft`, 1px `--hairline`, 8px radius, 10px/14px padding. Focus: border `--primary`, no ring. |
+| **Text input** | bg `var(--color-surface-soft)`, 1px `var(--color-hairline)`, 8px radius, 10px/14px padding. Focus: border `var(--color-primary)`, no ring. |
 | **Textarea** | Same as input. Min-height 42px, max-height 160px, resize none. |
 | **Select** | Same as input. Custom chevron. |
 
@@ -120,23 +115,23 @@ monospace` for code.
 
 | Element | Style |
 |---------|-------|
-| **Default card** | bg `--surface-elevated`, 1px `--hairline`, 12px radius, 16px padding. |
-| **Message bubble (user)** | bg `--primary` at 15% opacity + 1px `--primary` at 30%, 12px radius bottom-right 4px, max-w 80%. |
-| **Message bubble (assistant)** | bg `--surface-elevated`, 1px `--hairline`, 12px radius bottom-left 4px, max-w 80%. |
-| **Tool call card** | bg `--surface-soft`, 1px `--hairline`, 8px radius, 12px padding, mono text. |
-| **Code block** | bg `--code-bg`, 1px `--hairline`, 8px radius, 16px padding. |
+| **Default card** | bg `var(--color-surface-elevated)`, 1px `var(--color-hairline)`, 12px radius, 16px padding. |
+| **Message bubble (user)** | full-row translucent azure wash + 2px left azure hairline (`--color-primary-muted` / `--color-primary`), 2px radius. |
+| **Message bubble (assistant)** | transparent ink-on-canvas paper; no container background; max-w clamp(360px, 78%, 720px). |
+| **Tool call card** | bg `var(--color-surface-soft)`, 1px `var(--color-hairline)`, 8px radius, 12px padding, mono text. |
+| **Code block** | bg `var(--color-code-bg)`, 1px `var(--color-hairline)`, 8px radius, 16px padding. |
 
 ### Sidebar
 
 | Element | Style |
 |---------|-------|
-| **Panel** | bg `--canvas`, 240px width, 1px `--hairline` right border. |
-| **Session item** | 6px/12px padding, 8px radius. Hover: bg `--surface-soft`. Active: bg `--primary-muted` + 1px `--primary` left border. |
-| **New chat button** | Primary variant, full-width, 8px/12px padding. |
+| **Panel** | bg `var(--color-canvas)`, 280px width, 1px `var(--color-hairline)` right border. |
+| **Session item** | 6px/12px padding, 8px radius. Hover: bg `var(--color-surface-soft)`. Active: bg `var(--color-primary-muted)` + left accent. |
+| **New chat button** | Secondary-outline variant, full-width, azure text, serif label. |
 
 ### Typing Indicator
-Three dots, 6px diameter, `--primary` color, 1.2s bounce animation.
-bg `--surface-elevated` pill, 16px radius, 12px/20px padding.
+Three dots, 6px diameter, `var(--color-primary)`, 1.2s bounce animation.
+bg `var(--color-surface-elevated)` pill, 16px radius, 12px/20px padding.
 
 ---
 
@@ -146,55 +141,60 @@ bg `--surface-elevated` pill, 16px radius, 12px/20px padding.
 ```
 ┌──────────┬──────────────────────────────────┐
 │ Sidebar  │           Chat Area               │
-│ 240px    │     (messages + input)            │
+│ 280px    │     (messages + input)            │
 │          │                                    │
-│ Sessions │   ┌─ message bubble ──────────┐   │
-│ list     │   │  user / agent content     │   │
-│          │   └───────────────────────────┘   │
+│ Sessions │   ┌─ message row ──────────────┐  │
+│ list     │   │  user / agent content      │  │
+│          │   └────────────────────────────┘  │
 │          │                                    │
 │          │   ┌─ input area ────────────────┐ │
 │          │   │  [textarea         ] [Send] │ │
 │          └────────────────────────────────────┘
 ```
 
-**Grid:** Single sidebar-column layout. No multi-column inside chat.
-Message area fills remaining space.
+**Grid:** single chat column plus optional right artifact panel. No nested
+multi-column inside the message area.
 
 **Spacing scale (8px base):**
 `4 / 8 / 12 / 16 / 20 / 24 / 32 / 48 / 64`
 
-**Max content width:** 720px for message text. Input full-width.
+**Max content width:** 720px for message text; assistant rows may clamp to
+`clamp(360px, 78%, 720px)`. Input uses the chat column width.
 
 ---
 
 ## 6. Depth & Elevation
 
-**Flat by default.** No drop shadows. Elevation via:
-- Surface color shifts (`--surface-soft` → `--surface-elevated` → `--surface-overlay`)
-- 1px `--hairline` borders
-- Type weight contrast
+**Flat by default. No drop shadows, box-shadows, or drop-shadow filters.**
+Elevation is communicated only by:
+- surface steps (`--color-surface-soft` → `--color-surface-elevated` →
+  `--color-surface-overlay`)
+- 1px `--color-hairline` borders
+- type weight contrast
 
 **Exceptions:**
-- Modals: `--surface-overlay` bg with subtle inner border glow
-- Tool call cards: `--surface-soft` with 1px `--primary-muted` left accent bar
+- Modals: `--color-surface-overlay` with a stronger hairline border
+- Tool call cards: `--color-surface-soft` with a hairline border; no shadow
 
 ---
 
 ## 7. Do's and Don'ts
 
 **Do:**
-- Use `--primary` (#cc785c) as the sole chromatic accent — one coral moment per view
-- Let surface-color shifts communicate hierarchy
+- Use `--color-primary` (#93c3d6) as the sole chromatic accent; cinnabar is
+  only for errors/destructive actions
+- Use surface steps and hairlines for hierarchy
 - Show streaming tokens character-by-character
 - Display tool calls as collapsible cards between messages
-- Show message timestamp + token count in `--muted` text
-- Use `/` commands for power-user actions
+- Show timestamp + token counts in `--color-muted`
+- Keep all interactive targets ≥44px
+- Use local system font stacks (offline-first)
 
 **Don't:**
-- Use blue or purple accents — they clash with the coral warmth
-- Add drop shadows — depth comes from color
-- Mix more than two typefaces (Inter + JetBrains Mono only)
-- Use emojis in UI chrome
+- Use blue/purple gradients or a second brand accent
+- Add any shadow / glow / box-shadow — depth comes from color
+- Mix more than three families (sans/serif/mono)
+- Use emojis in UI chrome (message content may contain them)
 - Show raw JSON to users — render tool calls as readable cards
 
 ---
@@ -203,9 +203,9 @@ Message area fills remaining space.
 
 | Breakpoint | Sidebar | Message width |
 |------------|---------|---------------|
-| > 900px | 240px, visible | 80% max |
-| 600–900px | Collapsed, toggle button | 90% max |
-| < 600px | Hidden, slide-over overlay | Full width |
+| > 1100px | 280px, visible | clamp(360px, 78%, 720px) assistant |
+| 720–1100px | Collapsed, toggle button | 88% assistant / 78% user |
+| < 720px | Hidden, slide-over overlay | Full width |
 
 Touch targets: minimum 44px for all interactive elements.
 
@@ -214,16 +214,17 @@ Touch targets: minimum 44px for all interactive elements.
 ## 9. Agent Prompt Guide
 
 **Color reference:**
-- Canvas: `#181715`
-- Primary (coral): `#cc785c`
-- Elevated surface: `#252320`
-- Ink text: `#faf9f5`
-- Body text: `#c4c1b8`
-- Hairline: `#2a2824`
+- Canvas: `#14120e`
+- Primary (sky azure): `#93c3d6`
+- Elevated surface: `#221e17`
+- Ink text: `#e4ddca`
+- Body text: `#b8b0a3`
+- Hairline: `rgba(147, 195, 214, 0.12)`
 
-**Prompt:** "Design a warm-dark chat interface for an AI agent. Use a
-coral-on-warm-black palette. Messages are bubbles — user on right, agent on
-left. Include a sidebar with session history. Show streaming text as it
-arrives. Tool calls appear as collapsible cards between messages.
-Typography: Inter for body/UI, JetBrains Mono for code. No shadows — use
-surface-color shifts for elevation."
+**Prompt:** "Design a warm-dark, Song-celadon chat interface for an AI
+companion. Use sky-azure (#93c3d6) as the only chromatic accent on a warm
+ink-night canvas (#14120e). Messages are paper-like rows — user rows carry
+a translucent azure wash with a left hairline, assistant rows are plain ink
+on canvas. Tool calls appear as collapsible cards. Typography: system sans
+for body/UI, Songti serif for inscriptions, mono for code. Absolutely no
+shadows — use surface-color steps for elevation."
