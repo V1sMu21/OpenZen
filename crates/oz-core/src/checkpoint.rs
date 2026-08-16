@@ -332,7 +332,10 @@ fn save_loop_checkpoint_impl(dir: &Path, session_id: &str, cp: &LoopCheckpoint, 
     }
     let safe_session = sanitize_session_id(session_id);
     let path = dir.join(format!("loop_{}_{:03}.json", safe_session, cp.turn));
-    if let Ok(json) = serde_json::to_string_pretty(cp) {
+    // Compact serialization: a 170K-token context snapshots every 3 turns
+    // and pretty-printing inflated the payload ~30% for zero benefit on a
+    // machine-written recovery file.
+    if let Ok(json) = serde_json::to_string(cp) {
         if let Err(e) = std::fs::write(&path, &json) {
             tracing::warn!("Failed to save loop checkpoint: {e}");
         }

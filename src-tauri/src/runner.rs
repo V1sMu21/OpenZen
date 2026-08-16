@@ -1026,197 +1026,206 @@ pub async fn run_agent_for_session(
         .and_then(|d| d.get("full_response"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    // Build the persisted assistant message OUTSIDE the sessions lock:
+    // streamEvents/tool_use/tool_results reconstruction is O(run length)
+    // and previously held the global sessions mutex for seconds on long
+    // runs, blocking every other session command meanwhile.
+    let (assistant_msg, tool_results_user_msg) = {
+        let has_events = !lock_poison_guard(&collected_events).is_empty();
+        let full = full_response.as_deref().unwrap_or("");
+        // When the agent is stopped mid-stream, full_response may be empty
+        // even though the UI already rendered text deltas (the stream
+        // parser emits events in real time but full_response is only
+        // populated after stream completes). Reconstruct content from
+        // TextDelta events so the saved message shows what the user saw.
+        let display_content: String = if full.is_empty() && has_events {
+            let events = lock_poison_guard(&collected_events);
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    oz_core_types::StreamEvent::TextDelta { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<&str>>()
+                .join("")
+        } else {
+            full.to_string()
+        };
+        if !(has_events || !display_content.is_empty()) {
+            (None, None)
+        } else {
+            let now = chrono::Utc::now();
+            let mut msg = serde_json::json!({
+                "role": "assistant",
+                "content": display_content,
+                "timestamp": now.to_rfc3339(),
+            });
+
+            let stream_events_json: Vec<serde_json::Value> = {
+                let events = lock_poison_guard(&collected_events);
+                let arrivals = lock_poison_guard(&event_arrival_ms);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                events
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, e)| {
+                        let mut v = serde_json::to_value(e).ok()?;
+                        let arr_i = arrivals.get(i).copied().unwrap_or(0);
+                        let next_arr = arrivals.get(i + 1).copied().unwrap_or(now_ms);
+                        let dur = next_arr.saturating_sub(arr_i);
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert(
+                                "duration_ms".to_string(),
+                                serde_json::Value::Number(dur.into()),
+                            );
+                        }
+                        Some(v)
+                    })
+                    .collect()
+            };
+            if !stream_events_json.is_empty() {
+                msg["streamEvents"] = serde_json::Value::Array(stream_events_json);
+            }
+
+            let dur = run_start.elapsed().as_millis() as u64;
+            if dur > 0 {
+                msg["duration"] = serde_json::json!(dur);
+            }
+
+            msg["modelInfo"] = serde_json::json!({
+                "model": sess_config.model,
+                "provider": provider,
+                "contextWindow": sess_config.context_win,
+                "isLocal": crate::is_local_deploy(&sess_config.apibase),
+            });
+
+            msg["exitReason"] = serde_json::json!(outcome.exit_reason);
+
+            if let Some(ref data) = outcome.data {
+                if let Some(thinking) = data.get("full_thinking").and_then(|v| v.as_str()) {
+                    if !thinking.is_empty() {
+                        msg["thinking"] = serde_json::Value::String(thinking.to_string());
+                    }
+                }
+                if let Some(tools) = data.get("tool_calls").and_then(|v| v.as_array()) {
+                    if !tools.is_empty() {
+                        msg["toolCalls"] = serde_json::Value::Array(tools.clone());
+                    }
+                }
+                if let Some(ti) = data.get("input_tokens_est").and_then(|v| v.as_u64()) {
+                    msg["tokensIn"] = serde_json::Value::Number(ti.into());
+                }
+                if let Some(to) = data.get("output_tokens_est").and_then(|v| v.as_u64()) {
+                    msg["tokensOut"] = serde_json::Value::Number(to.into());
+                }
+                if let Some(ct) = data.get("context_tokens_est").and_then(|v| v.as_u64()) {
+                    msg["contextTokens"] = serde_json::Value::Number(ct.into());
+                }
+            }
+
+            // Embed ToolUse blocks (id + name + input) directly on the
+            // assistant message so the next agent run can reconstruct
+            // the tool_use ↔ tool_result pairing mandated by the chat-
+            // completion protocol. Without this, the prior assistant
+            // turn is just `assistant(text)` and any ToolResult blocks
+            // would be rejected by the API.
+            //
+            // IMPORTANT: Deduplicate by tool_call_id — the agent loop
+            // can emit multiple ToolInputAvailable for the same tool
+            // (speculative execution + regular execution), which would
+            // create unmatched tool_use ↔ tool_result pairs and cause
+            // the LLM to repeat the previous task on the next run.
+            {
+                let events = lock_poison_guard(&collected_events);
+                let mut seen_ids = std::collections::HashSet::new();
+                let tool_use_blocks: Vec<serde_json::Value> = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        StreamEvent::ToolInputAvailable {
+                            tool_call_id,
+                            name,
+                            args,
+                        } => {
+                            let id_str = tool_call_id.as_str();
+                            if id_str.is_empty() {
+                                return None;
+                            }
+                            // Deduplicate: keep only the first occurrence per tool_call_id
+                            if !seen_ids.insert(id_str.to_string()) {
+                                return None;
+                            }
+                            let input: serde_json::Value = serde_json::from_str(args)
+                                .unwrap_or(serde_json::Value::Null);
+                            Some(serde_json::json!({
+                                "id": id_str,
+                                "name": name,
+                                "input": input,
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !tool_use_blocks.is_empty() {
+                    msg["tool_use_blocks"] = serde_json::Value::Array(tool_use_blocks);
+                }
+            }
+
+            // Persist all ToolOutputAvailable blocks as ONE user-role
+            // message with `tool_results` (not as stand-alone
+            // role:"tool" messages, which break the Claude/OpenAI
+            // protocol pairing). Deduplicate by tool_call_id to
+            // prevent unmatched tool_use ↔ tool_result pairs.
+            let tool_results_user_msg = {
+                let events = lock_poison_guard(&collected_events);
+                let mut seen_trids = std::collections::HashSet::new();
+                let tool_results: Vec<serde_json::Value> = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        StreamEvent::ToolOutputAvailable {
+                            tool_call_id,
+                            output,
+                            ..
+                        } => {
+                            if tool_call_id.is_empty() {
+                                return None;
+                            }
+                            if !seen_trids.insert(tool_call_id.to_string()) {
+                                return None;
+                            }
+                            Some(serde_json::json!({
+                                "tool_use_id": tool_call_id,
+                                "content": output,
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if tool_results.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::json!({
+                        "role": "user",
+                        "content": "",
+                        "tool_results": tool_results,
+                        "timestamp": now.to_rfc3339(),
+                    }))
+                }
+            };
+            (Some(msg), tool_results_user_msg)
+        }
+    };
     {
         let mut store = lock_poison_guard(&state.sessions);
         if let Some(s) = store.get_mut(session_id) {
             s.status = SessionStatus::Idle;
-            {
-                let has_events = !lock_poison_guard(&collected_events).is_empty();
-                let full = full_response.as_deref().unwrap_or("");
-                // When the agent is stopped mid-stream, full_response
-                // may be empty even though the UI already rendered text
-                // deltas (the stream parser emits events in real time but
-                // full_response is only populated after stream completes).
-                // Reconstruct content from TextDelta events so the saved
-                // message shows what the user already saw.
-                let display_content: String = if full.is_empty() && has_events {
-                    let events = lock_poison_guard(&collected_events);
-                    events
-                        .iter()
-                        .filter_map(|e| match e {
-                            oz_core_types::StreamEvent::TextDelta { text, .. } => {
-                                Some(text.as_str())
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<&str>>()
-                        .join("")
-                } else {
-                    full.to_string()
-                };
-                if has_events || !display_content.is_empty() {
-                    let now = chrono::Utc::now();
-                    let mut msg = serde_json::json!({
-                        "role": "assistant",
-                        "content": display_content,
-                        "timestamp": now.to_rfc3339(),
-                    });
-
-                    let stream_events_json: Vec<serde_json::Value> = {
-                        let events = lock_poison_guard(&collected_events);
-                        let arrivals = lock_poison_guard(&event_arrival_ms);
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0);
-                        events
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, e)| {
-                                let mut v = serde_json::to_value(e).ok()?;
-                                let arr_i = arrivals.get(i).copied().unwrap_or(0);
-                                let next_arr = arrivals.get(i + 1).copied().unwrap_or(now_ms);
-                                let dur = next_arr.saturating_sub(arr_i);
-                                if let Some(obj) = v.as_object_mut() {
-                                    obj.insert(
-                                        "duration_ms".to_string(),
-                                        serde_json::Value::Number(dur.into()),
-                                    );
-                                }
-                                Some(v)
-                            })
-                            .collect()
-                    };
-                    if !stream_events_json.is_empty() {
-                        msg["streamEvents"] = serde_json::Value::Array(stream_events_json);
-                    }
-
-                    let dur = run_start.elapsed().as_millis() as u64;
-                    if dur > 0 {
-                        msg["duration"] = serde_json::json!(dur);
-                    }
-
-                    msg["modelInfo"] = serde_json::json!({
-                        "model": sess_config.model,
-                        "provider": provider,
-                        "contextWindow": sess_config.context_win,
-                        "isLocal": crate::is_local_deploy(&sess_config.apibase),
-                    });
-
-                    msg["exitReason"] = serde_json::json!(outcome.exit_reason);
-
-                    if let Some(ref data) = outcome.data {
-                        if let Some(thinking) = data.get("full_thinking").and_then(|v| v.as_str()) {
-                            if !thinking.is_empty() {
-                                msg["thinking"] = serde_json::Value::String(thinking.to_string());
-                            }
-                        }
-                        if let Some(tools) = data.get("tool_calls").and_then(|v| v.as_array()) {
-                            if !tools.is_empty() {
-                                msg["toolCalls"] = serde_json::Value::Array(tools.clone());
-                            }
-                        }
-                        if let Some(ti) = data.get("input_tokens_est").and_then(|v| v.as_u64()) {
-                            msg["tokensIn"] = serde_json::Value::Number(ti.into());
-                        }
-                        if let Some(to) = data.get("output_tokens_est").and_then(|v| v.as_u64()) {
-                            msg["tokensOut"] = serde_json::Value::Number(to.into());
-                        }
-                        if let Some(ct) = data.get("context_tokens_est").and_then(|v| v.as_u64()) {
-                            msg["contextTokens"] = serde_json::Value::Number(ct.into());
-                        }
-                    }
-
-                    // Embed ToolUse blocks (id + name + input) directly on the
-                    // assistant message so the next agent run can reconstruct
-                    // the tool_use ↔ tool_result pairing mandated by the chat-
-                    // completion protocol. Without this, the prior assistant
-                    // turn is just `assistant(text)` and any ToolResult blocks
-                    // would be rejected by the API.
-                    //
-                    // IMPORTANT: Deduplicate by tool_call_id — the agent loop
-                    // can emit multiple ToolInputAvailable for the same tool
-                    // (speculative execution + regular execution), which would
-                    // create unmatched tool_use ↔ tool_result pairs and cause
-                    // the LLM to repeat the previous task on the next run.
-                    {
-                        let events = lock_poison_guard(&collected_events);
-                        let mut seen_ids = std::collections::HashSet::new();
-                        let tool_use_blocks: Vec<serde_json::Value> = events
-                            .iter()
-                            .filter_map(|e| match e {
-                                StreamEvent::ToolInputAvailable {
-                                    tool_call_id,
-                                    name,
-                                    args,
-                                } => {
-                                    let id_str = tool_call_id.as_str();
-                                    if id_str.is_empty() {
-                                        return None;
-                                    }
-                                    // Deduplicate: keep only the first occurrence per tool_call_id
-                                    if !seen_ids.insert(id_str.to_string()) {
-                                        return None;
-                                    }
-                                    let input: serde_json::Value = serde_json::from_str(args)
-                                        .unwrap_or(serde_json::Value::Null);
-                                    Some(serde_json::json!({
-                                        "id": id_str,
-                                        "name": name,
-                                        "input": input,
-                                    }))
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        if !tool_use_blocks.is_empty() {
-                            msg["tool_use_blocks"] = serde_json::Value::Array(tool_use_blocks);
-                        }
-                    }
-
-                    s.messages.push(msg);
-
-                    // Persist all ToolOutputAvailable blocks as ONE user-role
-                    // message with `tool_results` (not as stand-alone
-                    // role:"tool" messages, which break the Claude/OpenAI
-                    // protocol pairing). Deduplicate by tool_call_id to
-                    // prevent unmatched tool_use ↔ tool_result pairs.
-                    {
-                        let events = lock_poison_guard(&collected_events);
-                        let mut seen_trids = std::collections::HashSet::new();
-                        let tool_results: Vec<serde_json::Value> = events
-                            .iter()
-                            .filter_map(|e| match e {
-                                StreamEvent::ToolOutputAvailable {
-                                    tool_call_id,
-                                    output,
-                                    ..
-                                } => {
-                                    if tool_call_id.is_empty() {
-                                        return None;
-                                    }
-                                    if !seen_trids.insert(tool_call_id.to_string()) {
-                                        return None;
-                                    }
-                                    Some(serde_json::json!({
-                                        "tool_use_id": tool_call_id,
-                                        "content": output,
-                                    }))
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        if !tool_results.is_empty() {
-                            let user_msg = serde_json::json!({
-                                "role": "user",
-                                "content": "",
-                                "tool_results": tool_results,
-                                "timestamp": now.to_rfc3339(),
-                            });
-                            s.messages.push(user_msg);
-                        }
-                    }
-                }
+            if let Some(msg) = assistant_msg {
+                s.messages.push(msg);
+            }
+            if let Some(user_msg) = tool_results_user_msg {
+                s.messages.push(user_msg);
             }
         }
         store.save();
