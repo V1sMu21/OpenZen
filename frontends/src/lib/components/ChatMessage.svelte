@@ -400,7 +400,7 @@ import { t, locale, tSync } from "../i18n";
         {/if}
         {#if isRunning}
         {/if}
-        <button class="copy-btn" onclick={copyContent} title={$t("chat.copy")}>
+        <button class="copy-btn" onclick={copyContent} title={$t("chat.copy")} aria-label={$t("chat.copy")}>
           {#if copied}
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M3 7.5l3 3 5-6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -413,7 +413,7 @@ import { t, locale, tSync } from "../i18n";
           {/if}
         </button>
         {#if canRegenerate}
-          <button class="regenerate-btn" onclick={() => chat.regenerate()} title={$t("message.regenerateTitle")}>
+          <button class="regenerate-btn" onclick={() => chat.regenerate()} title={$t("message.regenerateTitle")} aria-label={$t("message.regenerateTitle")}>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M2 5.5A5 5 0 0111.5 3.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
               <path d="M9 2.5l2.5 1-1 2.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -426,7 +426,7 @@ import { t, locale, tSync } from "../i18n";
 
       {#if message.role === "assistant"}
         {#if hasOverflow}
-          <button class="timeline-header" onclick={toggleTimeline} type="button">
+          <button class="timeline-header" onclick={toggleTimeline} type="button" aria-expanded={timelineExpanded} aria-label={$t("message.timeline")}>
             <span class="timeline-label">
               {$t("message.timeline")} · 折叠 {foldedStats.count} 事 · {foldedStats.toolCount} 工具
               {#if !timelineExpanded && foldedStats.totalMs > 0} · {formatDurationCompact(foldedStats.totalMs)}{/if}

@@ -25,7 +25,7 @@
   --color-ink: #e4ddca;
   --color-body: #b8b0a3;
   --color-muted: #7a7366;
-  --color-dim: #4d483e;
+  --color-dim: #8a8170; /* WCAG AA: ≥4.5:1 on canvas/surface */
 
   /* Borders — 青调发丝线 */
   --color-hairline: rgba(147, 195, 214, 0.12);

@@ -213,7 +213,7 @@
 
 {#if thinking}
   <div class="thinking-block">
-    <button class="thinking-header" onclick={toggle}>
+    <button class="thinking-header" onclick={toggle} aria-expanded={!collapsed} aria-label={$t("thinking.label")}>
       <span class="tglyph">⚘</span>
       <span class="thinking-label">{$t("thinking.label")}</span>
       {#if headerDurationLabel && showTimer}

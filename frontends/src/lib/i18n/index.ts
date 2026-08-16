@@ -21,6 +21,12 @@ export function localT(key: string, fallback?: string): string {
   return translations[get(locale)]?.[key] ?? fallback ?? key;
 }
 
+function applyDocumentLang(lang: string): void {
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = lang;
+  }
+}
+
 export async function initLocale(): Promise<void> {
   let lang = "zh";
   if (isTauri()) {
@@ -34,10 +40,12 @@ export async function initLocale(): Promise<void> {
     lang = saved === "en" ? "en" : "zh";
   }
   locale.set(lang);
+  applyDocumentLang(lang);
 }
 
 export async function switchLocale(lang: "zh" | "en"): Promise<void> {
   locale.set(lang);
+  applyDocumentLang(lang);
   if (isTauri()) {
     await tauriInvoke("set_locale", { lang });
   } else {
