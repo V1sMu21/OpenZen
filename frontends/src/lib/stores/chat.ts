@@ -243,12 +243,7 @@ function createChatStore() {
     update((s) => {
       const parts = [...s.streamingParts];
       for (const ev of batch) applyProtocolEvent(parts, ev);
-      const content = contentFromParts(parts);
-      const idx = s.messages.length - 1;
-      const msgs = s.messages.map((m, i) =>
-        i === idx && m.role === "assistant" ? { ...m, content } : m
-      );
-      return { ...s, streamingParts: parts, messages: msgs };
+      return withStreamingParts(s, parts);
     });
   }
 
@@ -316,6 +311,28 @@ function createChatStore() {
     return parts.filter((p): p is Extract<UIMessagePart, { type: 'text' }> => p.type === 'text')
       .map((p) => p.text)
       .join('');
+  }
+
+  /**
+   * Attach freshly-built streaming parts to the current state without
+   * replacing the messages array (or any historical message object).
+   *
+   * Streaming deltas arrive at token frequency; replacing the array used
+   * to make every ChatMessage's derived inputs dirty on every frame. With
+   * the live-message flags now computed once in App.svelte, only the live
+   * bubble receives the new `streamingParts` — but the in-place update is
+   * still required so callers such as `visibleMessages` can cache by
+   * "same array, same last message" instead of re-filtering N messages
+   * per token.
+   */
+  function withStreamingParts(s: ChatState, parts: UIMessagePart[]): ChatState {
+    const last = s.messages[s.messages.length - 1];
+    if (last && last.role === 'assistant') {
+      // Mutate the final assistant message in place; the array identity
+      // intentionally stays stable (see T3.1 in the optimization plan).
+      last.content = contentFromParts(parts);
+    }
+    return { ...s, streamingParts: parts };
   }
 
   return {
@@ -394,11 +411,7 @@ function createChatStore() {
           partArrivalTimes.set(key, Date.now());
           partArrivalOrder.push(key);
         }
-        const idx = s.messages.length - 1;
-        const msgs = s.messages.map((m, i) =>
-          i === idx && m.role === "assistant" ? { ...m, content: contentFromParts(parts) } : m
-        );
-        return { ...s, streamingParts: parts, messages: msgs };
+        return withStreamingParts(s, parts);
       });
     },
 

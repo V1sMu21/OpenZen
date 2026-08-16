@@ -124,6 +124,31 @@
     "#f60934"
   );
 
+  // Module-level stable array for non-live ChatMessage props. Using one
+  // shared reference means a streaming update never dirties the
+  // `streamingParts` prop of the other N-1 message components.
+  const NO_STREAMING_PARTS: import("./lib/stores/parts").UIMessagePart[] = [];
+
+  // The single authority for "which message is live right now".
+  // This is the exact four-condition isLive predicate from
+  // docs/correct-rendering-spec.md §3.2, evaluated once per state change
+  // instead of once per ChatMessage component.
+  let liveMessageId = $derived.by(() => {
+    if (!$chat.isProcessing) return null;
+    const msgs = $chat.messages;
+    if (msgs.length === 0) return null;
+    const last = msgs[msgs.length - 1];
+    return last.role === "assistant" ? last.id : null;
+  });
+
+  let regenerableMessageId = $derived.by(() => {
+    if ($chat.isProcessing) return null;
+    const msgs = $chat.messages;
+    if (msgs.length === 0) return null;
+    const last = msgs[msgs.length - 1];
+    return last.role === "assistant" && !last.streaming ? last.id : null;
+  });
+
   let visibleMessages = $derived.by(() =>
     $chat.messages.filter((m) => {
       if (m.role === "system") return false;
@@ -675,6 +700,9 @@
                 message={msg}
                 showTimer={showThinkingTimer}
                 workingDir={workingDir}
+                isLive={liveMessageId === msg.id}
+                streamingParts={liveMessageId === msg.id ? $chat.streamingParts : NO_STREAMING_PARTS}
+                canRegenerate={regenerableMessageId === msg.id}
               />
             {/each}
 

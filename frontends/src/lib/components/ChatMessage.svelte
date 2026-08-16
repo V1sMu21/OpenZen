@@ -1,6 +1,6 @@
   <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import type { Message, ToolCallInfo } from "../stores/types";
+  import type { ToolCallInfo } from "../stores/types";
   import type { UIMessagePart, ToolInvocationPart } from "../stores/parts";
   import { convertStreamEventsToParts } from "../stores/parts";
   import { chat } from "../stores/chat";
@@ -22,42 +22,35 @@ import { t, locale, tSync } from "../i18n";
     return false;
   }
 
-  let { message, showTimer = false, workingDir = "" } = $props();
+  // Stable empty array for non-live messages: historical bubbles never
+  // receive a new array reference when streaming parts change.
+  const NO_STREAMING_PARTS: UIMessagePart[] = [];
 
-  // ── Direct store subscription ──
-  let storeMessages = $state<Message[]>([]);
-  let storeStreamingParts = $state<UIMessagePart[]>([]);
-  let storeIsProcessing = $state(false);
+  let {
+    message,
+    showTimer = false,
+    workingDir = "",
+    // Computed in App.svelte, which is the only component that needs the
+    // global chat-store state. Previously every ChatMessage subscribed to
+    // the chat store; N subscriptions made every streaming delta O(N).
+    // The `isLive` predicate is EXACTLY the four-condition predicate from
+    // docs/correct-rendering-spec.md §3.2 — it just moved up one level.
+    isLive = false,
+    streamingParts = NO_STREAMING_PARTS,
+    canRegenerate = false,
+  } = $props();
 
-  $effect(() => {
-    const unsub = chat.subscribe((s) => {
-      storeMessages = s.messages;
-      storeStreamingParts = s.streamingParts;
-      storeIsProcessing = s.isProcessing;
-    });
-    return unsub;
-  });
   // ── Derived reactive values ──
   //
   //  See docs/correct-rendering-spec.md §二 for the correct rendering
   //  behavior of every derived signal in all three time-states.
-
-  /** "is this turn actively streaming?" — used to decide whether to
-   *  show the streaming-zone (live token text, typing dots) vs. the
-   *  final rendered markdown.
-   *
-   *  MUST be true ONLY for the LATEST assistant message when the
-   *  backend is processing.  Without the `storeMessages[last].id ===
-   *  message.id` guard, ALL historical assistant messages become
-   *  "live" when any round starts → they all read the global
-   *  `storeStreamingParts` → old bubbles show new-round cards
-   *  (content bleeding across rounds). */
-   let isLive = $derived(
-     storeIsProcessing
-     && message.role === "assistant"
-     && storeMessages.length > 0
-     && storeMessages[storeMessages.length - 1].id === message.id
-   );
+  //
+  // `isLive` is a prop now. The predicate lives in App.svelte and is:
+  //   storeIsProcessing
+  //   && last.role === "assistant"
+  //   && storeMessages.length > 0
+  //   && last.id === message.id
+  // which guarantees only the latest assistant turn is live.
 
   /** "is this turn done?" — true when this assistant message has been
    *  finalized.  The authoritative finalize markers are `duration > 0`
@@ -81,7 +74,7 @@ import { t, locale, tSync } from "../i18n";
   let parts = $derived.by<UIMessagePart[]>(() => {
     if (isLive) {
       const zoneId = zoneTextPart?.id;
-      return storeStreamingParts.filter((p) => {
+      return streamingParts.filter((p) => {
         if (p.type !== 'text') return true;
         if (p.state === 'streaming') return false;
         if (zoneId != null && p.id === zoneId) return false;
@@ -107,7 +100,7 @@ import { t, locale, tSync } from "../i18n";
    *  the loop renders it with the precise markdown. */
   let zoneTextPart = $derived.by<{ id: string; text: string } | null>(() => {
     if (!isLive) return null;
-    const arr = storeStreamingParts;
+    const arr = streamingParts;
     for (let i = arr.length - 1; i >= 0; i--) {
       const p = arr[i];
       if (p.type === 'text' && p.state === 'streaming') return { id: p.id, text: p.text };
@@ -126,7 +119,7 @@ import { t, locale, tSync } from "../i18n";
   // of isProcessing (an agent that errored mid-tool still shows which
   // tool it was on, instead of a permanent "准备中").
   let runningToolLabel = $derived.by(() => {
-    const source = (isLive ? storeStreamingParts : parts) as UIMessagePart[];
+    const source = (isLive ? streamingParts : parts) as UIMessagePart[];
     const tool = source
       .filter((p) => p.type === "tool-invocation")
       .filter((p) => {
@@ -419,7 +412,7 @@ import { t, locale, tSync } from "../i18n";
             </svg>
           {/if}
         </button>
-        {#if message.role === "assistant" && message.id === storeMessages[storeMessages.length - 1]?.id && !message.streaming && !storeIsProcessing}
+        {#if canRegenerate}
           <button class="regenerate-btn" onclick={() => chat.regenerate()} title={$t("message.regenerateTitle")}>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M2 5.5A5 5 0 0111.5 3.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
