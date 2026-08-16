@@ -203,6 +203,24 @@ impl PlatformAdapter for WechatAdapter {
     }
 }
 
+/// Clears the per-user running flag when the stream task ends — including
+/// during a panic unwind, so a mid-task panic cannot leave the user locked
+/// into "previous task still running" until process restart.
+struct RunningGuard {
+    running: Arc<tokio::sync::Mutex<HashMap<String, bool>>>,
+    uid: String,
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        let running = self.running.clone();
+        let uid = std::mem::take(&mut self.uid);
+        tokio::spawn(async move {
+            running.lock().await.remove(&uid);
+        });
+    }
+}
+
 /// Spawn an agent run for one WeChat message and stream the result back.
 /// Returns immediately — the long-poll loop must never block on a full
 /// agent run, otherwise one user's long task stalls every other user.
@@ -226,6 +244,10 @@ fn spawn_wechat_agent(
     let model = default_model.clone();
 
     tokio::spawn(async move {
+        let _running_guard = RunningGuard {
+            running,
+            uid: uid.clone(),
+        };
         match agent
             .send_message(&sid, &prompt, "wechat", model.as_deref())
             .await
@@ -235,7 +257,6 @@ fn spawn_wechat_agent(
                 let _ = bot.send_text(&uid, &format!("❌ {e}"), &ctx_token).await;
             }
         }
-        running.lock().await.remove(&uid);
     });
 }
 
@@ -286,6 +307,17 @@ fn handle_wechat_command(
     }
 }
 
+/// Byte index snapped down to a UTF-8 char boundary. Raw byte slicing of
+/// CJK text panics when the index lands mid-char; every stream offset in
+/// this module goes through this snap.
+fn floor_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 async fn stream_to_wechat(
     bot: &WxBotClient,
     uid: &str,
@@ -303,9 +335,9 @@ async fn stream_to_wechat(
             }
             StreamEvent::FinishMessage { .. } => {
                 let cleaned = clean_for_wechat(&buffer);
-                let rest = &cleaned[sent_parts.min(cleaned.len())..];
+                let rest = &cleaned[floor_boundary(&cleaned, sent_parts)..];
                 let final_text = if rest.len() > 2000 {
-                    &rest[rest.len().saturating_sub(2000)..]
+                    &rest[floor_boundary(rest, rest.len().saturating_sub(2000))..]
                 } else {
                     rest
                 };
@@ -350,8 +382,8 @@ async fn stream_to_wechat(
 
         let cleaned = clean_for_wechat(&buffer);
         if cleaned.len() > sent_parts {
-            let new_part = &cleaned[sent_parts..];
-            let chunk = &new_part[..new_part.len().min(2000)];
+            let new_part = &cleaned[floor_boundary(&cleaned, sent_parts)..];
+            let chunk = &new_part[..floor_boundary(new_part, 2000)];
             let _ = bot.send_text(uid, chunk, ctx_token).await;
             sent_parts = cleaned.len();
             last_send = now;

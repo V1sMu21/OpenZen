@@ -743,6 +743,21 @@ fn truncate_stream_event(event: oz_core_types::StreamEvent) -> oz_core_types::St
     }
 }
 
+/// Byte-budget truncation that never splits a UTF-8 char: slicing at a raw
+/// byte index panics when the boundary lands mid-char, which for CJK text
+/// (>100KB tool output) is the common case, not the exception.
+/// Returns None when the string already fits.
+fn truncate_bytes_char_safe(s: &str, max_bytes: usize) -> Option<String> {
+    if s.len() <= max_bytes {
+        return None;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(format!("{}... [truncated {} bytes]", &s[..end], s.len() - end))
+}
+
 /// Run the agent loop for a session, broadcasting events via SSE.
 /// Returns the full response text if available.
 #[allow(clippy::too_many_arguments, clippy::field_reassign_with_default)]
@@ -1321,12 +1336,9 @@ async fn run_agent_for_session(
                     for ev in events.iter_mut() {
                         if ev.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
                             if let Some(result) = ev.get("result").and_then(|v| v.as_str()) {
-                                if result.len() > MAX_TOOL_RESULT_BYTES {
-                                    let truncated = format!(
-                                        "{}... [truncated {} bytes]",
-                                        &result[..MAX_TOOL_RESULT_BYTES],
-                                        result.len() - MAX_TOOL_RESULT_BYTES
-                                    );
+                                if let Some(truncated) =
+                                    truncate_bytes_char_safe(result, MAX_TOOL_RESULT_BYTES)
+                                {
                                     ev["result"] = serde_json::Value::String(truncated);
                                 }
                             }
@@ -1334,12 +1346,7 @@ async fn run_agent_for_session(
                     }
                 }
                 if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
-                    if content.len() > MAX_CONTENT_BYTES {
-                        let truncated = format!(
-                            "{}... [truncated {} bytes]",
-                            &content[..MAX_CONTENT_BYTES],
-                            content.len() - MAX_CONTENT_BYTES
-                        );
+                    if let Some(truncated) = truncate_bytes_char_safe(content, MAX_CONTENT_BYTES) {
                         msg["content"] = serde_json::Value::String(truncated);
                     }
                 }
