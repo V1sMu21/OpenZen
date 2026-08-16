@@ -264,6 +264,14 @@ fn init_erme_store(
             .spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_secs(idle_interval_secs));
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // Drain the event queue first: portrait/relationship
+                    // updates (UserStatement, MemoryStored, …) only happen
+                    // in process_pending — without this call the queue
+                    // grows forever and the portraits never evolve.
+                    let drained = reflection.process_pending();
+                    if drained > 0 {
+                        tracing::debug!("ERME reflection consumed {drained} pending events");
+                    }
                     reflection.run_full_cycle();
                     orchestrator.run_idle_cycle();
                 }));

@@ -494,6 +494,18 @@ pub async fn run_agent_for_session(
                 } else {
                     query
                 };
+                // Feed the user's statement to the L0 reflection engine so
+                // the user portrait and relationship actually evolve from
+                // real conversations (notify only queues here — the events
+                // are consumed by the idle cycle's process_pending).
+                if !query.is_empty() {
+                    runtime.reflection.notify(
+                        entropy_memory_engine::l0::ReflectionEvent::UserStatement {
+                            text: query.clone(),
+                            tags: Vec::new(),
+                        },
+                    );
+                }
                 let store = std::sync::Arc::clone(store);
                 let recalls = tokio::task::spawn_blocking(move || store.recall_by_text(&query, 5))
                     .await
@@ -564,6 +576,32 @@ pub async fn run_agent_for_session(
         if !harness_ctx.is_empty() {
             system_prompt.push_str("\n\n## Persistent Harness Lessons\n\n");
             system_prompt.push_str(&harness_ctx);
+        }
+    }
+    // Crystallized user facts/insights (skill-mcp L2 memory): without this
+    // the facts the model writes were invisible to later sessions —
+    // build_memory_prompt was only reachable through a rarely-taken
+    // fallback path inside the agent loop. SkillMcpMemory::new is path
+    // setup only (no directory scan); the prompt is byte-capped.
+    if let Some(dir) = &state.skill_mcp_dir {
+        const MAX_USER_MEMORY_PROMPT_BYTES: usize = 8 * 1024;
+        let mem = oz_skill_mcp::SkillMcpMemory::new(std::path::Path::new(dir));
+        if let Ok(mut prompt) = mem
+            .build_memory_prompt(std::path::Path::new(&ctx.working_dir))
+            .await
+        {
+            if prompt.len() > MAX_USER_MEMORY_PROMPT_BYTES {
+                let mut end = MAX_USER_MEMORY_PROMPT_BYTES;
+                while end > 0 && !prompt.is_char_boundary(end) {
+                    end -= 1;
+                }
+                prompt.truncate(end);
+                prompt.push_str("\n…[memory truncated]");
+            }
+            if !prompt.is_empty() {
+                system_prompt.push_str("\n\n## User Memory (facts/insights)\n\n");
+                system_prompt.push_str(&prompt);
+            }
         }
     }
     if !memory_context.is_empty() {
