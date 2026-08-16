@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -191,6 +191,61 @@
     return value;
   });
 
+  // ── Virtual scrolling (T3.8) ─────────────────────────────────────
+  // Render only the viewport window plus a generous overscan (two
+  // screens above and below). Uniform row estimates keep the scrollbar
+  // geometry stable for thousands of messages while DOM stays in the
+  // hundreds. Anchor restoration on "load earlier" prevents the viewport
+  // from jumping when older pages are prepended.
+  const VIRTUAL_ROW_ESTIMATE_PX = 180; // average row + list gap
+  let scrollTop = $state(0);
+  let viewportHeight = $state(0);
+
+  let virtualWindow = $derived.by(() => {
+    const msgs = visibleMessages;
+    const count = msgs.length;
+    const overscan = Math.max(VIRTUAL_ROW_ESTIMATE_PX, viewportHeight * 2);
+    const visibleRows = Math.ceil((viewportHeight + overscan * 2) / VIRTUAL_ROW_ESTIMATE_PX) + 2;
+    const first = Math.max(0, Math.floor((scrollTop - overscan) / VIRTUAL_ROW_ESTIMATE_PX));
+    const start = Math.min(first, Math.max(0, count - visibleRows));
+    const end = Math.min(count, start + visibleRows);
+    return {
+      slice: msgs.slice(start, end),
+      beforeHeight: start * VIRTUAL_ROW_ESTIMATE_PX,
+      afterHeight: (count - end) * VIRTUAL_ROW_ESTIMATE_PX,
+    };
+  });
+
+  function readVirtualScrollMetrics() {
+    const scroller = document.querySelector<HTMLElement>(".messages-scroll");
+    if (!scroller) return;
+    scrollTop = scroller.scrollTop;
+    viewportHeight = scroller.clientHeight;
+  }
+
+  function findMessageElement(id: string | undefined): HTMLElement | null {
+    if (!id) return null;
+    const rows = document.querySelectorAll<HTMLElement>("[data-message-id]");
+    for (const row of rows) {
+      if (row.dataset.messageId === id) return row;
+    }
+    return null;
+  }
+
+  async function loadEarlierWithAnchor(anchorId: string | undefined) {
+    const scroller = document.querySelector<HTMLElement>(".messages-scroll");
+    const anchorBefore = findMessageElement(anchorId);
+    const topBefore = anchorBefore?.getBoundingClientRect().top ?? 0;
+    await chat.loadEarlierMessages();
+    await tick();
+    const anchorAfter = findMessageElement(anchorId);
+    if (scroller && anchorBefore && anchorAfter) {
+      const topAfter = anchorAfter.getBoundingClientRect().top;
+      scroller.scrollTop += topAfter - topBefore;
+      readVirtualScrollMetrics();
+    }
+  }
+
   function aggregateTokens(messages: readonly Message[]): { in: number; out: number } {
     let inTotal = 0;
     let outTotal = 0;
@@ -306,6 +361,7 @@
     //   - a new message arrives (grew)           → always scroll
     //   - the user scrolls back near the bottom  → intent resets
     const handleScroll = () => {
+      readVirtualScrollMetrics();
       const scroller = document.querySelector<HTMLElement>('.messages-scroll');
       if (!scroller) return;
       const dist = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
@@ -326,6 +382,7 @@
           const scroller = document.querySelector<HTMLElement>('.messages-scroll');
           if (scroller) {
             scroller.scrollTop = scroller.scrollHeight;
+            readVirtualScrollMetrics();
           } else if (messagesEnd) {
             messagesEnd.scrollIntoView({ behavior: "auto", block: "end" });
           }
@@ -364,6 +421,8 @@
       if (chatContainer) {
         chatContainer.addEventListener('scroll', handleScroll, { passive: true });
       }
+      readVirtualScrollMetrics();
+      window.addEventListener('resize', readVirtualScrollMetrics, { passive: true });
 
       const observer = new MutationObserver(() => {
         // Only auto-scroll if the user hasn't scrolled up manually.
@@ -420,6 +479,7 @@
 
     return () => {
       unsub();
+      window.removeEventListener('resize', readVirtualScrollMetrics);
       // Remove scroll listener
       const chatContainer = document.querySelector<HTMLElement>('.messages-scroll');
       if (chatContainer) {
@@ -757,7 +817,7 @@
             {#if $chat.hasMoreMessages}
               <button
                 class="load-earlier-btn"
-                onclick={() => chat.loadEarlierMessages()}
+                onclick={() => loadEarlierWithAnchor(virtualWindow.slice[0]?.id)}
                 disabled={$chat.loadingEarlier === true}
               >
                 {#if $chat.loadingEarlier}
@@ -766,7 +826,10 @@
                 {$t("message.loadEarlier", "Load earlier messages")}
               </button>
             {/if}
-            {#each visibleMessages as msg (msg.id)}
+            {#if virtualWindow.beforeHeight > 0}
+              <div class="virtual-spacer" style="height:{virtualWindow.beforeHeight}px" aria-hidden="true"></div>
+            {/if}
+            {#each virtualWindow.slice as msg (msg.id)}
               <ChatMessage
                 message={msg}
                 showTimer={showThinkingTimer}
@@ -776,6 +839,9 @@
                 canRegenerate={regenerableMessageId === msg.id}
               />
             {/each}
+            {#if virtualWindow.afterHeight > 0}
+              <div class="virtual-spacer" style="height:{virtualWindow.afterHeight}px" aria-hidden="true"></div>
+            {/if}
 
             <div bind:this={messagesEnd}></div>
           </div>
@@ -1062,6 +1128,11 @@
     0% { opacity: 0.25; transform: scale(0.8); }
     50% { opacity: 1; transform: scale(1); }
     100% { opacity: 0.25; transform: scale(0.8); }
+  }
+  .virtual-spacer {
+    flex: none;
+    width: 1px;
+    pointer-events: none;
   }
 
   /* 待办侧栏: 固定于会话区右侧空白顶部, 不随消息滚动 */

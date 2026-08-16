@@ -392,7 +392,7 @@ import { t, locale, tSync } from "../i18n";
     <div class="system-content">{message.content}</div>
   </div>
 {:else}
-  <div class="message-row" class:user={message.role === "user"} class:assistant={message.role === "assistant"} class:live={isLive}>
+  <div class="message-row" data-message-id={message.id} class:user={message.role === "user"} class:assistant={message.role === "assistant"} class:live={isLive}>
     <div class="bubble">
       <div class="bubble-header">
         {#if message.role === "user"}
