@@ -6,6 +6,46 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::session::{blocks_to_response, Session};
 
+// Module-level precompiled patterns for parse_text_tool_calls: this
+// parser runs on every text-protocol turn and recompiled ~8 regexes each
+// call before.
+use std::sync::LazyLock;
+static RE_TOOL_USE_BLOCK: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
+    regex::Regex::new(r#"<(tool_use|tool_call)>([\s\S]{15,}?)</(?:tool_use|tool_call)>"#).ok()
+});
+static RE_TOOL_USE_STRIP: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
+    regex::Regex::new(r"<(?:tool_use|tool_call)>.*?</(?:tool_use|tool_call)>").ok()
+});
+static RE_PARAMETER: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
+    regex::Regex::new(r#"<parameter(?:\s+name="([^"]+)"|=([^>\s]+))?\s*>([\s\S]*?)</parameter>"#)
+        .ok()
+});
+static RE_FUNCTION_INVOKE: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"<(function|invoke)(?:\s+name="([^"]+)"|=([^>\s]+))?\s*>([\s\S]*?)</(function|invoke)>"#,
+    )
+    .ok()
+});
+static RE_FUNCTION_STRIP: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"<(function|invoke)(?:\s+[^>]*)?\s*>[\s\S]*?</(function|invoke)>|<parameter(?:\s+[^>]*)?\s*>[\s\S]*?</parameter>"#,
+    )
+    .unwrap()
+});
+static RE_JSON_FENCE: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
+    regex::Regex::new(r"(?s)```(?:json)?\s*\n?(\{(?:[^{}]|\{[^{}]*\})*\})\s*\n?```").ok()
+});
+static RE_JSON_FENCE_STRIP: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"```(?:json)?\s*\n?\{[^`]*\}\s*\n?```").unwrap()
+});
+static RE_BARE_JSON: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#""name"\s*:\s*"([^"]+)"\s*,\s*"(?:arguments|args|parameters)"\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})"#,
+    )
+    .ok()
+});
+
+
 pub struct NativeToolClient {
     backend: Box<dyn Session>,
     thinking_prompt_zh: &'static str,
@@ -211,9 +251,7 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
 
     // NOTE: the regex crate does not support look-around, so nested-tag
     // exclusion is approximated with a lazy `[\s\S]{15,}?` match.
-    if let Ok(re) =
-        regex::Regex::new(r#"<(tool_use|tool_call)>([\s\S]{15,}?)</(?:tool_use|tool_call)>"#)
-    {
+    if let Some(re) = &*RE_TOOL_USE_BLOCK {
         let mut new_remaining = remaining.clone();
         for cap in re.captures_iter(&remaining) {
             let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -236,9 +274,7 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
             }
         }
         if !tcs.is_empty() {
-            if let Ok(re2) =
-                regex::Regex::new(r#"<(?:tool_use|tool_call)>.*?</(?:tool_use|tool_call)>"#)
-            {
+            if let Some(re2) = RE_TOOL_USE_STRIP.as_ref() {
                 new_remaining = re2.replace_all(&remaining, "").to_string();
             }
             remaining = new_remaining.trim().to_string();
@@ -247,13 +283,8 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
 
     // Cursor / Claude Code style: <function name="...">...</function> or <invoke name="...">...</invoke>.
     // Inner content is either a JSON object or a series of <parameter name="key">value</parameter>.
-    let param_re = regex::Regex::new(
-        r#"<parameter(?:\s+name="([^"]+)"|=([^>\s]+))?\s*>([\s\S]*?)</parameter>"#,
-    )
-    .ok();
-    if let Ok(fn_re) = regex::Regex::new(
-        r#"<(function|invoke)(?:\s+name="([^"]+)"|=([^>\s]+))?\s*>([\s\S]*?)</(function|invoke)>"#,
-    ) {
+    let param_re = RE_PARAMETER.as_ref();
+    if let Some(fn_re) = RE_FUNCTION_INVOKE.as_ref() {
         for cap in fn_re.captures_iter(&remaining) {
             let name = cap
                 .get(2)
@@ -302,9 +333,7 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
         }
         if !tcs.is_empty() {
             // Strip matched function/invoke blocks and any stray <parameter> tags
-            let strip_re = regex::Regex::new(
-                r#"<(function|invoke)(?:\s+[^>]*)?\s*>[\s\S]*?</(function|invoke)>|<parameter(?:\s+[^>]*)?\s*>[\s\S]*?</parameter>"#,
-            ).unwrap();
+            let strip_re = &*RE_FUNCTION_STRIP;
             remaining = strip_re
                 .replace_all(&remaining, "")
                 .to_string()
@@ -321,9 +350,7 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
     // Best-effort: regex only handles shallow nesting. Complex nested
     // args rely on the native function-calling path (tool_choice: required).
     if tcs.is_empty() {
-        if let Ok(re) =
-            regex::Regex::new(r"(?s)```(?:json)?\s*\n?(\{(?:[^{}]|\{[^{}]*\})*\})\s*\n?```")
-        {
+        if let Some(re) = RE_JSON_FENCE.as_ref() {
             for cap in re.captures_iter(&remaining) {
                 let json_str = cap.get(1).map(|m| m.as_str()).unwrap_or("");
                 if let Ok(d) = serde_json::from_str::<serde_json::Value>(json_str) {
@@ -344,8 +371,7 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
                 }
             }
             if !tcs.is_empty() {
-                let strip_re = regex::Regex::new(r"```(?:json)?\s*\n?\{[^`]*\}\s*\n?```")
-                    .unwrap_or_else(|_| regex::Regex::new(r"").unwrap());
+                let strip_re = &*RE_JSON_FENCE_STRIP;
                 remaining = strip_re
                     .replace_all(&remaining, "")
                     .to_string()
@@ -359,9 +385,7 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
     // Models like DeepSeek/Qwen sometimes embed a tool-call JSON
     // directly in prose without any markup wrapper.
     if tcs.is_empty() {
-        if let Ok(re) = regex::Regex::new(
-            r#""name"\s*:\s*"([^"]+)"\s*,\s*"(?:arguments|args|parameters)"\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})"#,
-        ) {
+        if let Some(re) = RE_BARE_JSON.as_ref() {
             if let Some(cap) = re.captures(&remaining) {
                 let name = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
                 let args_str = cap.get(2).map(|m| m.as_str()).unwrap_or("{}");

@@ -209,10 +209,13 @@ pub async fn parse_claude_sse(
         };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-        while let Some(newline) = buffer.find('\n') {
-            let line = buffer[..newline].to_string();
-            buffer = buffer[newline + 1..].to_string();
-            let line = line.trim().to_string();
+        // Scan by offset and drain once per chunk: rebuilding the rest of
+        // the buffer for every line made this loop O(buffer^2) on large
+        // chunks.
+        let mut consumed = 0usize;
+        while let Some(rel) = buffer[consumed..].find('\n') {
+            let line = buffer[consumed..consumed + rel].trim().to_string();
+            consumed += rel + 1;
             if line.is_empty() {
                 continue;
             }
@@ -457,6 +460,7 @@ pub async fn parse_claude_sse(
                 }
             }
         }
+        buffer.drain(..consumed);
     }
 
     // Defensive: close any block that was open at end-of-stream without a
@@ -558,9 +562,12 @@ pub async fn parse_openai_sse(
         };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-        while let Some(newline) = buffer.find('\n') {
-            let line = buffer[..newline].trim().to_string();
-            buffer = buffer[newline + 1..].to_string();
+        // Same offset-scan as the Claude path: O(chunk) instead of
+        // O(buffer^2).
+        let mut consumed = 0usize;
+        while let Some(rel) = buffer[consumed..].find('\n') {
+            let line = buffer[consumed..consumed + rel].trim().to_string();
+            consumed += rel + 1;
             if line.is_empty() || !line.starts_with("data:") {
                 continue;
             }
@@ -961,6 +968,7 @@ pub async fn parse_openai_sse(
                 }
             }
         }
+        buffer.drain(..consumed);
     }
 
     // Close any open text / reasoning blocks at end-of-stream.

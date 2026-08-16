@@ -676,11 +676,6 @@ where
             let stats_before = crate::compress::measure_usage(&messages);
             let before_count = messages.len();
 
-            let snapshot_before: Vec<serde_json::Value> = messages
-                .iter()
-                .filter_map(|m| serde_json::to_value(m).ok())
-                .collect();
-
             // Phase 3 removes messages AFTER the system prompts (the
             // system block never leaves). The summary must cover exactly
             // the removed window, so the JSON slice starts past the
@@ -722,6 +717,19 @@ where
                 tracing::warn!("{msg}");
                 agent_log(&msg);
             }
+
+            // Snapshot lazily: serializing every message costs a full
+            // deep JSON pass (~hundreds of KB near the ceiling) and is
+            // only read when Phase 3 actually removes messages, which
+            // happens exclusively on the force_compress path.
+            let snapshot_before: Vec<serde_json::Value> = if force_compress {
+                messages
+                    .iter()
+                    .filter_map(|m| serde_json::to_value(m).ok())
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             let saved = if force_compress {
                 crate::compress::compress_messages(
@@ -1083,23 +1091,42 @@ where
                 response
             }
             None => {
-                let resp = client.chat(&messages, tools).await;
-                match resp {
-                    Ok(resp) => resp,
-                    Err(e) => {
-                        tracing::error!("LLM chat error: {e}");
-                        transition_state(
-                            handler,
-                            AgentState::Done("llm_error".into()),
-                            "non-streaming LLM error",
-                        );
-                        return LoopOutcome {
-                            turn,
-                            exit_reason: "llm_error".into(),
-                            data: Some(serde_json::json!({"error": e.to_string()})),
-                        };
+                // Same retry/backoff semantics as the streaming path: a
+                // single transient failure used to terminate the whole
+                // run here.
+                let mut chat_resp: Option<_> = None;
+                loop {
+                    match client.chat(&messages, tools).await {
+                        Ok(resp) => {
+                            consecutive_llm_errors = 0;
+                            chat_resp = Some(resp);
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::error!("LLM chat error: {e}");
+                            consecutive_llm_errors += 1;
+                            if consecutive_llm_errors > max_llm_error_retries {
+                                transition_state(
+                                    handler,
+                                    AgentState::Done("llm_error".into()),
+                                    "non-streaming LLM error",
+                                );
+                                return LoopOutcome {
+                                    turn,
+                                    exit_reason: "llm_error".into(),
+                                    data: Some(serde_json::json!({
+                                        "error": format!("{e} ({consecutive_llm_errors} consecutive)"),
+                                    })),
+                                };
+                            }
+                            tracing::warn!(
+                                "LLM chat error (attempt {consecutive_llm_errors}/{max_llm_error_retries}), retrying turn {turn}: {e}"
+                            );
+                            backoff_or_stop(stop_signal, consecutive_llm_errors).await;
+                        }
                     }
                 }
+                chat_resp.expect("loop breaks only after success or return")
             }
         };
 
