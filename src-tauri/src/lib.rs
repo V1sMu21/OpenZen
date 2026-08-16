@@ -323,6 +323,8 @@ fn init_erme_store(
         let reflection = Arc::clone(&reflection);
         let orchestrator = Arc::clone(&orchestrator);
         let last_user_activity = std::sync::Arc::clone(&last_user_activity);
+        let store_for_maintenance = Arc::clone(&store);
+        let mut last_daily_maintenance_nanos: i64 = 0;
         std::thread::Builder::new()
             .name("erme-idle-cycle".into())
             .spawn(move || loop {
@@ -351,6 +353,25 @@ fn init_erme_store(
                     }
                     reflection.run_full_cycle();
                     orchestrator.run_idle_cycle();
+                    // Daily maintenance: recursive consolidation merges
+                    // similar entries and applies the forgetting strategy
+                    // (nothing else ever forgot, so the store only grew).
+                    const TWENTY_FOUR_H_NANOS: i64 = 24 * 3600 * 1_000_000_000;
+                    if entropy_memory_engine::core::now_nanos() - last_daily_maintenance_nanos
+                        > TWENTY_FOUR_H_NANOS
+                    {
+                        last_daily_maintenance_nanos =
+                            entropy_memory_engine::core::now_nanos();
+                        let stats = store_for_maintenance.consolidate_recursive();
+                        tracing::info!(
+                            "ERME daily consolidation: rounds={} merged={} deduped={} forgotten_l2={} forgotten_l3={}",
+                            stats.rounds,
+                            stats.total_merged,
+                            stats.total_deduped,
+                            stats.total_forgotten_l2,
+                            stats.total_forgotten_l3
+                        );
+                    }
                 }));
                 if let Err(panic) = outcome {
                     tracing::error!(

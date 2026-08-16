@@ -36,9 +36,22 @@ pub struct L3Engine {
 impl L3Engine {
     pub fn new(config: L3Config) -> Self {
         let compressor = build_compressor(&config.distillation, config.compression_max_chars);
+        let storage = L3Storage::new(config.storage_path);
+        let budget = BudgetController::new(config.budget);
+        // The budget controller is memory-only; without backfilling the
+        // persisted entry sizes, the annual storage limit restarted from
+        // zero on every launch and never actually bounded growth.
+        let existing_bytes: usize = storage
+            .all()
+            .iter()
+            .map(|m| BudgetController::estimate_bytes(&m.content_text()))
+            .sum();
+        if existing_bytes > 0 {
+            budget.record_usage(0, existing_bytes);
+        }
         Self {
-            storage: L3Storage::new(config.storage_path),
-            budget: BudgetController::new(config.budget),
+            storage,
+            budget,
             compressor,
         }
     }

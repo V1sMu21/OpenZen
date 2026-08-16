@@ -324,6 +324,15 @@ impl Compressor for MLXCompressor {
             return self.fallback.compress(content);
         }
 
+        // Short inputs don't justify a Python subprocess that cold-loads a
+        // 1B model (seconds per call, competing with the main agent for
+        // MLX): below the truncation threshold the fallback preserves the
+        // full fact at zero cost. Distillation emits many short facts —
+        // this was N cold starts per conversation.
+        if text.chars().count() <= 400 {
+            return self.fallback.compress(content);
+        }
+
         if let Some(compressed) = self.run_mlx(&text) {
             let clen = compressed.len();
             CompressedMemory {

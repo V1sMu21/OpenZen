@@ -148,7 +148,19 @@ impl oz_core::memory_job::MemoryDistiller for ErmeMemoryDistiller {
             if let Some(dir) = &harness_dir {
                 stored += ingest_harness_entries(&store, dir);
             }
-            store.consolidate();
+            // Consolidation scans the whole L2 index (O(n x HNSW)) and ran
+            // after every distill job — it gets slower as the store grows.
+            // Gate it to at most once per 12h; the daily idle maintenance
+            // in the ERME cycle covers the rest.
+            const TWELVE_H_NANOS: i64 = 12 * 3600 * 1_000_000_000;
+            let due = store
+                .stats()
+                .last_consolidation
+                .map(|t| entropy_memory_engine::core::now_nanos() - t > TWELVE_H_NANOS)
+                .unwrap_or(true);
+            if due {
+                store.consolidate();
+            }
             Ok(stored)
         })
         .await
