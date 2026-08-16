@@ -99,11 +99,30 @@ impl McpClient {
         self.stdin = Some(stdin);
         self.stdout = Some(stdout);
 
-        self.send_request("initialize", Some(self.initialize_params()?))
-            .await?;
-        self.send_notification("notifications/initialized", None)
-            .await?;
-        self.list_tools().await?;
+        // The handshake shares one initialization future per process (OnceCell
+        // callers): a stdio server that hangs here would wedge every later
+        // request until restart, so bound it.
+        const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        let init_params = self.initialize_params()?;
+        let handshake = async {
+            self.send_request("initialize", Some(init_params)).await?;
+            self.send_notification("notifications/initialized", None).await?;
+            self.list_tools().await
+        };
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                // Drop the pipes and child (kill_on_drop) so a retry can start fresh.
+                self.child = None;
+                self.stdin = None;
+                self.stdout = None;
+                self.state = McpState::Error("handshake timed out".into());
+                return Err(McpError::Config(format!(
+                    "MCP server '{}' handshake timed out after 10s",
+                    self.config.name
+                )));
+            }
+        }
 
         self.state = McpState::Connected;
         tracing::info!(
