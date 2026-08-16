@@ -249,8 +249,11 @@ mod tests {
         }
         fn set_system(&mut self, _system: String) {}
         fn set_tools(&mut self, _tools: Vec<ToolDefinition>) {}
-        fn model(&self) -> String {
-            self.model_name.clone()
+        fn format_messages(&self, _messages: &[Message]) -> Vec<serde_json::Value> {
+            vec![]
+        }
+        async fn ask(&self, _prompt: &str) -> Result<Vec<ContentBlock>, LlmError> {
+            Ok(vec![])
         }
         async fn raw_ask(
             &self,
@@ -258,7 +261,10 @@ mod tests {
         ) -> Result<(Vec<ContentBlock>, Option<TokenUsage>), LlmError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.fail_times {
-                Err(LlmError::RequestFailed("boom".into()))
+                Err(LlmError::HttpError {
+                    status: 503,
+                    body: "boom".into(),
+                })
             } else {
                 Ok((vec![], None))
             }
