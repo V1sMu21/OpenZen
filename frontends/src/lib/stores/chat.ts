@@ -288,7 +288,14 @@ function createChatStore() {
           thinking: m.thinking,
           timestamp: m.timestamp || new Date().toISOString(),
           toolCalls: m.toolCalls as Message["toolCalls"],
-          streamEvents: m.streamEvents as Message["streamEvents"],
+          // Parts are the converted form of streamEvents — keeping both
+          // roughly doubles per-message memory in long sessions.
+          // ChatMessage reads streamEvents only as a fallback when
+          // parts are absent.
+          streamEvents:
+            parts && parts.length > 0
+              ? undefined
+              : (m.streamEvents as Message["streamEvents"]),
           parts,
           streaming: false,
           duration: m.duration,
@@ -625,12 +632,42 @@ function createChatStore() {
    * "same array, same last message" instead of re-filtering N messages
    * per token.
    */
+  // Incremental join state for the streaming fast path: the common flush
+  // only appends to the last text part, so content grows by the delta
+  // instead of re-walking every part (O(delta) vs O(total) per frame).
+  let streamJoinCache: { partsLen: number; lastPartText: string; content: string } | null =
+    null;
+
   function withStreamingParts(s: ChatState, parts: UIMessagePart[]): ChatState {
     const last = s.messages[s.messages.length - 1];
     if (last && last.role === 'assistant') {
       // Mutate the final assistant message in place; the array identity
       // intentionally stays stable (see T3.1 in the optimization plan).
-      last.content = contentFromParts(parts);
+      const lastPart = parts[parts.length - 1];
+      if (
+        streamJoinCache &&
+        streamJoinCache.partsLen === parts.length &&
+        lastPart &&
+        lastPart.type === 'text' &&
+        typeof lastPart.text === 'string' &&
+        lastPart.text.startsWith(streamJoinCache.lastPartText)
+      ) {
+        last.content =
+          streamJoinCache.content +
+          lastPart.text.slice(streamJoinCache.lastPartText.length);
+        streamJoinCache.lastPartText = lastPart.text;
+        streamJoinCache.content = last.content;
+      } else {
+        last.content = contentFromParts(parts);
+        streamJoinCache = {
+          partsLen: parts.length,
+          lastPartText:
+            lastPart && lastPart.type === 'text' && typeof lastPart.text === 'string'
+              ? lastPart.text
+              : '',
+          content: last.content,
+        };
+      }
     }
     return { ...s, streamingParts: parts };
   }

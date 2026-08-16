@@ -242,9 +242,6 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
     }
   });
 
-  $effect(() => {
-    $chat;
-  });
 </script>
 
 <div class="input-wrapper">

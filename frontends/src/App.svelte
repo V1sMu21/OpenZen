@@ -326,15 +326,11 @@
   // `cancelCurrent` path. The message carries its own finalised markers
   // (duration / exitReason), so we trust those too.
   $effect(() => {
-    const msgs = $chat.messages;
-    const last = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-    const lastIsFinished = !!last
-      && last.role === "assistant"
-      && (last.streaming !== true
-        || (last.duration != null && last.duration > 0)
-        || (last.exitReason != null && last.exitReason.length > 0));
     // Only disable input during ask_user dialog — user can freely
     // send messages even while agent is processing a long task.
+    // (The old body also subscribed to the whole messages array for a
+    // lastIsFinished value that was never used, re-running the effect
+    // on every streaming frame.)
     disableInput = $chat.pendingAskUser != null;
   });
 

@@ -153,6 +153,9 @@ function applyKeywordHighlights(html: string): string {
 // cache is intentionally small and verifies the full text on hit, so a
 // hash collision can only cost a miss, never a wrong render.
 const MARKDOWN_CACHE_MAX = 256;
+// Byte budget on top of the entry count: 256 entries x a 100KB code dump
+// would pin tens of MB of strings in a 7x24 session.
+const MARKDOWN_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 
 interface MarkdownCacheEntry {
   text: string;
@@ -161,6 +164,25 @@ interface MarkdownCacheEntry {
 }
 
 const markdownRenderCache = new Map<number, MarkdownCacheEntry>();
+let markdownCacheBytes = 0;
+
+function entryBytes(e: MarkdownCacheEntry): number {
+  return e.text.length + e.html.length;
+}
+
+function evictMarkdownCache() {
+  while (
+    markdownRenderCache.size > 0 &&
+    (markdownRenderCache.size >= MARKDOWN_CACHE_MAX ||
+      markdownCacheBytes > MARKDOWN_CACHE_MAX_BYTES)
+  ) {
+    const oldestKey = markdownRenderCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    const oldest = markdownRenderCache.get(oldestKey);
+    if (oldest) markdownCacheBytes -= entryBytes(oldest);
+    markdownRenderCache.delete(oldestKey);
+  }
+}
 
 function hashMarkdownText(text: string): number {
   // FNV-1a — fast, good enough for a verifying cache key.
@@ -175,9 +197,13 @@ function hashMarkdownText(text: string): number {
 export function renderMarkdown(text: string, opts?: { highlight?: boolean }): string {
   if (!text) return "";
   const highlight = opts?.highlight !== false;
+  const originalText = text;
   const hash = hashMarkdownText(text);
   const cached = markdownRenderCache.get(hash);
-  if (cached && cached.text === text && cached.highlight === highlight) {
+  if (cached && cached.text === originalText && cached.highlight === highlight) {
+    // LRU: refresh insertion order so hot entries are not evicted by age.
+    markdownRenderCache.delete(hash);
+    markdownRenderCache.set(hash, cached);
     return cached.html;
   }
 
@@ -359,12 +385,14 @@ export function renderMarkdown(text: string, opts?: { highlight?: boolean }): st
     .join("");
   html = html.replace(/%%PH(\d+)%%/g, (_m: string, idx: string) => placeholders[parseInt(idx)] ?? "");
 
-  if (markdownRenderCache.size >= MARKDOWN_CACHE_MAX) {
-    // Drop the oldest insertion (Map preserves insertion order).
-    const oldestKey = markdownRenderCache.keys().next().value;
-    if (oldestKey !== undefined) markdownRenderCache.delete(oldestKey);
-  }
-  markdownRenderCache.set(hash, { text, highlight, html });
+  // Replacing an existing (verified-mismatch) entry must first release
+  // its byte share; then evict to budget and insert.
+  const prev = markdownRenderCache.get(hash);
+  if (prev) markdownCacheBytes -= entryBytes(prev);
+  evictMarkdownCache();
+  const entry: MarkdownCacheEntry = { text: originalText, highlight, html };
+  markdownRenderCache.set(hash, entry);
+  markdownCacheBytes += entryBytes(entry);
 
   return html;
 }

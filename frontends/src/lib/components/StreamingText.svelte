@@ -23,13 +23,33 @@
   function commitAppend() {
     rafId = undefined;
     if (!containerEl || pendingText.length === 0) return;
-    if (pendingText.length > INLINE_WINDOW) {
-      // Slice is large (block-level content): fall back to a full
-      // render of the entire text so markdown structure stays intact.
+    // Block-level syntax in a large slice needs a structural render;
+    // plain-text bulk (fast local prefill) appends in segments so the
+    // work per frame stays O(delta) instead of re-rendering the whole
+    // message (which made long prefills quadratic).
+    const BLOCK_TRIGGER =
+      /(?:^|\n)(?:#{1,6} |```|> |\| |-{3,}|={3,}|\*\*\*|\d+\. )/;
+    if (pendingText.length > INLINE_WINDOW && BLOCK_TRIGGER.test(pendingText)) {
       // Strip leading whitespace to match the final `renderMarkdown`
       // pass (it trims the text), so the live view has the same
       // top spacing as the finalized one.
       containerEl.innerHTML = renderStreamingFragment(text.replace(/^\s+/, ""));
+    } else if (pendingText.length > INLINE_WINDOW) {
+      let slice = pendingText;
+      if (containerEl.childNodes.length === 0) {
+        slice = slice.replace(/^\s+/, "");
+        if (slice.length === 0) {
+          renderedLen = text.length;
+          pendingText = "";
+          return;
+        }
+      }
+      for (let off = 0; off < slice.length; off += INLINE_WINDOW) {
+        containerEl.insertAdjacentHTML(
+          "beforeend",
+          renderStreamingFragment(slice.slice(off, off + INLINE_WINDOW)),
+        );
+      }
     } else {
       // Strip leading whitespace on the FIRST append only: models
       // typically start the reply with "\n" after reasoning, which
