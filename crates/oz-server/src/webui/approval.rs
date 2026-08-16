@@ -67,6 +67,21 @@ impl ApprovalHandler for WebApprovalHandler {
         let (tx, mut rx) = oneshot::channel();
 
         self.pending.lock().unwrap().insert(request_id.clone(), tx);
+        // Drop-safe cleanup: a cancelled waiting future (run stopped /
+        // aborted) must not leak the map entry.
+        struct PendingGuard {
+            pending: Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>,
+            request_id: String,
+        }
+        impl Drop for PendingGuard {
+            fn drop(&mut self) {
+                self.pending.lock().unwrap().remove(&self.request_id);
+            }
+        }
+        let _pending_guard = PendingGuard {
+            pending: self.pending.clone(),
+            request_id: request_id.clone(),
+        };
 
         let payload = serde_json::json!({
             "request_id": request_id,

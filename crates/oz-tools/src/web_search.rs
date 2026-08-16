@@ -200,12 +200,16 @@ fn search_exa(
     }
 }
 
+// Shared client for search API calls (pooling + TLS session reuse).
+static SEARCH_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(reqwest::Client::new);
+
 async fn search_bocha(
     query: &str,
     num_results: usize,
     api_key: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let client = reqwest::Client::new();
+    let client = &*SEARCH_CLIENT;
     let resp = client
         .post("https://api.bochaai.com/v1/web-search")
         .header("Authorization", format!("Bearer {}", api_key))

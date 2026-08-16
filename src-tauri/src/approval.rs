@@ -99,6 +99,22 @@ impl ApprovalHandler for TauriApprovalHandler {
                 tx,
             },
         );
+        // Drop-safe cleanup: when the waiting future is cancelled
+        // (session stopped, run aborted), the map entry must not linger —
+        // only the timeout path removed it before.
+        struct PendingGuard {
+            pending: PendingApprovals,
+            request_id: String,
+        }
+        impl Drop for PendingGuard {
+            fn drop(&mut self) {
+                crate::lock_poison_guard(&self.pending).remove(&self.request_id);
+            }
+        }
+        let _pending_guard = PendingGuard {
+            pending: self.pending.clone(),
+            request_id: request_id.clone(),
+        };
 
         let payload = serde_json::json!({
             "session_id": request.session_id,
@@ -140,10 +156,7 @@ impl ApprovalHandler for TauriApprovalHandler {
         match tokio::time::timeout(timeout, &mut rx).await {
             Ok(Ok(decision)) => Ok(decision),
             Ok(Err(_)) => Err(ApprovalError::Cancelled),
-            Err(_) => {
-                crate::lock_poison_guard(&self.pending).remove(&request_id);
-                Err(ApprovalError::Timeout)
-            }
+            Err(_) => Err(ApprovalError::Timeout),
         }
     }
 }

@@ -1418,7 +1418,13 @@ where
             // dispatch() takes &self so we can share the handler reference
             // Each tool gets a timeout; concurrency is limited by Semaphore;
             // if any tool triggers should_exit, remaining tasks are cancelled.
+            // The per-run semaphore is topped up by a process-wide cap:
+            // concurrent sessions (desktop + IM bridge) would otherwise
+            // multiply the limit (8 x N tool subprocesses, unbounded).
             let cancel_flag = Arc::new(AtomicBool::new(false));
+            static GLOBAL_TOOL_SEMAPHORE: std::sync::OnceLock<tokio::sync::Semaphore> =
+                std::sync::OnceLock::new();
+            let global_sem = GLOBAL_TOOL_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(16));
             let semaphore = if config.max_concurrent_tools > 0 {
                 Some(Arc::new(tokio::sync::Semaphore::new(
                     config.max_concurrent_tools,
@@ -1431,6 +1437,7 @@ where
                 let handler_ref: &dyn Handler = &*handler;
                 let cancel = cancel_flag.clone();
                 let sem = semaphore.clone();
+                let global_sem = global_sem.clone();
 
                 let spec_cache_for_phase2 = spec_cache.clone();
                 let futures: Vec<_> = tool_meta
@@ -1457,6 +1464,7 @@ where
                         }
                         let cancel = cancel.clone();
                         let sem = sem.clone();
+                        let global_sem = global_sem.clone();
                         let resp = &response;
                         let cx = ctx;
                         let cfg = config;
@@ -1482,7 +1490,23 @@ where
                                 return (ii, tool_name, Err(ToolError::Custom("cancelled".into())));
                             }
 
-                            // Acquire concurrency permit (blocks if at capacity)
+                            // Acquire concurrency permits (blocks if at
+                            // capacity): per-run first, then the global cap
+                            // so concurrent sessions share one budget.
+                            let _global_permit = match global_sem.acquire().await {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "Global tool semaphore closed, skipping {}",
+                                        tool_name
+                                    );
+                                    return (
+                                        ii,
+                                        tool_name.clone(),
+                                        Err(ToolError::Custom("semaphore closed".into())),
+                                    );
+                                }
+                            };
                             let _permit = match &sem {
                                 Some(s) => match s.acquire().await {
                                     Ok(p) => Some(p),
@@ -2213,10 +2237,15 @@ where
             // with an empty reply rather than wedging the session.
             const ASK_USER_TIMEOUT_SECS: u64 = 300;
             let user_reply: String = if let Some(ref rx) = config.ask_user_rx {
+                // Discard replies that arrived for a previous (already
+                // timed-out or answered) question: the slot is a single
+                // cell with no question id, so a late answer would
+                // otherwise be consumed as THIS question's response.
+                *rx.lock().unwrap_or_else(|p| p.into_inner()) = None;
                 let wait_fut = async {
                     loop {
                         {
-                            let mut guard = rx.lock().unwrap();
+                            let mut guard = rx.lock().unwrap_or_else(|p| p.into_inner());
                             if let Some(reply) = guard.take() {
                                 return Some(reply);
                             }

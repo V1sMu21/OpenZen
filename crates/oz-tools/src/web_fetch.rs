@@ -72,12 +72,18 @@ struct PageContent {
     text: String,
 }
 
-async fn fetch_and_extract(url: &str, max_chars: usize) -> Result<PageContent, String> {
-    let client = reqwest::Client::builder()
+// Shared client: connection pooling and TLS session reuse across calls
+// (a fresh client per fetch re-did the handshake every time).
+static FETCH_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; OpenZen/1.0)")
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("client build failed: {e}"))?;
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
+async fn fetch_and_extract(url: &str, max_chars: usize) -> Result<PageContent, String> {
+    let client = &*FETCH_CLIENT;
 
     let resp = client
         .get(url)
