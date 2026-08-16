@@ -1,16 +1,5 @@
 <script lang="ts">
-  import ArtifactHTMLView from "./ArtifactHTMLView.svelte";
-  import ArtifactTerminal from "./ArtifactTerminal.svelte";
-  import ArtifactMarkdownView from "./ArtifactMarkdownView.svelte";
-  import ArtifactPDFView from "./ArtifactPDFView.svelte";
-  import ArtifactSheetView from "./ArtifactSheetView.svelte";
-  import ArtifactCodeView from "./ArtifactCodeView.svelte";
-  import ArtifactDiffView from "./ArtifactDiffView.svelte";
-  import ArtifactLatexView from "./ArtifactLatexView.svelte";
-  import ArtifactImageView from "./ArtifactImageView.svelte";
-  import ArtifactOfficeView from "./ArtifactOfficeView.svelte";
-  import ArtifactDocxView from "./ArtifactDocxView.svelte";
-  import ArtifactEmpty from "./ArtifactEmpty.svelte";
+  import ArtifactRenderer from "./ArtifactRenderer.svelte";
   import { sidepanel, type Artifact } from "../stores/sidepanel.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { t } from "../i18n";
@@ -194,37 +183,7 @@
              file (and terminal tabs shared one PTY). -->
         {#key sidepanel.activeArtifact.id}
           {@const renderer = rendererFor(sidepanel.activeArtifact)}
-          {#if renderer === "html"}
-            <ArtifactHTMLView artifact={sidepanel.activeArtifact} />
-          {:else if renderer === "terminal"}
-            <ArtifactTerminal cwd={sidepanel.activeArtifact.path} />
-          {:else if renderer === "markdown"}
-            <ArtifactMarkdownView artifact={sidepanel.activeArtifact} />
-          {:else if renderer === "pdf"}
-            <ArtifactPDFView artifact={sidepanel.activeArtifact} />
-          {:else if renderer === "spreadsheet"}
-            <ArtifactSheetView artifact={sidepanel.activeArtifact} />
-          {:else if renderer === "code"}
-            <ArtifactCodeView artifact={sidepanel.activeArtifact} />
-          {:else if renderer === "diff"}
-            <ArtifactDiffView artifact={sidepanel.activeArtifact} />
-          {:else if renderer === "latex"}
-            <ArtifactLatexView artifact={sidepanel.activeArtifact} />
-          {:else if renderer === "image"}
-            <ArtifactImageView artifact={sidepanel.activeArtifact} />
-          {:else if renderer === "office"}
-            {#if sidepanel.activeArtifact.path.toLowerCase().endsWith(".docx")}
-              <ArtifactDocxView artifact={sidepanel.activeArtifact} />
-            {:else}
-              <ArtifactOfficeView artifact={sidepanel.activeArtifact} />
-            {/if}
-          {:else}
-            <!-- Future: PDF, code, spreadsheet renderers -->
-            <div class="sidepanel-placeholder">
-              <p>📄 {sidepanel.activeArtifact.label}</p>
-              <p class="hint">{$t("sidepanel.comingSoon").replace("{renderer}", renderer)}</p>
-            </div>
-          {/if}
+          <ArtifactRenderer {renderer} artifact={sidepanel.activeArtifact} />
         {/key}
       {:else}
         <ArtifactEmpty />
