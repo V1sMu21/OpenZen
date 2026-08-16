@@ -201,19 +201,85 @@
   let scrollTop = $state(0);
   let viewportHeight = $state(0);
 
+  // Measured per-message heights (px). Rows record their real height once
+  // rendered; unmeasured rows fall back to the estimate. Long code blocks
+  // and tool cards are 500-1000px+, so uniform estimates made the scrollbar
+  // geometry re-estimate as rows rendered and the thumb jump while
+  // dragging. The spacer heights now use measured values.
+  const rowHeights = new Map<string, number>();
+  let heightsVersion = $state(0);
+  let rowPrefixCache: {
+    msgs: Message[];
+    version: number;
+    offsets: Float64Array;
+  } | null = null;
+
+  function rowPrefixOffsets(msgs: Message[]): Float64Array {
+    if (
+      rowPrefixCache &&
+      rowPrefixCache.msgs === msgs &&
+      rowPrefixCache.version === heightsVersion
+    ) {
+      return rowPrefixCache.offsets;
+    }
+    const offsets = new Float64Array(msgs.length + 1);
+    for (let i = 0; i < msgs.length; i++) {
+      offsets[i + 1] =
+        offsets[i] + (rowHeights.get(msgs[i].id) ?? VIRTUAL_ROW_ESTIMATE_PX);
+    }
+    rowPrefixCache = { msgs, version: heightsVersion, offsets };
+    return offsets;
+  }
+
   let virtualWindow = $derived.by(() => {
     const msgs = visibleMessages;
+    const offsets = rowPrefixOffsets(msgs);
     const count = msgs.length;
+    const total = offsets[count] || 0;
     const overscan = Math.max(VIRTUAL_ROW_ESTIMATE_PX, viewportHeight * 2);
-    const visibleRows = Math.ceil((viewportHeight + overscan * 2) / VIRTUAL_ROW_ESTIMATE_PX) + 2;
-    const first = Math.max(0, Math.floor((scrollTop - overscan) / VIRTUAL_ROW_ESTIMATE_PX));
-    const start = Math.min(first, Math.max(0, count - visibleRows));
-    const end = Math.min(count, start + visibleRows);
+    // Binary search the first row whose bottom passes the overscanned
+    // top edge; extend the window until the overscanned bottom edge.
+    let lo = 0;
+    let hi = count;
+    const topEdge = scrollTop - overscan;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (offsets[mid + 1] < topEdge) lo = mid + 1;
+      else hi = mid;
+    }
+    const start = lo;
+    const bottomEdge = scrollTop + viewportHeight + overscan;
+    let end = start;
+    while (end < count && offsets[end] < bottomEdge) end++;
     return {
       slice: msgs.slice(start, end),
-      beforeHeight: start * VIRTUAL_ROW_ESTIMATE_PX,
-      afterHeight: (count - end) * VIRTUAL_ROW_ESTIMATE_PX,
+      beforeHeight: offsets[start],
+      afterHeight: Math.max(0, total - offsets[end]),
     };
+  });
+
+  // Measure rendered rows and record their real heights. Re-runs when the
+  // window shifts; a settle re-check catches heights that changed after
+  // the first paint (images, code highlight, card expansion).
+  $effect(() => {
+    void virtualWindow.slice;
+    const measure = () => {
+      let changed = false;
+      for (const row of document.querySelectorAll<HTMLElement>("[data-message-id]")) {
+        const id = row.dataset.messageId;
+        if (!id) continue;
+        const h = row.getBoundingClientRect().height;
+        const known = rowHeights.get(id);
+        if (h > 0 && (known === undefined || Math.abs(known - h) > 1)) {
+          rowHeights.set(id, h);
+          changed = true;
+        }
+      }
+      if (changed) heightsVersion += 1;
+    };
+    measure();
+    const t = window.setTimeout(measure, 150);
+    return () => window.clearTimeout(t);
   });
 
   function readVirtualScrollMetrics() {
@@ -251,7 +317,7 @@
     // offset so the window covers it again, then fine-tune against the
     // real DOM below.
     if (anchorIdxAfter !== anchorIdxBefore) {
-      scroller.scrollTop = anchorIdxAfter * VIRTUAL_ROW_ESTIMATE_PX;
+      scroller.scrollTop = rowPrefixOffsets(visibleMessages)[anchorIdxAfter];
       readVirtualScrollMetrics();
       await tick();
     }

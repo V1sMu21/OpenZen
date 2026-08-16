@@ -562,7 +562,10 @@ import { t, locale, tSync } from "../i18n";
        the viewport band, so historical rows are inert. The intrinsic
        size placeholder keeps scrollbar geometry stable. */
     content-visibility: auto;
-    contain-intrinsic-size: auto 120px;
+    /* Match App.svelte's VIRTUAL_ROW_ESTIMATE_PX so the placeholder and
+       the virtual spacer agree on geometry (two different estimates made
+       scrollHeight re-estimate as rows rendered). */
+    contain-intrinsic-size: auto 180px;
   }
   /* The streaming row must render live: content-visibility would
      substitute the 120px placeholder for the real height while the
