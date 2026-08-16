@@ -101,6 +101,9 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
                 .to_string_lossy()
                 .to_string(),
         ),
+        // Daemon mode has no in-memory AppState; the disk-side cleanup
+        // path (now case-corrected) applies.
+        session_pruner: None,
     };
     tokio::spawn(scheduler.run(task_ctx));
 
