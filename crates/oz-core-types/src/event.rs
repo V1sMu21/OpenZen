@@ -150,3 +150,103 @@ pub enum StreamEvent {
         content: String,
     },
 }
+
+/// Append `event` to `buf`, merging per-token deltas (Text / Reasoning /
+/// ToolInput) into the previous event when they belong to the same block.
+///
+/// Long streaming runs emit one event per token; keeping every delta in the
+/// collected Vec (and then in the persisted `streamEvents`) makes memory and
+/// sessions.json grow with token count. Consumers concatenate same-id deltas
+/// anyway, so merging keeps the collected stream O(blocks) with identical
+/// reconstruction semantics.
+///
+/// Returns `true` when the event was merged into its predecessor — callers
+/// that keep per-event side data (e.g. arrival timestamps) must skip pushing
+/// a new sample in that case to stay index-aligned.
+pub fn append_coalesced(buf: &mut Vec<StreamEvent>, event: StreamEvent) -> bool {
+    match (buf.last_mut(), &event) {
+        (
+            Some(StreamEvent::TextDelta {
+                id: prev_id,
+                text: prev,
+            }),
+            StreamEvent::TextDelta { id, text },
+        ) if prev_id == id => {
+            prev.push_str(text);
+            true
+        }
+        (
+            Some(StreamEvent::ReasoningDelta {
+                id: prev_id,
+                text: prev,
+            }),
+            StreamEvent::ReasoningDelta { id, text },
+        ) if prev_id == id => {
+            prev.push_str(text);
+            true
+        }
+        (
+            Some(StreamEvent::ToolInputDelta {
+                tool_call_id: prev_id,
+                delta: prev,
+            }),
+            StreamEvent::ToolInputDelta { tool_call_id, delta },
+        ) if prev_id == tool_call_id => {
+            prev.push_str(delta);
+            true
+        }
+        _ => {
+            buf.push(event);
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod coalesce_tests {
+    use super::*;
+
+    #[test]
+    fn merges_consecutive_same_id_deltas() {
+        let mut buf = vec![
+            StreamEvent::TextStart { id: "t1".into() },
+            StreamEvent::TextDelta {
+                id: "t1".into(),
+                text: "你".into(),
+            },
+        ];
+        let merged = append_coalesced(
+            &mut buf,
+            StreamEvent::TextDelta {
+                id: "t1".into(),
+                text: "好".into(),
+            },
+        );
+        assert!(merged);
+        assert_eq!(buf.len(), 2);
+        match &buf[1] {
+            StreamEvent::TextDelta { text, .. } => assert_eq!(text, "你好"),
+            _ => panic!("expected TextDelta"),
+        }
+    }
+
+    #[test]
+    fn different_id_or_type_starts_new_event() {
+        let mut buf = vec![StreamEvent::TextDelta {
+            id: "t1".into(),
+            text: "a".into(),
+        }];
+        assert!(!append_coalesced(
+            &mut buf,
+            StreamEvent::TextDelta {
+                id: "t2".into(),
+                text: "b".into(),
+            }
+        ));
+        assert!(!append_coalesced(
+            &mut buf,
+            StreamEvent::TextEnd { id: "t2".into() }
+        ));
+        assert_eq!(buf.len(), 3);
+    }
+}

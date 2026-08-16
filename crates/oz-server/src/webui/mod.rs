@@ -963,8 +963,16 @@ async fn run_agent_for_session(
                 }
                 let base = start_for_collector.lock().unwrap().unwrap_or(now_ms);
                 let arr = now_ms.saturating_sub(base);
-                arrivals_for_collector.lock().unwrap().push(arr);
-                events_for_collector.lock().unwrap().push(event.clone());
+                // Coalesce per-token deltas into their block: the collected
+                // Vec and the persisted streamEvents stay O(blocks), not
+                // O(tokens). Arrival samples stay index-aligned.
+                let merged = {
+                    let mut events = events_for_collector.lock().unwrap();
+                    oz_core_types::append_coalesced(&mut events, event.clone())
+                };
+                if !merged {
+                    arrivals_for_collector.lock().unwrap().push(arr);
+                }
 
                 // Forward as-is in the protocol_v1 envelope. Internal
                 // events (ToolCallReady) are filtered out — UIs ignore

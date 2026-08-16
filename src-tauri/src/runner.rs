@@ -835,8 +835,18 @@ pub async fn run_agent_for_session(
                 }
                 let base = lock_poison_guard(&start_for_collector).unwrap_or(now_ms);
                 let arr = now_ms.saturating_sub(base);
-                lock_poison_guard(&arrivals_for_collector).push(arr);
-                lock_poison_guard(&events_for_collector).push(event.clone());
+                // Coalesce per-token deltas into their block so the collected
+                // Vec stays O(blocks) — a long streamed run must not accumulate
+                // one entry (and later one persisted streamEvents entry) per
+                // token. Arrival samples stay index-aligned by skipping the
+                // push for merged events.
+                let merged = {
+                    let mut events = lock_poison_guard(&events_for_collector);
+                    oz_core_types::append_coalesced(&mut events, event.clone())
+                };
+                if !merged {
+                    lock_poison_guard(&arrivals_for_collector).push(arr);
+                }
 
                 // ask_user pending → system notification so the user knows
                 // the agent is waiting even when the app is in the background.
