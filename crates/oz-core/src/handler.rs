@@ -260,7 +260,11 @@ pub struct LoopConfig {
     /// Channel the `ask_user` tool blocks on for the user's reply.
     /// Lets the loop stay alive across the wait so the same run resumes
     /// with the user's answer as a tool_result.
-    pub ask_user_rx: Option<Arc<Mutex<Option<String>>>>,
+    /// ask_user reply slot, keyed by the question's tool_use_id so a late
+    /// answer to an already-timed-out question can never satisfy a later
+    /// one (round3 P1-i). Writers without an id use the `__last__` legacy
+    /// key, which the loop consumes only after its own id misses.
+    pub ask_user_rx: Option<Arc<Mutex<std::collections::HashMap<String, String>>>>,
     /// Working directory for saving checkpoints and state.
     pub working_dir: String,
     /// Safety guard for checking tool calls (progressive trust + blocklist).

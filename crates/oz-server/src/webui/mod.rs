@@ -63,7 +63,7 @@ pub struct AppState {
     /// Per-session ask_user reply slots: the agent loop blocks on the
     /// session's slot while `ask_user` is pending, and resumes the same
     /// run with the reply as a tool_result (no new run / no new user msg).
-    pub ask_user_rxs: Mutex<HashMap<String, Arc<Mutex<Option<String>>>>>,
+    pub ask_user_rxs: Mutex<HashMap<String, Arc<Mutex<HashMap<String, String>>>>>,
     /// Per-session stop signals that the running agent loop polls. When the user
     /// clicks "Stop" the corresponding AtomicBool is flipped to true and the
     /// loop checks it between tool calls / turns.
@@ -1009,8 +1009,8 @@ async fn run_agent_for_session(
         let mut ask_rxs = state.ask_user_rxs.lock().unwrap();
         let slot = ask_rxs
             .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(None)));
-        *slot.lock().unwrap() = None;
+            .or_insert_with(|| Arc::new(Mutex::new(HashMap::new())));
+        slot.lock().unwrap().clear();
         loop_config.ask_user_rx = Some(slot.clone());
     }
 
@@ -2017,6 +2017,10 @@ struct AskUserResponseRequest {
     /// The user's reply — becomes a tool_result for the ask_user call,
     /// NOT a new user message.
     response: String,
+    /// Question id (tool_use_id) so the reply is matched to its question
+    /// instead of any pending one. Optional for legacy clients.
+    #[serde(default)]
+    tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2050,7 +2054,9 @@ async fn handle_ask_user_response(
             ));
         }
     };
-    *slot.lock().unwrap() = Some(req.response.clone());
+    // Legacy key when the client cannot supply the question id (P1-i).
+    let key = req.tool_use_id.clone().unwrap_or_else(|| "__last__".to_string());
+    slot.lock().unwrap().insert(key, req.response.clone());
 
     let _ = state.sse_bus.send(SseEvent::system(
         &id,

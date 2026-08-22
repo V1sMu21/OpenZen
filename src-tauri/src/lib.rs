@@ -554,7 +554,7 @@ pub(crate) fn load_system_prompt(ctx: &ToolContext) -> String {
 use crate::sidepanel::state::SidePanelState;
 use crate::sidepanel::terminal::TerminalRegistry;
 
-type AskUserSlot = Arc<Mutex<Option<String>>>;
+type AskUserSlot = Arc<Mutex<HashMap<String, String>>>;
 
 pub struct AppState {
     pub sessions: Arc<Mutex<SessionStore>>,

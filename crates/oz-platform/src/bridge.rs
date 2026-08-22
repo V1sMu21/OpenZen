@@ -18,7 +18,7 @@ use crate::{PlatformError, FILE_HINT};
 static BRIDGE_CONCURRENCY: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
 
 /// Per-session slot the ask_user tool waits on for the user's reply.
-pub type AskUserSlot = Arc<Mutex<Option<String>>>;
+pub type AskUserSlot = Arc<Mutex<HashMap<String, String>>>;
 /// Session id → ask_user reply slot.
 pub type AskUserRxs = Arc<Mutex<HashMap<String, AskUserSlot>>>;
 
@@ -177,8 +177,8 @@ impl AgentBridge {
             let mut ask_rxs = lock(&self.ask_user_rxs);
             let slot = ask_rxs
                 .entry(session_id.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(None)));
-            *lock(slot) = None;
+                .or_insert_with(|| Arc::new(Mutex::new(HashMap::new())));
+            lock(slot).clear();
             loop_config.ask_user_rx = Some(slot.clone());
         }
 
@@ -295,7 +295,8 @@ impl AgentBridge {
 
     pub fn ask_user_response(&self, session_id: &str, response: &str) {
         if let Some(slot) = lock(&self.ask_user_rxs).get(session_id) {
-            *lock(slot) = Some(response.to_string());
+            // IM replies carry no tool_use_id — land under the legacy key.
+            lock(slot).insert("__last__".to_string(), response.to_string());
         }
     }
 

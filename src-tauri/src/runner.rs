@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use oz_config::mykey::{MyKeyConfig, SessionType};
@@ -913,8 +914,8 @@ pub async fn run_agent_for_session(
         let mut ask_rxs = lock_poison_guard(&state.ask_user_rxs);
         let slot = ask_rxs
             .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(None)));
-        *lock_poison_guard(slot) = None;
+            .or_insert_with(|| Arc::new(Mutex::new(HashMap::new())));
+        lock_poison_guard(slot).clear();
         loop_config.ask_user_rx = Some(slot.clone());
     }
 

@@ -1088,17 +1088,20 @@ function createChatStore() {
             const raw = protoEvent as unknown as { data?: string };
             let question = "";
             let candidates: string[] = [];
+            let toolUseId: string | undefined;
             if (typeof raw.data === "string" && raw.data) {
               try {
                 const outer = JSON.parse(raw.data) as {
+                  tool_use_id?: string;
                   payload?: { data?: { question?: string; candidates?: string[] } };
                 };
                 const inner = outer.payload?.data;
                 if (inner && typeof inner.question === "string") question = inner.question;
                 if (Array.isArray(inner?.candidates)) candidates = inner!.candidates as string[];
+                if (typeof outer.tool_use_id === "string") toolUseId = outer.tool_use_id;
               } catch { /* malformed JSON — fall through with empty values */ }
             }
-            this.setPendingAskUser({ question, candidates });
+            this.setPendingAskUser({ question, candidates, askId: toolUseId });
           }
           if (protoEvent.type === 'data_todo_update') {
             const ev = protoEvent as unknown as { items: Array<{id:string;content:string;status:string;priority:string;order:number}>; current: number; total: number };
@@ -1459,18 +1462,20 @@ function createChatStore() {
       const sid = get(sessions).currentId;
       // Reply is delivered to the running agent loop via a dedicated
       // endpoint, NOT as a brand-new user message — the original task
-      // resumes in the same run.
+      // resumes in the same run. askId (tool_use_id) lets the loop match
+      // this reply to its exact question (P1-i).
+      const askId = readState().pendingAskUser?.askId;
       update((s) => ({ ...s, pendingAskUser: null }));
       if (!sid) return;
       try {
         if (isTauri()) {
-          await tauriInvoke("ask_user_response", { sessionId: sid, response: text });
+          await tauriInvoke("ask_user_response", { sessionId: sid, response: text, toolUseId: askId });
         } else {
           const { fetchJson } = await import("../api/chat");
           const res = await fetchJson(`/api/sessions/${sid}/ask_user_response`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ response: text }),
+            body: JSON.stringify({ response: text, tool_use_id: askId }),
           });
           if (!res.ok) {
             const detail = await res.text().catch(() => "");

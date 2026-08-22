@@ -1125,6 +1125,7 @@ pub async fn resume_session(
 pub fn ask_user_response(
     session_id: String,
     response: String,
+    tool_use_id: Option<String>,
     app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
@@ -1143,7 +1144,10 @@ pub fn ask_user_response(
             ));
         }
     };
-    *lock_poison_guard(&slot) = Some(response);
+    // P1-i: key by the question's tool_use_id when the caller has it;
+    // otherwise the legacy key keeps old clients working.
+    let key = tool_use_id.unwrap_or_else(|| "__last__".to_string());
+    lock_poison_guard(&slot).insert(key, response);
     let _ = app_handle.emit(
         "sse_event",
         serde_json::to_value(SseEvent::system(

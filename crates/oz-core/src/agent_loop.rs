@@ -879,6 +879,20 @@ where
                 // window (`summary_wait_secs`) must cover the merge cost:
                 // measured ≈46s for a 170K-token window, hence 60s.
 
+                // P1-h: tell the UI compression STARTED before blocking on
+                // the summary model (up to 60s of otherwise-silent wait).
+                // after_tokens=0 is the pending marker; the final event
+                // below overwrites it with real numbers.
+                if removed_count > 0 {
+                    if let Some(ref tx) = config.event_tx {
+                        let _ = tx.send(oz_core_types::StreamEvent::DataCompressingContext {
+                            before_tokens: est_tokens,
+                            after_tokens: 0,
+                            saved_tokens: 0,
+                        });
+                    }
+                }
+
                 let previous = crate::compress::extract_compression_summaries(&mut messages);
                 if !previous.is_empty() {
                     full_prompt = format!(
@@ -2296,21 +2310,30 @@ where
             // disconnects without responding — the agent loop continues
             // with an empty reply rather than wedging the session.
             const ASK_USER_TIMEOUT_SECS: u64 = 300;
-            let user_reply: String = if let Some(ref rx) = config.ask_user_rx {
-                // Discard replies that arrived for a previous (already
-                // timed-out or answered) question: the slot is a single
-                // cell with no question id, so a late answer would
-                // otherwise be consumed as THIS question's response.
-                *rx.lock().unwrap_or_else(|p| p.into_inner()) = None;
-                let wait_fut = async {
+            const LEGACY_ASK_USER_KEY: &str = "__last__";
+            let user_reply: String = if let Some(rx_arc) = &config.ask_user_rx {
+                // P1-i: replies are keyed by tool_use_id. Discard a stale
+                // reply for THIS question, then wait on exactly this key —
+                // a late answer to an earlier (timed-out) question can no
+                // longer be eaten by the next one. Writers that cannot
+                // supply an id land under `__last__`, consumed only after
+                // our own key misses.
+                {
+                    let mut guard = rx_arc.lock().unwrap_or_else(|p| p.into_inner());
+                    guard.remove(&pending.tool_use_id);
+                }
+                let rx = std::sync::Arc::clone(rx_arc);
+                let qid = pending.tool_use_id.clone();
+                let legacy_key = LEGACY_ASK_USER_KEY.to_string();
+                let wait_fut = async move {
                     loop {
-                        {
+                        let reply = {
                             let mut guard = rx.lock().unwrap_or_else(|p| p.into_inner());
-                            if let Some(reply) = guard.take() {
-                                return Some(reply);
-                            }
+                            guard.remove(&qid).or_else(|| guard.remove(&legacy_key))
+                        };
+                        if let Some(reply) = reply {
+                            return Some(reply);
                         }
-                        // Honor stop signal while waiting.
                         if stop_signal.load(Ordering::Relaxed) {
                             return None;
                         }
@@ -2793,6 +2816,15 @@ where
                             &config.working_dir,
                         );
                         let full_prompt = crate::compress::build_compression_prompt(&snapshot);
+                        // P1-h pending marker (after_tokens=0) — see pre-call site.
+                        if let Some(ref tx) = config.event_tx {
+                            let _ =
+                                tx.send(oz_core_types::StreamEvent::DataCompressingContext {
+                                    before_tokens: est_tokens,
+                                    after_tokens: 0,
+                                    saved_tokens: 0,
+                                });
+                        }
                         // Wait (bounded) for the LLM summary so a later
                         // resume sees the real summary; the template is the
                         // terminal fallback on timeout (never replaced later).
@@ -3078,6 +3110,14 @@ where
                 let template =
                     crate::compress::build_compression_summary(&snapshot, &config.working_dir);
                 let full_prompt = crate::compress::build_compression_prompt(&snapshot);
+                // P1-h pending marker (after_tokens=0) — see pre-call site.
+                if let Some(ref tx) = config.event_tx {
+                    let _ = tx.send(oz_core_types::StreamEvent::DataCompressingContext {
+                        before_tokens: est_tokens,
+                        after_tokens: 0,
+                        saved_tokens: 0,
+                    });
+                }
                 // Wait (bounded) for the LLM summary via the summary
                 // model; the template is the terminal fallback on timeout
                 // (never replaced later — one compression changes the
@@ -3930,8 +3970,11 @@ mod tests {
             }),
         );
         let signal = AtomicBool::new(false);
-        // Pre-populate so the loop's first poll finds the reply.
-        let ask_rx = std::sync::Arc::new(std::sync::Mutex::new(Some("answer-1".to_string())));
+        // Pre-populate under the legacy key so the loop's first poll
+        // finds it regardless of which question id is being waited on.
+        let ask_rx = std::sync::Arc::new(std::sync::Mutex::new(
+            std::iter::once(("__last__".to_string(), "answer-1".to_string())).collect(),
+        ));
         let config = LoopConfig {
             max_turns: 10,
             verbose: false,
