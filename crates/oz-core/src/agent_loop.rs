@@ -2738,7 +2738,7 @@ where
                             &deliverables,
                             &config.lang,
                         );
-                        let rx = compression_service.spawn_summary(prompt.clone(), String::new());
+                        let rx = compression_service.spawn_summary(prompt, String::new());
                         let raw = wait_for_summary(Some(rx), String::new(), 30).await;
                         let lines = crate::quality::extract_verify_lines(&raw);
                         match crate::quality::write_auto_spec(&config.working_dir, &lines) {
