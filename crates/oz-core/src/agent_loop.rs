@@ -3403,11 +3403,25 @@ where
         if config.enable_crystallization {
             if let Some(ref store_arc) = skill_mcp_store {
                 let mut store = store_arc.lock().await;
+                // QC-2: SOP carries this run's acceptance evidence so future
+                // consumers can see whether the path was verified.
+                let sop_verified_by = contract_assertions.map(|(total, failed)| {
+                    if failed == 0 {
+                        format!("all {total} acceptance assertions passed")
+                    } else {
+                        format!(
+                            "{}/{} acceptance assertions passed",
+                            total.saturating_sub(failed),
+                            total
+                        )
+                    }
+                });
                 let _ = store.crystallise_sop(
                     &safe_name,
                     &smart_format(&user_input, 100),
                     &tool_sequence,
                     sess_id,
+                    sop_verified_by.as_deref(),
                 );
                 if config.verbose {
                     tracing::info!(

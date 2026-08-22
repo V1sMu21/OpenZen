@@ -299,6 +299,7 @@ impl SopManager {
         description: &str,
         tool_sequence: &[(String, serde_json::Value)],
         session_id: Option<String>,
+        verified_by: Option<&str>,
     ) -> Result<Sop, SkillMcpError> {
         let mut content = String::new();
         content.push_str(&format!("# {} — {}\n\n", name, description));
@@ -316,6 +317,12 @@ impl SopManager {
             content.push_str("\n```\n\n");
         }
 
+        // QC-2: carry the run's acceptance evidence into the SOP so future
+        // consumers can see whether this path was verified, not just used.
+        if let Some(evidence) = verified_by {
+            content.push_str("\n## Verification\n\n");
+            content.push_str(&format!("- {evidence}\n"));
+        }
         content.push_str("## Notes\n\n");
         content.push_str("- Auto-crystallized from agent run");
         if let Some(ref sid) = session_id {
@@ -504,6 +511,7 @@ Use web_search to find current information.
                 "Check hosts file",
                 &sequence,
                 Some("sess_abc".into()),
+                None,
             )
             .unwrap();
 

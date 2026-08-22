@@ -61,7 +61,7 @@ mod e2e_tests {
         );
 
         let seq = vec![("read".to_string(), serde_json::json!({"path": "/tmp"}))];
-        store.crystallise_sop("check", "Check", &seq, None).unwrap();
+        store.crystallise_sop("check", "Check", &seq, None, None).unwrap();
         assert_eq!(store.sop_count(), 1);
         assert!(!store.find_sops("check").is_empty());
 
@@ -74,7 +74,7 @@ mod e2e_tests {
         let (_dir, mut store) = setup_store();
         let seq = vec![("grep".to_string(), serde_json::json!({"pattern": "t"}))];
         store
-            .crystallise_sop("grep_test", "Run grep", &seq, None)
+            .crystallise_sop("grep_test", "Run grep", &seq, None, None)
             .unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();

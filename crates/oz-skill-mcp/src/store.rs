@@ -25,7 +25,7 @@ use crate::{SkillMcpError, SKILL_MCP_DIR};
 /// // At agent loop start:
 /// let context = store.build_context("search the web", "en");
 /// // After successful execution:
-/// store.crystallise_sop("web_search", "Search web", &tool_seq, Some("sess_1"))?;
+/// store.crystallise_sop("web_search", "Search web", &tool_seq, Some("sess_1"), None)?;
 /// store.record_skill_success("web_search", 5)?;
 /// ```
 pub struct SkillMcpStore {
@@ -226,9 +226,9 @@ impl SkillMcpStore {
         description: &str,
         tool_sequence: &[(String, serde_json::Value)],
         session_id: Option<String>,
+        verified_by: Option<&str>,
     ) -> Result<crate::sop::Sop, SkillMcpError> {
-        self.sops
-            .crystallise(name, description, tool_sequence, session_id)
+        self.sops.crystallise(name, description, tool_sequence, session_id, verified_by)
     }
 
     /// Record a successful SOP usage.
@@ -391,7 +391,7 @@ mod tests {
         ];
 
         store
-            .crystallise_sop("check_file", "Check a file", &sequence, None)
+            .crystallise_sop("check_file", "Check a file", &sequence, None, None)
             .unwrap();
 
         assert_eq!(store.sop_count(), 1);
@@ -481,7 +481,7 @@ mod tests {
         let (_dir, mut store) = tmp_skill_mcp();
         let seq = vec![("grep".to_string(), serde_json::json!({}))];
         store
-            .crystallise_sop("tracked_sop", "Track", &seq, None)
+            .crystallise_sop("tracked_sop", "Track", &seq, None, None)
             .unwrap();
 
         store.record_sop_success("tracked_sop", 5).unwrap();
@@ -533,7 +533,7 @@ mod tests {
 
         let seq = vec![("grep".to_string(), serde_json::json!({}))];
         store
-            .crystallise_sop("deploy", "平台部署 SOP", &seq, None)
+            .crystallise_sop("deploy", "平台部署 SOP", &seq, None, None)
             .unwrap();
 
         let index = store.build_index();
