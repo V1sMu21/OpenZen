@@ -77,6 +77,11 @@ impl MmapWal {
     pub fn append(&mut self, cp: &LoopCheckpoint) -> std::io::Result<()> {
         let json = serde_json::to_vec(cp)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        self.append_bytes(&json)
+    }
+
+    /// Append pre-serialized checkpoint JSON (length-prefixed) to the WAL.
+    pub fn append_bytes(&mut self, json: &[u8]) -> std::io::Result<()> {
         let record_len = 4 + json.len(); // length prefix + data
 
         // Grow if needed
@@ -181,6 +186,13 @@ fn wal_key(dir: &Path, session_id: &str) -> String {
 /// record budget is exceeded). Best-effort: a WAL failure never blocks
 /// the JSON path.
 pub fn append_checkpoint_wal(dir: &Path, session_id: &str, cp: &LoopCheckpoint) {
+    let Ok(json) = serde_json::to_vec(cp) else {
+        return;
+    };
+    append_checkpoint_wal_bytes(dir, session_id, &json);
+}
+
+fn append_checkpoint_wal_bytes(dir: &Path, session_id: &str, json: &[u8]) {
     let key = wal_key(dir, session_id);
     let mut cache = wal_cache().lock().unwrap_or_else(|e| e.into_inner());
     // Health check the cached handle: a replaced/deleted file underneath
@@ -231,7 +243,7 @@ pub fn append_checkpoint_wal(dir: &Path, session_id: &str, cp: &LoopCheckpoint) 
         }
     }
     if let Some(wal) = cache.get_mut(&key) {
-        if let Err(e) = wal.append(cp) {
+        if let Err(e) = wal.append_bytes(json) {
             tracing::warn!("checkpoint WAL append failed for {session_id}: {e}");
             return;
         }
@@ -347,6 +359,35 @@ pub struct LoopCheckpoint {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_origin_url: Option<String>,
+}
+
+/// Borrowed mirror of [`LoopCheckpoint`] for the every-3-turns periodic
+/// save: field names and serde attributes match exactly so the produced
+/// JSON is byte-identical, but nothing is cloned (round3 P1-f — cloning a
+/// 170K-token conversation every few turns was pure memcpy waste).
+#[derive(Serialize)]
+pub struct LoopCheckpointRef<'a> {
+    pub turn: u32,
+    pub timestamp: f64,
+    pub messages: &'a [Message],
+    pub history_info: &'a [String],
+    pub full_response: &'a str,
+    pub exit_reason: &'a Option<String>,
+    pub session_id: Option<&'a str>,
+    #[serde(default)]
+    pub plan: &'a CheckpointPlan,
+    #[serde(default)]
+    pub todos: &'a [oz_core_types::TodoItem],
+    #[serde(default)]
+    pub interventions: &'a [InterventionEvent],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_thinking: Option<&'a str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<&'a str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<&'a str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_origin_url: Option<&'a str>,
 }
 
 /// Metadata about a saved checkpoint (used for listing without loading full data).
@@ -479,6 +520,41 @@ pub async fn save_loop_checkpoint_async(dir: &Path, session_id: &str, cp: LoopCh
         save_loop_checkpoint(&dir, &session_id, &cp);
     })
     .await;
+}
+
+/// Borrowed periodic-save: serializes ONCE (no conversation clone), then
+/// hands the raw bytes to the blocking pool for file + WAL writes.
+/// `spawn_blocking` requires 'static, so the borrow ends at this
+/// serialization boundary — that single compact to_vec is the only copy.
+pub async fn save_loop_checkpoint_borrowed_async(
+    dir: &Path,
+    session_id: &str,
+    cp: LoopCheckpointRef<'_>,
+) {
+    let turn = cp.turn;
+    let Ok(json) = serde_json::to_vec(&cp) else {
+        return;
+    };
+    let dir = dir.to_path_buf();
+    let session_id = session_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        write_loop_checkpoint_bytes(&dir, &session_id, turn, &json);
+    })
+    .await;
+}
+
+fn write_loop_checkpoint_bytes(dir: &Path, session_id: &str, turn: u32, json: &[u8]) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        tracing::warn!("Failed to create checkpoint dir: {e}");
+        return;
+    }
+    let safe_session = sanitize_session_id(session_id);
+    let path = dir.join(format!("loop_{safe_session}_{turn:03}.json"));
+    if let Err(e) = std::fs::write(&path, json) {
+        tracing::warn!("Failed to save loop checkpoint: {e}");
+    }
+    append_checkpoint_wal_bytes(dir, session_id, json);
+    cleanup_session_checkpoints(dir, &safe_session, 5);
 }
 
 /// Load the latest loop checkpoint for a given session.

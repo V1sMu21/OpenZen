@@ -2831,7 +2831,7 @@ where
         // ── Direction B: FSM transition — back to Idle for next turn ──
         transition_state(handler, AgentState::Idle, "turn complete, ready for next");
 
-        // Save loop checkpoint periodically
+        // Save loop checkpoint periodically — borrowed, zero-clone (P1-f).
         if config.checkpoint_interval > 0
             && turn.is_multiple_of(config.checkpoint_interval)
             && !config.session_id.is_empty()
@@ -2841,23 +2841,27 @@ where
             let (git_sha, git_branch, git_origin_url) =
                 crate::checkpoint::git_snapshot_async(std::path::Path::new(&config.working_dir))
                     .await;
-            let cp = crate::checkpoint::LoopCheckpoint {
+            let session_opt = Some(config.session_id.as_str());
+            let interventions: [crate::checkpoint::InterventionEvent; 0] = [];
+            let plan = crate::checkpoint::plan_from_todos(&handler.working().todos);
+            let cp = crate::checkpoint::LoopCheckpointRef {
                 turn,
                 timestamp: chrono::Utc::now().timestamp() as f64,
-                messages: messages.clone(),
-                history_info: history_info.clone(),
-                full_response: full_response.clone(),
-                exit_reason: exit_reason.clone(),
-                session_id: Some(config.session_id.clone()),
-                plan: crate::checkpoint::plan_from_todos(&handler.working().todos),
-                todos: handler.working().todos.clone(),
-                interventions: vec![],
-                full_thinking: Some(full_thinking.clone()),
-                git_sha,
-                git_branch,
-                git_origin_url,
+                messages: &messages,
+                history_info: &history_info,
+                full_response: &full_response,
+                exit_reason: &exit_reason,
+                session_id: session_opt,
+                plan: &plan,
+                todos: &handler.working().todos,
+                interventions: &interventions,
+                full_thinking: Some(full_thinking.as_str()),
+                git_sha: git_sha.as_deref(),
+                git_branch: git_branch.as_deref(),
+                git_origin_url: git_origin_url.as_deref(),
             };
-            crate::checkpoint::save_loop_checkpoint_async(&cp_dir, &config.session_id, cp).await;
+            crate::checkpoint::save_loop_checkpoint_borrowed_async(&cp_dir, &config.session_id, cp)
+                .await;
         }
 
         let guard_msg = handler.working().sensorium.detect_loop();
