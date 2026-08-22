@@ -582,6 +582,11 @@ pub struct AppState {
     pub reminder_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<oz_core_types::Reminder>>>,
     pub locale: Arc<Mutex<String>>,
     pub skill_mcp_dir: Option<String>,
+    /// Process-wide shared skill/SOP store (round3 P1-d): built once from
+    /// `skill_mcp_dir`, kept parsed, and reloaded incrementally (mtime-gated)
+    /// before each run instead of re-walking the tree per user message.
+    pub shared_skill_store:
+        std::sync::Mutex<Option<(String, std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>)>>,
     pub projects: Mutex<Vec<projects::store::ProjectRecord>>,
     pub crystallization_enabled: AtomicBool,
     /// "完全访问" (full access): when set, the approval handler auto-allows
@@ -715,6 +720,7 @@ impl AppState {
                 )
                 .find(|p| p.is_dir())
                 .map(|p| p.to_string_lossy().to_string()),
+            shared_skill_store: std::sync::Mutex::new(None),
             projects: Mutex::new(projects::store::load_projects()),
             // Crystallization (skill/SOP/fact distillation) on by default:
             // with it off, the three-layer memory design only ever ran the
@@ -770,6 +776,27 @@ pub(crate) fn lock_poison_guard<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexG
         tracing::error!("Recovered from poisoned mutex — state may be inconsistent");
         poisoned.into_inner()
     })
+}
+
+/// Fetch the process-wide parsed skill store for `dir`, building it on first
+/// use and rebuilding if the configured directory changed (P1-d).
+pub(crate) fn get_or_init_skill_store(
+    cell: &std::sync::Mutex<
+        Option<(String, std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>)>,
+    >,
+    dir: &str,
+) -> std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>> {
+    let mut guard = lock_poison_guard(cell);
+    if let Some((cached_dir, store)) = guard.as_ref() {
+        if cached_dir == dir {
+            return std::sync::Arc::clone(store);
+        }
+    }
+    let store = std::sync::Arc::new(tokio::sync::Mutex::new(
+        oz_skill_mcp::SkillMcpStore::new(std::path::Path::new(dir), Some(dir.into())),
+    ));
+    *guard = Some((dir.to_string(), std::sync::Arc::clone(&store)));
+    store
 }
 
 // ── Desktop notification helper ──

@@ -34,6 +34,11 @@ pub struct SkillMcpStore {
     pub sops: SopManager,
     pub memory: SkillMcpMemory,
     pub meta: MetaStore,
+    /// (size, mtime_nanos) of every skill/sop source file at last full load.
+    /// `reload_incremental` re-parses only when this snapshot goes stale, so
+    /// a long-lived store can sit in app state and serve every run at the
+    /// cost of one stat-walk instead of a full SKILL.md parse per message.
+    fingerprint: Option<std::collections::BTreeMap<PathBuf, (u64, u64)>>,
 }
 
 impl SkillMcpStore {
@@ -52,7 +57,24 @@ impl SkillMcpStore {
             memory: SkillMcpMemory::new(&base_dir),
             meta: MetaStore::new(&base_dir),
             base_dir,
+            fingerprint: None,
         }
+    }
+
+    /// Stat-walk the skill/SOP source tree and re-parse both managers only
+    /// when a file changed since the last load. Returns true when a reload
+    /// happened. Cheap enough to call before every agent run.
+    pub fn reload_incremental(&mut self) -> bool {
+        let mut snap = std::collections::BTreeMap::new();
+        fingerprint_tree(&self.base_dir.join("skills"), 2, &["md", "toml"], &mut snap);
+        fingerprint_tree(&self.base_dir.join("sops"), 2, &["md"], &mut snap);
+        if self.fingerprint.as_ref() == Some(&snap) {
+            return false;
+        }
+        let _ = self.skills.load_all();
+        let _ = self.sops.load_all();
+        self.fingerprint = Some(snap);
+        true
     }
 
     /// Build a compact index (name + description) of ALL active skills and
@@ -243,6 +265,40 @@ impl SkillMcpStore {
     }
 }
 
+fn fingerprint_tree(
+    dir: &Path,
+    max_depth: u32,
+    extensions: &[&str],
+    out: &mut std::collections::BTreeMap<PathBuf, (u64, u64)>,
+) {
+    if max_depth == 0 || !dir.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            fingerprint_tree(&path, max_depth - 1, extensions, out);
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| extensions.contains(&ext))
+        {
+            if let Ok(meta) = path.metadata() {
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                out.insert(path, (meta.len(), mtime));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +314,32 @@ mod tests {
         let (_dir, store) = tmp_skill_mcp();
         assert!(store.base_dir().exists());
         assert!(store.base_dir().join("skills").exists() || true); // skills dir won't exist until written
+    }
+
+    #[test]
+    fn reload_incremental_skips_unchanged_tree_and_picks_up_new_files() {
+        let (dir, mut store) = tmp_skill_mcp();
+        let skills_dir = dir.path().join("skills").join("alpha");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+
+        // Baseline: empty tree, first call establishes the fingerprint.
+        assert!(!store.reload_incremental(), "first call only snapshots");
+        assert_eq!(store.skill_count(), 0);
+
+        // New skill lands → fingerprint differs → full reload, count grows.
+        std::fs::write(
+            skills_dir.join("SKILL.md"),
+            "---\nname: alpha\ndescription: test skill\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(
+            store.reload_incremental(),
+            "changed tree must trigger reload"
+        );
+        assert_eq!(store.skill_count(), 1);
+
+        // Nothing changed → no reload.
+        assert!(!store.reload_incremental(), "unchanged tree must skip");
     }
 
     #[test]

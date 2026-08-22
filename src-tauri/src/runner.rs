@@ -727,6 +727,13 @@ pub async fn run_agent_for_session(
         3
     };
     loop_config.skill_mcp_dir = state.skill_mcp_dir.clone();
+    // P1-d: hand the loop the process-wide parsed store (incremental reload
+    // happens inside the loop); without it the loop re-parses every SKILL.md
+    // per user message.
+    if let Some(dir) = state.skill_mcp_dir.clone() {
+        loop_config.skill_mcp_store =
+            Some(crate::get_or_init_skill_store(&state.shared_skill_store, &dir));
+    }
     loop_config.enable_crystallization = state
         .crystallization_enabled
         .load(std::sync::atomic::Ordering::Relaxed);

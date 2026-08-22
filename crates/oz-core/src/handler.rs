@@ -235,6 +235,16 @@ pub struct LoopConfig {
     /// Directory containing the .skill_mcp/ knowledge base.
     /// When set, skills, SOPs, and memory are loaded from this directory.
     pub skill_mcp_dir: Option<String>,
+    /// Process-wide shared knowledge store (round3 P1-d). When set it takes
+    /// precedence over `skill_mcp_dir`: the loop runs an mtime-gated
+    /// incremental reload and reuses the already-parsed store instead of
+    /// re-walking the whole tree per user message. The local-dir fallback
+    /// stays for TUI/CLI/tests.
+    ///
+    /// tokio Mutex because guards are held across `.await` (build_context);
+    /// a std guard would make the loop future !Send.
+    pub skill_mcp_store:
+        Option<std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>>,
     /// When true, use the LLM to crystallize knowledge from completed sessions.
     pub enable_crystallization: bool,
     /// When true, periodically refine existing skills via LLM.
@@ -328,6 +338,7 @@ impl Default for LoopConfig {
             checkpoint_interval: 0,
             sop_dir: None,
             skill_mcp_dir: None,
+            skill_mcp_store: None,
             enable_crystallization: false,
             enable_refinement: false,
             max_concurrent_tools: 8,
@@ -382,6 +393,7 @@ impl Clone for LoopConfig {
             checkpoint_interval: self.checkpoint_interval,
             sop_dir: self.sop_dir.clone(),
             skill_mcp_dir: self.skill_mcp_dir.clone(),
+            skill_mcp_store: self.skill_mcp_store.clone(),
             enable_crystallization: self.enable_crystallization,
             enable_refinement: self.enable_refinement,
             max_concurrent_tools: self.max_concurrent_tools,

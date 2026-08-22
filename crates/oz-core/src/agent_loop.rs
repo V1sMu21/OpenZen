@@ -503,20 +503,32 @@ where
     let mut tool_sequence: Vec<(String, serde_json::Value)> = Vec::new();
 
     // ── Knowledge store: unified skill/SOP/memory injection ──
-    let mut skill_mcp_store: Option<oz_skill_mcp::SkillMcpStore> =
-        config.skill_mcp_dir.as_ref().map(|dir| {
+    // P1-d: prefer the AppState-level shared store (one process-wide instance,
+    // mtime-gated incremental reload) over re-walking and re-parsing every
+    // SKILL.md on each user message. Local construction stays as the
+    // TUI/CLI/test fallback.
+    type SharedSkillStore = std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>;
+    let mut skill_mcp_store: Option<SharedSkillStore> = match &config.skill_mcp_store {
+        Some(shared) => {
+            if let Ok(mut guard) = shared.try_lock() {
+                let _ = guard.reload_incremental();
+            }
+            Some(std::sync::Arc::clone(shared))
+        }
+        None => config.skill_mcp_dir.as_ref().map(|dir| {
             let ks = oz_skill_mcp::SkillMcpStore::new(
                 &std::path::PathBuf::from(&config.working_dir),
                 Some(std::path::PathBuf::from(dir)),
             );
-            eprintln!(
+            tracing::info!(
                 "[openzen] Knowledge store: {} skills, {} SOPs from {}",
                 ks.skill_count(),
                 ks.sop_count(),
                 dir
             );
-            ks
-        });
+            std::sync::Arc::new(tokio::sync::Mutex::new(ks))
+        }),
+    };
     if skill_mcp_store.is_none() {
         eprintln!("[openzen] WARNING: skill_mcp_dir is None — NO SKILLS OR SOPS WILL BE LOADED. config.skill_mcp_dir={:?}", config.skill_mcp_dir);
     }
@@ -524,10 +536,13 @@ where
     // If skill_mcp_store is active, inject the compact skill/SOP index at
     // loop start (progressive disclosure: name+description only, ~100 tokens).
     // Full bodies are fetched on demand via skill_mcp_search.
-    if let Some(ref store) = skill_mcp_store {
-        let skill_index = store.build_index();
+    if let Some(ref store_arc) = skill_mcp_store {
+        let skill_index = {
+            let store = store_arc.lock().await;
+            store.build_index()
+        };
         if !skill_index.is_empty() {
-            eprintln!(
+            tracing::info!(
                 "[openzen] Injected skill/SOP index ({} chars)",
                 skill_index.len()
             );
@@ -537,7 +552,7 @@ where
                 messages.insert(0, Message::system(&skill_index));
             }
         } else {
-            eprintln!("[openzen] SkillMcpStore active but no active skills/SOPs registered");
+            tracing::info!("[openzen] SkillMcpStore active but no active skills/SOPs registered");
         }
     }
 
@@ -1322,14 +1337,17 @@ where
                 // matched skill/SOP bodies once (first intent-only turn only)
                 // so the intent can proceed.
                 if consecutive_intent_hits == 1 {
-                    if let Some(ref store) = skill_mcp_store {
-                        let matched = store
-                            .build_context(
-                                &user_input,
-                                std::path::Path::new(&config.working_dir),
-                                None,
-                            )
-                            .await;
+                    if let Some(ref store_arc) = skill_mcp_store {
+                        let matched = {
+                            let store = store_arc.lock().await;
+                            store
+                                .build_context(
+                                    &user_input,
+                                    std::path::Path::new(&config.working_dir),
+                                    None,
+                                )
+                                .await
+                        };
                         if !matched.is_empty() {
                             let mut blocks = Vec::new();
                             blocks.push(ContentBlock::text(format!(
@@ -3160,7 +3178,8 @@ where
 
         // Priority: skill_mcp_store > sop_store (legacy)
         if config.enable_crystallization {
-            if let Some(ref mut store) = skill_mcp_store {
+            if let Some(ref store_arc) = skill_mcp_store {
+                let mut store = store_arc.lock().await;
                 let _ = store.crystallise_sop(
                     &safe_name,
                     &smart_format(&user_input, 100),
@@ -3236,11 +3255,12 @@ where
     }
 
     // LLM-driven crystallization & refinement (when skill_mcp_store is active)
-    if let Some(ref mut store) = skill_mcp_store {
+    if let Some(ref store_arc) = skill_mcp_store {
+        let mut store = store_arc.lock().await;
         if config.enable_crystallization && !tool_sequence.is_empty() && final_reason == "EXITED" {
             match Crystallizer::crystallize(
                 client,
-                store,
+                &mut store,
                 &user_input,
                 &messages,
                 &tool_sequence,
@@ -3273,7 +3293,7 @@ where
         }
 
         if config.enable_refinement && store.skill_count() > 0 {
-            match Refiner::refine_all_skills(client, store).await {
+            match Refiner::refine_all_skills(client, &mut store).await {
                 Ok(results) => {
                     for r in &results {
                         if let crate::refiner::RefineResult::Refined {
