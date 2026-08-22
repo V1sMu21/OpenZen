@@ -728,6 +728,11 @@ pub async fn run_agent_for_session(
         3
     };
     loop_config.skill_mcp_dir = state.skill_mcp_dir.clone();
+    // P1-j: per-session tool concurrency cap. The process-wide semaphore
+    // (16) bounds the total; without a per-run cap one session's parallel
+    // tool burst could occupy every global permit and starve other
+    // sessions (desktop + IM bridge run side by side).
+    loop_config.max_concurrent_tools = 6;
     // P1-d: hand the loop the process-wide parsed store (incremental reload
     // happens inside the loop); without it the loop re-parses every SKILL.md
     // per user message.

@@ -296,7 +296,44 @@ fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<
 /// first instead of whatever was updated last.
 pub fn render_context_relevant(dir: &Path, kind: HarnessKind, limit: usize, query: &str) -> String {
     let state = HarnessState::load(dir);
-    let mut entries = state.entries_of(kind);
+    render_entries(&state.entries_of(kind), kind, limit, query)
+}
+
+/// Round3 P2-p: same rendering with a process-wide 5-minute TTL cache over
+/// the ledger file — the runner calls this once per run per session, and
+/// re-reading + re-parsing the JSONL every time was pure IO waste for a
+/// ledger that changes at most a few times an hour.
+pub fn render_context_relevant_cached(
+    dir: &Path,
+    kind: HarnessKind,
+    limit: usize,
+    query: &str,
+) -> String {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    static CACHE: LazyLock<Mutex<HashMap<PathBuf, (std::time::Instant, Vec<HarnessEntry>)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let fresh = match cache.get(dir) {
+        Some((at, _)) => at.elapsed() < std::time::Duration::from_secs(300),
+        None => false,
+    };
+    if !fresh {
+        let state = HarnessState::load(dir);
+        let owned: Vec<HarnessEntry> = state.entries_of(kind).into_iter().cloned().collect();
+        cache.insert(dir.to_path_buf(), (std::time::Instant::now(), owned));
+    }
+    // Clone only the small entry vec out so the lock is not held while
+    // rendering (rendering is cheap too, but borrowing through the guard
+    // across format! calls invites lock-order bugs later).
+    let owned = cache.get(dir).map(|(_, e)| e.clone()).unwrap_or_default();
+    drop(cache);
+    let refs: Vec<&HarnessEntry> = owned.iter().collect();
+    render_entries(&refs, kind, limit, query)
+}
+
+fn render_entries(entries: &[&HarnessEntry], kind: HarnessKind, limit: usize, query: &str) -> String {
+    let mut entries = entries.to_vec();
     if entries.is_empty() {
         return String::new();
     }
