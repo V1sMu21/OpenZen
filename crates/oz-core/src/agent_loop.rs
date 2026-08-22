@@ -1467,6 +1467,15 @@ where
             }
         } else {
             // ── Parallel tool execution (Phases 1-6) ──
+            // Tools already satisfied by the speculative cache skip the
+            // breaker tick here — their budget was consumed once when they
+            // were queued during the stream (double-counting would halve
+            // the effective read-tool budget for speculated calls).
+            let spec_cached_ids: std::collections::HashSet<String> = {
+                let c = spec_cache.lock().unwrap_or_else(|p| p.into_inner());
+                c.keys().cloned().collect()
+            };
+
             // Collect pre-processing info for each tool call
             tool_meta = tool_calls_iter
                 .iter()
@@ -1492,8 +1501,10 @@ where
                         tracing::debug!("Tool: `{tool_name}` args:\n```text\n{args_pretty}\n```");
                     }
 
-                    // Check breaker
-                    let blocked = tool_name != "respond" && !breaker.check(&tool_name);
+                    // Check breaker (skip for spec-cached calls — see above)
+                    let already_cached = !tid.is_empty() && spec_cached_ids.contains(&tid);
+                    let blocked =
+                        tool_name != "respond" && !already_cached && !breaker.check(&tool_name);
 
                     ToolCallMeta {
                         ii,
