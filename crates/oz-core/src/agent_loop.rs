@@ -34,6 +34,11 @@ const SPECULATIVE_READ_ONLY_TOOLS: &[&str] = &[
     "skill_mcp_list",
 ];
 
+/// Slot key for reply writers that cannot supply a tool_use_id (IM
+/// bridges, legacy HTTP clients) — consumed only after the exact
+/// question id misses (round3 P1-i).
+pub(crate) const LEGACY_ASK_USER_KEY: &str = "__last__";
+
 fn next_block_id(prefix: &str) -> String {
     let n = BLOCK_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}{n}")
@@ -2336,7 +2341,6 @@ where
             // disconnects without responding — the agent loop continues
             // with an empty reply rather than wedging the session.
             const ASK_USER_TIMEOUT_SECS: u64 = 300;
-            const LEGACY_ASK_USER_KEY: &str = "__last__";
             let user_reply: String = if let Some(rx_arc) = &config.ask_user_rx {
                 // P1-i: replies are keyed by tool_use_id. Discard a stale
                 // reply for THIS question, then wait on exactly this key —
