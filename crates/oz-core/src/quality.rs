@@ -395,10 +395,12 @@ pub fn has_write_operations(tool_sequence: &[(String, serde_json::Value)]) -> bo
 // (cargo check for Rust workspaces) and feed failures back immediately —
 // instead of only verifying at exit time.
 
-/// Run a quick check after a write/edit turn. Returns a feedback prompt on
-/// failure (None when nothing to check or everything passes).
+/// Run a quick check after a write/edit turn (DQ2 QB-1). One verification
+/// chain runs per call, selected by project markers; file-targeted where the
+/// language allows it. Returns a feedback prompt on failure.
 pub async fn quick_verify_after_write(
     tool_names: &[String],
+    written_files: &[String],
     working_dir: &str,
     lang: &str,
 ) -> Option<String> {
@@ -411,15 +413,64 @@ pub async fn quick_verify_after_write(
     if !has_write {
         return None;
     }
+    let dir = Path::new(working_dir);
 
-    // Rust workspace → cargo check (quiet, bounded).
-    if Path::new(working_dir).join("Cargo.toml").is_file() {
+    // Rust workspace → cargo check (dir-level, quiet, bounded).
+    if dir.join("Cargo.toml").is_file() {
         let (passed, output) = run_quick_cmd("cargo check --quiet", working_dir, 45).await;
         if !passed {
             return Some(quick_check_feedback("cargo check --quiet", &output, lang));
         }
+        return None;
+    }
+
+    // TypeScript project (type-check configured) → tsc over the whole tree.
+    if dir.join("package.json").is_file() && dir.join("tsconfig.json").is_file() {
+        if written_files.iter().any(|f| f.ends_with(".ts") || f.ends_with(".tsx")) {
+            let (passed, output) =
+                run_quick_cmd("npx tsc --noEmit --pretty false", working_dir, 30).await;
+            if !passed {
+                return Some(quick_check_feedback("tsc --noEmit", &output, lang));
+            }
+        }
+        return None;
+    }
+
+    // Python project → py_compile only the files actually edited this run.
+    if dir.join("pyproject.toml").is_file()
+        || dir.join("setup.py").is_file()
+        || dir.join("requirements.txt").is_file()
+    {
+        let py_files: Vec<String> = written_files
+            .iter()
+            .filter(|f| f.ends_with(".py"))
+            .take(20)
+            .cloned()
+            .collect();
+        if !py_files.is_empty() {
+            let listed = py_files.iter().map(|f| shell_quote(f)).collect::<Vec<_>>().join(" ");
+            let cmd = format!("python3 -m py_compile {listed}");
+            let (passed, output) = run_quick_cmd(&cmd, working_dir, 30).await;
+            if !passed {
+                return Some(quick_check_feedback(&cmd, &output, lang));
+            }
+        }
+        return None;
+    }
+
+    // Go module → go vet over the tree.
+    if dir.join("go.mod").is_file() && written_files.iter().any(|f| f.ends_with(".go")) {
+        let (passed, output) = run_quick_cmd("go vet ./...", working_dir, 30).await;
+        if !passed {
+            return Some(quick_check_feedback("go vet ./...", &output, lang));
+        }
     }
     None
+}
+
+/// Minimal POSIX single-argument quoting for py_compile file lists.
+fn shell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
 }
 
 async fn run_quick_cmd(cmd: &str, working_dir: &str, timeout_secs: u64) -> (bool, String) {

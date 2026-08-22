@@ -2294,14 +2294,16 @@ where
             }
         } // end else (non-fast-path: parallel tool execution)
 
-        // ── In-turn quick verification (P2-10) ──
-        // After a write/edit turn, run a fast check (cargo check for Rust
-        // workspaces) and feed failures back immediately — environment as
-        // ground truth, not just exit-time acceptance.
+        // ── In-turn quick verification (P2-10 / DQ2 QB-1) ──
+        // After a write/edit turn, run a fast per-project check (cargo/tsc/
+        // py_compile/go vet) and feed failures back immediately —
+        // environment as ground truth, not just exit-time acceptance.
         if config.quality_gates && next_prompts.is_empty() {
             let tool_names: Vec<String> = tool_meta.iter().map(|m| m.tool_name.clone()).collect();
+            let written_files = crate::quality::collect_deliverables(&tool_sequence);
             if let Some(check_fb) = crate::quality::quick_verify_after_write(
                 &tool_names,
+                &written_files,
                 &config.working_dir,
                 &config.lang,
             )
