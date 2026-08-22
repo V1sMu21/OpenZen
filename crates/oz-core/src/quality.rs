@@ -299,6 +299,41 @@ pub async fn run_independent_review<C: LlmClient>(
     }
 }
 
+/// QA-2: run an already-built review prompt through any client. Splitting
+/// prompt-building from execution lets the loop choose the reviewer (main
+/// model vs summary model) without duplicating parsing logic.
+pub async fn review_prompt_via_client<C: LlmClient>(
+    client: &mut C,
+    prompt: &str,
+) -> Option<ReviewVerdict> {
+    let msg = oz_core_types::Message::user(prompt.to_string());
+    match tokio::time::timeout(
+        Duration::from_secs(REVIEW_TIMEOUT_SECS),
+        client.chat(std::slice::from_ref(&msg), &[]),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => Some(parse_review_response(&resp.content)),
+        Ok(Err(e)) => {
+            tracing::warn!("[quality] review call failed (fail-open): {e}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("[quality] review timed out (fail-open)");
+            None
+        }
+    }
+}
+
+/// QA-2: parse a review verdict from pre-fetched raw text (summary-model
+/// path). Empty input → None so callers can fall back.
+pub fn review_verdict_from_raw(raw: &str) -> Option<ReviewVerdict> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(parse_review_response(raw))
+}
+
 /// Hint injected when the agent did file writes without creating a spec
 /// first (spec anchor, one-shot guidance, no loop).
 pub fn spec_anchor_hint(lang: &str) -> String {
@@ -664,6 +699,200 @@ fn truncate(s: &str, max: usize) -> String {
         out
     }
 }
+
+// ── Round3 DQ 批次：QA-1/2/3/4 + QC-1/L1 助手 ──────────────────────────
+
+/// QA-2: appended to the review prompt for high-risk tasks (many writes or
+/// destructive/networked commands) — forces an adversarial second look.
+pub const RED_TEAM_SUFFIX_ZH: &str =
+    "\n\n[红队模式] 你现在是独立安全与边界审查员。请专门寻找：越界修改（任务范围外的文件）、\
+     危险操作（rm/del、网络外发、凭据读取）、遗漏的失败分支、未处理的并发/资源释放。\
+     即使表面完成，也必须列出所有 high 级疑点；没有发现才允许 pass。";
+pub const RED_TEAM_SUFFIX_EN: &str =
+    "\n\n[RED TEAM] You are now an independent security & boundary reviewer. Hunt specifically for: \
+     out-of-scope file edits, dangerous operations (rm/del, network exfiltration, credential reads), \
+     missing failure branches, unhandled concurrency/resource cleanup. List every high-severity doubt; \
+     only allow pass if none remain.";
+
+/// QA-2: heuristic trigger for the red-team review pass — many deliverables,
+/// or any run command touching deletion / network egress / credentials.
+pub fn is_high_risk_write(tool_sequence: &[(String, serde_json::Value)]) -> bool {
+    const DANGER_TOKENS: &[&str] =
+        &["rm ", "rm -", "rmdir", "del ", "curl", "wget", ".ssh", ".aws", "credential", "secret"];
+    let mut write_like = 0usize;
+    for (name, args) in tool_sequence {
+        match name.as_str() {
+            "write" | "edit" | "patch" | "file_write" | "file_edit" | "file_patch" => {
+                write_like += 1;
+            }
+            "code_run" | "run_command" | "shell" => {
+                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let low = cmd.to_lowercase();
+                if DANGER_TOKENS.iter().any(|t| low.contains(t)) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    write_like >= 6
+}
+
+/// QA-1: prompt asking the summary model to derive minimal EXECUTABLE
+/// acceptance assertions from the user's own request text (amplify stated
+/// intent — never invent domain rules).
+pub fn build_spec_synthesis_prompt(
+    user_input: &str,
+    deliverables: &[String],
+    lang: &str,
+) -> String {
+    let files = deliverables.join("\n");
+    if lang == "zh" {
+        format!(
+            "从下面的用户需求生成交付前验收断言。\n\n【用户需求】\n{}\n\n【本次写动的文件】\n{}\n\n\
+             要求：输出 2-4 行，每行格式严格为 `[verify] <shell命令>`；只允许存在性检查、构建/语法级命令\
+             （如 test -f、python3 -m py_compile X、node --check X、cargo check --quiet）；禁止模糊断言。\
+             只输出这些行，不要解释。",
+            truncate(user_input, 1500),
+            files
+        )
+    } else {
+        format!(
+            "Derive pre-delivery acceptance assertions from the user request below.\n\n[REQUEST]\n{}\n\n             [FILES WRITTEN]\n{}\n\nRules: output 2-4 lines, each strictly `[verify] <shell command>`; \
+             existence checks and build/syntax-level commands only (test -f, python3 -m py_compile X, \
+             node --check X, cargo check --quiet); no vague assertions. Output only those lines.",
+            truncate(user_input, 1500),
+            files
+        )
+    }
+}
+
+/// QA-1: leniently pull `[verify] ...` lines out of a model reply.
+pub fn extract_verify_lines(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("[verify]").map(|c| c.trim().to_string()))
+        .filter(|c| !c.is_empty())
+        .take(MAX_ASSERTIONS)
+        .collect()
+}
+
+/// QA-1: write an auto-synthesized spec. Returns the path on success.
+/// The marker comment keeps provenance visible so a human can tell it apart
+/// from an agent-authored spec.
+pub fn write_auto_spec(working_dir: &str, verify_lines: &[String]) -> Option<std::path::PathBuf> {
+    if verify_lines.is_empty() {
+        return None;
+    }
+    let path = Path::new(working_dir).join(SPEC_FILE);
+    let mut body = String::from("<!-- auto-synthesized by quality gate (QA-1); edit freely -->\n\n# 验收标准（自动合成）\n\n");
+    for line in verify_lines {
+        body.push_str(&format!("- [verify] {line}\n"));
+    }
+    std::fs::write(&path, body).ok()?;
+    Some(path)
+}
+
+/// QA-3 thresholds: beyond this the exit is blocked once for a self-check.
+pub const DIFF_FILES_MAX: usize = 7;
+pub const DIFF_CHURN_MAX: usize = 300;
+
+pub struct DiffStatSummary {
+    pub files_changed: usize,
+    pub churn: usize,
+    /// Raw `git diff --stat` tail (last 12 lines) for the self-check prompt.
+    pub excerpt: String,
+}
+
+/// QA-3: uncommitted diff footprint vs HEAD (staged + unstaged combined).
+pub async fn git_diff_stat_summary(working_dir: &str) -> Option<DiffStatSummary> {
+    let dir = working_dir.to_string();
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .args(["diff", "--stat", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    })
+    .await
+    .ok()
+    .flatten()?;
+    let last = out.lines().last()?.to_string();
+    // Summary line: " 3 files changed, 120 insertions(+), 40 deletions(-)"
+    let files_changed: usize = last
+        .split_whitespace()
+        .find(|t| t.ends_with("file") || t.ends_with("files"))
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(0);
+    let churn: usize = ["insertion", "deletion"]
+        .iter()
+        .filter_map(|word| {
+            out.split_whitespace()
+                .zip(out.split_whitespace().skip(1))
+                .find(|(_, nxt)| nxt.starts_with(word))
+                .and_then(|(num, _)| num.parse::<usize>().ok())
+        })
+        .sum();
+    let tail: Vec<&str> = out.lines().rev().take(12).collect();
+    let excerpt = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    Some(DiffStatSummary { files_changed, churn, excerpt })
+}
+
+/// QA-3: instruction fed back when the diff looks oversized — asks the agent
+/// to re-read its own changes against the spec before finishing.
+pub fn build_diff_selfcheck_prompt(excerpt: &str, lang: &str) -> String {
+    if lang == "zh" {
+        format!(
+            "[DIFF 自查] 本次改动规模偏大。请在结束前用 read 工具复核关键改动文件是否与 task_spec 一致，\
+             并确认没有越界改动或遗留调试代码；确认后再次 respond。\n```\n{excerpt}\n```"
+        )
+    } else {
+        format!(
+            "[DIFF SELF-CHECK] This change set is large. Before finishing, re-read the key changed files \
+             with the read tool and confirm they match task_spec, with no out-of-scope edits or leftover \
+             debug code; then respond again.\n```\n{excerpt}\n```"
+        )
+    }
+}
+
+/// QA-4: three-section delivery contract appended to the final reply — what
+/// was done / how it was verified / what remains. Honesty becomes protocol,
+/// not goodwill. Sections are omitted when empty.
+#[allow(clippy::too_many_arguments)]
+pub fn format_delivery_contract(
+    lang: &str,
+    completed: Option<&str>,
+    verification: Option<&str>,
+    leftover: Option<&str>,
+) -> String {
+    let (title, done_l, ver_l, left_l) = if lang == "zh" {
+        ("📋 交付说明", "完成", "验证", "遗留")
+    } else {
+        ("📋 Delivery notes", "Done", "Verified", "Left open")
+    };
+    let mut out = format!("\n\n---\n> **{title}**\n");
+    if let Some(c) = completed.filter(|s| !s.trim().is_empty()) {
+        out.push_str(&format!("> {done_l}：{c}\n"));
+    }
+    match verification.filter(|s| !s.trim().is_empty()) {
+        Some(v) => out.push_str(&format!("> {ver_l}：{v}\n")),
+        None => out.push_str(&format!("> {ver_l}：—\n")),
+    }
+    match leftover.filter(|s| !s.trim().is_empty()) {
+        Some(l) => out.push_str(&format!("> {left_l}：{l}\n")),
+        None => {}
+    }
+    out
+}
+
+/// QC-1/L1-a: generalized event log — success verdicts, failure reflections,
+/// and synthesized lessons share one JSONL so weekly aggregation has one source.
+pub fn log_quality_event(working_dir: &str, kind: &str, summary: &str) {
+    log_reflection(working_dir, kind, summary);
+}
+
 
 #[cfg(test)]
 mod tests {

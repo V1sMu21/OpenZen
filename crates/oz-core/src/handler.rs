@@ -322,6 +322,13 @@ pub struct LoopConfig {
     /// When true, run an independent multi-perspective review before exit
     /// for important tasks (write count >= review_min_tools).
     pub review_enabled: bool,
+    /// QA-2: prefer the summary model as the independent reviewer when it is
+    /// configured — a different model removes self-review blind spots.
+    /// Falls back to the main client with an independence declaration.
+    pub review_use_summary: bool,
+    /// QB-2: gentle test-first nudge gate. Default off — opt-in while the
+    /// false-positive cost on non-test projects is being observed.
+    pub tdd_gate_enabled: bool,
     /// Minimum number of file-writing tool calls for a task to be
     /// considered "important" enough for the independent review.
     pub review_min_tools: u32,
@@ -366,6 +373,8 @@ impl Default for LoopConfig {
             include_diagnostics: false,
             quality_gates: true,
             assertion_max_rounds: 2,
+            review_use_summary: true,
+            tdd_gate_enabled: false,
             review_enabled: true,
             review_min_tools: 3,
         }
@@ -419,6 +428,8 @@ impl Clone for LoopConfig {
             memory_scheduler: self.memory_scheduler.clone(),
             hooks: self.hooks.clone(),
             include_diagnostics: self.include_diagnostics,
+            review_use_summary: self.review_use_summary,
+            tdd_gate_enabled: self.tdd_gate_enabled,
             quality_gates: self.quality_gates,
             assertion_max_rounds: self.assertion_max_rounds,
             review_enabled: self.review_enabled,
