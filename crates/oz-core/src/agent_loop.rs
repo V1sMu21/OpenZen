@@ -19,6 +19,21 @@ const DANGER_LOOP_MSG: &str =
 
 static BLOCK_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Tools eligible for speculative pre-execution: strictly read-only lookups.
+/// Side-effectful tools (write/edit/patch/code_run…) must NEVER run ahead of
+/// the complete-response + approval semantics (round3 P0-B), and a tool the
+/// breaker is throttling must not sneak past it via the speculative lane.
+const SPECULATIVE_READ_ONLY_TOOLS: &[&str] = &[
+    "read",
+    "grep",
+    "glob",
+    "ls",
+    "web_search",
+    "web_fetch",
+    "skill_mcp_search",
+    "skill_mcp_list",
+];
+
 fn next_block_id(prefix: &str) -> String {
     let n = BLOCK_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}{n}")
@@ -202,6 +217,26 @@ fn tool_result_content(data: &serde_json::Value) -> String {
         return serialized;
     }
     smart_format(&serialized, MAX_TOOL_RESULT_CTX_CHARS)
+}
+
+/// Char-safe cap for tool output streamed to the UI. `String::truncate`
+/// panics when the cut lands mid-UTF-8 character — CJK tool results larger
+/// than the cap hit this on ~2/3 of offsets (same bug class fixed in
+/// webui/mod.rs and wechat; this SSE path had been missed).
+fn truncate_stream_output(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n...[truncated, original {} bytes, kept first {}]",
+        &s[..end],
+        s.len(),
+        end
+    )
 }
 
 /// Truncate text to a readable length, showing start and end with "..." in between.
@@ -601,7 +636,7 @@ where
         // Check for user interventions before each turn
         if let Some(ref intervention_rx) = config.intervention_rx {
             let interventions = {
-                let mut queue = intervention_rx.lock().unwrap();
+                let mut queue = intervention_rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let mut items = Vec::new();
                 while let Some(evt) = queue.pop_front() {
                     items.push(evt);
@@ -962,9 +997,16 @@ where
                             }
                             maybe_ready = spec_rx.recv() => {
                                 if let Some(StreamEvent::ToolCallReady { id, name, args }) = maybe_ready {
-                                    if name != "respond" {
+                                    // Round3 P0-B: only strictly read-only tools with a
+                                    // provider-issued id may pre-execute. An empty id would
+                                    // never match Phase 2's cache lookup (keyed by tid) and
+                                    // would execute twice; side-effectful or breaker-throttled
+                                    // tools must wait for the full Phase 2 path.
+                                    let spec_eligible = !id.is_empty()
+                                        && SPECULATIVE_READ_ONLY_TOOLS.contains(&name.as_str());
+                                    if name != "respond" && spec_eligible {
                                         let cache_id = id.clone();
-                                        let tc_id = if id.is_empty() { next_block_id("tc") } else { id };
+                                        let tc_id = id;
                                         let _ = tx.send(StreamEvent::ToolInputStart {
                                             tool_call_id: tc_id.clone(),
                                             name: name.clone(),
@@ -980,14 +1022,14 @@ where
                                             // tools needing approval or blocked are
                                             // left for Phase 2 instead of running
                                             // ahead of the user's decision.
-                                            let allowed = match (&config.safety_guard, &config.approval_handler) {
+                                            let guard_ok = match (&config.safety_guard, &config.approval_handler) {
                                                 (Some(guard), Some(_)) => matches!(
                                                     guard.check(&name, &parsed),
                                                     oz_safety::TrustDecision::Allowed
                                                 ),
                                                 _ => true,
                                             };
-                                            if allowed {
+                                            if guard_ok && breaker.check(&name) {
                                                 pending_spec.push((cache_id, name, parsed));
                                             }
                                         }
@@ -1064,25 +1106,32 @@ where
                         };
                     }
                 };
-                // Speculative pre-execution phase: dispatch the guard-approved
+                // Speculative pre-execution phase: dispatch the approved read-only
                 // tool calls now that the stream finished, so Phase 2 finds
                 // their results cached and skips re-execution. A dispatch that
                 // misses its 5s budget is recorded as an error in the cache —
                 // Phase 2 then reports the failure instead of running the same
-                // side effect a second time.
-                for (cache_id, name, parsed) in pending_spec {
-                    let empty = MockResponse::new("");
-                    let outcome = match tokio::time::timeout(
-                        Duration::from_secs(5),
-                        handler_ref.dispatch(&name, parsed, &empty, 0, ctx),
-                    )
-                    .await
-                    {
-                        Ok(res) => res,
-                        Err(_) => Err(ToolError::Custom(
-                            "speculative execution timed out; skipped".into(),
-                        )),
-                    };
+                // side effect a second time. All dispatches run concurrently:
+                // worst-case wall time is one 5s budget, not 5s × N.
+                let empty = MockResponse::new("");
+                let empty_ref = &empty;
+                let dispatch_futs = pending_spec.into_iter().map(|(cache_id, name, parsed)| {
+                    async move {
+                        let outcome = match tokio::time::timeout(
+                            Duration::from_secs(5),
+                            handler_ref.dispatch(&name, parsed, empty_ref, 0, ctx),
+                        )
+                        .await
+                        {
+                            Ok(res) => res,
+                            Err(_) => Err(ToolError::Custom(
+                                "speculative execution timed out; skipped".into(),
+                            )),
+                        };
+                        (cache_id, outcome)
+                    }
+                });
+                for (cache_id, outcome) in futures::future::join_all(dispatch_futs).await {
                     cache
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
@@ -1470,7 +1519,7 @@ where
                         async move {
                             // Check speculative execution cache first (Direction A)
                             if !tid.is_empty() {
-                                let cached = cache.lock().unwrap().remove(&tid);
+                                let cached = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&tid);
                                 if let Some(cached_outcome) = cached {
                                     // Tool was already speculatively executed; skip re-dispatch
                                     if let Ok(ref outcome) = cached_outcome {
@@ -1800,18 +1849,7 @@ where
                         .map(|m| m.tc_id.clone())
                         .unwrap_or_else(|| next_block_id("tc"));
                     const MAX_TOOL_OUTPUT_IN_STREAM: usize = 32 * 1024;
-                    let output_for_stream = if result_str.len() > MAX_TOOL_OUTPUT_IN_STREAM {
-                        let mut t = result_str.clone();
-                        t.truncate(MAX_TOOL_OUTPUT_IN_STREAM);
-                        t.push_str(&format!(
-                            "\n...[truncated, original {} bytes, kept first {}]",
-                            result_str.len(),
-                            MAX_TOOL_OUTPUT_IN_STREAM
-                        ));
-                        t
-                    } else {
-                        result_str
-                    };
+                    let output_for_stream = truncate_stream_output(&result_str, MAX_TOOL_OUTPUT_IN_STREAM);
                     let _ = tx.send(StreamEvent::ToolOutputAvailable {
                         tool_call_id: tc_id,
                         name: tool_name.clone(),
@@ -2889,6 +2927,13 @@ where
             }
         }
 
+        // Anti-runaway warning every 10 turns on CONTINUING turns only —
+        // placed after the emptiness check so a clean finish is never held
+        // hostage by it (this used to be computed-then-discarded dead code).
+        if turn.is_multiple_of(10) {
+            next_prompts.push(DANGER_LOOP_MSG.replace("{turn}", &turn.to_string()));
+        }
+
         let combined_next = next_prompts.join("\n");
         let next_prompt_str = handler.turn_end(
             &response,
@@ -3064,12 +3109,7 @@ where
                 }
             }
         }
-
-        if turn.is_multiple_of(10) {
-            let _danger = DANGER_LOOP_MSG.replace("{turn}", &turn.to_string());
-        }
     }
-
     // Honesty: when the turn budget ran out (loop exited via the while
     // condition, not via respond), report max_turns_exhausted instead of
     // silently claiming "CURRENT_TASK_DONE". Only fall back to
@@ -3421,6 +3461,41 @@ mod tests {
     fn smart_format_odd_max_len() {
         let result = smart_format("testing123", 5);
         assert_eq!(result.len(), 7);
+    }
+
+    #[test]
+    fn truncate_stream_output_ascii_under_cap() {
+        assert_eq!(truncate_stream_output("hello", 32), "hello");
+        assert_eq!(truncate_stream_output("", 10), "");
+    }
+
+    #[test]
+    fn truncate_stream_output_ascii_over_cap() {
+        let out = truncate_stream_output("x".repeat(40).as_str(), 32);
+        assert!(out.starts_with(&"x".repeat(32)));
+        assert!(out.contains("original 40 bytes"));
+        assert!(out.contains("kept first 32"));
+    }
+
+    // Regression (round3 P0-A): String::truncate panicked when the byte cap
+    // landed inside a multi-byte CJK character. 3-byte chars × cap 9 forces
+    // the old code to cut at offset 9-1/2 → panic; the char-safe path must
+    // instead back off to a boundary and keep valid UTF-8.
+    #[test]
+    fn truncate_stream_output_cjk_char_boundary() {
+        let s = "中".repeat(8); // 24 bytes, all 3-byte chars
+        let out = truncate_stream_output(&s, 10);
+        assert!(out.is_char_boundary(0));
+        let kept = out.split('\n').next().unwrap();
+        assert!(!kept.ends_with('\u{FFFD}'));
+        assert_eq!(kept.as_bytes().len() % 3, 0, "cut must fall on a 3-byte boundary");
+        assert!(out.contains("original 24 bytes"));
+    }
+
+    #[test]
+    fn truncate_stream_output_exact_cap_is_identity() {
+        let s = "中".repeat(4); // exactly 12 bytes
+        assert_eq!(truncate_stream_output(&s, 12), s);
     }
 
     // ── integration tests for run_agent_loop ──
