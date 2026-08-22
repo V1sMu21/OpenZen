@@ -408,6 +408,19 @@ async fn stream_to_wechat(
     }
 }
 
+/// Streaming-relay cleanup patterns, compiled once — clean_for_wechat runs
+/// on every buffer update of the IM relay (hot path).
+static WECHAT_CLEAN_RES: std::sync::LazyLock<[Option<regex::Regex>; 5]> =
+    std::sync::LazyLock::new(|| {
+        [
+            regex::Regex::new(r"(?m)^\**LLM Running \(Turn \d+\) \.\.\.\**\s*$").ok(),
+            regex::Regex::new(r"(?m)^\s*🛠️\s*[A-Za-z_][A-Za-z0-9_]*\(.*$").ok(),
+            regex::Regex::new(r"\[([^\]]+)\]\([^\)]+\)").ok(),
+            regex::Regex::new(r"!\[.*?\]\(.*?\)").ok(),
+            regex::Regex::new(r"\n{3,}").ok(),
+        ]
+    });
+
 fn clean_for_wechat(text: &str) -> String {
     let mut result = text.to_string();
 
@@ -431,11 +444,7 @@ fn clean_for_wechat(text: &str) -> String {
             .replace(&format!("<{tag}>"), "");
     }
 
-    let re_turn = regex::Regex::new(r"(?m)^\**LLM Running \(Turn \d+\) \.\.\.\**\s*$").ok();
-    let re_tool = regex::Regex::new(r"(?m)^\s*🛠️\s*[A-Za-z_][A-Za-z0-9_]*\(.*$").ok();
-    let re_links = regex::Regex::new(r"\[([^\]]+)\]\([^\)]+\)").ok();
-    let re_images = regex::Regex::new(r"!\[.*?\]\(.*?\)").ok();
-    let re_multi_nl = regex::Regex::new(r"\n{3,}").ok();
+    let [re_turn, re_tool, re_links, re_images, re_multi_nl] = &*WECHAT_CLEAN_RES;
 
     if let Some(re) = re_turn {
         result = re.replace_all(&result, "").to_string();

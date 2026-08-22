@@ -5,36 +5,65 @@
 
 use regex::Regex;
 
+/// Precompiled once: simplify_html ran ~19 Regex::new calls per invocation
+/// and is invoked per web_scan page.
+struct SimplifyPatterns {
+    block: [Regex; 4],
+    ws: Regex,
+    remove_pairs: Vec<Regex>,
+    remove_self_closing: Vec<Regex>,
+}
+
+static PATTERNS: std::sync::LazyLock<SimplifyPatterns> = std::sync::LazyLock::new(|| {
+    let remove_tags = ["meta", "link", "svg", "nav", "footer", "header", "aside"];
+    SimplifyPatterns {
+        block: [
+            Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap(),
+            Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap(),
+            Regex::new(r"(?is)<noscript[^>]*>.*?</noscript>").unwrap(),
+            Regex::new(r"(?is)<!--.*?-->").unwrap(),
+        ],
+        ws: Regex::new(r"\s+").unwrap(),
+        remove_pairs: remove_tags
+            .iter()
+            .map(|t| Regex::new(&format!(r"(?is)<{t}[^>]*>.*?</{t}>")).unwrap())
+            .collect(),
+        remove_self_closing: remove_tags
+            .iter()
+            .map(|t| Regex::new(&format!(r"(?is)<{t}[^>]*/?>")).unwrap())
+            .collect(),
+    }
+});
+
 /// Simplify raw HTML: remove script/style tags, limit depth, truncate.
 pub fn simplify_html(html: &str, max_chars: usize) -> String {
     if html.is_empty() {
         return String::new();
     }
 
-    let re_script = Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
-    let re_style = Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
-    let re_noscript = Regex::new(r"(?is)<noscript[^>]*>.*?</noscript>").unwrap();
-    let re_comment = Regex::new(r"(?is)<!--.*?-->").unwrap();
-    let re_ws = Regex::new(r"\s+").unwrap();
-
+    let p = &*PATTERNS;
     let mut result = html.to_string();
-    result = re_script.replace_all(&result, "").to_string();
-    result = re_style.replace_all(&result, "").to_string();
-    result = re_noscript.replace_all(&result, "").to_string();
+    result = p.block[0].replace_all(&result, "").to_string();
+    result = p.block[1].replace_all(&result, "").to_string();
+    result = p.block[2].replace_all(&result, "").to_string();
 
-    let remove_tags = ["meta", "link", "svg", "nav", "footer", "header", "aside"];
-    for tag in &remove_tags {
-        let re = Regex::new(&format!(r"(?is)<{tag}[^>]*>.*?</{tag}>")).unwrap();
+    for re in &p.remove_pairs {
         result = re.replace_all(&result, "").to_string();
-        let re_self = Regex::new(&format!(r"(?is)<{tag}[^>]*/?>")).unwrap();
-        result = re_self.replace_all(&result, "").to_string();
+    }
+    for re in &p.remove_self_closing {
+        result = re.replace_all(&result, "").to_string();
     }
 
-    result = re_comment.replace_all(&result, "").to_string();
-    result = re_ws.replace_all(&result, " ").to_string();
+    result = p.block[3].replace_all(&result, "").to_string();
+    result = p.ws.replace_all(&result, " ").to_string();
 
     if result.len() > max_chars {
-        result.truncate(max_chars);
+        // Char-safe cut — byte truncation panicked on CJK pages (P0-A class).
+        let mut end = max_chars;
+        while end > 0 && !result.is_char_boundary(end) {
+            end -= 1;
+        }
+        result.truncate(end);
         result.push_str("... (truncated)");
     }
 

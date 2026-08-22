@@ -257,6 +257,31 @@ fn smart_format(text: &str, max_len: usize) -> String {
     format!("{}...{}", left, right)
 }
 
+/// Internal tag wrappers dropped by `strip_summary_tags`, compiled once.
+static INTERNAL_TAG_PATTERNS: std::sync::LazyLock<Vec<regex::Regex>> =
+    std::sync::LazyLock::new(|| {
+        [
+            r"(?is)<antThinking[^>]*>.*?</antThinking\s*>",
+            r"(?is)<antThinking[^>]*/>",
+            r"(?is)<thinking[^>]*>.*?</thinking\s*>",
+            r"(?is)<thinking[^>]*/>",
+            r"(?is)<tool_code[^>]*>.*?</tool_code\s*>",
+            r"(?is)<tool_code[^>]*/>",
+            r"(?is)<respond[^>]*>",
+            r"(?is)</respond\s*>",
+            r"(?is)<summary\s*>",
+            r"(?is)</summary\s*>",
+            r"(?is)<tool_use\s*>",
+            r"(?is)</tool_use\s*>",
+            r"(?is)<file_content\s*>",
+            r"(?is)</file_content\s*>",
+            r"(?is)</thinking\s*>",
+        ]
+        .iter()
+        .filter_map(|p| regex::Regex::new(p).ok())
+        .collect()
+    });
+
 /// Strip model-output tag wrappers from `text`, returning the cleaned
 /// text and the extracted `<summary>` body. Other tags
 /// (`<antThinking>`, `<thinking>`, `<tool_code>`, `<respond>`) are
@@ -287,26 +312,8 @@ fn strip_summary_tags(text: &str) -> (String, String) {
     // channel, but the agent loop stores the raw LLM text in
     // `full_response` and may re-display it; we double-clean here so
     // historical sessions rendered from disk stay tag-free.
-    for pattern in [
-        r"(?is)<antThinking[^>]*>.*?</antThinking\s*>",
-        r"(?is)<antThinking[^>]*/>",
-        r"(?is)<thinking[^>]*>.*?</thinking\s*>",
-        r"(?is)<thinking[^>]*/>",
-        r"(?is)<tool_code[^>]*>.*?</tool_code\s*>",
-        r"(?is)<tool_code[^>]*/>",
-        r"(?is)<respond[^>]*>",
-        r"(?is)</respond\s*>",
-        r"(?is)<summary\s*>",
-        r"(?is)</summary\s*>",
-        r"(?is)<tool_use\s*>",
-        r"(?is)</tool_use\s*>",
-        r"(?is)<file_content\s*>",
-        r"(?is)</file_content\s*>",
-        r"(?is)</thinking\s*>",
-    ] {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            cleaned = re.replace_all(&cleaned, "").to_string();
-        }
+    for re in INTERNAL_TAG_PATTERNS.iter() {
+        cleaned = re.replace_all(&cleaned, "").to_string();
     }
 
     (cleaned, summary)
