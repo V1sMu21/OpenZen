@@ -64,17 +64,29 @@ impl SkillMcpStore {
     /// Stat-walk the skill/SOP source tree and re-parse both managers only
     /// when a file changed since the last load. Returns true when a reload
     /// happened. Cheap enough to call before every agent run.
+    ///
+    /// The stored snapshot is captured AFTER loading, not before: the loaders
+    /// backfill meta.toml inside the watched tree on first parse, so a
+    /// pre-load snapshot would lag one write behind forever and force a
+    /// redundant reload on every subsequent call.
     pub fn reload_incremental(&mut self) -> bool {
-        let mut snap = std::collections::BTreeMap::new();
-        fingerprint_tree(&self.base_dir.join("skills"), 2, &["md", "toml"], &mut snap);
-        fingerprint_tree(&self.base_dir.join("sops"), 2, &["md"], &mut snap);
+        let snap = Self::fingerprint(&self.base_dir);
         if self.fingerprint.as_ref() == Some(&snap) {
             return false;
         }
         let _ = self.skills.load_all();
         let _ = self.sops.load_all();
-        self.fingerprint = Some(snap);
+        self.fingerprint = Some(Self::fingerprint(&self.base_dir));
         true
+    }
+
+    fn fingerprint(
+        base_dir: &Path,
+    ) -> std::collections::BTreeMap<PathBuf, (u64, u64)> {
+        let mut out = std::collections::BTreeMap::new();
+        fingerprint_tree(&base_dir.join("skills"), 2, &["md", "toml"], &mut out);
+        fingerprint_tree(&base_dir.join("sops"), 2, &["md"], &mut out);
+        out
     }
 
     /// Build a compact index (name + description) of ALL active skills and
