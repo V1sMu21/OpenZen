@@ -104,3 +104,9 @@ VERIFICATION_REPORT.md
 # ZCode tool dir + benchmark run data (local only)
 .zcode/
 bench/
+
+# Pet dev-only raw animation frames (~144MB loose PNGs; runtime uses frames_webp/, builds strip frames/ via vite plugin)
+frontends/public/pet/frames/
+
+# Local design source materials (pet-godot project)
+design/

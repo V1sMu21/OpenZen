@@ -17,7 +17,22 @@
         "height": 800,
         "resizable": true,
         "fullscreen": false,
-        "devtools": false
+        "devtools": false,
+        "label": "main"
+      },
+      {
+        "label": "pet",
+        "title": "阿青",
+        "url": "/pet/pet.html",
+        "width": 260,
+        "height": 340,
+        "resizable": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "shadow": false
       }
     ],
     "security": {
@@ -31,7 +46,9 @@
       },
       "csp": "default-src 'self' https://tauri.localhost asset: ozfile:; script-src 'self' http://asset.localhost asset: ozfile:; style-src 'self' 'unsafe-inline' http://asset.localhost asset: ozfile:; connect-src 'self' http://127.0.0.1:18567 http://127.0.0.1:8080 http://asset.localhost asset: ozfile:; img-src 'self' data: blob: http://asset.localhost asset: ozfile:; font-src 'self' data: http://asset.localhost asset: ozfile:; frame-src 'self' https://tauri.localhost http://asset.localhost asset: ozfile:; media-src 'self' blob: http://asset.localhost asset: ozfile:",
       "devCsp": "default-src 'self' https://tauri.localhost asset: ozfile:; script-src 'self' http://asset.localhost asset: ozfile:; style-src 'self' 'unsafe-inline' http://asset.localhost asset: ozfile:; connect-src 'self' http://localhost:5173 ws://localhost:5173 http://127.0.0.1:18567 http://127.0.0.1:8080 http://asset.localhost asset: ozfile:; img-src 'self' data: blob: http://asset.localhost asset: ozfile:; font-src 'self' data: http://asset.localhost asset: ozfile:; frame-src 'self' https://tauri.localhost http://asset.localhost asset: ozfile:; media-src 'self' blob: http://asset.localhost asset: ozfile:"
-    }
+    },
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,

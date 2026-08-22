@@ -31,7 +31,7 @@ pub async fn discover_and_start_platforms(
     sessions: Arc<Mutex<oz_server::webui::sessions::SessionStore>>,
     running_agents: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     stop_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
-    ask_user_rxs: Arc<Mutex<HashMap<String, Arc<Mutex<Option<String>>>>>>,
+    ask_user_rxs: Arc<Mutex<HashMap<String, Arc<Mutex<HashMap<String, String>>>>>>,
     approval_handler: Arc<Mutex<Option<Arc<dyn oz_safety::ApprovalHandler>>>>,
     skill_mcp_dir: Option<String>,
     locale: Arc<Mutex<String>>,

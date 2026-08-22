@@ -4172,6 +4172,10 @@ dependencies = [
 [[package]]
 name = "oz-tests"
 version = "0.1.0"
+dependencies = [
+ "entropy_memory_engine",
+ "tempfile",
+]
 
 [[package]]
 name = "oz-tools"

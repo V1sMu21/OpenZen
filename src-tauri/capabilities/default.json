@@ -1,7 +1,9 @@
 {
   "identifier": "default",
   "description": "OpenZen desktop default permissions",
-  "windows": ["*"],
+  "windows": [
+    "*"
+  ],
   "permissions": [
     "core:default",
     "core:window:default",
@@ -15,6 +17,15 @@
     "core:event:allow-emit",
     "notification:default",
     "shell:allow-open",
-    "dialog:default"
+    "dialog:default",
+    "core:window:allow-create",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-position",
+    "core:window:allow-outer-position",
+    "core:window:allow-start-dragging",
+    "core:window:allow-hide",
+    "core:window:allow-unminimize",
+    "core:window:allow-destroy"
   ]
 }

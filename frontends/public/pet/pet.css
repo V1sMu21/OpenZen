@@ -1,0 +1,76 @@
+/* 阿青 · 桌面小猫咪 —— 宋韵天青风 */
+:root {
+  --canvas: #14120e; --surface: #1a1712; --surface-elev: #221e17;
+  --hairline: rgba(147,195,214,.16); --primary: #93c3d6;
+  --ink: #e4ddca; --body: #b8b0a3; --muted: #7a7366;
+  --error: #c05a3e; --ok: #7ab3a8; --gold: #c4a877;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; background: transparent; overflow: hidden;
+  font-family: -apple-system, "PingFang SC", sans-serif; user-select: none; -webkit-user-select: none; }
+
+@font-face { font-family: "Kuai"; src: url("fonts/ZCOOLKuaiLe-Regular.ttf"); }
+@font-face { font-family: "Hand"; src: url("fonts/PatrickHand-Regular.ttf"); }
+
+/* 猫 canvas：垂直居中于窗口，窗口 260x300 展示猫约 220px */
+#catA, #catB {
+  position: absolute; left: 50%; top: 46%;
+  transform: translate(-50%, -50%) scale(0.30);
+  transform-origin: center;
+  image-rendering: auto; pointer-events: none;
+}
+
+/* 状态文字（猫头顶上方、偏左；与画布同以 46% 为基准。
+   猫耳顶位于画布 y=34 → 窗口内 46% - 105px；文字下沿留 ~8px 间距） */
+#stateText {
+  position: absolute; left: 0; right: 0;
+  top: calc(46% - 145px);
+  text-align: center; pointer-events: none;
+  transform: translateX(-26px);
+}
+#zhText {
+  font-family: "Kuai", "PingFang SC", sans-serif; font-size: 17px;
+  color: var(--ink); text-shadow: 0 1px 2px rgba(0,0,0,.45); letter-spacing: 2px;
+}
+#enText {
+  font-family: "Hand", sans-serif; font-size: 12px; color: var(--primary);
+  text-shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+
+/* 迷你浮签 */
+#tooltip {
+  position: absolute; left: 50%; bottom: 2px; transform: translateX(-50%);
+  background: var(--surface-elev); border: 1px solid var(--hairline); border-radius: 8px;
+  padding: 4px 10px; font-size: 12px; color: var(--body); white-space: nowrap;
+  pointer-events: none;
+}
+
+/* 状态卡 */
+#card {
+  position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%);
+  width: 228px; background: var(--surface-elev); border: 1px solid var(--hairline);
+  border-radius: 10px; padding: 10px 12px; font-size: 12px; color: var(--body);
+  line-height: 1.6; box-shadow: 0 6px 18px rgba(0,0,0,.35);
+}
+#cardTitle { font-family: "Songti SC", serif; font-size: 14px; color: var(--ink); margin-bottom: 2px; }
+#cardState { color: var(--primary); }
+#cardProgress { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+#progressBar { flex: 1; height: 5px; background: rgba(147,195,214,.15); border-radius: 3px; overflow: hidden; }
+#progressFill { height: 100%; width: 0%; background: var(--primary); border-radius: 3px; transition: width .4s; }
+#contextText, #affText, #moodText { color: var(--primary); }
+
+/* 右键菜单 */
+#menu {
+  position: absolute; left: 8px; bottom: 8px; width: 148px;
+  background: var(--surface-elev); border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+}
+#menu button {
+  display: block; width: 100%; padding: 8px 12px; text-align: left; font-size: 13px;
+  color: var(--body); background: transparent; border: 0; border-bottom: 1px solid var(--hairline); cursor: pointer;
+}
+#menu button:last-child { border-bottom: 0; }
+#menu button:hover { background: rgba(147,195,214,.1); color: var(--ink); }
+
+/* 拖拽可供性：默认抓取手型，拖拽中收紧 */
+body { cursor: grab; }
+body.dragging { cursor: grabbing; }

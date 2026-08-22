@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh" data-tauri-drag-region>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>阿青 · 桌面小猫咪</title>
+  <link rel="stylesheet" href="pet.css?v=20260818" />
+</head>
+<body data-tauri-drag-region>
+  <!-- 猫渲染层：两个 canvas 叠放，供交叉淡化切换 -->
+  <!-- 原生拖拽带（OS 级，零 JS 依赖）：猫头顶隐形条 -->
+  <div id="dragbar" data-tauri-drag-region title=""></div>
+
+  <canvas id="catA" data-tauri-drag-region width="768" height="768"></canvas>
+  <canvas id="catB" data-tauri-drag-region width="768" height="768"></canvas>
+
+  <!-- 状态文字（头顶） -->
+  <div id="stateText">
+    <div id="zhText">休息中</div>
+    <div id="enText">Idle</div>
+  </div>
+
+  <!-- 迷你浮签（悬停） -->
+  <div id="tooltip" hidden></div>
+
+  <!-- 状态卡（单击） -->
+  <div id="card" hidden>
+    <div id="cardTitle">阿青 · 修砚</div>
+    <div id="cardState">状态：休息中</div>
+    <div id="cardProgress"><span>步骤</span><div id="progressBar"><div id="progressFill"></div></div><span id="progressText">--</span></div>
+    <div id="cardContext">上下文 <span id="contextText">--</span></div>
+    <div id="cardSoul">心情：<span id="moodText">宁静</span> · 亲密度 <span id="affText">0</span></div>
+  </div>
+
+  <!-- 右键菜单 -->
+  <div id="menu" hidden>
+    <button data-act="back">回到主窗口</button>
+    <button data-act="rename">改名字</button>
+    <button data-act="settings">设置</button>
+    <button data-act="quit">退出猫咪</button>
+  </div>
+
+  <script src="pet.js?v=20260822c"></script>
+</body>
+</html>
