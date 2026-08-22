@@ -1279,6 +1279,7 @@ pub fn run() {
 commands::get_working_dir_for_session,
             commands::get_dashboard_stats,
             commands::get_memory_status,
+            commands::get_quality_report,
             commands::list_models,
             commands::list_sessions,
             commands::create_session,

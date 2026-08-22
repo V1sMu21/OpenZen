@@ -1,5 +1,6 @@
 //! Tauri IPC command handlers for the OpenZen desktop app.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use oz_config::mykey::{MyKeyConfig, SessionType};
@@ -198,6 +199,68 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
         },
         "harness": { "entry_count": harness_entry_count },
     })
+}
+
+/// QC-3: aggregate quality events (reflections.jsonl: failures, successes,
+/// lessons, synthesized specs) across every known project working dir —
+/// last-7-day counts per type plus lifetime totals. Persists the report to
+/// {data_dir}/openzen/quality_report.json so nightly tooling can diff runs.
+#[tauri::command]
+pub fn get_quality_report(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let mut store = lock_poison_guard(&state.sessions);
+    store.reload();
+    let mut dirs: Vec<String> = store
+        .list()
+        .iter()
+        .filter_map(|s| s.working_dir.clone())
+        .collect();
+    drop(store);
+    dirs.sort();
+    dirs.dedup();
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+    let mut week: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut total: std::collections::BTreeMap<String, u64> = Default::default();
+    for dir in &dirs {
+        let path = Path::new(dir).join(".openzen").join("reflections.jsonl");
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let kind = v
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            *total.entry(kind.clone()).or_insert(0) += 1;
+            if let Some(ts) = v
+                .get("ts")
+                .and_then(|t| t.as_str())
+                .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+            {
+                if ts.with_timezone(&chrono::Utc) >= cutoff {
+                    *week.entry(kind).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    let report = serde_json::json!({
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "projects_scanned": dirs.len(),
+        "window_days": 7,
+        "week": week,
+        "total": total,
+    });
+    let out_dir = crate::data_dir().join("openzen");
+    let _ = std::fs::create_dir_all(&out_dir);
+    if let Ok(json) = serde_json::to_string_pretty(&report) {
+        let _ = std::fs::write(out_dir.join("quality_report.json"), json);
+    }
+    report
 }
 
 #[tauri::command]
