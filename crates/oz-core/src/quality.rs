@@ -426,7 +426,10 @@ pub async fn quick_verify_after_write(
 
     // TypeScript project (type-check configured) → tsc over the whole tree.
     if dir.join("package.json").is_file() && dir.join("tsconfig.json").is_file() {
-        if written_files.iter().any(|f| f.ends_with(".ts") || f.ends_with(".tsx")) {
+        if written_files
+            .iter()
+            .any(|f| f.ends_with(".ts") || f.ends_with(".tsx"))
+        {
             let (passed, output) =
                 run_quick_cmd("npx tsc --noEmit --pretty false", working_dir, 30).await;
             if !passed {
@@ -448,7 +451,11 @@ pub async fn quick_verify_after_write(
             .cloned()
             .collect();
         if !py_files.is_empty() {
-            let listed = py_files.iter().map(|f| shell_quote(f)).collect::<Vec<_>>().join(" ");
+            let listed = py_files
+                .iter()
+                .map(|f| shell_quote(f))
+                .collect::<Vec<_>>()
+                .join(" ");
             let cmd = format!("python3 -m py_compile {listed}");
             let (passed, output) = run_quick_cmd(&cmd, working_dir, 30).await;
             if !passed {
@@ -768,8 +775,18 @@ pub const RED_TEAM_SUFFIX_EN: &str =
 /// QA-2: heuristic trigger for the red-team review pass — many deliverables,
 /// or any run command touching deletion / network egress / credentials.
 pub fn is_high_risk_write(tool_sequence: &[(String, serde_json::Value)]) -> bool {
-    const DANGER_TOKENS: &[&str] =
-        &["rm ", "rm -", "rmdir", "del ", "curl", "wget", ".ssh", ".aws", "credential", "secret"];
+    const DANGER_TOKENS: &[&str] = &[
+        "rm ",
+        "rm -",
+        "rmdir",
+        "del ",
+        "curl",
+        "wget",
+        ".ssh",
+        ".aws",
+        "credential",
+        "secret",
+    ];
     let mut write_like = 0usize;
     for (name, args) in tool_sequence {
         match name.as_str() {
@@ -888,7 +905,11 @@ pub async fn git_diff_stat_summary(working_dir: &str) -> Option<DiffStatSummary>
         .sum();
     let tail: Vec<&str> = out.lines().rev().take(12).collect();
     let excerpt = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-    Some(DiffStatSummary { files_changed, churn, excerpt })
+    Some(DiffStatSummary {
+        files_changed,
+        churn,
+        excerpt,
+    })
 }
 
 /// QA-3: instruction fed back when the diff looks oversized — asks the agent
@@ -931,9 +952,8 @@ pub fn format_delivery_contract(
         Some(v) => out.push_str(&format!("> {ver_l}：{v}\n")),
         None => out.push_str(&format!("> {ver_l}：—\n")),
     }
-    match leftover.filter(|s| !s.trim().is_empty()) {
-        Some(l) => out.push_str(&format!("> {left_l}：{l}\n")),
-        None => {}
+    if let Some(l) = leftover.filter(|s| !s.trim().is_empty()) {
+        out.push_str(&format!("> {left_l}：{l}\n"));
     }
     out
 }
@@ -943,7 +963,6 @@ pub fn format_delivery_contract(
 pub fn log_quality_event(working_dir: &str, kind: &str, summary: &str) {
     log_reflection(working_dir, kind, summary);
 }
-
 
 #[cfg(test)]
 mod tests {

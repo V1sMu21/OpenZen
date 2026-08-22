@@ -474,10 +474,10 @@ where
     let mut tdd_nudged = false;
     let mut contract_assertions: Option<(usize, usize)> = None; // (total, failed)
     let mut contract_review: Option<(bool, usize)> = None; // (pass, high count)
-    // Consecutive LLM transport failures (timeout / stream error). Local
-    // servers (omlx etc.) can wedge for minutes; instead of terminating
-    // the whole long task, retry the same turn. Cap retries so a
-    // persistently-broken backend still exits instead of looping forever.
+                                                           // Consecutive LLM transport failures (timeout / stream error). Local
+                                                           // servers (omlx etc.) can wedge for minutes; instead of terminating
+                                                           // the whole long task, retry the same turn. Cap retries so a
+                                                           // persistently-broken backend still exits instead of looping forever.
     let mut consecutive_llm_errors: u32 = 0;
     let max_llm_error_retries: u32 = config.llm_error_retries;
 
@@ -2682,9 +2682,9 @@ where
                 && !tdd_nudged
                 && turn >= 2
                 && crate::quality::has_write_operations(&tool_sequence)
-                && !tool_sequence.iter().any(|(n, a)| {
-                    n == "code_run" && a.to_string().to_lowercase().contains("test")
-                })
+                && !tool_sequence
+                    .iter()
+                    .any(|(n, a)| n == "code_run" && a.to_string().to_lowercase().contains("test"))
             {
                 tdd_nudged = true;
                 next_prompts.push(if config.lang == "zh" {
@@ -2732,8 +2732,7 @@ where
                 {
                     auto_spec_attempted = true;
                     if compression_service.is_configured() {
-                        let deliverables =
-                            crate::quality::collect_deliverables(&tool_sequence);
+                        let deliverables = crate::quality::collect_deliverables(&tool_sequence);
                         let prompt = crate::quality::build_spec_synthesis_prompt(
                             &user_input,
                             &deliverables,
@@ -2853,51 +2852,45 @@ where
                     let verdict_opt = if config.review_use_summary
                         && compression_service.is_configured()
                     {
-                        let rx =
-                            compression_service.spawn_summary(review_prompt, String::new());
+                        let rx = compression_service.spawn_summary(review_prompt, String::new());
                         let raw = wait_for_summary(Some(rx), String::new(), 90).await;
                         crate::quality::review_verdict_from_raw(&raw)
                     } else {
                         crate::quality::review_prompt_via_client(client, &review_prompt).await
                     };
-                    match verdict_opt {
-                        Some(v) => {
-                            let high_count =
-                                v.issues.iter().filter(|i| i.severity == "high").count();
-                            contract_review = Some((v.pass, high_count));
-                            if v.pass {
-                                // QC-1: success-side evidence.
-                                crate::quality::log_quality_event(
-                                    &config.working_dir,
-                                    "review_passed",
-                                    &format!("high={high_count}"),
-                                );
-                            } else if review_rounds < 2 {
-                                crate::quality::log_reflection(
-                                    &config.working_dir,
-                                    "review_failed",
-                                    &format!("{high_count} high issue(s)"),
-                                );
-                                next_prompts.push(crate::quality::format_review_feedback(
-                                    &v.issues,
-                                    &config.lang,
-                                ));
-                                exit_reason = None;
-                                transition_state(
-                                    handler,
-                                    AgentState::Thinking,
-                                    "quality gate: review issues found",
-                                );
+                    if let Some(v) = verdict_opt {
+                        let high_count = v.issues.iter().filter(|i| i.severity == "high").count();
+                        contract_review = Some((v.pass, high_count));
+                        if v.pass {
+                            // QC-1: success-side evidence.
+                            crate::quality::log_quality_event(
+                                &config.working_dir,
+                                "review_passed",
+                                &format!("high={high_count}"),
+                            );
+                        } else if review_rounds < 2 {
+                            crate::quality::log_reflection(
+                                &config.working_dir,
+                                "review_failed",
+                                &format!("{high_count} high issue(s)"),
+                            );
+                            next_prompts.push(crate::quality::format_review_feedback(
+                                &v.issues,
+                                &config.lang,
+                            ));
+                            exit_reason = None;
+                            transition_state(
+                                handler,
+                                AgentState::Thinking,
+                                "quality gate: review issues found",
+                            );
+                        } else {
+                            quality_note = Some(if config.lang == "zh" {
+                                "独立评审未通过，修复预算已耗尽".to_string()
                             } else {
-                                quality_note = Some(if config.lang == "zh" {
-                                    "独立评审未通过，修复预算已耗尽".to_string()
-                                } else {
-                                    "independent review failed, fix budget exhausted"
-                                        .to_string()
-                                });
-                            }
+                                "independent review failed, fix budget exhausted".to_string()
+                            });
                         }
-                        None => {}
                     }
                 }
             }
@@ -2910,9 +2903,7 @@ where
                 && crate::quality::has_write_operations(&tool_sequence)
             {
                 diff_selfcheck_done = true;
-                if let Some(ds) =
-                    crate::quality::git_diff_stat_summary(&config.working_dir).await
-                {
+                if let Some(ds) = crate::quality::git_diff_stat_summary(&config.working_dir).await {
                     if ds.files_changed > crate::quality::DIFF_FILES_MAX
                         || ds.churn > crate::quality::DIFF_CHURN_MAX
                     {
@@ -3364,9 +3355,13 @@ where
         // L1-a: distill an actionable lesson from abnormal exits — future
         // similar runs recall it through the harness-lessons channel.
         let exit_lesson = match final_reason.as_str() {
-            "llm_stuck" => Some("任务多轮无工具调用而停滞：把需求拆成更小的可验证 todo，先跑通最小闭环再扩展。"),
+            "llm_stuck" => Some(
+                "任务多轮无工具调用而停滞：把需求拆成更小的可验证 todo，先跑通最小闭环再扩展。",
+            ),
             "max_turns_exhausted" => Some("轮次耗尽：减少一次性大改动，分批交付并尽早验证每一步。"),
-            "llm_error" | "llm_timeout" => Some("传输不稳导致中断：重要节点及时 checkpoint，恢复后从断点继续而非重做。"),
+            "llm_error" | "llm_timeout" => {
+                Some("传输不稳导致中断：重要节点及时 checkpoint，恢复后从断点继续而非重做。")
+            }
             _ => None,
         };
         if let Some(lesson) = exit_lesson {
@@ -3584,64 +3579,67 @@ where
 
     // DQ1 QA-4: three-section delivery contract — done / verified / left
     // open. Honesty becomes protocol rather than goodwill.
-    let final_full_response = if config.quality_gates
-        && crate::quality::has_write_operations(&tool_sequence)
-    {
-        let completed_head = smart_format(final_full_response.trim(), 120);
-        let mut verified: Vec<String> = Vec::new();
-        if let Some((total, failed)) = contract_assertions {
-            verified.push(if config.lang == "zh" {
-                format!("断言 {}/{} 通过", total.saturating_sub(failed), total)
-            } else {
-                format!("{}/{} assertions passed", total.saturating_sub(failed), total)
-            });
-        }
-        if let Some((passed, high)) = contract_review {
-            verified.push(if passed {
-                if config.lang == "zh" {
-                    "独立评审通过".to_string()
+    let final_full_response =
+        if config.quality_gates && crate::quality::has_write_operations(&tool_sequence) {
+            let completed_head = smart_format(final_full_response.trim(), 120);
+            let mut verified: Vec<String> = Vec::new();
+            if let Some((total, failed)) = contract_assertions {
+                verified.push(if config.lang == "zh" {
+                    format!("断言 {}/{} 通过", total.saturating_sub(failed), total)
                 } else {
-                    "independent review passed".to_string()
-                }
-            } else if config.lang == "zh" {
-                format!("独立评审提出 high 问题 ×{high}")
-            } else {
-                format!("independent review raised {high} high issue(s)")
-            });
-        }
-        if verified.is_empty() && contract_assertions.is_none() {
-            verified.push(if config.lang == "zh" {
-                "未运行验收断言（无 spec）".to_string()
-            } else {
-                "no acceptance assertions ran (no spec)".to_string()
-            });
-        }
-        let pending_left = handler
-            .working()
-            .todos
-            .iter()
-            .filter(|t| t.status == "pending" || t.status == "in_progress")
-            .count();
-        let leftover = quality_note.clone().or_else(|| {
-            (pending_left > 0).then(|| {
-                if config.lang == "zh" {
-                    format!("{pending_left} 项待办未完成")
+                    format!(
+                        "{}/{} assertions passed",
+                        total.saturating_sub(failed),
+                        total
+                    )
+                });
+            }
+            if let Some((passed, high)) = contract_review {
+                verified.push(if passed {
+                    if config.lang == "zh" {
+                        "独立评审通过".to_string()
+                    } else {
+                        "independent review passed".to_string()
+                    }
+                } else if config.lang == "zh" {
+                    format!("独立评审提出 high 问题 ×{high}")
                 } else {
-                    format!("{pending_left} pending todo(s)")
-                }
-            })
-        });
-        let verification = (!verified.is_empty()).then(|| verified.join("；"));
-        final_full_response
-            + &crate::quality::format_delivery_contract(
-                &config.lang,
-                Some(&completed_head),
-                verification.as_deref(),
-                leftover.as_deref(),
-            )
-    } else {
-        final_full_response
-    };
+                    format!("independent review raised {high} high issue(s)")
+                });
+            }
+            if verified.is_empty() && contract_assertions.is_none() {
+                verified.push(if config.lang == "zh" {
+                    "未运行验收断言（无 spec）".to_string()
+                } else {
+                    "no acceptance assertions ran (no spec)".to_string()
+                });
+            }
+            let pending_left = handler
+                .working()
+                .todos
+                .iter()
+                .filter(|t| t.status == "pending" || t.status == "in_progress")
+                .count();
+            let leftover = quality_note.clone().or_else(|| {
+                (pending_left > 0).then(|| {
+                    if config.lang == "zh" {
+                        format!("{pending_left} 项待办未完成")
+                    } else {
+                        format!("{pending_left} pending todo(s)")
+                    }
+                })
+            });
+            let verification = (!verified.is_empty()).then(|| verified.join("；"));
+            final_full_response
+                + &crate::quality::format_delivery_contract(
+                    &config.lang,
+                    Some(&completed_head),
+                    verification.as_deref(),
+                    leftover.as_deref(),
+                )
+        } else {
+            final_full_response
+        };
 
     LoopOutcome {
         turn,
