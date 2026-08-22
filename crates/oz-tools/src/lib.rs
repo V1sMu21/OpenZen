@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn test_shared_registry_has_tools() {
         let reg = shared_registry();
-        let guard = reg.lock().unwrap();
+        let guard = reg.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             !guard.definitions().is_empty(),
             "shared registry should have tools"

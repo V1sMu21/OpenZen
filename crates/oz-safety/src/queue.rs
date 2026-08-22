@@ -26,14 +26,14 @@ impl ApprovalQueue {
     }
 
     pub fn push(&self, request: ApprovalRequest) {
-        self.inner.lock().unwrap().push_back(PendingApproval {
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push_back(PendingApproval {
             request,
             resolved: false,
         });
     }
 
     pub fn pop(&self) -> Option<ApprovalRequest> {
-        let mut q = self.inner.lock().unwrap();
+        let mut q = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(pos) = q.iter().position(|p| !p.resolved) {
             q[pos].resolved = true;
             Some(q[pos].request.clone())
@@ -52,7 +52,7 @@ impl ApprovalQueue {
     }
 
     pub fn clear(&self) {
-        self.inner.lock().unwrap().clear();
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 
     pub fn current(&self) -> Option<ApprovalRequest> {

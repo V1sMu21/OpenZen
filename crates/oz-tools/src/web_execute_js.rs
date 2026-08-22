@@ -22,7 +22,7 @@ impl WebExecuteJsTool {
         }
     }
     pub fn set_browser(&self, client: BrowserClient) {
-        *self.browser.lock().unwrap() = Some(client);
+        *self.browser.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(client);
     }
 }
 
@@ -54,7 +54,7 @@ impl ToolHandler for WebExecuteJsTool {
         _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let client = {
-            let guard = self.browser.lock().unwrap();
+            let guard = self.browser.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().ok_or_else(|| {
                 ToolError::Custom("No browser connected. Start TMWebDriver first.".into())
             })?
@@ -97,7 +97,7 @@ impl WebListTabsTool {
         }
     }
     pub fn set_browser(&self, client: BrowserClient) {
-        *self.browser.lock().unwrap() = Some(client);
+        *self.browser.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(client);
     }
 }
 
@@ -118,7 +118,7 @@ impl ToolHandler for WebListTabsTool {
         _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let client = {
-            let guard = self.browser.lock().unwrap();
+            let guard = self.browser.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
                 .clone()
                 .ok_or_else(|| ToolError::Custom("No browser connected.".into()))?
