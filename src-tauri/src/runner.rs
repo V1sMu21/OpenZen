@@ -663,7 +663,7 @@ pub async fn run_agent_for_session(
     // lessons every turn (a write-only ledger would silently rot), ranked
     // by relevance to the current user message instead of recency.
     if let Some(harness_dir) = &ctx.harness_dir {
-        let harness_ctx = oz_core::harness::render_context_relevant(
+        let harness_ctx = oz_core::harness::render_context_relevant_cached(
             std::path::Path::new(harness_dir),
             oz_core::harness::HarnessKind::Memory,
             8,

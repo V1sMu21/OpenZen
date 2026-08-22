@@ -239,22 +239,36 @@ fn truncate_stream_output(s: &str, max_bytes: usize) -> String {
     )
 }
 
+/// Byte offset of the n-th char (clamped to len) — lets smart_format slice
+/// without materializing a Vec<char> of the whole string (P2-l: 100K+ tool
+/// results allocated ~400KB per call just to keep head+tail).
+fn nth_char_offset(s: &str, n: usize) -> usize {
+    s.char_indices()
+        .nth(n)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
 /// Truncate text to a readable length, showing start and end with "..." in between.
 fn smart_format(text: &str, max_len: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_len || max_len == 0 {
-        if max_len == 0 && !text.is_empty() {
-            let half = 3.min(chars.len() / 2);
-            let left: String = chars[..half].iter().collect();
-            let right: String = chars[chars.len() - half..].iter().collect();
-            return format!("{}...{}", left, right);
-        }
+    let chars = text.chars().count();
+    if chars <= max_len {
         return text.to_string();
     }
+    if max_len == 0 {
+        let half = 3.min(chars / 2);
+        return format!(
+            "{}...{}",
+            &text[..nth_char_offset(text, half)],
+            &text[nth_char_offset(text, chars - half)..]
+        );
+    }
     let half = max_len / 2;
-    let left: String = chars[..half].iter().collect();
-    let right: String = chars[chars.len() - half..].iter().collect();
-    format!("{}...{}", left, right)
+    format!(
+        "{}...{}",
+        &text[..nth_char_offset(text, half)],
+        &text[nth_char_offset(text, chars - half)..]
+    )
 }
 
 /// Internal tag wrappers dropped by `strip_summary_tags`, compiled once.
@@ -530,7 +544,7 @@ where
         }),
     };
     if skill_mcp_store.is_none() {
-        eprintln!("[openzen] WARNING: skill_mcp_dir is None — NO SKILLS OR SOPS WILL BE LOADED. config.skill_mcp_dir={:?}", config.skill_mcp_dir);
+        tracing::warn!("WARNING: skill_mcp_dir is None — NO SKILLS OR SOPS WILL BE LOADED. config.skill_mcp_dir={:?}", config.skill_mcp_dir);
     }
 
     // If skill_mcp_store is active, inject the compact skill/SOP index at
@@ -1368,8 +1382,8 @@ where
                                 "<system-reminder>Detected intent without tool calls — matched skill/SOP context injected below:</system-reminder>\n{matched}"
                             )));
                             messages.push(Message::user_with_blocks(blocks));
-                            eprintln!(
-                                "[openzen] Degraded to full skill/SOP context ({} chars) after intent-only turn",
+                            tracing::info!(
+                                "Degraded to full skill/SOP context ({} chars) after intent-only turn",
                                 matched.len()
                             );
                         }
