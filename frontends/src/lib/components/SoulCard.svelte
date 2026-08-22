@@ -51,14 +51,26 @@
   }
 
   onMount(() => {
-    if (isTauri()) {
-      refresh();
-      timer = setInterval(refresh, 30_000);
-    }
+    // One fetch so the collapsed header has data; ongoing polling only
+    // runs while the panel is expanded (see effect below).
+    if (isTauri()) refresh();
   });
   onDestroy(() => {
     destroyed = true;
     if (timer) clearInterval(timer);
+  });
+
+  // P1-g: poll only while expanded — the collapsed header shows cached
+  // totals, and a permanent 30s IPC loop burned battery for data nobody
+  // was looking at.
+  $effect(() => {
+    if (!isTauri() || !expanded) return;
+    refresh();
+    timer = setInterval(refresh, 30_000);
+    return () => {
+      if (timer) clearInterval(timer);
+      timer = null;
+    };
   });
 
   const fmtBytes = (b: number) =>
@@ -88,8 +100,8 @@
       <svg class="soul-chevron" class:expanded width="10" height="10" viewBox="0 0 10 10" fill="none">
         <path d="M3.5 2l3.5 3-3.5 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <span class="soul-label">🧠 {$t("soul.title")}</span>
-      <span class="soul-detail">{status.store?.total_entries ?? 0} · {status.soul?.identity ?? ""}</span>
+      <span class="soul-label">{$t("soul.title")}</span>
+      <span class="soul-detail">{status.store?.total_entries ?? 0} · {status.soul?.identity?.trim() || $t("soul.unnamed")}</span>
     </button>
 
     {#if expanded}
@@ -107,12 +119,7 @@
 
 <style>
   .soul-card {
-    flex: none;
     width: 320px;
-    position: sticky;
-    top: 0;
-    align-self: flex-start;
-    margin-top: 4px;
   }
 
   .soul-toggle {

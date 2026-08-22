@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import katex from "katex";
   import { invoke } from "@tauri-apps/api/core";
-  import type { Artifact } from "../stores/sidepanel";
+  import type { Artifact } from "../stores/sidepanel.svelte";
 
   let { artifact } = $props<{ artifact: Artifact }>();
 

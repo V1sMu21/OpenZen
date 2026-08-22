@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import type { Artifact } from "../stores/sidepanel";
+  import type { Artifact } from "../stores/sidepanel.svelte";
 
   let { artifact } = $props<{ artifact: Artifact }>();
 
@@ -27,15 +27,15 @@
   function parseDiff(raw: string): DiffLine[] {
     return raw.split("\n").map(line => {
       if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@") || line.startsWith("diff")) {
-        return { content: line, kind: "header" };
+        return { content: line, kind: "header" as const };
       }
       if (line.startsWith("+") && !line.startsWith("+++")) {
-        return { content: line, kind: "add" };
+        return { content: line, kind: "add" as const };
       }
       if (line.startsWith("-") && !line.startsWith("---")) {
-        return { content: line, kind: "remove" };
+        return { content: line, kind: "remove" as const };
       }
-      return { content: line, kind: "context" };
+      return { content: line, kind: "context" as const };
     }).filter(l => l.content.trim() !== "");
   }
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Artifact } from "../stores/sidepanel";
+  import type { Artifact } from "../stores/sidepanel.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
   import { t } from "../i18n";

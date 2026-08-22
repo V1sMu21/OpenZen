@@ -66,6 +66,13 @@
     }
   }
 
+  function handleDialogKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleDialogConfirm();
+    }
+  }
+
   async function handleNewSessionInProject(projectId: string) {
     const result = await projects.createSessionIn(projectId);
     console.log("[ProjectList] new session in project:", projectId, "=> session:", result?.session_id);
@@ -138,7 +145,7 @@
         <div class="dialog-field">
           <label>{$t("project.folderLabel")}</label>
           <div class="path-row">
-            <input type="text" bind:value={addPath} placeholder="/path/to/project" />
+            <input type="text" bind:value={addPath} placeholder="/path/to/project" onkeydown={handleDialogKeydown} />
             <button class="browse-btn" onclick={async () => {
               try {
                 const selected = await openDialog({ directory: true, multiple: false, title: "Select project folder" });
@@ -151,12 +158,12 @@
         </div>
         <div class="dialog-field">
           <label>{$t("project.nameLabel")}</label>
-          <input type="text" bind:value={addName} placeholder={$t("project.namePlaceholder")} />
+          <input type="text" bind:value={addName} placeholder={$t("project.namePlaceholder")} onkeydown={handleDialogKeydown} />
         </div>
       {:else}
         <div class="dialog-field">
           <label>{$t("project.folderLabel")}</label>
-          <input type="text" bind:value={addPath} placeholder="/path/to/project" />
+          <input type="text" bind:value={addPath} placeholder="/path/to/project" onkeydown={handleDialogKeydown} />
         </div>
       {/if}
       {#if addError}

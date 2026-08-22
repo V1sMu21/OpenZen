@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import * as pdfjsLib from "pdfjs-dist";
   import { invoke } from "@tauri-apps/api/core";
-  import type { Artifact } from "../stores/sidepanel";
+  import type { Artifact } from "../stores/sidepanel.svelte";
   import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;

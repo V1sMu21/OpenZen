@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { Artifact } from "../stores/sidepanel";
+  import type { Artifact } from "../stores/sidepanel.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { mathReady, renderMarkdown } from "../utils/markdown";
 
