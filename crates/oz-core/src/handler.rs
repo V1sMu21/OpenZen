@@ -243,8 +243,7 @@ pub struct LoopConfig {
     ///
     /// tokio Mutex because guards are held across `.await` (build_context);
     /// a std guard would make the loop future !Send.
-    pub skill_mcp_store:
-        Option<std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>>,
+    pub skill_mcp_store: Option<std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>>,
     /// When true, use the LLM to crystallize knowledge from completed sessions.
     pub enable_crystallization: bool,
     /// When true, periodically refine existing skills via LLM.

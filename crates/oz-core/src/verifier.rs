@@ -188,13 +188,12 @@ async fn run_command_with_timeout(
 }
 
 /// File-path probe used on every todoupdate completion — compiled once.
-static FILE_PATH_RE: std::sync::LazyLock<Option<regex::Regex>> =
-    std::sync::LazyLock::new(|| {
-        regex::Regex::new(
+static FILE_PATH_RE: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
             r"[\w\-_./]+\.(rs|toml|json|yaml|yml|ts|tsx|js|jsx|py|go|java|cpp|c|h|hpp|css|html|md|txt|sh|sql|svg|png|jpg)",
         )
         .ok()
-    });
+});
 
 pub fn extract_file_path(text: &str) -> Option<String> {
     FILE_PATH_RE

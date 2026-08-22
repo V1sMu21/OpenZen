@@ -243,10 +243,7 @@ fn truncate_stream_output(s: &str, max_bytes: usize) -> String {
 /// without materializing a Vec<char> of the whole string (P2-l: 100K+ tool
 /// results allocated ~400KB per call just to keep head+tail).
 fn nth_char_offset(s: &str, n: usize) -> usize {
-    s.char_indices()
-        .nth(n)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len())
+    s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
 }
 
 /// Truncate text to a readable length, showing start and end with "..." in between.
@@ -522,7 +519,7 @@ where
     // SKILL.md on each user message. Local construction stays as the
     // TUI/CLI/test fallback.
     type SharedSkillStore = std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>;
-    let mut skill_mcp_store: Option<SharedSkillStore> = match &config.skill_mcp_store {
+    let skill_mcp_store: Option<SharedSkillStore> = match &config.skill_mcp_store {
         Some(shared) => {
             if let Ok(mut guard) = shared.try_lock() {
                 let _ = guard.reload_incremental();
@@ -672,7 +669,9 @@ where
         // Check for user interventions before each turn
         if let Some(ref intervention_rx) = config.intervention_rx {
             let interventions = {
-                let mut queue = intervention_rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut queue = intervention_rx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let mut items = Vec::new();
                 while let Some(evt) = queue.pop_front() {
                     items.push(evt);
@@ -1165,22 +1164,23 @@ where
                 // worst-case wall time is one 5s budget, not 5s × N.
                 let empty = MockResponse::new("");
                 let empty_ref = &empty;
-                let dispatch_futs = pending_spec.into_iter().map(|(cache_id, name, parsed)| {
-                    async move {
-                        let outcome = match tokio::time::timeout(
-                            Duration::from_secs(5),
-                            handler_ref.dispatch(&name, parsed, empty_ref, 0, ctx),
-                        )
-                        .await
-                        {
-                            Ok(res) => res,
-                            Err(_) => Err(ToolError::Custom(
-                                "speculative execution timed out; skipped".into(),
-                            )),
-                        };
-                        (cache_id, outcome)
-                    }
-                });
+                let dispatch_futs =
+                    pending_spec
+                        .into_iter()
+                        .map(|(cache_id, name, parsed)| async move {
+                            let outcome = match tokio::time::timeout(
+                                Duration::from_secs(5),
+                                handler_ref.dispatch(&name, parsed, empty_ref, 0, ctx),
+                            )
+                            .await
+                            {
+                                Ok(res) => res,
+                                Err(_) => Err(ToolError::Custom(
+                                    "speculative execution timed out; skipped".into(),
+                                )),
+                            };
+                            (cache_id, outcome)
+                        });
                 for (cache_id, outcome) in futures::future::join_all(dispatch_futs).await {
                     cache
                         .lock()
@@ -1902,7 +1902,8 @@ where
                         .map(|m| m.tc_id.clone())
                         .unwrap_or_else(|| next_block_id("tc"));
                     const MAX_TOOL_OUTPUT_IN_STREAM: usize = 32 * 1024;
-                    let output_for_stream = truncate_stream_output(&result_str, MAX_TOOL_OUTPUT_IN_STREAM);
+                    let output_for_stream =
+                        truncate_stream_output(&result_str, MAX_TOOL_OUTPUT_IN_STREAM);
                     let _ = tx.send(StreamEvent::ToolOutputAvailable {
                         tool_call_id: tc_id,
                         name: tool_name.clone(),
@@ -2832,12 +2833,11 @@ where
                         let full_prompt = crate::compress::build_compression_prompt(&snapshot);
                         // P1-h pending marker (after_tokens=0) — see pre-call site.
                         if let Some(ref tx) = config.event_tx {
-                            let _ =
-                                tx.send(oz_core_types::StreamEvent::DataCompressingContext {
-                                    before_tokens: est_tokens,
-                                    after_tokens: 0,
-                                    saved_tokens: 0,
-                                });
+                            let _ = tx.send(oz_core_types::StreamEvent::DataCompressingContext {
+                                before_tokens: est_tokens,
+                                after_tokens: 0,
+                                saved_tokens: 0,
+                            });
                         }
                         // Wait (bounded) for the LLM summary so a later
                         // resume sees the real summary; the template is the
@@ -3573,7 +3573,11 @@ mod tests {
         assert!(out.is_char_boundary(0));
         let kept = out.split('\n').next().unwrap();
         assert!(!kept.ends_with('\u{FFFD}'));
-        assert_eq!(kept.as_bytes().len() % 3, 0, "cut must fall on a 3-byte boundary");
+        assert_eq!(
+            kept.as_bytes().len() % 3,
+            0,
+            "cut must fall on a 3-byte boundary"
+        );
         assert!(out.contains("original 24 bytes"));
     }
 

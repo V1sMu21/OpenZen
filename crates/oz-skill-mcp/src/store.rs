@@ -80,9 +80,7 @@ impl SkillMcpStore {
         true
     }
 
-    fn fingerprint(
-        base_dir: &Path,
-    ) -> std::collections::BTreeMap<PathBuf, (u64, u64)> {
+    fn fingerprint(base_dir: &Path) -> std::collections::BTreeMap<PathBuf, (u64, u64)> {
         let mut out = std::collections::BTreeMap::new();
         fingerprint_tree(&base_dir.join("skills"), 2, &["md", "toml"], &mut out);
         fingerprint_tree(&base_dir.join("sops"), 2, &["md"], &mut out);

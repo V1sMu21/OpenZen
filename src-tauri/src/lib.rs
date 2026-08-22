@@ -585,8 +585,7 @@ pub struct AppState {
     /// Process-wide shared skill/SOP store (round3 P1-d): built once from
     /// `skill_mcp_dir`, kept parsed, and reloaded incrementally (mtime-gated)
     /// before each run instead of re-walking the tree per user message.
-    pub shared_skill_store:
-        std::sync::Mutex<Option<(String, std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>)>>,
+    pub shared_skill_store: SharedSkillStoreCell,
     pub projects: Mutex<Vec<projects::store::ProjectRecord>>,
     pub crystallization_enabled: AtomicBool,
     /// "完全访问" (full access): when set, the approval handler auto-allows
@@ -778,12 +777,19 @@ pub(crate) fn lock_poison_guard<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexG
     })
 }
 
+/// Cell holding the process-wide skill store plus the directory it was
+/// built from, so a changed config rebuilds it (round3 P1-d).
+pub(crate) type SharedSkillStoreCell = std::sync::Mutex<
+    Option<(
+        String,
+        std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>,
+    )>,
+>;
+
 /// Fetch the process-wide parsed skill store for `dir`, building it on first
 /// use and rebuilding if the configured directory changed (P1-d).
 pub(crate) fn get_or_init_skill_store(
-    cell: &std::sync::Mutex<
-        Option<(String, std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>)>,
-    >,
+    cell: &SharedSkillStoreCell,
     dir: &str,
 ) -> std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>> {
     let mut guard = lock_poison_guard(cell);
@@ -792,9 +798,10 @@ pub(crate) fn get_or_init_skill_store(
             return std::sync::Arc::clone(store);
         }
     }
-    let store = std::sync::Arc::new(tokio::sync::Mutex::new(
-        oz_skill_mcp::SkillMcpStore::new(std::path::Path::new(dir), Some(dir.into())),
-    ));
+    let store = std::sync::Arc::new(tokio::sync::Mutex::new(oz_skill_mcp::SkillMcpStore::new(
+        std::path::Path::new(dir),
+        Some(dir.into()),
+    )));
     *guard = Some((dir.to_string(), std::sync::Arc::clone(&store)));
     store
 }

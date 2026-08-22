@@ -4,9 +4,9 @@
 //! slots, and persists the final assistant message with duration + token
 //! counts back to the session store.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use oz_config::mykey::{MyKeyConfig, SessionType};
@@ -737,8 +737,10 @@ pub async fn run_agent_for_session(
     // happens inside the loop); without it the loop re-parses every SKILL.md
     // per user message.
     if let Some(dir) = state.skill_mcp_dir.clone() {
-        loop_config.skill_mcp_store =
-            Some(crate::get_or_init_skill_store(&state.shared_skill_store, &dir));
+        loop_config.skill_mcp_store = Some(crate::get_or_init_skill_store(
+            &state.shared_skill_store,
+            &dir,
+        ));
     }
     loop_config.enable_crystallization = state
         .crystallization_enabled

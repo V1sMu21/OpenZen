@@ -35,7 +35,7 @@ pub struct SoulModel {
 
 impl SoulModel {
     pub fn new() -> Self {
-        Self {
+        let mut soul = Self {
             core: SoulCore::default(),
             state: SoulState::new(),
             self_portrait: Portrait::new(),
@@ -43,7 +43,10 @@ impl SoulModel {
             relationship: Relationship::default(),
             narrative: LifeNarrative::new(),
             version: SOUL_VERSION,
-        }
+        };
+        // 新生的灵魂不允许停留在「未命名」占位：用诞生时刻命名。
+        soul.core.name_if_unnamed();
+        soul
     }
 
     /// 从 JSON 字符串加载（向后兼容：旧 L0SelfModel 的 data 字段迁移）。
@@ -52,9 +55,12 @@ impl SoulModel {
     /// - 旧 `data.core_identity` → `SoulCore.identity`
     /// - 旧 `data.last_updated` → `SoulState.last_updated_nanos`
     /// - 其余字段保留默认值；解析失败时返回错误。
+    ///
+    /// 旧文件若从未命名（identity 仍为占位符），同样用诞生时刻补名。
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         // 先尝试新格式
-        if let Ok(soul) = serde_json::from_str::<SoulModel>(json) {
+        if let Ok(mut soul) = serde_json::from_str::<SoulModel>(json) {
+            soul.core.name_if_unnamed();
             return Ok(soul);
         }
         // 旧格式：{ data: { core_identity, ... } }
@@ -72,6 +78,7 @@ impl SoulModel {
         if let Some(total) = data.get("total_memories").and_then(|v| v.as_u64()) {
             soul.state.confidence = if total == 0 { 0.0 } else { 1.0 };
         }
+        soul.core.name_if_unnamed();
         Ok(soul)
     }
 
@@ -183,11 +190,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nope.json");
         let soul = SoulModel::load_from(&path).unwrap();
-        // 时间戳在两次构造间不同，逐字段比较结构而非整体相等
-        assert_eq!(soul.core.identity, SoulModel::new().core.identity);
-        assert_eq!(soul.version, SoulModel::new().version);
+        // 默认模型出生即被命名（诞生时刻派生），且原则仍为默认值
+        assert_eq!(soul.core.identity, soul.core.birth_name());
+        assert_eq!(soul.version, SOUL_VERSION);
         assert!(soul.narrative.chapters.is_empty());
         assert!(soul.user_portrait.facts.is_empty());
+    }
+
+    #[test]
+    fn test_unnamed_placeholders_get_birth_name() {
+        assert!(!SoulModel::new().core.is_unnamed());
+        // 新格式文件里残留占位身份 → 加载时补名
+        let fresh = SoulModel::new();
+        let mut parsed: SoulModel = serde_json::from_str(&fresh.to_json()).unwrap();
+        parsed.core.identity = crate::l0::core::DEFAULT_IDENTITY.into();
+        let json = serde_json::to_string(&parsed).unwrap();
+        let loaded = SoulModel::from_json(&json).unwrap();
+        assert_eq!(loaded.core.identity, loaded.core.birth_name());
+        // 显式身份绝不被动补名
+        let mut explicit = SoulModel::new();
+        explicit.core.identity = "修砚".into();
+        let back = SoulModel::from_json(&explicit.to_json()).unwrap();
+        assert_eq!(back.core.identity, "修砚");
+        // 空串同样视为未命名
+        let mut blank = SoulModel::new();
+        blank.core.identity = String::new();
+        assert!(blank.core.is_unnamed());
     }
 
     #[test]

@@ -52,6 +52,11 @@ use crate::webui::sessions::SessionStatus;
 use crate::webui::sse_bus::SseEvent;
 
 /// Shared application state for the WebUI server.
+/// Session id → ask_user reply slot (question-id keyed).
+type AskUserSlotInner = HashMap<String, String>;
+/// Session id → reply slot.
+type AskUserRxs = Mutex<HashMap<String, Arc<Mutex<AskUserSlotInner>>>>;
+
 pub struct AppState {
     pub config_path: String,
     pub assets_dir: String,
@@ -63,7 +68,9 @@ pub struct AppState {
     /// Per-session ask_user reply slots: the agent loop blocks on the
     /// session's slot while `ask_user` is pending, and resumes the same
     /// run with the reply as a tool_result (no new run / no new user msg).
-    pub ask_user_rxs: Mutex<HashMap<String, Arc<Mutex<HashMap<String, String>>>>>,
+    /// Session id → (question-id → reply) slots; `__last__` is the legacy
+    /// key for writers that cannot supply a tool_use_id (round3 P1-i).
+    pub ask_user_rxs: AskUserRxs,
     /// Per-session stop signals that the running agent loop polls. When the user
     /// clicks "Stop" the corresponding AtomicBool is flipped to true and the
     /// loop checks it between tool calls / turns.
@@ -2055,7 +2062,10 @@ async fn handle_ask_user_response(
         }
     };
     // Legacy key when the client cannot supply the question id (P1-i).
-    let key = req.tool_use_id.clone().unwrap_or_else(|| "__last__".to_string());
+    let key = req
+        .tool_use_id
+        .clone()
+        .unwrap_or_else(|| "__last__".to_string());
     slot.lock().unwrap().insert(key, req.response.clone());
 
     let _ = state.sse_bus.send(SseEvent::system(

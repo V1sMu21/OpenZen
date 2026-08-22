@@ -95,7 +95,7 @@ impl MmapWal {
         let len_bytes = (json.len() as u32).to_le_bytes();
         self.map[self.cursor..self.cursor + 4].copy_from_slice(&len_bytes);
         // Write JSON data
-        self.map[self.cursor + 4..self.cursor + record_len].copy_from_slice(&json);
+        self.map[self.cursor + 4..self.cursor + record_len].copy_from_slice(json);
         self.cursor += record_len;
         Ok(())
     }

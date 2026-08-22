@@ -311,8 +311,8 @@ pub fn render_context_relevant_cached(
 ) -> String {
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
-    static CACHE: LazyLock<Mutex<HashMap<PathBuf, (std::time::Instant, Vec<HarnessEntry>)>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+    type LedgerCache = HashMap<PathBuf, (std::time::Instant, Vec<HarnessEntry>)>;
+    static CACHE: LazyLock<Mutex<LedgerCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let fresh = match cache.get(dir) {
         Some((at, _)) => at.elapsed() < std::time::Duration::from_secs(300),
@@ -332,7 +332,12 @@ pub fn render_context_relevant_cached(
     render_entries(&refs, kind, limit, query)
 }
 
-fn render_entries(entries: &[&HarnessEntry], kind: HarnessKind, limit: usize, query: &str) -> String {
+fn render_entries(
+    entries: &[&HarnessEntry],
+    kind: HarnessKind,
+    limit: usize,
+    query: &str,
+) -> String {
     let mut entries = entries.to_vec();
     if entries.is_empty() {
         return String::new();

@@ -57,7 +57,10 @@ impl WebScanTool {
     }
 
     fn get_browser(&self) -> BrowserClient {
-        let mut b = self.browser.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut b = self
+            .browser
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if b.is_none() {
             *b = Some(BrowserClient::new("http://127.0.0.1:18765"));
         }

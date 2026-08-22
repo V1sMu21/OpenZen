@@ -762,21 +762,24 @@ mod memory_recall_eval {
             let found = store
                 .recall(&Query::by_text(q), 3)
                 .map(|v| {
-                    v.iter()
-                        .any(|(m, _, _)| match &m.content {
-                            MemoryContent::Fact(f) => {
-                                format!("{} {} {}", f.subject, f.predicate, f.object)
-                                    .contains(marker)
-                            }
-                            MemoryContent::Summary(t) => t.contains(marker),
-                            _ => false,
-                        })
+                    v.iter().any(|(m, _, _)| match &m.content {
+                        MemoryContent::Fact(f) => {
+                            format!("{} {} {}", f.subject, f.predicate, f.object).contains(marker)
+                        }
+                        MemoryContent::Summary(t) => t.contains(marker),
+                        _ => false,
+                    })
                 })
                 .unwrap_or(false);
             if found {
                 hits += 1;
             }
-            println!("{:>2}/10 {} {}", hits, if found { "HIT " } else { "MISS" }, q);
+            println!(
+                "{:>2}/10 {} {}",
+                hits,
+                if found { "HIT " } else { "MISS" },
+                q
+            );
         }
         println!("hit-rate: {hits}/10");
     }

@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::now_nanos;
 
+/// 未命名灵魂的占位身份（`SoulCore::default` 初始值）。
+pub const DEFAULT_IDENTITY: &str = "未命名的记忆体";
+
 /// 核心良知：几乎不变。对应「无善无恶心之体」。
 ///
 /// `SoulCore` 承载身份锚点、原则与价值观权重。它的更新速率极慢——
@@ -30,6 +33,23 @@ impl SoulCore {
         }
     }
 
+    /// 是否仍停留在未命名占位（含空串）。
+    pub fn is_unnamed(&self) -> bool {
+        self.identity.is_empty() || self.identity == DEFAULT_IDENTITY
+    }
+
+    /// 由诞生时刻派生稳定名字（UTC 日期，细粒度到天即可）。
+    pub fn birth_name(&self) -> String {
+        format!("记忆体 · 醒于 {}", format_birth_date(self.created_at_nanos))
+    }
+
+    /// 未命名时用诞生时刻命名，避免身份锚点长期停留在占位符。
+    pub fn name_if_unnamed(&mut self) {
+        if self.is_unnamed() {
+            self.identity = self.birth_name();
+        }
+    }
+
     /// 顶层的良知原则，用于注入提示词。
     pub fn principle_summary(&self) -> String {
         if self.principles.is_empty() {
@@ -40,10 +60,27 @@ impl SoulCore {
     }
 }
 
+/// 从 Unix 纪元纳秒派生 UTC 公历日期（civil-from-days 算法，无第三方依赖；
+/// 名字只需「哪天醒来」，不需要时区精度）。
+fn format_birth_date(nanos: i64) -> String {
+    let days = nanos.div_euclid(86_400_000_000_000);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 impl Default for SoulCore {
     fn default() -> Self {
         Self {
-            identity: "未命名的记忆体".into(),
+            identity: DEFAULT_IDENTITY.into(),
             principles: vec!["知行合一".into(), "诚实优先".into()],
             value_weights: HashMap::from([
                 ("truth".into(), 0.8_f32),
