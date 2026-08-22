@@ -57,7 +57,7 @@ impl ToolHandler for LongTermTool {
                 let tools: Vec<(String, serde_json::Value)> = Vec::new();
                 store
                     .sops
-                    .crystallise(data, data, &tools, None)
+                    .crystallise(data, data, &tools, None, None)
                     .map_err(|e| ToolError::Custom(e.to_string()))?;
 
                 Ok(ToolOutput::success_with_prompt(

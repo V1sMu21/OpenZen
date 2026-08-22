@@ -115,7 +115,7 @@ impl ToolHandler for SkillMcpStoreTool {
             "sop" => {
                 let tools: Vec<(String, serde_json::Value)> = Vec::new();
                 let sop = store
-                    .crystallise_sop(name, description, &tools, None)
+                    .crystallise_sop(name, description, &tools, None, None)
                     .map_err(|e| ToolError::Custom(e.to_string()))?;
 
                 Ok(ToolOutput::success_with_prompt(
