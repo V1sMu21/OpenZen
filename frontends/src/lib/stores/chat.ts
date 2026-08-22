@@ -1540,7 +1540,7 @@ function createChatStore() {
       return null;
     },
 
-    setPendingAskUser(pending: { question: string; candidates: string[] }) {
+    setPendingAskUser(pending: PendingAskUser) {
       update((s) => ({ ...s, pendingAskUser: pending }));
     },
 
