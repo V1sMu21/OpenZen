@@ -171,8 +171,13 @@ impl Crystallizer {
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
 
-                    let _ =
-                        store.crystallise_sop(name, description, tool_sequence, session_id.clone(), None);
+                    let _ = store.crystallise_sop(
+                        name,
+                        description,
+                        tool_sequence,
+                        session_id.clone(),
+                        None,
+                    );
                     results.push(CrystallizeResult::SopCreated {
                         name: name.to_string(),
                     });

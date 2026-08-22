@@ -61,7 +61,9 @@ mod e2e_tests {
         );
 
         let seq = vec![("read".to_string(), serde_json::json!({"path": "/tmp"}))];
-        store.crystallise_sop("check", "Check", &seq, None, None).unwrap();
+        store
+            .crystallise_sop("check", "Check", &seq, None, None)
+            .unwrap();
         assert_eq!(store.sop_count(), 1);
         assert!(!store.find_sops("check").is_empty());
 

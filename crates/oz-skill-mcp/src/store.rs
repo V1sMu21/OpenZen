@@ -228,7 +228,8 @@ impl SkillMcpStore {
         session_id: Option<String>,
         verified_by: Option<&str>,
     ) -> Result<crate::sop::Sop, SkillMcpError> {
-        self.sops.crystallise(name, description, tool_sequence, session_id, verified_by)
+        self.sops
+            .crystallise(name, description, tool_sequence, session_id, verified_by)
     }
 
     /// Record a successful SOP usage.
