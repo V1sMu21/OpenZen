@@ -319,12 +319,17 @@ mod tests {
     #[test]
     fn reload_incremental_skips_unchanged_tree_and_picks_up_new_files() {
         let (dir, mut store) = tmp_skill_mcp();
-        let skills_dir = dir.path().join("skills").join("alpha");
+        let skills_dir = store.base_dir().join("skills").join("alpha");
         std::fs::create_dir_all(&skills_dir).unwrap();
 
-        // Baseline: empty tree, first call establishes the fingerprint.
-        assert!(!store.reload_incremental(), "first call only snapshots");
+        // Baseline: empty tree. The very first call upgrades the None
+        // sentinel to an empty snapshot (a harmless no-op reload).
+        store.reload_incremental();
         assert_eq!(store.skill_count(), 0);
+        assert!(
+            !store.reload_incremental(),
+            "unchanged empty tree must skip"
+        );
 
         // New skill lands → fingerprint differs → full reload, count grows.
         std::fs::write(
