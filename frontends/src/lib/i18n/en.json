@@ -274,6 +274,7 @@
   "sidepanel.modified": "Modified",
   "sidepanel.officePreviewHint": "This file format cannot be previewed inline. Open it with your system's default application.",
   "status.compressing": "Compressing context: {before} → {after} tokens",
+  "status.compressingPending": "Compressing context (long tasks may take about a minute)…",
   "status.cloud": "Cloud",
   "status.localDeploy": "Local",
   "status.msgs": "msgs",
@@ -305,5 +306,6 @@
   "reminder.every": "every",
   "reminder.next": "next",
   "reminder.once": "one-shot",
-  "reminder.left": "left"
+  "reminder.left": "left",
+  "soul.unnamed": "Unnamed"
 }

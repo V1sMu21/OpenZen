@@ -274,6 +274,7 @@
   "sidepanel.modified": "修改时间",
   "sidepanel.officePreviewHint": "此文件格式无法内联预览。请使用系统默认应用打开。",
   "status.compressing": "压缩上下文中: {before} → {after} tokens",
+  "status.compressingPending": "正在压缩上下文（长任务可能需要约一分钟）…",
   "status.cloud": "云端API",
   "status.localDeploy": "本地部署",
   "status.msgs": "条消息",
@@ -305,5 +306,6 @@
   "reminder.every": "每",
   "reminder.next": "下次",
   "reminder.once": "定时",
-  "reminder.left": "次剩余"
+  "reminder.left": "次剩余",
+  "soul.unnamed": "无名"
 }

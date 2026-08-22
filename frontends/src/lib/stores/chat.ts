@@ -1130,6 +1130,16 @@ function createChatStore() {
           if (protoEvent.type === 'data_compressing_context') {
             const ev = protoEvent as unknown as { before_tokens: number; after_tokens: number };
             import("../i18n/index").then(({ localT }) => {
+              // after_tokens=0 is the backend's pending marker (P1-h): the
+              // summary model is still running. Show a persistent notice —
+              // no auto-dismiss timer — until the real numbers arrive.
+              if (ev.after_tokens === 0) {
+                update((s) => ({
+                  ...s,
+                  compressionNotice: localT("status.compressingPending", "Compressing context…"),
+                }));
+                return;
+              }
               const notice = localT("status.compressing", "Compressing context: {before} → {after} tokens")
                 .replace("{before}", formatTokenCount(ev.before_tokens))
                 .replace("{after}", formatTokenCount(ev.after_tokens));

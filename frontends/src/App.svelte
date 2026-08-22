@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+  import { getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { sessions } from "./lib/stores/sessions";
   import { projects } from "./lib/stores/projects";
   import { chat } from "./lib/stores/chat";
@@ -25,6 +25,73 @@
   import { t, locale } from "./lib/i18n";
   import { sidepanel } from "./lib/stores/sidepanel.svelte";
   import ThemeSwitcher from "./lib/components/ThemeSwitcher.svelte";
+
+  // 宠物小猫咪：创建/聚焦透明置顶小窗（插件式，pet/pet.html 独立 webview）
+  function handlePetClick() {
+    console.log("[pet] seal clicked");
+    ensurePetWindow();
+  }
+  // 轻量桌面 toast：点击 seal 后给出可见反馈（成功/失败不再静默）
+  let petToast = $state("");
+  let petToastTimer: ReturnType<typeof setTimeout> | undefined;
+  function showPetToast(msg: string) {
+    petToast = msg;
+    clearTimeout(petToastTimer);
+    petToastTimer = setTimeout(() => (petToast = ""), 2400);
+  }
+  async function ensurePetWindow() {
+    try {
+      // 宠物窗是 tauri.conf.json 里声明的静态窗口（启动即建、隐藏），
+      // seal 点击只需显示/置顶——动态创建 webview 的资产加载不可靠，
+      // 静态窗口走与主窗相同的加载路径，也省去创建等待。
+      const existing = await WebviewWindow.getByLabel("pet");
+      if (existing) {
+        try { await existing.show(); } catch (_) {}
+        try { await existing.setFocus(); } catch (_) {}
+        try { await existing.setAlwaysOnTop(true); } catch (_) {}
+        showPetToast("🐱 阿青回来啦");
+        console.log("[pet] shown existing window");
+        return;
+      }
+      // 兜底：窗口不存在（配置异常）时动态创建。
+      // 注意：WebviewWindow 构造是异步 fire-and-forget，创建成败通过
+      // tauri://created / tauri://error 事件上报；不监听会让失败静默
+      // （toast 照弹但窗口根本没出现）。
+      const w = new WebviewWindow("pet", {
+        url: "/pet/pet.html",
+        width: 260,
+        height: 340,
+        resizable: false,
+        transparent: true,
+        decorations: false,
+        alwaysOnTop: true,
+        visible: true,
+        focus: true,
+        skipTaskbar: true,
+        shadow: false,
+      });
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("超时（10s 未收到创建回执）")), 10_000);
+        w.once("tauri://created", () => { clearTimeout(timer); resolve(); });
+        w.once("tauri://error", (e) => {
+          const msg = (e as { message?: string } | null)?.message ?? "创建被拒绝";
+          clearTimeout(timer);
+          reject(new Error(msg));
+        });
+      });
+      // 防御性置前：macOS 下程序化创建的置顶透明窗偶发落在主窗之后
+      try { await w.show(); } catch (_) {}
+      try { await w.setFocus(); } catch (_) {}
+      try { await w.setAlwaysOnTop(true); } catch (_) {}
+      showPetToast("🐱 阿青放到桌面啦");
+      console.log("[pet] created /pet/pet.html");
+    } catch (e) {
+      console.error("[pet] create failed", e);
+      const msg = e instanceof Error ? e.message : String(e);
+      // P2-s: native alert() blocks the whole webview — use the in-page toast.
+      showPetToast("⚠️ 宠物窗创建失败: " + msg);
+    }
+  }
 
 
   let sidebarOpen = $state(true);
@@ -247,10 +314,19 @@
       if (offsets[mid + 1] < topEdge) lo = mid + 1;
       else hi = mid;
     }
-    const start = lo;
+    let start = lo;
     const bottomEdge = scrollTop + viewportHeight + overscan;
     let end = start;
     while (end < count && offsets[end] < bottomEdge) end++;
+    // Never hand back an empty window while messages exist. Measured
+    // heights go stale when a row grows in place (timeline/card
+    // expansion, late image load), so scrollTop can land past the
+    // virtual total; an empty slice unmounts every row and drops their
+    // local UI state (e.g. timelineExpanded) on remount — the "expand
+    // flashes but stays folded" symptom. Clamp to a non-empty window;
+    // the settle re-measure converges the geometry right after.
+    if (start >= count) start = Math.max(0, count - 1);
+    if (end <= start) end = Math.min(count, start + 1);
     return {
       slice: msgs.slice(start, end),
       beforeHeight: offsets[start],
@@ -261,24 +337,36 @@
   // Measure rendered rows and record their real heights. Re-runs when the
   // window shifts; a settle re-check catches heights that changed after
   // the first paint (images, code highlight, card expansion).
+  function measureRowHeights() {
+    let changed = false;
+    for (const row of document.querySelectorAll<HTMLElement>("[data-message-id]")) {
+      const id = row.dataset.messageId;
+      if (!id) continue;
+      const h = row.getBoundingClientRect().height;
+      const known = rowHeights.get(id);
+      if (h > 0 && (known === undefined || Math.abs(known - h) > 1)) {
+        rowHeights.set(id, h);
+        changed = true;
+      }
+    }
+    if (changed) heightsVersion += 1;
+  }
+
+  // Debounced re-measure after content changes that did NOT shift the
+  // virtual window (e.g. the user expanded an activity timeline or a card
+  // in a historical message) so rowHeights converge without a scroll —
+  // otherwise the next scroll computes the window from the stale
+  // collapsed height and rows misplace / jump.
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleSettleMeasure(delay = 150) {
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(measureRowHeights, delay);
+  }
+
   $effect(() => {
     void virtualWindow.slice;
-    const measure = () => {
-      let changed = false;
-      for (const row of document.querySelectorAll<HTMLElement>("[data-message-id]")) {
-        const id = row.dataset.messageId;
-        if (!id) continue;
-        const h = row.getBoundingClientRect().height;
-        const known = rowHeights.get(id);
-        if (h > 0 && (known === undefined || Math.abs(known - h) > 1)) {
-          rowHeights.set(id, h);
-          changed = true;
-        }
-      }
-      if (changed) heightsVersion += 1;
-    };
-    measure();
-    const t = window.setTimeout(measure, 150);
+    measureRowHeights();
+    const t = window.setTimeout(measureRowHeights, 150);
     return () => window.clearTimeout(t);
   });
 
@@ -423,6 +511,15 @@
   // changes that don't cause DOM mutations (e.g. isProcessing flag
   // flip while the same message is being streamed).
   onMount(() => {
+    // 主窗关闭时把宠物窗一并关掉：只有最后一个窗口关闭，Tauri 才会退出
+    // 应用。若只关主窗而宠物窗还开着，应用会"无窗存活"，Dock/头像再点
+    // 也打不开（macOS 不会自动重建主窗）。
+    getCurrentWebviewWindow().onCloseRequested(async () => {
+      const petWin = await WebviewWindow.getByLabel("pet").catch(() => null);
+      if (petWin) {
+        petWin.close().catch(() => {});
+      }
+    });
     initLocale();
     invoke<string>("get_working_dir").then(d => workingDir = d).catch(() => {});
     invoke<boolean>("get_crystallization").then(v => crystallizationOn = v).catch(() => {});
@@ -507,12 +604,44 @@
       readVirtualScrollMetrics();
       window.addEventListener('resize', readVirtualScrollMetrics, { passive: true });
 
-      listObserver = new MutationObserver(() => {
-        // Only auto-scroll if the user hasn't scrolled up manually.
-        // Card expansion inside earlier messages triggers DOM mutations
-        // (subtree childList) but should NOT yank the viewport away.
-        if (!userScrolledUp) {
+      listObserver = new MutationObserver((mutations) => {
+        // Only auto-scroll when the list actually GREW for the reader:
+        // new message rows being added, streaming characterData, or new
+        // content inside the LIVE message (current turn's cards/text).
+        // In-place changes to historical rows are user-driven expansions
+        // (activity timeline / card toggle) — those must NOT yank the
+        // viewport, and expanding at the bottom must not trigger a
+        // scroll that lands beyond the still-stale measured geometry
+        // (which caused the window to blank and rows to remount folded).
+        if (userScrolledUp) return;
+        let shouldScroll = false;
+        for (const m of mutations) {
+          if (m.type === "characterData") {
+            shouldScroll = true;
+            break;
+          }
+          for (const node of m.addedNodes) {
+            if (node.nodeType !== Node.ELEMENT_NODE) continue;
+            const el = node as HTMLElement;
+            if (el.matches("[data-message-id]")) {
+              shouldScroll = true;
+              break;
+            }
+            const host = el.closest("[data-message-id]");
+            if (host && host.getAttribute("data-message-id") === liveMessageId) {
+              shouldScroll = true;
+              break;
+            }
+          }
+          if (shouldScroll) break;
+        }
+        if (shouldScroll) {
           scrollToBottom();
+        } else {
+          // Historical-row content changed (user expanded a card or the
+          // timeline): re-measure on a settle so the virtual window uses
+          // the new row height without waiting for a scroll.
+          scheduleSettleMeasure();
         }
       });
       listObserver.observe(list, {
@@ -834,7 +963,7 @@
           {/if}
         </svg>
       </button>
-      <span class="seal" title="OpenZen"><img class="seal-icon" src="/cat-icon.png" alt="OpenZen" /></span>
+      <span class="seal" title="OpenZen" onclick={() => handlePetClick()} style="cursor:pointer"><img class="seal-icon" src="/cat-icon.png" alt="OpenZen" /></span>
       <span class="title-name">修砚</span>
       <span class="inscription era">丙午 制</span>
       <!-- 运行状态指示: 活跃态(运行中/待确认)带墨滴涟漪动画, 完成态静态圆点 -->
@@ -955,8 +1084,14 @@
               {/if}
             </div>
           {/if}
-          <!-- 灵魂/记忆状态卡片：自隐藏（未启用/未加载时不占布局），
-               ERME 启用时以 sticky 卡片显示在会话区右侧 -->
+        </div>
+
+        <!-- 灵魂/记忆状态卡片：浮动于会话区右上角，不占布局宽度——
+             待办栏出现/消失不再挤压或移动它；待办栏在场时让位到其左侧 -->
+        <div
+          class="soul-float"
+          class:shifted={$chat.todos.length > 0 || $chat.reminders.length > 0}
+        >
           <SoulCard />
         </div>
       {/if}
@@ -1055,6 +1190,10 @@
   </main>
 
   <SidePanel />
+
+  {#if petToast}
+    <div class="pet-toast">{petToast}</div>
+  {/if}
 </div>
 
 <AuthDialog />
@@ -1280,6 +1419,23 @@
   }
   .todo-rail .todo-progress {
     margin: 0;
+  }
+
+  /* 灵魂卡悬浮层: 绝对定位不占 flex 布局宽度, 待办栏增减不再挤压会话列
+     或移动卡片; 待办栏在场时右移让出 320px+间距, 否则贴右缘。外层空白
+     不拦截滚动/点击, 只有卡片本体可交互。 */
+  .soul-float {
+    position: absolute;
+    top: 28px;
+    right: 0;
+    z-index: 5;
+    pointer-events: none;
+  }
+  .soul-float.shifted {
+    right: calc(320px + 24px);
+  }
+  .soul-float :global(.soul-card) {
+    pointer-events: auto;
   }
 
   .empty-chat {
@@ -1641,5 +1797,28 @@
   @keyframes drop-bounce {
     0%, 100% { transform: translateY(0); }
     50% { transform: translateY(-6px); }
+  }
+
+  /* 宠物开关 toast */
+  .pet-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 28px;
+    transform: translateX(-50%);
+    z-index: 200;
+    padding: 8px 16px;
+    border-radius: 999px;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-hairline);
+    color: var(--color-ink);
+    font-size: 13px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+    white-space: nowrap;
+    animation: petToastIn 0.18s ease-out;
+  }
+  @keyframes petToastIn {
+    from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
   }
 </style>
