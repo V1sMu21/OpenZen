@@ -1052,6 +1052,21 @@ pub async fn run_agent_for_session(
             err_msg.unwrap_or("(none)"),
             full_len,
         ));
+
+        // D2 (round3): abnormal exits proactively tell the user instead of
+        // leaving a silently-dead session in the background — the companion
+        // should say "I'm stuck" rather than disappear. Normal completions
+        // already notify through the finish path below.
+        if matches!(
+            outcome.exit_reason.as_str(),
+            "llm_stuck" | "llm_error" | "llm_timeout" | "max_turns_exhausted"
+        ) {
+            let body = format!(
+                "任务在{}轮后异常中止（{}）。回来戳一下阿青，可以 /resume 继续。",
+                outcome.turn, outcome.exit_reason
+            );
+            crate::notify_if_unfocused(app, "OpenZen · 需要你", &body);
+        }
     }
 
     // Send terminal event through the event channel

@@ -294,6 +294,7 @@
   "soul.identity": "Identity",
   "soul.memories": "Memories",
   "soul.mood": "Mood",
+  "soul.embeddings": "Embeddings",
   "soul.narrative": "Narrative",
   "soul.portraitFacts": "User portrait facts",
   "soul.recalls": "Recalls",

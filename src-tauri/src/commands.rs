@@ -181,6 +181,7 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
 
     serde_json::json!({
         "enabled": true,
+        "embedding_kind": runtime.store.router().l2_engine().embedding_kind(),
         "soul": soul,
         "store": {
             "total_entries": stats.total_entries,

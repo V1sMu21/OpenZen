@@ -235,6 +235,15 @@ pub fn build_embedding_model(config: &EmbeddingConfig) -> Box<dyn EmbeddingModel
     if uses_mlx_embeddings(config) {
         return Box::new(MLXEmbedding::new(config));
     }
+    // D1 (round3): the hash fallback makes semantic similarity near-random,
+    // so silent fallback directly degrades "recall what we discussed".
+    // Scream about it once at startup with the actionable reason.
+    tracing::warn!(
+        "ERME embeddings falling back to HashEmbedding (semantic recall will be weak).          enable_mlx={} dimension={} (MLX needs {MLX_EMBEDDING_DIMENSION}) mlx_available={}",
+        config.enable_mlx,
+        config.dimension,
+        crate::l3::compress::check_mlx_available(),
+    );
     Box::new(HashEmbedding::new(config.dimension))
 }
 

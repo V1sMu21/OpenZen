@@ -51,6 +51,7 @@ pub struct L2Engine {
     pub storage: L2Storage,
     write_buffer: Arc<WriteBuffer>,
     embedder: Box<dyn EmbeddingModel>,
+    embedding_kind: &'static str,
 }
 
 impl L2Engine {
@@ -82,7 +83,18 @@ impl L2Engine {
             storage: L2Storage::new(),
             write_buffer: wb,
             embedder,
+            embedding_kind: if super::embedding::uses_mlx_embeddings(&embedding_config) {
+                "mlx"
+            } else {
+                "hash-fallback"
+            },
         }
+    }
+
+    /// Which embedder is active — surfaced through memory status so the UI
+    /// can show when semantic recall is running on the hash fallback.
+    pub fn embedding_kind(&self) -> &'static str {
+        self.embedding_kind
     }
 
     pub fn config(&self) -> &L2Config {

@@ -693,3 +693,91 @@ mod tests {
         );
     }
 }
+
+/// D3 (round3): memory-recall evaluation set — 10 seeded facts, each probed
+/// by a next-day-style paraphrase. Report-only (prints a hit-rate table);
+/// run explicitly with:
+///   cargo test -p oz-tests memory_recall_eval -- --ignored --nocapture
+#[cfg(test)]
+mod memory_recall_eval {
+    use entropy_memory_engine::core::types::{Fact, LayerId, MemoryContent, MemoryInput, Query};
+    use entropy_memory_engine::l1::L1Cache;
+    use entropy_memory_engine::memory_store::MemoryStore;
+
+    fn seed_store() -> MemoryStore {
+        let l1 = L1Cache::builder().capacity(1_000).build();
+        let l2 = entropy_memory_engine::l2::L2Engine::new(Default::default());
+        let l3_tmp = tempfile::tempdir().unwrap();
+        let l3 = entropy_memory_engine::l3::L3Engine::new(entropy_memory_engine::l3::L3Config {
+            storage_path: l3_tmp.path().join("eval.bin"),
+            ..Default::default()
+        });
+        let store = MemoryStore::new(
+            l1,
+            std::sync::Arc::new(l2),
+            l3,
+            entropy_memory_engine::consolidation::ConsolidationConfig::default(),
+        );
+        let facts: [(&str, &str, &str); 10] = [
+            ("用户", "主力编辑器是", "Zed"),
+            ("用户", "养了一只猫叫", "阿青"),
+            ("用户", "偏好的编程语言是", "Rust"),
+            ("用户", "生日在", "三月"),
+            ("用户", "讨厌的技术是", "正则表达式"),
+            ("用户", "常去的咖啡馆在", "余杭"),
+            ("用户", "的项目用", "Tauri 桌面端"),
+            ("用户", "的时区是", "UTC+8 上海"),
+            ("用户", "喜欢在", "深夜写代码"),
+            ("用户", "的键盘是", "HHKB"),
+        ];
+        for (s, p, o) in facts {
+            let input = MemoryInput::new(MemoryContent::Fact(Fact::new(s, p, o)));
+            let mut input = input;
+            input.importance = 0.9;
+            input.layer = LayerId::L3;
+            store.store(input).expect("seed fact");
+        }
+        store
+    }
+
+    #[test]
+    #[ignore = "report-only eval; run with --ignored --nocapture"]
+    fn recall_hit_rate_report() {
+        let cases: [(&str, &str); 10] = [
+            ("用户用什么编辑器写代码？", "Zed"),
+            ("用户的宠物叫什么名字？", "阿青"),
+            ("用户最喜欢哪门语言？", "Rust"),
+            ("用户生日是几月？", "三月"),
+            ("用户不喜欢什么技术？", "正则表达式"),
+            ("用户常去哪里喝咖啡？", "余杭"),
+            ("用户桌面项目用什么框架？", "Tauri"),
+            ("用户在哪个时区？", "上海"),
+            ("用户习惯什么时间段编程？", "深夜"),
+            ("用户用什么键盘？", "HHKB"),
+        ];
+        let store = seed_store();
+        let mut hits = 0usize;
+        println!("\n== 记忆召回评测（隔日追问式） ==");
+        for (q, marker) in cases {
+            let found = store
+                .recall(&Query::by_text(q), 3)
+                .map(|v| {
+                    v.iter()
+                        .any(|(m, _, _)| match &m.content {
+                            MemoryContent::Fact(f) => {
+                                format!("{} {} {}", f.subject, f.predicate, f.object)
+                                    .contains(marker)
+                            }
+                            MemoryContent::Summary(t) => t.contains(marker),
+                            _ => false,
+                        })
+                })
+                .unwrap_or(false);
+            if found {
+                hits += 1;
+            }
+            println!("{:>2}/10 {} {}", hits, if found { "HIT " } else { "MISS" }, q);
+        }
+        println!("hit-rate: {hits}/10");
+    }
+}

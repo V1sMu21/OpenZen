@@ -5,3 +5,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
+
+# D3 (round3): memory-recall evaluation harness runs as an explicit,
+# ignored test — dev-only so release builds never link the engine twice.
+[dev-dependencies]
+entropy_memory_engine = { path = "../../vendor/entropy-memory-engine" }
+tempfile = "3"

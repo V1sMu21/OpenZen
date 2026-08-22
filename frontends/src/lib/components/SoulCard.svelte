@@ -6,6 +6,7 @@
   /** Mirrors the get_memory_status command response (commands.rs). */
   interface SoulStatus {
     enabled: boolean;
+    embedding_kind?: string;
     soul?: {
       identity: string;
       mood: string;
@@ -82,6 +83,9 @@
       ? [
           { key: "soul.identity", value: status.soul.identity },
           { key: "soul.mood", value: status.soul.mood },
+          ...(status.embedding_kind
+            ? [{ key: "soul.embeddings", value: status.embedding_kind }]
+            : []),
           { key: "soul.confidence", value: pct(status.soul.confidence) },
           { key: "soul.portraitFacts", value: String(status.soul.portrait_facts) },
           { key: "soul.narrative", value: `${status.soul.narrative_chapters} ${$t("soul.chapters")}` },
