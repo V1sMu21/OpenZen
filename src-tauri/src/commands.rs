@@ -10,7 +10,8 @@ use oz_server::webui::sse_bus::SseEvent;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
-    data_dir, debug_log, lock_poison_guard, runner, AppState, ModelEntry, SendMessageResponse,
+    data_dir, debug_log, debug_log_flush, lock_poison_guard, runner, AppState, ModelEntry,
+    SendMessageResponse,
 };
 
 #[tauri::command]
@@ -75,6 +76,16 @@ pub fn ping(state: State<'_, Arc<AppState>>) -> serde_json::Value {
         "model_count": models.len(),
         "working_dir": state.working_dir,
     })
+}
+
+/// Frontend console bridge: persists a line to the debug log so release
+/// builds (no devtools) stay diagnosable. Cheap; used by startup paths and
+/// the heartbeat check. Flushes per line — this path is cold and the whole
+/// point is to see the line even if the app dies right after.
+#[tauri::command]
+pub fn log_frontend(line: String) {
+    debug_log(&format!("[web] {}", line.trim_end()));
+    debug_log_flush();
 }
 
 #[tauri::command]

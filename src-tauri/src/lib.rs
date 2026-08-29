@@ -66,6 +66,13 @@ impl DebugLogWriter {
             .map(std::io::BufWriter::new);
         self.written = 0;
     }
+
+    fn flush(&mut self) {
+        use std::io::Write as _;
+        if let Some(f) = self.file.as_mut() {
+            let _ = f.flush();
+        }
+    }
 }
 
 static DEBUG_LOG_WRITER: std::sync::OnceLock<std::sync::Mutex<DebugLogWriter>> =
@@ -127,6 +134,23 @@ pub(crate) fn debug_log(msg: &str) {
     });
     if let Ok(mut w) = writer.lock() {
         w.write(msg);
+    }
+}
+
+/// Flush the buffered debug log — used by the frontend log bridge so
+/// release-build diagnosis doesn't sit in an unflushed 8KB BufWriter.
+pub(crate) fn debug_log_flush() {
+    let writer = DEBUG_LOG_WRITER.get_or_init(|| {
+        let log_dir = data_dir().join("logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        std::sync::Mutex::new(DebugLogWriter {
+            path: log_dir.join("openzen.log"),
+            file: None,
+            written: 0,
+        })
+    });
+    if let Ok(mut w) = writer.lock() {
+        w.flush();
     }
 }
 
@@ -1286,6 +1310,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::clear_session_messages,
             commands::ping,
+            commands::log_frontend,
             commands::get_working_dir,
 commands::get_working_dir_for_session,
             commands::get_dashboard_stats,

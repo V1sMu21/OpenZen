@@ -28,6 +28,7 @@
   import ThemeSwitcher from "./lib/components/ThemeSwitcher.svelte";
   import { soulDisplayName } from "./lib/api/settings";
   import { soulStore } from "./lib/stores/soul.svelte";
+  import { isTauri, tauriInvoke } from "./lib/api/tauri";
 
   // 顶栏标题：用户给 agent 起的名字（null = 未命名，保持器物底款默认）。
   // 读共享 soul store：设置面板/灵魂卡里改名后这里即时更新。
@@ -915,6 +916,7 @@
     };
     try {
       await Promise.all([sessions.load(), projects.loadAll()]);
+      if (isTauri()) void tauriInvoke("log_frontend", { line: "startup: sessions+projects loaded" }).catch(() => {});
     } catch (e) {
       startupDebug("load sessions/projects", e);
     }
@@ -949,6 +951,7 @@
     // Connect real-time event stream FIRST: the heartbeat indicator (后端灯)
     // and streaming events must come up even if session restore below fails.
     connectSSE();
+    if (isTauri()) void tauriInvoke("log_frontend", { line: "startup: connectSSE done" }).catch(() => {});
 
     const savedId = localStorage.getItem("currentSessionId");
     const restoreId = windowSessionId ?? savedId;

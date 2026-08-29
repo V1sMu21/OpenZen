@@ -198,17 +198,21 @@ function scheduleReconnect() {
 async function checkHealth(): Promise<boolean> {
   if (isTauri()) {
     try {
+      void tauriInvoke("log_frontend", { line: "ping:start" }).catch(() => {});
       const result = await tauriInvoke("ping") as HeartbeatStatus;
+      void tauriInvoke("log_frontend", { line: "ping:ok" }).catch(() => {});
       heartbeat.set({ ...result, connected: true, lastPing: Date.now(), lastError: undefined });
       return true;
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      void tauriInvoke("log_frontend", { line: `ping:fail: ${msg}` }).catch(() => {});
       heartbeat.set({
         connected: false,
         lastPing: Date.now(),
         sessions: 0,
         runningAgents: 0,
         scheduler: false,
-        lastError: e instanceof Error ? e.message : String(e),
+        lastError: msg,
       });
       return false;
     }
