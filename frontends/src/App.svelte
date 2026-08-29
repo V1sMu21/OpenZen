@@ -21,15 +21,17 @@
   import TodoProgress from "./lib/components/TodoProgress.svelte";
   import ReminderCard from "./lib/components/ReminderCard.svelte";
   import SoulCard from "./lib/components/SoulCard.svelte";
+  import UpdateButton from "./lib/components/UpdateButton.svelte";
   import { initLocale } from "./lib/i18n";
   import { t, locale } from "./lib/i18n";
   import { sidepanel } from "./lib/stores/sidepanel.svelte";
   import ThemeSwitcher from "./lib/components/ThemeSwitcher.svelte";
 
-  // 宠物小猫咪：创建/聚焦透明置顶小窗（插件式，pet/pet.html 独立 webview）
+  // 宠物小猫咪：seal 点击切换显隐（再点一次即可关掉，不必右键菜单）。
+  // 宠物窗本体是 tauri.conf.json 里声明的静态窗口（启动即建、隐藏）。
   function handlePetClick() {
     console.log("[pet] seal clicked");
-    ensurePetWindow();
+    togglePetWindow();
   }
   // 轻量桌面 toast：点击 seal 后给出可见反馈（成功/失败不再静默）
   let petToast = $state("");
@@ -39,16 +41,26 @@
     clearTimeout(petToastTimer);
     petToastTimer = setTimeout(() => (petToast = ""), 2400);
   }
-  async function ensurePetWindow() {
+  async function togglePetWindow() {
     try {
-      // 宠物窗是 tauri.conf.json 里声明的静态窗口（启动即建、隐藏），
-      // seal 点击只需显示/置顶——动态创建 webview 的资产加载不可靠，
-      // 静态窗口走与主窗相同的加载路径，也省去创建等待。
       const existing = await WebviewWindow.getByLabel("pet");
       if (existing) {
+        // 已可见 → 隐藏（关闭）；不可见 → 显示并置顶。
+        // isVisible 失败（旧权限）时保守按"显示"处理，保持旧按钮行为。
+        let visible = true;
+        try { visible = await existing.isVisible(); } catch (_) {}
+        if (visible) {
+          await existing.hide();
+          showPetToast("🐱 阿青先去睡觉啦（再点印章唤醒）");
+          console.log("[pet] hidden via seal toggle");
+          return;
+        }
         try { await existing.show(); } catch (_) {}
-        try { await existing.setFocus(); } catch (_) {}
         try { await existing.setAlwaysOnTop(true); } catch (_) {}
+        // tao 的 show() = makeKeyAndOrderFront——宠物窗会抢走主窗 key 状态，
+        // macOS 对失活窗口的首个点击只做激活不投递内容，"再点一次关闭"
+        // 会变成要点两下。显示后立刻把焦点还给主窗。
+        try { await getCurrentWebviewWindow().setFocus(); } catch (_) {}
         showPetToast("🐱 阿青回来啦");
         console.log("[pet] shown existing window");
         return;
@@ -66,7 +78,7 @@
         decorations: false,
         alwaysOnTop: true,
         visible: true,
-        focus: true,
+        focus: false,
         skipTaskbar: true,
         shadow: false,
       });
@@ -79,10 +91,11 @@
           reject(new Error(msg));
         });
       });
-      // 防御性置前：macOS 下程序化创建的置顶透明窗偶发落在主窗之后
+      // 防御性置前：macOS 下程序化创建的置顶透明窗偶发落在主窗之后。
+      // 不拉焦点（同上：避免主窗失活吞掉下一次 seal 点击）。
       try { await w.show(); } catch (_) {}
-      try { await w.setFocus(); } catch (_) {}
       try { await w.setAlwaysOnTop(true); } catch (_) {}
+      try { await getCurrentWebviewWindow().setFocus(); } catch (_) {}
       showPetToast("🐱 阿青放到桌面啦");
       console.log("[pet] created /pet/pet.html");
     } catch (e) {
@@ -963,7 +976,7 @@
           {/if}
         </svg>
       </button>
-      <span class="seal" title="OpenZen" onclick={() => handlePetClick()} style="cursor:pointer"><img class="seal-icon" src="/cat-icon.png" alt="OpenZen" /></span>
+      <span class="seal" title="阿青 · 显示/隐藏桌面宠物" onclick={() => handlePetClick()} style="cursor:pointer"><img class="seal-icon" src="/cat-icon.png" alt="OpenZen" /></span>
       <span class="title-name">修砚</span>
       <span class="inscription era">丙午 制</span>
       <!-- 运行状态指示: 活跃态(运行中/待确认)带墨滴涟漪动画, 完成态静态圆点 -->
@@ -1000,6 +1013,8 @@
         <span class="switch-track"></span>
         <span class="switch-label">{$t("status.fullAccess")}</span>
       </label>
+      <!-- 自动更新入口: 平时隐藏, 检测到新版本时以绿色图标出现在标题栏右侧 -->
+      <UpdateButton />
       <ThemeSwitcher />
       <button class="header-btn header-btn-right" onclick={() => sidepanel.toggle()} title="Toggle Panel (⌘⇧E)">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1073,26 +1088,20 @@
             <div bind:this={messagesEnd}></div>
           </div>
 
-          {#if $chat.todos.length > 0 || $chat.reminders.length > 0}
-            <div class="todo-rail">
-              {#if $chat.todos.length > 0}
-                <TodoProgress items={$chat.todos} />
-              {/if}
-              {#if $chat.reminders.length > 0}
-                <!-- 定时/心跳任务卡片：位于待办事项卡片下方 -->
-                <ReminderCard items={$chat.reminders} />
-              {/if}
-            </div>
-          {/if}
-        </div>
-
-        <!-- 灵魂/记忆状态卡片：浮动于会话区右上角，不占布局宽度——
-             待办栏出现/消失不再挤压或移动它；待办栏在场时让位到其左侧 -->
-        <div
-          class="soul-float"
-          class:shifted={$chat.todos.length > 0 || $chat.reminders.length > 0}
-        >
-          <SoulCard />
+          <!-- 右侧状态栏：待办 / 提醒 / 灵魂卡垂直堆叠于同一栏。
+               三张卡片共享同一流式布局（互斥于构造层面，不可能重叠），
+               随滚动区 sticky 置顶。栏内无可见卡片时 :has() 整栏隐藏，
+               归还消息列宽度。 -->
+          <div class="todo-rail">
+            {#if $chat.todos.length > 0}
+              <TodoProgress items={$chat.todos} />
+            {/if}
+            {#if $chat.reminders.length > 0}
+              <!-- 定时/心跳任务卡片：位于待办事项卡片下方 -->
+              <ReminderCard items={$chat.reminders} />
+            {/if}
+            <SoulCard />
+          </div>
         </div>
       {/if}
 
@@ -1363,7 +1372,9 @@
     flex-direction: column;
     gap: 16px;
     flex: 1;
-    max-width: 660px;
+    /* 流式宽度: 跟随窗口伸展（含 todo-rail 让位后的剩余空间），
+       1200px 只作为超宽屏的可读性上限 */
+    max-width: min(100%, 1200px);
     min-width: 0;
   }
 
@@ -1408,34 +1419,27 @@
     pointer-events: none;
   }
 
-  /* 待办侧栏: 固定于会话区右侧空白顶部, 不随消息滚动 */
+  /* 右侧状态栏: 待办/提醒/灵魂卡垂直堆叠, sticky 固定于滚动区右上角。
+     margin-left:auto 把它吸附到滚动区右缘 —— 消息列有 max-width 上限,
+     剩余 flex 空间若无 auto margin 会滞留在行尾。卡片全部隐藏时
+     :has() 整栏 display:none, 把宽度还给消息列。 */
   .todo-rail {
     flex: none;
     width: 320px;
+    margin-left: auto;
     position: sticky;
     top: 0;
     align-self: flex-start;
     margin-top: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .todo-rail:not(:has(> :not(style))) {
+    display: none;
   }
   .todo-rail .todo-progress {
     margin: 0;
-  }
-
-  /* 灵魂卡悬浮层: 绝对定位不占 flex 布局宽度, 待办栏增减不再挤压会话列
-     或移动卡片; 待办栏在场时右移让出 320px+间距, 否则贴右缘。外层空白
-     不拦截滚动/点击, 只有卡片本体可交互。 */
-  .soul-float {
-    position: absolute;
-    top: 28px;
-    right: 0;
-    z-index: 5;
-    pointer-events: none;
-  }
-  .soul-float.shifted {
-    right: calc(320px + 24px);
-  }
-  .soul-float :global(.soul-card) {
-    pointer-events: auto;
   }
 
   .empty-chat {

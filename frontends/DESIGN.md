@@ -116,8 +116,8 @@ system stacks so the desktop app renders identically offline.
 | Element | Style |
 |---------|-------|
 | **Default card** | bg `var(--color-surface-elevated)`, 1px `var(--color-hairline)`, 12px radius, 16px padding. |
-| **Message bubble (user)** | full-row translucent azure wash + 2px left azure hairline (`--color-primary-muted` / `--color-primary`), 2px radius. |
-| **Message bubble (assistant)** | transparent ink-on-canvas paper; no container background; max-w clamp(360px, 78%, 720px). |
+| **Message bubble (user)** | full-row translucent azure wash + 2px left azure hairline (`--color-primary-muted` / `--color-primary`), 2px radius. max-w clamp(280px, 68%, 100%) — scales with the message column. |
+| **Message bubble (assistant)** | transparent ink-on-canvas paper; no container background; max-w 100% of the message column (column itself capped at 1200px, see `.messages-list`). |
 | **Tool call card** | bg `var(--color-surface-soft)`, 1px `var(--color-hairline)`, 8px radius, 12px padding, mono text. |
 | **Code block** | bg `var(--color-code-bg)`, 1px `var(--color-hairline)`, 8px radius, 16px padding. |
 

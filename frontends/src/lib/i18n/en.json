@@ -308,5 +308,11 @@
   "reminder.next": "next",
   "reminder.once": "one-shot",
   "reminder.left": "left",
-  "soul.unnamed": "Unnamed"
+  "soul.unnamed": "Unnamed",
+  "soul.rename": "Rename",
+  "soul.namePlaceholder": "Name your agent",
+  "soul.nameSaved": "Named",
+  "update.available": "Version {version} available — click to install",
+  "update.downloading": "Downloading update…",
+  "update.installed": "Installed — restarting"
 }

@@ -605,32 +605,30 @@ import { t, locale, tSync } from "../i18n";
     box-sizing: border-box;
   }
   .message-row.assistant .bubble {
-    /* 纸上墨: 无容器、无底色、纯墨字 */
+    /* 纸上墨: 无容器、无底色、纯墨字。
+       气泡随消息列伸展（可达 100%），长回复少折行；
+       短回复时 flex item 仍按内容收缩, 视觉不变 */
     background: transparent;
     border: none;
     border-radius: 0;
-    max-width: clamp(360px, 78%, 720px);
+    max-width: 100%;
   }
   .message-row.user .bubble {
-    /* 釉色条: 整行淡青底 + 左缘青线 (器物刻痕) */
+    /* 釉色条: 整行淡青底 + 左缘青线 (器物刻痕)
+       去掉 620px 硬顶: 68% 随消息列等比伸展 */
     background: var(--color-primary-muted, rgba(147,195,214,0.07));
     border-left: 2px solid var(--color-primary, #93c3d6);
     border-radius: 2px;
-    max-width: clamp(280px, 68%, 620px);
+    max-width: clamp(280px, 68%, 100%);
   }
 
   @media (max-width: 1100px) {
-    .message-row.assistant .bubble { max-width: 88%; }
     .message-row.user .bubble { max-width: 78%; }
   }
   @media (max-width: 720px) {
     .message-row { padding: 4px 10px; }
     .message-row.assistant .bubble,
     .message-row.user .bubble { max-width: 100%; }
-  }
-  @media (min-width: 1600px) {
-    .message-row.assistant .bubble { max-width: clamp(480px, 56%, 1100px); }
-    .message-row.user .bubble { max-width: clamp(360px, 48%, 900px); }
   }
   .bubble-header {
     display: flex;
@@ -727,7 +725,9 @@ import { t, locale, tSync } from "../i18n";
   }
   .bubble-content {
     line-height: 1.6;
-    max-width: 70ch;
+    /* 文本宽度跟随气泡（气泡自身已受消息列约束），
+       不再叠加 70ch 二次上限，长回复可以铺满气泡宽度 */
+    max-width: 100%;
     overflow-wrap: break-word;
     word-break: break-word;
   }

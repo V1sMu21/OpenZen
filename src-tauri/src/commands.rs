@@ -201,6 +201,40 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     })
 }
 
+/// Rename the agent: writes the user-given name into the L0 soul identity
+/// (the same field `get_memory_status` exposes as `soul.identity`). The
+/// write goes through the shared soul handle so the prompt injector and
+/// reflection engine see it immediately, then the model is atomically
+/// persisted to {data_dir}/memory_erme/soul.json so it survives restarts.
+#[tauri::command]
+pub fn set_soul_identity(name: String, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let Some(runtime) = &state.erme_store else {
+        return serde_json::json!({ "error": "memory backend not enabled" });
+    };
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 24 {
+        return serde_json::json!({ "error": "name must be 1-24 characters" });
+    }
+    let handle = runtime.injector.soul();
+    {
+        let mut model = handle.write().unwrap_or_else(|e| e.into_inner());
+        model.core.identity = trimmed.to_string();
+        model.bump_version();
+    }
+    // The reflection engine persists soul.json on its own idle cycle; an
+    // explicit save here covers app exit before that cycle runs.
+    let soul_path = data_dir().join("memory_erme").join("soul.json");
+    let persist_error = {
+        let model = handle.read().unwrap_or_else(|e| e.into_inner());
+        model.save_atomic(&soul_path).err().map(|e| e.to_string())
+    };
+    serde_json::json!({
+        "status": "ok",
+        "identity": handle.read().unwrap_or_else(|e| e.into_inner()).core.identity,
+        "persist_error": persist_error,
+    })
+}
+
 /// QC-3: aggregate quality events (reflections.jsonl: failures, successes,
 /// lessons, synthesized specs) across every known project working dir —
 /// last-7-day counts per type plus lifetime totals. Persists the report to

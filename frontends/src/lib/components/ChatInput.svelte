@@ -350,7 +350,8 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
 <style>
   .input-wrapper {
     position: relative;
-    max-width: 660px;
+    /* 与 App.svelte 的 .messages-list 同步: 跟随窗口伸展, 1200px 封顶 */
+    max-width: min(100%, 1200px);
     margin: 0 auto;
     width: 100%;
     padding: 8px 24px 16px;

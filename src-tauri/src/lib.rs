@@ -935,7 +935,13 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_dialog::init());
+        .plugin(tauri_plugin_dialog::init())
+        // Auto-update: check/install updates (frontend UpdateButton) and
+        // relaunch after install. Endpoints + pubkey are configured in
+        // tauri.conf.json under plugins.updater; without them check()
+        // simply errors and the UI stays hidden.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
 
     let builder = sidepanel::scheme::register(builder);
 
@@ -1279,6 +1285,7 @@ pub fn run() {
 commands::get_working_dir_for_session,
             commands::get_dashboard_stats,
             commands::get_memory_status,
+            commands::set_soul_identity,
             commands::get_quality_report,
             commands::list_models,
             commands::list_sessions,

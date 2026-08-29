@@ -45,19 +45,13 @@
 
 <style>
   .todo-bubble {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 100%;
+    /* 流内展开: 占据常规文档流, 展开时把状态栏下方的提醒卡/灵魂卡
+       推下去, 而不是浮层盖住它们 —— 状态栏内部同样不允许重叠。 */
     margin-top: 4px;
-    width: 100%;
-    min-width: 0;
-    max-width: none;
     background: var(--color-surface-overlay);
     border: 1px solid var(--color-hairline-strong);
     border-radius: 8px;
     padding: 8px;
-    z-index: 10;
     box-shadow: 0 4px 12px rgba(0,0,0,0.3);
   }
 

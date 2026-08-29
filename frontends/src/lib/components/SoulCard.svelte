@@ -36,6 +36,49 @@
   let timer: ReturnType<typeof setInterval> | null = null;
   let destroyed = false;
 
+  // ── Agent name (user-given) ──
+  // soul.identity is the name source, but the engine auto-fills it with a
+  // birth name ("记忆体 · 醒于 …", vendor entropy-memory-engine core.rs
+  // birth_name) or the "未命名的记忆体" placeholder until the user actually
+  // names the agent — only a real name becomes the card title.
+  const BIRTH_NAME_PREFIX = "记忆体 · 醒于";
+  const DEFAULT_IDENTITY = "未命名的记忆体";
+
+  let agentName = $derived.by(() => {
+    const id = status?.soul?.identity?.trim();
+    if (!id || id === DEFAULT_IDENTITY || id.startsWith(BIRTH_NAME_PREFIX)) return null;
+    return id;
+  });
+
+  let renaming = $state(false);
+  let nameDraft = $state("");
+  let savingName = $state(false);
+
+  function focusOnMount(node: HTMLInputElement) {
+    node.focus();
+    node.select();
+  }
+
+  function startRename() {
+    nameDraft = agentName ?? "";
+    renaming = true;
+  }
+
+  async function saveName() {
+    const name = nameDraft.trim();
+    if (!name || savingName) return;
+    savingName = true;
+    try {
+      await tauriInvoke("set_soul_identity", { name });
+      renaming = false;
+      await refresh();
+    } catch {
+      // keep the editor open so the user can retry
+    } finally {
+      savingName = false;
+    }
+  }
+
   async function refresh() {
     if (!isTauri()) return;
     try {
@@ -104,8 +147,10 @@
       <svg class="soul-chevron" class:expanded width="10" height="10" viewBox="0 0 10 10" fill="none">
         <path d="M3.5 2l3.5 3-3.5 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <span class="soul-label">{$t("soul.title")}</span>
-      <span class="soul-detail">{status.store?.total_entries ?? 0} · {status.soul?.identity?.trim() || $t("soul.unnamed")}</span>
+      <span class="soul-label">{agentName ?? $t("soul.title")}</span>
+      <span class="soul-detail">
+        {status.store?.total_entries ?? 0}{#if !agentName} · {status.soul?.identity?.trim() || $t("soul.unnamed")}{/if}
+      </span>
     </button>
 
     {#if expanded}
@@ -113,7 +158,30 @@
         {#each rows as row (row.key)}
           <div class="soul-row">
             <span class="soul-key">{$t(row.key)}</span>
-            <span class="soul-val">{row.value}</span>
+            {#if row.key === "soul.identity" && renaming}
+              <input
+                class="soul-name-input"
+                bind:value={nameDraft}
+                use:focusOnMount
+                placeholder={$t("soul.namePlaceholder")}
+                maxlength={24}
+                disabled={savingName}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") saveName();
+                  else if (e.key === "Escape") renaming = false;
+                }}
+              />
+              <button class="soul-rename-btn" onclick={saveName} disabled={savingName} title={$t("soul.rename")}>✓</button>
+            {:else if row.key === "soul.identity"}
+              <span class="soul-val">{row.value}</span>
+              <button class="soul-rename-btn" onclick={startRename} title={$t("soul.rename")}>
+                <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+                  <path d="M8.3 1.7l2 2L4 10l-2.6.6L2 8l6.3-6.3z" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            {:else}
+              <span class="soul-val">{row.value}</span>
+            {/if}
           </div>
         {/each}
       </div>
@@ -164,14 +232,16 @@
   }
 
   .soul-detail {
+    /* 占满折叠头剩余宽度；放不下时换行而不是截断，
+       保证 "记忆体 · 醒于 …" 全文可见 */
     margin-left: auto;
+    flex: 1 1 auto;
+    min-width: 0;
     font-size: 11px;
     font-variant-numeric: tabular-nums;
     opacity: 0.7;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 140px;
+    word-break: break-word;
+    text-align: right;
   }
 
   .soul-list {
@@ -202,9 +272,49 @@
     color: var(--color-body);
     font-variant-numeric: tabular-nums;
     text-align: right;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    /* 长值（如 identity）换行展示全部内容，不再单行截断 */
+    word-break: break-word;
+  }
+
+  .soul-rename-btn {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    border: none;
+    background: none;
+    padding: 0 2px;
+    color: var(--color-muted);
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.15s, color 0.15s;
+  }
+
+  .soul-rename-btn:hover {
+    opacity: 1;
+    color: var(--color-primary);
+  }
+
+  .soul-rename-btn:disabled {
+    cursor: default;
+    opacity: 0.4;
+  }
+
+  .soul-name-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: inherit;
+    font-size: 12px;
+    padding: 2px 6px;
+    border: 1px solid var(--color-hairline-strong);
+    border-radius: 4px;
+    background: var(--color-surface-soft);
+    color: var(--color-ink);
+    text-align: right;
+  }
+
+  .soul-name-input:focus {
+    outline: none;
+    border-color: var(--color-primary);
   }
 
   /* 窄窗口下与 todo-rail 同步隐藏 */
