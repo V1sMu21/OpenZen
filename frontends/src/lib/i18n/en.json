@@ -308,6 +308,7 @@
   "reminder.next": "next",
   "reminder.once": "one-shot",
   "reminder.left": "left",
+  "reminder.cancelled": "cancelled",
   "soul.unnamed": "Unnamed",
   "soul.rename": "Rename",
   "soul.namePlaceholder": "Name your agent",

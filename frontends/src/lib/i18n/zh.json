@@ -308,6 +308,7 @@
   "reminder.next": "下次",
   "reminder.once": "定时",
   "reminder.left": "次剩余",
+  "reminder.cancelled": "已取消",
   "soul.unnamed": "无名",
   "soul.rename": "改名",
   "soul.namePlaceholder": "给 agent 起个名字",
