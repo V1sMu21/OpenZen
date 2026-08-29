@@ -536,8 +536,9 @@ pub fn list_mcp_servers(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     }
 }
 
-/// Toggle an MCP server's `enabled` flag in servers.toml. NOTE: the file is
-/// rewritten via structured round-trip — comments in it are lost.
+/// Toggle an MCP server's `enabled` flag in servers.toml. Edited with
+/// `toml_edit` so hand-written comments and formatting in the file survive
+/// the round-trip.
 #[tauri::command]
 pub fn toggle_mcp_server(
     name: String,
@@ -548,22 +549,28 @@ pub fn toggle_mcp_server(
     let Ok(content) = std::fs::read_to_string(&path) else {
         return serde_json::json!({ "error": "servers.toml not found" });
     };
-    let mut cfg: oz_mcp::config::ServersToml = match toml::from_str(&content) {
-        Ok(c) => c,
+    let mut doc: toml_edit::Document = match content.parse() {
+        Ok(d) => d,
         Err(e) => {
             return serde_json::json!({ "error": format!("servers.toml parse error: {e}") });
         }
     };
-    let Some(server) = cfg.servers.iter_mut().find(|s| s.name == name) else {
+    let Some(servers) = doc
+        .get_mut("servers")
+        .and_then(|i| i.as_array_of_tables_mut())
+    else {
+        return serde_json::json!({ "error": "servers.toml has no [[servers]] array" });
+    };
+    let Some(server) = servers
+        .iter_mut()
+        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(name.as_str()))
+    else {
         return serde_json::json!({ "error": format!("server not found: {name}") });
     };
-    server.enabled = enabled;
-    let out = match toml::to_string_pretty(&cfg) {
-        Ok(out) => out,
-        Err(e) => return serde_json::json!({ "error": e.to_string() }),
-    };
+    server["enabled"] = toml_edit::value(enabled);
     // Atomic write: a crash mid-write must not truncate the MCP config.
     let tmp = path.with_extension("toml.tmp");
+    let out = doc.to_string();
     if let Err(e) = std::fs::write(&tmp, out).and_then(|()| std::fs::rename(&tmp, &path)) {
         return serde_json::json!({ "error": e.to_string() });
     }

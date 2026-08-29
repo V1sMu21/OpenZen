@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { isTauri, tauriInvoke } from "../api/tauri";
+  import { soulDisplayName } from "../api/settings";
   import { t } from "../i18n";
 
   /** Mirrors the get_memory_status command response (commands.rs). */
@@ -37,18 +38,11 @@
   let destroyed = false;
 
   // ── Agent name (user-given) ──
-  // soul.identity is the name source, but the engine auto-fills it with a
-  // birth name ("记忆体 · 醒于 …", vendor entropy-memory-engine core.rs
-  // birth_name) or the "未命名的记忆体" placeholder until the user actually
-  // names the agent — only a real name becomes the card title.
-  const BIRTH_NAME_PREFIX = "记忆体 · 醒于";
-  const DEFAULT_IDENTITY = "未命名的记忆体";
-
-  let agentName = $derived.by(() => {
-    const id = status?.soul?.identity?.trim();
-    if (!id || id === DEFAULT_IDENTITY || id.startsWith(BIRTH_NAME_PREFIX)) return null;
-    return id;
-  });
+  // soul.identity is the name source; soulDisplayName (api/settings) returns
+  // it only once the user actually named the agent — the engine auto-fills
+  // a birth name ("记忆体 · 醒于 …") or the "未命名的记忆体" placeholder
+  // before that, which falls back to the generic "灵魂" title.
+  let agentName = $derived(soulDisplayName(status));
 
   let renaming = $state(false);
   let nameDraft = $state("");

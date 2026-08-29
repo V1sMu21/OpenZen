@@ -26,6 +26,11 @@
   import { t, locale } from "./lib/i18n";
   import { sidepanel } from "./lib/stores/sidepanel.svelte";
   import ThemeSwitcher from "./lib/components/ThemeSwitcher.svelte";
+  import { fetchSoulStatus, soulDisplayName } from "./lib/api/settings";
+  import { isTauri } from "./lib/api/tauri";
+
+  // 顶栏标题：用户给 agent 起的名字（null = 未命名，保持器物底款默认）
+  let agentName = $state<string | null>(null);
 
   // 宠物小猫咪：seal 点击切换显隐（再点一次即可关掉，不必右键菜单）。
   // 宠物窗本体是 tauri.conf.json 里声明的静态窗口（启动即建、隐藏）。
@@ -900,6 +905,14 @@
     // not projects + sessions + sessions (the old Sidebar onMount).
     await Promise.all([sessions.load(), projects.loadAll()]);
 
+    // 标题栏跟随用户给 agent 起的名字（soul.identity）；未命名时保持
+    // 器物底款默认"修砚"。失败静默（webui 模式无此命令）。
+    if (isTauri()) {
+      fetchSoulStatus()
+        .then((s) => (agentName = soulDisplayName(s)))
+        .catch(() => {});
+    }
+
     // Dedicated session windows (`session-{id}`) bind to their own session.
     // The label is set by open_session_window in Rust — authoritative, does
     // not depend on localStorage or on window open order (P2-1).
@@ -977,7 +990,7 @@
         </svg>
       </button>
       <span class="seal" title="阿青 · 显示/隐藏桌面宠物" onclick={() => handlePetClick()} style="cursor:pointer"><img class="seal-icon" src="/cat-icon.png" alt="OpenZen" /></span>
-      <span class="title-name">修砚</span>
+      <span class="title-name">{agentName ?? "修砚"}</span>
       <span class="inscription era">丙午 制</span>
       <!-- 运行状态指示: 活跃态(运行中/待确认)带墨滴涟漪动画, 完成态静态圆点 -->
       <span class="run-state {runState.cls}" title={$t(runState.key)}>

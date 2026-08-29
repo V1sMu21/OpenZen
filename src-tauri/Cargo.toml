@@ -46,4 +46,7 @@ nix = { version = "0.27", features = ["process", "signal", "term", "fs"] }
 libc = "0.2"
 calamine = "0.24"
 toml.workspace = true
+# Format-preserving TOML editing (keeps comments in hand-edited files like
+# servers.toml); already in the tree as toml 0.8's internal engine.
+toml_edit = "0.19"
 async-trait.workspace = true

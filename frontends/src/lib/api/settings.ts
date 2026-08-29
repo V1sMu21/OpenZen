@@ -38,6 +38,18 @@ export interface SoulStatus {
 
 type MutationResult = { status?: string; error?: string };
 
+const BIRTH_NAME_PREFIX = "记忆体 · 醒于";
+const DEFAULT_IDENTITY = "未命名的记忆体";
+
+/** The user-given agent name from soul.identity, or null while the soul
+ *  still carries its auto-assigned birth name ("记忆体 · 醒于 …",
+ *  vendor entropy-memory-engine core.rs birth_name) or the placeholder. */
+export function soulDisplayName(status: SoulStatus | null | undefined): string | null {
+  const id = status?.soul?.identity?.trim();
+  if (!id || id === DEFAULT_IDENTITY || id.startsWith(BIRTH_NAME_PREFIX)) return null;
+  return id;
+}
+
 async function invoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   if (!isTauri()) throw new Error(`${cmd} is only available in the desktop app`);
   return (await tauriInvoke(cmd, args)) as T;
