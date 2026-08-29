@@ -63,5 +63,11 @@
     "resources": {
       "../assets/sys_prompt*": "assets/"
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": []
+    }
   }
 }
