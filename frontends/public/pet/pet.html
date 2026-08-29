@@ -1,18 +1,18 @@
 <!doctype html>
-<html lang="zh" data-tauri-drag-region>
+<html lang="zh">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>阿青 · 桌面小猫咪</title>
   <link rel="stylesheet" href="pet.css?v=20260818" />
 </head>
-<body data-tauri-drag-region>
+<!-- 拖拽不用 data-tauri-drag-region：Tauri 的 drag 脚本会对 mousedown
+     stopImmediatePropagation，单击状态卡/双击回主窗会全部失效。
+     改由 pet.js 阈值拖拽（移动>4px → startDragging）。 -->
+<body>
   <!-- 猫渲染层：两个 canvas 叠放，供交叉淡化切换 -->
-  <!-- 原生拖拽带（OS 级，零 JS 依赖）：猫头顶隐形条 -->
-  <div id="dragbar" data-tauri-drag-region title=""></div>
-
-  <canvas id="catA" data-tauri-drag-region width="768" height="768"></canvas>
-  <canvas id="catB" data-tauri-drag-region width="768" height="768"></canvas>
+  <canvas id="catA" width="768" height="768"></canvas>
+  <canvas id="catB" width="768" height="768"></canvas>
 
   <!-- 状态文字（头顶） -->
   <div id="stateText">
@@ -32,14 +32,24 @@
     <div id="cardSoul">心情：<span id="moodText">宁静</span> · 亲密度 <span id="affText">0</span></div>
   </div>
 
-  <!-- 右键菜单 -->
-  <div id="menu" hidden>
-    <button data-act="back">回到主窗口</button>
-    <button data-act="rename">改名字</button>
-    <button data-act="settings">设置</button>
-    <button data-act="quit">退出猫咪</button>
+  <!-- 改名对话框：WKWebView 没有原生 prompt()（静默返回 undefined），
+       改名字必须在页面内实现输入框 -->
+  <div id="renameBox" hidden>
+    <div id="renameLabel">给小猫起个名字</div>
+    <input id="renameInput" type="text" maxlength="12" autocomplete="off" />
+    <div id="renameRow">
+      <button type="button" id="renameCancel">取消</button>
+      <button type="button" id="renameOk">确定</button>
+    </div>
   </div>
 
-  <script src="pet.js?v=20260822c"></script>
+  <!-- 右键菜单 -->
+  <div id="menu" hidden>
+    <button type="button" data-act="back">回到主窗口</button>
+    <button type="button" data-act="rename">改名字</button>
+    <button type="button" data-act="quit">退出猫咪</button>
+  </div>
+
+  <script src="pet.js?v=20260823d"></script>
 </body>
 </html>
