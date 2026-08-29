@@ -42,7 +42,7 @@ oz-platform-telegram = { path = "../crates/oz-platform-telegram" }
 oz-platform-wechat = { path = "../crates/oz-platform-wechat" }
 entropy_memory_engine.workspace = true
 uuid.workspace = true
-nix = { version = "0.27", features = ["process", "signal", "term", "fs"] }
+nix = { version = "0.31", features = ["process", "signal", "term", "fs"] }
 libc = "0.2"
 calamine = "0.24"
 toml.workspace = true
