@@ -83,7 +83,10 @@ impl SkillMcpStore {
     fn fingerprint(base_dir: &Path) -> std::collections::BTreeMap<PathBuf, (u64, u64)> {
         let mut out = std::collections::BTreeMap::new();
         fingerprint_tree(&base_dir.join("skills"), 2, &["md", "toml"], &mut out);
-        fingerprint_tree(&base_dir.join("sops"), 2, &["md"], &mut out);
+        // sops must watch .toml too: meta.toml writes (e.g. the settings
+        // panel's enable/disable toggle) have to trigger an incremental
+        // reload or the in-memory SopManager keeps stale metadata.
+        fingerprint_tree(&base_dir.join("sops"), 2, &["md", "toml"], &mut out);
         out
     }
 

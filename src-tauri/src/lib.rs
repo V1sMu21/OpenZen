@@ -702,7 +702,9 @@ impl AppState {
             html_roots: std::sync::Mutex::new(Vec::new()),
             artifact_roots: std::sync::Mutex::new(Vec::new()),
             terminal_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            config_path: data_root.join("mykey.toml").to_string_lossy().to_string(),
+            config_path: resolve_config_path(data_root.join("mykey.toml"))
+                .to_string_lossy()
+                .to_string(),
             working_dir: working_dir.to_string_lossy().to_string(),
             assets_dir: find_assets_dir().to_string_lossy().to_string(),
             scheduler_started: AtomicBool::new(false),
@@ -755,6 +757,9 @@ pub struct ModelEntry {
     pub provider: String,
     pub context_win: usize,
     pub is_local: bool,
+    /// True when `default_session` in mykey.toml points at this entry.
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 pub(crate) fn is_local_deploy(apibase: &str) -> bool {
@@ -1286,6 +1291,14 @@ commands::get_working_dir_for_session,
             commands::get_dashboard_stats,
             commands::get_memory_status,
             commands::set_soul_identity,
+            commands::upsert_model,
+            commands::delete_model,
+            commands::set_default_model,
+            commands::list_skill_mcp,
+            commands::toggle_skill_mcp,
+            commands::list_mcp_servers,
+            commands::toggle_mcp_server,
+            commands::get_token_stats,
             commands::get_quality_report,
             commands::list_models,
             commands::list_sessions,

@@ -13,6 +13,48 @@ export interface ModelEntry {
   model: string;
   provider: string;
   context_win: number;
+  is_local?: boolean;
+  /** True when mykey.toml default_session points here (list_models only). */
+  is_default?: boolean;
+}
+
+export interface SkillMcpItem {
+  name: string;
+  description: string;
+  active: boolean;
+  quality?: number;
+  successCount?: number;
+  failureCount?: number;
+}
+
+export interface McpServerItem {
+  name: string;
+  command: string;
+  enabled: boolean;
+  autoStart?: boolean;
+}
+
+export interface TokenStats {
+  totals: { in: number; out: number };
+  perDay: { day: string; in: number; out: number }[];
+  perModel: { model: string; in: number; out: number }[];
+  perSession: {
+    id: string;
+    name: string;
+    createdAt: string;
+    messageCount: number;
+    tokensIn: number;
+    tokensOut: number;
+  }[];
+}
+
+export interface ModelUpsertArgs {
+  name: string;
+  /** Blank/omitted on an edit keeps the stored value; required for new entries. */
+  apibase?: string;
+  apikey?: string;
+  model?: string;
+  context_win: number;
 }
 
 let cachedAuthToken: string | null = null;

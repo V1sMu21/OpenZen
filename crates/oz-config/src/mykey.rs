@@ -55,9 +55,24 @@ pub struct SessionConfig {
     pub spring_back: Option<u64>,
 }
 
+/// Default SessionConfig context window (serde fallback + UI form default).
+pub const DEFAULT_CONTEXT_WIN: usize = 28000;
+
 fn default_context_win() -> usize {
-    28000
+    DEFAULT_CONTEXT_WIN
 }
+
+/// Top-level mykey.toml keys that hold configuration, not session entries.
+/// `from_file` skips them when collecting sessions; writers of the file
+/// (settings panel) must reject model names that would collide with them.
+pub const RESERVED_TOP_LEVEL_KEYS: [&str; 6] = [
+    "default_session",
+    "summary_model",
+    "memory_backend",
+    "erme_idle_interval_secs",
+    "tui",
+    "router",
+];
 
 /// API mode for OpenAI-compatible endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -207,22 +222,7 @@ impl MyKeyConfig {
         }
 
         for (key, value) in &raw {
-            if key == "default_session" {
-                continue;
-            }
-            if key == "summary_model" {
-                continue;
-            }
-            if key == "memory_backend" {
-                continue;
-            }
-            if key == "erme_idle_interval_secs" {
-                continue;
-            }
-            if key == "tui" {
-                continue;
-            }
-            if key == "router" {
+            if RESERVED_TOP_LEVEL_KEYS.contains(&key.as_str()) {
                 continue;
             }
             if !value.is_table() {

@@ -35,6 +35,7 @@ oz-server = { path = "../crates/oz-server" }
 oz-safety = { path = "../crates/oz-safety" }
 oz-scheduler = { path = "../crates/oz-scheduler" }
 oz-skill-mcp = { path = "../crates/oz-skill-mcp" }
+oz-mcp = { path = "../crates/oz-mcp" }
 oz-platform = { path = "../crates/oz-platform" }
 oz-platform-feishu = { path = "../crates/oz-platform-feishu" }
 oz-platform-telegram = { path = "../crates/oz-platform-telegram" }

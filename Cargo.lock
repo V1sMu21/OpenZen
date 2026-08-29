@@ -3841,6 +3841,7 @@ dependencies = [
  "oz-core",
  "oz-core-types",
  "oz-llm",
+ "oz-mcp",
  "oz-memory",
  "oz-platform",
  "oz-platform-feishu",

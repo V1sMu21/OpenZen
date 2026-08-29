@@ -125,6 +125,10 @@ pub fn list_models(state: State<'_, Arc<AppState>>) -> Vec<ModelEntry> {
                         provider: provider.to_string(),
                         context_win: sess.context_win,
                         is_local,
+                        // Compare the explicit field only: the
+                        // default_session_name() fallback pick walks a
+                        // HashMap and is nondeterministic between reloads.
+                        is_default: cfg.default_session.as_deref() == Some(name.as_str()),
                     }
                 })
                 .collect()
@@ -232,6 +236,427 @@ pub fn set_soul_identity(name: String, state: State<'_, Arc<AppState>>) -> serde
         "status": "ok",
         "identity": handle.read().unwrap_or_else(|e| e.into_inner()).core.identity,
         "persist_error": persist_error,
+    })
+}
+
+/// ── Settings panel (docs/settings-panel-plan.md) ──────────────────────────
+///
+/// Model management writes back `mykey.toml` preserving unknown keys: the
+/// raw TOML table is parsed, only the target session entry (or
+/// `default_session`) is mutated, then the table is serialized back.
+/// Encrypted configs (`mykey.toml.enc`) are re-encrypted after mutation;
+/// plaintext stays plaintext.
+fn write_mykey_toml<F>(config_path: &str, mutate: F) -> Result<(), String>
+where
+    F: FnOnce(&mut toml::Table) -> Result<(), String>,
+{
+    // Tauri commands run on a thread pool: gate RMW cycles on the same lock
+    // the platform config writer (add_platform) uses, so concurrent writers
+    // of mykey.toml cannot interleave and lose updates.
+    let _gate = lock_poison_guard(&CONFIG_WRITE_LOCK);
+    let path = std::path::Path::new(config_path);
+    let enc_path = path.with_extension("toml.enc");
+    let content = oz_config::crypto::read_config(path).map_err(|e| e.to_string())?;
+    let mut table: toml::Table = content
+        .parse()
+        .map_err(|e| format!("TOML parse error: {e}"))?;
+    mutate(&mut table)?;
+    let out = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+    // Write via tmp + rename so a crash mid-write cannot leave a truncated
+    // config holding every API key.
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, out).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        // mykey.toml holds API keys — keep the plaintext window owner-only
+        // (same policy as add_platform).
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    if enc_path.exists() {
+        // encrypt_config reads the plaintext we just renamed into place,
+        // writes path.enc with 0600 permissions; the plaintext copy is then
+        // removed so on-disk state stays "encrypted only" as before.
+        if let Err(e) = oz_config::crypto::encrypt_config(path) {
+            // Never leave plaintext keys behind when encryption fails — the
+            // pre-existing .enc stays in place and the error is reported.
+            let _ = std::fs::remove_file(path);
+            return Err(e.to_string());
+        }
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!("could not remove plaintext mykey.toml after encryption: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// Model/session names become TOML section headers; reject anything that
+/// would break parsing or inject into other TOML sections, plus the reserved
+/// top-level keys of mykey.toml (writing a table under one of those would
+/// break config parsing — e.g. `memory_backend` falling back to "file" and
+/// silently disabling the ERME memory engine). The reserved list is
+/// single-sourced from oz-config so a new top-level key can't drift.
+fn valid_model_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 64
+        && !oz_config::mykey::RESERVED_TOP_LEVEL_KEYS.contains(&name)
+        && !name.starts_with('.')
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '[' | ']' | '"' | '\'' | '#'))
+}
+
+/// Build a session table from upsert args. apibase/model/apikey may be
+/// absent — `upsert_model` fills blanks from the stored entry (edits keep
+/// existing values) and requires apibase/model for brand-new entries.
+fn session_table_from_args(args: &serde_json::Value) -> toml::Table {
+    let context_win = args["context_win"]
+        .as_u64()
+        .unwrap_or(oz_config::mykey::DEFAULT_CONTEXT_WIN as u64);
+    let mut t = toml::Table::new();
+    for key in ["apibase", "model", "apikey"] {
+        if let Some(v) = args[key].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            t.insert(key.into(), toml::Value::String(v.to_string()));
+        }
+    }
+    t.insert(
+        "context_win".into(),
+        toml::Value::Integer(context_win as i64),
+    );
+    t
+}
+
+/// Create or update a model entry (session config) in mykey.toml.
+#[tauri::command]
+pub fn upsert_model(args: serde_json::Value, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let name = args["name"].as_str().unwrap_or("").trim().to_string();
+    if !valid_model_name(&name) {
+        return serde_json::json!({ "error": "invalid model name" });
+    }
+    match write_mykey_toml(&state.config_path, |table| {
+        let mut entry = session_table_from_args(&args);
+        // Fill blanks from the stored entry so an edit that leaves a field
+        // empty keeps the existing value (apikey, apibase, model).
+        if let Some(existing) = table.get(&name).and_then(|v| v.as_table()) {
+            for key in ["apibase", "model", "apikey"] {
+                if !entry.contains_key(key) {
+                    if let Some(v) = existing.get(key) {
+                        entry.insert(key.into(), v.clone());
+                    }
+                }
+            }
+        }
+        // SessionConfig deserialization requires apikey; a brand-new entry
+        // without one gets an empty string (valid for local no-auth servers).
+        entry
+            .entry("apikey".to_string())
+            .or_insert_with(|| toml::Value::String(String::new()));
+        // A brand-new entry still needs apibase/model from the caller.
+        for key in ["apibase", "model"] {
+            if !entry.contains_key(key) {
+                return Err(format!("{key} is required"));
+            }
+        }
+        table.insert(name.clone(), toml::Value::Table(entry));
+        Ok(())
+    }) {
+        Ok(()) => serde_json::json!({ "status": "ok" }),
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Delete a model entry; clears `default_session` when it pointed at it so
+/// the config never keeps a dangling default.
+#[tauri::command]
+pub fn delete_model(name: String, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    match write_mykey_toml(&state.config_path, |table| {
+        if table.remove(&name).is_none() {
+            return Err(format!("model not found: {name}"));
+        }
+        if table.get("default_session").and_then(|v| v.as_str()) == Some(name.as_str()) {
+            table.remove("default_session");
+        }
+        Ok(())
+    }) {
+        Ok(()) => serde_json::json!({ "status": "ok" }),
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Point `default_session` at an existing model entry.
+#[tauri::command]
+pub fn set_default_model(name: String, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    match write_mykey_toml(&state.config_path, |table| {
+        if !table.contains_key(&name) {
+            return Err(format!("model not found: {name}"));
+        }
+        table.insert("default_session".into(), toml::Value::String(name.clone()));
+        Ok(())
+    }) {
+        Ok(()) => serde_json::json!({ "status": "ok" }),
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Skill/SOP inventory for the settings panel, sourced from the process-wide
+/// store (same data the agent's skill_mcp tools serve). `active` mirrors
+/// `SkillMcpMetadata::is_active()`.
+#[tauri::command]
+pub fn list_skill_mcp(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let Some(dir) = state.skill_mcp_dir.clone() else {
+        return serde_json::json!({ "skills": [], "sops": [] });
+    };
+    let store = crate::get_or_init_skill_store(&state.shared_skill_store, &dir);
+    let Ok(mut guard) = store.try_lock() else {
+        return serde_json::json!({ "busy": true, "skills": [], "sops": [] });
+    };
+    guard.reload_incremental();
+    let skills: Vec<serde_json::Value> = guard
+        .skills
+        .list()
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "description": s.description,
+                "active": s.metadata.is_active(),
+                "quality": s.quality,
+                "successCount": s.metadata.success_count,
+                "failureCount": s.metadata.failure_count,
+            })
+        })
+        .collect();
+    let sops: Vec<serde_json::Value> = guard
+        .sops
+        .all()
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "description": s.description,
+                "active": s.metadata.is_active(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "skills": skills, "sops": sops })
+}
+
+/// Enable/disable a skill or SOP by flipping its metadata `stale_flag`
+/// (the inverse of `is_active()`), persisted to the artifact's meta.toml.
+/// Takes effect on the next agent run (stores reload incrementally).
+#[tauri::command]
+pub fn toggle_skill_mcp(
+    kind: String,
+    name: String,
+    active: bool,
+    state: State<'_, Arc<AppState>>,
+) -> serde_json::Value {
+    let Some(dir) = state.skill_mcp_dir.clone() else {
+        return serde_json::json!({ "error": "skill store not configured" });
+    };
+    let category = match kind.as_str() {
+        "skill" => "skills",
+        "sop" => "sops",
+        _ => return serde_json::json!({ "error": "kind must be skill|sop" }),
+    };
+    let store = crate::get_or_init_skill_store(&state.shared_skill_store, &dir);
+    let Ok(mut guard) = store.try_lock() else {
+        return serde_json::json!({ "error": "skill store busy" });
+    };
+    // Source the metadata key + description/tags. Skills key their meta by
+    // name (upsert_skill); SOPs key it by the md file stem (load_all), which
+    // can differ from the display name — writing by display name would store
+    // metadata where the loader never reads it.
+    let found = match category {
+        "skills" => guard
+            .skills
+            .list()
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| (s.name.clone(), s.description.clone(), s.tags.clone())),
+        _ => guard.sops.all().iter().find(|s| s.name == name).map(|s| {
+            let key = s
+                .source_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(&s.name)
+                .to_string();
+            (key, s.description.clone(), s.tags.clone())
+        }),
+    };
+    let Some((meta_key, description, tags)) = found else {
+        return serde_json::json!({ "error": format!("not found: {name}") });
+    };
+    let mut meta = match guard.meta.load(category, &meta_key) {
+        Ok(Some(m)) => m,
+        Ok(None) => oz_core_types::skill_mcp::SkillMcpMetadata::new(&name, &description, tags),
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+    meta.stale_flag = !active;
+    // is_active() = !stale_flag && quality_score >= 0.3 — re-activating an
+    // artifact whose score has decayed below the floor needs a bump back to
+    // the neutral default, or the toggle would report ok yet change nothing.
+    if active && meta.quality_score < 0.3 {
+        meta.quality_score = 0.5;
+    }
+    meta.updated_at = chrono::Utc::now().to_rfc3339();
+    if let Err(e) = guard.meta.save(category, &meta_key, &meta) {
+        return serde_json::json!({ "error": e.to_string() });
+    }
+    guard.reload_incremental();
+    serde_json::json!({ "status": "ok" })
+}
+
+/// MCP server inventory from `{working_dir}/servers.toml` (the same file the
+/// webui/server backend loads). Empty when the file does not exist.
+#[tauri::command]
+pub fn list_mcp_servers(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let path = std::path::Path::new(&state.working_dir).join("servers.toml");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return serde_json::json!({ "servers": [] });
+    };
+    match toml::from_str::<oz_mcp::config::ServersToml>(&content) {
+        Ok(cfg) => {
+            let servers: Vec<serde_json::Value> = cfg
+                .servers
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "command": s.command,
+                        "enabled": s.enabled,
+                        "autoStart": s.auto_start,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "servers": servers })
+        }
+        Err(e) => serde_json::json!({ "error": format!("servers.toml parse error: {e}") }),
+    }
+}
+
+/// Toggle an MCP server's `enabled` flag in servers.toml. NOTE: the file is
+/// rewritten via structured round-trip — comments in it are lost.
+#[tauri::command]
+pub fn toggle_mcp_server(
+    name: String,
+    enabled: bool,
+    state: State<'_, Arc<AppState>>,
+) -> serde_json::Value {
+    let path = std::path::Path::new(&state.working_dir).join("servers.toml");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return serde_json::json!({ "error": "servers.toml not found" });
+    };
+    let mut cfg: oz_mcp::config::ServersToml = match toml::from_str(&content) {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({ "error": format!("servers.toml parse error: {e}") });
+        }
+    };
+    let Some(server) = cfg.servers.iter_mut().find(|s| s.name == name) else {
+        return serde_json::json!({ "error": format!("server not found: {name}") });
+    };
+    server.enabled = enabled;
+    let out = match toml::to_string_pretty(&cfg) {
+        Ok(out) => out,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+    // Atomic write: a crash mid-write must not truncate the MCP config.
+    let tmp = path.with_extension("toml.tmp");
+    if let Err(e) = std::fs::write(&tmp, out).and_then(|()| std::fs::rename(&tmp, &path)) {
+        return serde_json::json!({ "error": e.to_string() });
+    }
+    serde_json::json!({ "status": "ok" })
+}
+
+/// Rough token estimate mirroring the frontend `estimateTokens` heuristic
+/// (len/4). Reads `tokensIn`/`tokensOut` when a message carries real usage
+/// numbers and falls back to content-length estimation otherwise.
+fn message_tokens(m: &serde_json::Value) -> (u64, u64) {
+    let est = || -> u64 {
+        let content = &m["content"];
+        let len = match content.as_str() {
+            Some(s) => s.len(),
+            None => content
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|b| {
+                            b["text"].as_str().map(str::len).unwrap_or(0)
+                                + b["content"].as_str().map(str::len).unwrap_or(0)
+                        })
+                        .sum::<usize>()
+                })
+                .unwrap_or(0),
+        };
+        len.div_ceil(4) as u64
+    };
+    (
+        m["tokensIn"].as_u64().unwrap_or_else(est),
+        m["tokensOut"].as_u64().unwrap_or_else(est),
+    )
+}
+
+/// Aggregate token usage across the most recent sessions (default 50):
+/// totals, per-day (UTC date from message timestamps) and per-model sums.
+#[tauri::command]
+pub fn get_token_stats(limit: Option<usize>, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let mut store = lock_poison_guard(&state.sessions);
+    store.reload();
+    let max = limit.unwrap_or(50).clamp(1, 500);
+    let mut infos: Vec<_> = store.list();
+    infos.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    infos.truncate(max);
+
+    let mut total_in: u64 = 0;
+    let mut total_out: u64 = 0;
+    let mut per_day: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+    let mut per_model: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+    let mut per_session: Vec<serde_json::Value> = Vec::with_capacity(infos.len());
+
+    for info in &infos {
+        let Some(entry) = store.get(&info.id) else {
+            continue;
+        };
+        let mut s_in: u64 = 0;
+        let mut s_out: u64 = 0;
+        for m in &entry.messages {
+            let (tin, tout) = message_tokens(m);
+            s_in += tin;
+            s_out += tout;
+            if let Some(day) = m["timestamp"].as_str().and_then(|t| t.get(..10)) {
+                let e = per_day.entry(day.to_string()).or_insert((0, 0));
+                e.0 += tin;
+                e.1 += tout;
+            }
+            if let Some(model) = m["modelInfo"]["model"].as_str() {
+                let e = per_model.entry(model.to_string()).or_insert((0, 0));
+                e.0 += tin;
+                e.1 += tout;
+            }
+        }
+        total_in += s_in;
+        total_out += s_out;
+        per_session.push(serde_json::json!({
+            "id": info.id,
+            "name": info.name,
+            "createdAt": info.created_at,
+            "messageCount": info.message_count,
+            "tokensIn": s_in,
+            "tokensOut": s_out,
+        }));
+    }
+
+    serde_json::json!({
+        "totals": { "in": total_in, "out": total_out },
+        "perDay": per_day.iter().map(|(d, (i, o))| serde_json::json!({
+            "day": d, "in": i, "out": o,
+        })).collect::<Vec<_>>(),
+        "perModel": per_model.iter().map(|(m, (i, o))| serde_json::json!({
+            "model": m, "in": i, "out": o,
+        })).collect::<Vec<_>>(),
+        "perSession": per_session,
     })
 }
 
