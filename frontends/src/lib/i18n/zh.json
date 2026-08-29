@@ -300,6 +300,7 @@
   "soul.recalls": "召回",
   "soul.storage": "存储",
   "soul.title": "灵魂",
+  "soul.birthName": "记忆体 · 醒于 {date}",
   "reminder.active": "运行中",
   "reminder.allDone": "全部完成",
   "reminder.done": "已完成",

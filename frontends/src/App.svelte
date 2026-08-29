@@ -26,11 +26,12 @@
   import { t, locale } from "./lib/i18n";
   import { sidepanel } from "./lib/stores/sidepanel.svelte";
   import ThemeSwitcher from "./lib/components/ThemeSwitcher.svelte";
-  import { fetchSoulStatus, soulDisplayName } from "./lib/api/settings";
-  import { isTauri } from "./lib/api/tauri";
+  import { soulDisplayName } from "./lib/api/settings";
+  import { soulStore } from "./lib/stores/soul.svelte";
 
-  // 顶栏标题：用户给 agent 起的名字（null = 未命名，保持器物底款默认）
-  let agentName = $state<string | null>(null);
+  // 顶栏标题：用户给 agent 起的名字（null = 未命名，保持器物底款默认）。
+  // 读共享 soul store：设置面板/灵魂卡里改名后这里即时更新。
+  let agentName = $derived(soulDisplayName(soulStore.status));
 
   // 宠物小猫咪：seal 点击切换显隐（再点一次即可关掉，不必右键菜单）。
   // 宠物窗本体是 tauri.conf.json 里声明的静态窗口（启动即建、隐藏）。
@@ -903,14 +904,33 @@
     // One startup pass for both stores; api/sessions dedupes the
     // overlapping all-sessions fetch so this is projects + sessions,
     // not projects + sessions + sessions (the old Sidebar onMount).
-    await Promise.all([sessions.load(), projects.loadAll()]);
+    // FIXME(startup-debug): temporary instrumentation — surface the first
+    // startup error on screen (30s) to diagnose the dead heartbeat light.
+    const startupDebug = (step: string, e: unknown) => {
+      console.error(`[startup] ${step} failed:`, e);
+      showPetToast(
+        `⚠️ startup ${step}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 160),
+      );
+      setTimeout(() => (petToast = ""), 30000);
+    };
+    try {
+      await Promise.all([sessions.load(), projects.loadAll()]);
+    } catch (e) {
+      startupDebug("load sessions/projects", e);
+    }
 
     // 标题栏跟随用户给 agent 起的名字（soul.identity）；未命名时保持
     // 器物底款默认"修砚"。失败静默（webui 模式无此命令）。
+    // 冷启动头几秒 IPC/erme 可能未就绪 — 有界重试直到拿到状态。
     if (isTauri()) {
-      fetchSoulStatus()
-        .then((s) => (agentName = soulDisplayName(s)))
-        .catch(() => {});
+      const loadSoul = (attempt: number) => {
+        void soulStore.load().then(() => {
+          if (!soulStore.status && attempt < 6) {
+            setTimeout(() => loadSoul(attempt + 1), 5000);
+          }
+        });
+      };
+      loadSoul(0);
     }
 
     // Dedicated session windows (`session-{id}`) bind to their own session.
@@ -926,33 +946,40 @@
       // Browser (non-Tauri) context — no window label available.
     }
 
+    // Connect real-time event stream FIRST: the heartbeat indicator (后端灯)
+    // and streaming events must come up even if session restore below fails.
+    connectSSE();
+
     const savedId = localStorage.getItem("currentSessionId");
     const restoreId = windowSessionId ?? savedId;
 
-    if ($sessions.sessions.length > 0) {
-      // If the window-bound/saved session still exists on server, restore it
-      const stillExists = restoreId && $sessions.sessions.some((s) => s.id === restoreId);
-      if (stillExists && restoreId) {
-        handleSelectSession(restoreId);
+    try {
+      if ($sessions.sessions.length > 0) {
+        // If the window-bound/saved session still exists on server, restore it
+        const stillExists = restoreId && $sessions.sessions.some((s) => s.id === restoreId);
+        if (stillExists && restoreId) {
+          handleSelectSession(restoreId);
+        } else {
+          // Pick the most recent session from what the server has
+          const latest = [...$sessions.sessions].sort(
+            (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+          )[0];
+          handleSelectSession(latest.id);
+        }
       } else {
-        // Pick the most recent session from what the server has
-        const latest = [...$sessions.sessions].sort(
-          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-        )[0];
-        handleSelectSession(latest.id);
+        // No sessions on server — create a new one AND load it into chat
+        const result = await sessions.create("New Chat");
+        if (result) {
+          handleSelectSession(result.session_id);
+        } else {
+          chat.clearMessages();
+        }
       }
-    } else {
-      // No sessions on server — create a new one AND load it into chat
-      const result = await sessions.create("New Chat");
-      if (result) {
-        handleSelectSession(result.session_id);
-      } else {
-        chat.clearMessages();
-      }
+    } catch (e) {
+      // 会话恢复失败不该拖垮启动序列（否则心跳/后端灯永远不亮）
+      startupDebug("session restore", e);
+      chat.clearMessages();
     }
-
-    // Connect real-time event stream (SSE for browser, Tauri event listener for desktop)
-    connectSSE();
 
     // Initialize Side Panel state from Rust backend
     sidepanel.init();
@@ -1192,9 +1219,12 @@
 
         <span class="m-sep"></span>
 
-        <span class="m-tag m-tag-health" title="Backend heartbeat: {$heartbeat.connected ? 'connected' : 'disconnected'} | Scheduler: {$heartbeat.scheduler ? 'on' : 'off'} | Sessions: {$heartbeat.sessions} | Agents: {$heartbeat.runningAgents}">
+        <span class="m-tag m-tag-health" title="Backend heartbeat: {$heartbeat.connected ? 'connected' : 'disconnected'} | Scheduler: {$heartbeat.scheduler ? 'on' : 'off'} | Sessions: {$heartbeat.sessions} | Agents: {$heartbeat.runningAgents}{$heartbeat.lastError ? ' | ' + $heartbeat.lastError : ''}">
           <span class="health-dot" class:online={$heartbeat.connected}></span>
           <span class="m-tag-label">{$t("status.backend")}</span>
+          {#if !$heartbeat.connected && $heartbeat.lastError}
+            <span class="m-tag-err" title={$heartbeat.lastError}>{$heartbeat.lastError.length > 60 ? $heartbeat.lastError.slice(0, 60) + "…" : $heartbeat.lastError}</span>
+          {/if}
         </span>
       </div>
 
@@ -1704,6 +1734,15 @@
 
   .m-tag-health {
     color: var(--color-dim);
+  }
+
+  .m-tag-err {
+    font-size: 10px;
+    color: var(--color-error, #c05a3e);
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .health-dot {

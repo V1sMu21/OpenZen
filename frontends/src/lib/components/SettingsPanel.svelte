@@ -9,9 +9,9 @@
     TokenStats,
   } from "../api/chat";
   import {
+    birthNameDisplay,
     deleteModel,
     fetchModels,
-    fetchSoulStatus,
     getTokenStats,
     listMcpServers,
     listSkillMcp,
@@ -20,8 +20,9 @@
     toggleMcpServer,
     toggleSkillMcp,
     upsertModel,
-    type SoulStatus,
   } from "../api/settings";
+  import { soulDisplayName } from "../api/settings";
+  import { soulStore } from "../stores/soul.svelte";
 
   type Tab = "models" | "skills" | "soul" | "tokens";
 
@@ -47,7 +48,9 @@
   let servers = $state<McpServerItem[]>([]);
 
   // ── soul tab ──
-  let soul = $state<SoulStatus | null>(null);
+  // Shared store: renaming here also updates the title bar and the rail
+  // SoulCard instantly (they read the same signal).
+  let soul = $derived(soulStore.status);
   let nameDraft = $state("");
   let renaming = $state(false);
   let savingName = $state(false);
@@ -93,7 +96,7 @@
       });
     } else if (tab === "soul") {
       void run(async () => {
-        soul = await fetchSoulStatus();
+        await soulStore.load();
       });
     } else {
       void run(async () => {
@@ -206,7 +209,7 @@
     savingName = true;
     try {
       await setSoulIdentity(name);
-      soul = await fetchSoulStatus();
+      await soulStore.load();
       renaming = false;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -215,8 +218,16 @@
     }
   }
 
+  function focusOnMount(node: HTMLInputElement) {
+    // 改名输入框必须自动聚焦 — 否则用户直接打字落在页面上，
+    // "起了名字没生效"（E2E 实测踩过的坑）
+    node.focus();
+    node.select();
+  }
+
   function startRename() {
-    nameDraft = soul?.soul?.identity?.trim() ?? "";
+    // 只预填用户起过的名字；诞生名（记忆体 · 醒于 …）留空
+    nameDraft = soulDisplayName(soul) ?? "";
     renaming = true;
   }
 
@@ -276,7 +287,10 @@
           {#each models as m (m.name)}
             <div class="model-row">
               <div class="model-info">
-                <span class="model-name">{m.name}{#if m.is_default}<span class="tag default">{$t("settings.model.isDefault")}</span>{/if}</span>
+                <span class="model-name">
+                  <span class="model-name-text" title={m.name}>{m.name}</span>
+                  {#if m.is_default}<span class="tag default">{$t("settings.model.isDefault")}</span>{/if}
+                </span>
                 <span class="model-meta">{m.model} · {$t(m.is_local ? "status.localDeploy" : "status.cloud")} · {m.context_win}</span>
               </div>
               <div class="model-actions">
@@ -354,16 +368,24 @@
               <input
                 class="soul-input"
                 bind:value={nameDraft}
+                use:focusOnMount
+                placeholder={$t("soul.namePlaceholder")}
                 maxlength={24}
                 disabled={savingName}
                 onkeydown={(e) => {
                   if (e.key === "Enter") saveName();
                   else if (e.key === "Escape") renaming = false;
                 }}
+                onblur={() => {
+                  // 失焦也保存 — 只按 Enter 会让人 "输了名字没生效"
+                  if (renaming) saveName();
+                }}
               />
               <button class="btn primary" onclick={saveName} disabled={savingName}>{$t("settings.save")}</button>
             {:else}
-              <span class="soul-name">{soul.soul.identity}</span>
+              <span class="soul-name" title={soul.soul.identity}>
+                {birthNameDisplay(soul.soul.identity, $t("soul.birthName")) ?? soul.soul.identity}
+              </span>
               <button class="btn ghost" onclick={startRename}>{$t("soul.rename")}</button>
             {/if}
           </div>
@@ -600,9 +622,20 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    /* 截断链: 长模型名（无空格不可断行）必须能收缩, 否则会溢出盖住
+       右侧的 设为默认/编辑/删除 按钮 */
+    min-width: 0;
+  }
+
+  .model-name-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .tag {
+    flex: none;
     font-size: 9.5px;
     padding: 0 5px;
     border-radius: 999px;

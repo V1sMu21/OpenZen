@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { isTauri, tauriInvoke } from "../api/tauri";
-  import { soulDisplayName } from "../api/settings";
+  import { birthNameDisplay, soulDisplayName } from "../api/settings";
+  import { soulStore } from "../stores/soul.svelte";
   import { t } from "../i18n";
 
   /** Mirrors the get_memory_status command response (commands.rs). */
@@ -32,17 +33,26 @@
     harness?: { entry_count: number };
   }
 
-  let status = $state<SoulStatus | null>(null);
+  // Shared store: a rename in the settings panel updates this card instantly
+  // (and vice versa) instead of waiting for the 30s poll or a remount.
+  let status = $derived(soulStore.status);
   let expanded = $state(false);
   let timer: ReturnType<typeof setInterval> | null = null;
-  let destroyed = false;
 
   // ── Agent name (user-given) ──
-  // soul.identity is the name source; soulDisplayName (api/settings) returns
-  // it only once the user actually named the agent — the engine auto-fills
-  // a birth name ("记忆体 · 醒于 …") or the "未命名的记忆体" placeholder
-  // before that, which falls back to the generic "灵魂" title.
+  // soul.identity is the name source; soulDisplayName returns it only once
+  // the user actually named the agent — the engine auto-fills a birth name
+  // or the "未命名的记忆体" placeholder before that, which falls back to
+  // the generic "灵魂" title.
   let agentName = $derived(soulDisplayName(status));
+
+  /** Locale-aware identity display: the engine's auto birth name is
+   *  Chinese data ("记忆体 · 醒于 …") — re-render per locale; anything
+   *  else (user-given name) shows as-is. */
+  function identityDisplay(id: string | undefined): string {
+    if (!id?.trim()) return $t("soul.unnamed");
+    return birthNameDisplay(id, $t("soul.birthName")) ?? id;
+  }
 
   let renaming = $state(false);
   let nameDraft = $state("");
@@ -77,14 +87,14 @@
     if (!isTauri()) return;
     try {
       const s = (await tauriInvoke("get_memory_status")) as SoulStatus;
-      if (destroyed) return; // unmounted mid-invoke — drop the write
-      status = s;
+      // Module-level store: safe to write even if unmounted mid-invoke.
+      soulStore.set(s);
       if (!s.enabled && timer) {
         clearInterval(timer); // file backend: nothing to poll
         timer = null;
       }
     } catch {
-      if (!destroyed) status = null;
+      // keep the previous snapshot on IPC failure
     }
   }
 
@@ -94,7 +104,6 @@
     if (isTauri()) refresh();
   });
   onDestroy(() => {
-    destroyed = true;
     if (timer) clearInterval(timer);
   });
 
@@ -118,7 +127,7 @@
   let rows = $derived(
     status?.enabled && status.soul && status.store
       ? [
-          { key: "soul.identity", value: status.soul.identity },
+          { key: "soul.identity", value: identityDisplay(status.soul.identity) },
           { key: "soul.mood", value: status.soul.mood },
           ...(status.embedding_kind
             ? [{ key: "soul.embeddings", value: status.embedding_kind }]
@@ -143,7 +152,7 @@
       </svg>
       <span class="soul-label">{agentName ?? $t("soul.title")}</span>
       <span class="soul-detail">
-        {status.store?.total_entries ?? 0}{#if !agentName} · {status.soul?.identity?.trim() || $t("soul.unnamed")}{/if}
+        {status.store?.total_entries ?? 0}{#if !agentName} · {identityDisplay(status.soul?.identity)}{/if}
       </span>
     </button>
 
@@ -163,6 +172,10 @@
                 onkeydown={(e) => {
                   if (e.key === "Enter") saveName();
                   else if (e.key === "Escape") renaming = false;
+                }}
+                onblur={() => {
+                  // 失焦也保存 — 只按 Enter 会让人 "输了名字没生效"
+                  if (renaming) saveName();
                 }}
               />
               <button class="soul-rename-btn" onclick={saveName} disabled={savingName} title={$t("soul.rename")}>✓</button>

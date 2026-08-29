@@ -50,6 +50,17 @@ export function soulDisplayName(status: SoulStatus | null | undefined): string |
   return id;
 }
 
+const BIRTH_NAME_RE = /^记忆体 · 醒于 (\d{4}-\d{2}-\d{2})$/;
+
+/** Localized rendering of the auto-assigned birth name. The engine emits
+ *  it in Chinese ("记忆体 · 醒于 YYYY-MM-DD"); re-render per locale so the
+ *  English UI never shows Chinese data strings. Returns null for any other
+ *  identity (user-given names render as-is). `label` is $t("soul.birthName"). */
+export function birthNameDisplay(identity: string, label: string): string | null {
+  const m = BIRTH_NAME_RE.exec(identity.trim());
+  return m ? label.replace("{date}", m[1]) : null;
+}
+
 async function invoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   if (!isTauri()) throw new Error(`${cmd} is only available in the desktop app`);
   return (await tauriInvoke(cmd, args)) as T;

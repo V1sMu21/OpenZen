@@ -12,6 +12,9 @@ export interface HeartbeatStatus {
   sessions: number;
   runningAgents: number;
   scheduler: boolean;
+  /** Last ping failure reason (IPC error text) — surfaced in the health
+   *  tag so a red 后端 light is diagnosable without devtools. */
+  lastError?: string;
 }
 
 export const heartbeat = writable<HeartbeatStatus>({
@@ -196,10 +199,17 @@ async function checkHealth(): Promise<boolean> {
   if (isTauri()) {
     try {
       const result = await tauriInvoke("ping") as HeartbeatStatus;
-      heartbeat.set({ ...result, connected: true, lastPing: Date.now() });
+      heartbeat.set({ ...result, connected: true, lastPing: Date.now(), lastError: undefined });
       return true;
-    } catch {
-      heartbeat.set({ connected: false, lastPing: Date.now(), sessions: 0, runningAgents: 0, scheduler: false });
+    } catch (e) {
+      heartbeat.set({
+        connected: false,
+        lastPing: Date.now(),
+        sessions: 0,
+        runningAgents: 0,
+        scheduler: false,
+        lastError: e instanceof Error ? e.message : String(e),
+      });
       return false;
     }
   }
