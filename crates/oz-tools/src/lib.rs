@@ -5,6 +5,7 @@ use oz_core_types::{StepOutcome, ToolContext, ToolDefinition};
 
 pub mod ask_user;
 pub mod code_run;
+pub mod computer_use;
 pub mod doc_reader;
 pub mod file_ops;
 pub mod handler;

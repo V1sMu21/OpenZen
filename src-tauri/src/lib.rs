@@ -1311,6 +1311,7 @@ pub fn run() {
             commands::clear_session_messages,
             commands::ping,
             commands::log_frontend,
+            commands::computer_screenshot_data,
             commands::get_working_dir,
 commands::get_working_dir_for_session,
             commands::get_dashboard_stats,

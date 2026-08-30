@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ToolCallInfo } from "../stores/types";
   import { t, locale, tSync } from "../i18n";
+  import { isTauri, tauriInvoke } from "../api/tauri";
   let lang = $state("zh");
   $effect(() => { lang = $locale; });
 
@@ -18,6 +19,64 @@
   let cmdExpanded = $state(false);
   let resExpanded = $state(false);
   let paramsExpanded = $state(false);
+
+  // computer_screenshot: fetch the PNG as a data URI (path-restricted IPC)
+  // once the tool completes, for an inline preview inside the card.
+  let shotUri = $state<string | null>(null);
+  let shotFailed = $state(false);
+
+  /** Parse a tool result string into an object; null on failure. Shared by
+   *  the per-tool result extractors below. */
+  function parseResultObj(result: unknown): Record<string, unknown> | null {
+    if (typeof result !== "string") {
+      return result && typeof result === "object"
+        ? (result as Record<string, unknown>)
+        : null;
+    }
+    try {
+      const o = JSON.parse(result);
+      return o && typeof o === "object" ? (o as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  }
+  $effect(() => {
+    if (
+      toolCall?.name !== "computer_screenshot"
+      || !completed
+      || !isTauri()
+      || !workingDir
+      || !toolCall.result
+      || shotUri
+      || shotFailed
+    ) {
+      return;
+    }
+    const r = parseResultObj(toolCall.result);
+    if (!r || typeof r.path !== "string" || !r.path) {
+      // no path in the result — nothing to preview (latched, like every exit)
+      shotFailed = true;
+      return;
+    }
+    {
+      void (async () => {
+        try {
+          // Tauri 2 matches Rust snake_case params to camelCase JS keys.
+          const res = await tauriInvoke("computer_screenshot_data", {
+            path: r.path,
+            workingDir,
+          }) as { data_uri?: string };
+          if (typeof res?.data_uri === "string") {
+            shotUri = res.data_uri;
+          } else {
+            shotFailed = true;
+          }
+        } catch {
+          shotFailed = true;
+        }
+      })();
+    }
+  });
 
   function toggle() {
     collapsed = !collapsed;
@@ -459,6 +518,9 @@
             {/if}
           {/if}
         {/if}
+        {#if shotUri}
+          <img class="tcc-shot" src={shotUri} alt="computer screenshot preview" />
+        {/if}
         {#if toolCall.result != null && !isTodo}
           <button
             class="tcc-res"
@@ -707,6 +769,15 @@
     color: var(--color-primary);
     font-size: 10.5px;
     opacity: 0.8;
+  }
+
+  /* computer_screenshot 内联预览 */
+  .tcc-shot {
+    display: block;
+    width: 100%;
+    margin-top: 6px;
+    border-radius: 6px;
+    border: 1px solid var(--color-hairline);
   }
 
   /* 第三行: 结果 — 默认限高滚动, 点击展开完整 */

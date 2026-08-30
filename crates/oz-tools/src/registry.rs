@@ -149,6 +149,7 @@ impl ToolRegistry {
         reg.register(crate::todoupdate::TodoUpdateTool);
         reg.register(crate::schedule_reminder::ScheduleReminderTool);
         reg.register(crate::open_side_panel::OpenSidePanelTool);
+        crate::computer_use::register_all(&mut reg);
 
         reg
     }

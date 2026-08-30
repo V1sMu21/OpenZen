@@ -78,6 +78,35 @@ pub fn ping(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     })
 }
 
+/// Read a computer-use screenshot back as a data URI for the ToolCallCard
+/// preview. Path-restricted: only files under `{working_dir}/computer/` are
+/// served (the caller passes the session's working dir — the same root the
+/// capture tool wrote to), so this cannot become an arbitrary file read.
+/// Async so the multi-hundred-KB read+encode runs off the main thread.
+#[tauri::command]
+pub async fn computer_screenshot_data(path: String, working_dir: String) -> serde_json::Value {
+    let result = tokio::task::spawn_blocking(move || {
+        let allowed_root = std::path::Path::new(&working_dir)
+            .join(oz_tools::computer_use::SCREENSHOT_DIR)
+            .canonicalize()
+            .ok();
+        let Some(allowed_root) = allowed_root else {
+            return Err("no screenshots yet".to_string());
+        };
+        let canonical = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        if !canonical.starts_with(&allowed_root) {
+            return Err("path outside the screenshot directory".to_string());
+        }
+        oz_tools::doc_reader::read_image_base64(&canonical.to_string_lossy())
+    })
+    .await;
+    match result {
+        Ok(Ok(data_uri)) => serde_json::json!({ "data_uri": data_uri }),
+        Ok(Err(e)) => serde_json::json!({ "error": e }),
+        Err(e) => serde_json::json!({ "error": e.to_string() }),
+    }
+}
+
 /// Frontend console bridge: persists a line to the debug log so release
 /// builds (no devtools) stay diagnosable. Cheap; used by startup paths and
 /// the heartbeat check. Flushes per line — this path is cold and the whole

@@ -28,6 +28,9 @@ calamine = "0.26"
 zip = "0.6"
 quick-xml = "0.31"
 base64 = "0.22"
+core-foundation = "0.9"
+enigo = "0.2"
+accessibility = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true
