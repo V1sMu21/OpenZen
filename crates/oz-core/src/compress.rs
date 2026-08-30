@@ -42,6 +42,9 @@ pub struct CompressionConfig {
     /// in time, the main model's prefill runs against the REAL summary
     /// instead of the template. On timeout the template is used and
     /// collection continues in the background for the next turn.
+    /// 10 min: merge cost scales superlinearly with the removed-window
+    /// size, and a 1M-token window on a small local summarizer
+    /// (e.g. LFM2.5-230M) needs far more than the old 60s.
     pub summary_wait_secs: u64,
     /// Cap for the summary prompt in chars. The agent loop no longer
     /// truncates the prompt (full removed window is fed to
@@ -59,16 +62,19 @@ impl Default for CompressionConfig {
             old_assistant_budget: 2000, // ~8K chars — preserve planning context
             old_user_budget: 5000,    // ~20K chars — never truncate task descriptions
             enable_summarization: true,
-            // 170K = 256K window − 64K max output headroom. Old 35K/40K ceilings
-            // fired at 16% of window, thrashing every turn and breaking the
-            // omlx prefix-cache chain. Smaller windows are governed by
-            // trigger_pct (80%) which fires before hard_max when window < 212.5K.
-            max_trigger_tokens: 170_000,
-            hard_max_tokens: 170_000,
+            // Absolute ceiling on the trigger line. 0 (the default) = no
+            // absolute cap: the threshold is context_win × trigger_pct
+            // (80% of the model's window), so a 1M-context model compresses
+            // at 800K instead of being clamped to the old 170K constant
+            // (which made 80% of a big window unreachable). Set a non-zero
+            // value only to protect a model whose real capacity is smaller
+            // than its configured window.
+            max_trigger_tokens: 0,
+            hard_max_tokens: 0,
             // ~6% of a 256K window. Deep compression: 170K trigger → ~16K
             // after, one compression buys a long stable period.
             target_tokens: 16_000,
-            summary_wait_secs: 60,
+            summary_wait_secs: 600,
             // Kept for compatibility; the agent loop no longer truncates the
             // summary prompt (full removed window is fed to spawn_summary,
             // which splits oversized prompts via progressive_merge_summary).
@@ -258,7 +264,12 @@ pub fn compress_messages(
     known_tokens: Option<usize>,
 ) -> usize {
     let pct_trigger = context_win * config.trigger_pct as usize / 100;
-    let trigger_tokens = pct_trigger.min(config.max_trigger_tokens);
+    // 0 = no absolute cap — the threshold is pure win × trigger_pct.
+    let trigger_tokens = if config.max_trigger_tokens > 0 {
+        pct_trigger.min(config.max_trigger_tokens)
+    } else {
+        pct_trigger
+    };
     // Target must sit strictly below the trigger line (emergency mode
     // passes context_win=1 → trigger=0 → target=1, deleting down to the
     // min_messages floor, same as before).

@@ -781,13 +781,15 @@ where
                 est_tokens = stats_before.total_chars / 4;
             }
             let trigger_tokens = config.context_win * comp_config.trigger_pct as usize / 100;
-            // hard_max_tokens ceiling. If token count exceeds the
-            // emergency ceiling (170K by default), force compression
-            // regardless of percentage. This catches the exact scenario
-            // this bug fix addresses: 82K context but trigger at 204K
-            // (80% of 256K) → compression never fires.
-            let force_compress =
-                est_tokens > trigger_tokens || est_tokens > comp_config.hard_max_tokens;
+            // hard_max_tokens absolute ceiling — 0 (the default) means the
+            // threshold is purely context_win × trigger_pct (80% of the
+            // model's window), so a 1M-context model compresses at 800K
+            // instead of being clamped to the old 170K constant. A non-zero
+            // value still forces compression regardless of percentage, for
+            // a configured window larger than the model's real capacity.
+            let force_compress = est_tokens > trigger_tokens
+                || (comp_config.hard_max_tokens > 0
+                    && est_tokens > comp_config.hard_max_tokens);
             if config.verbose {
                 let msg = format!(
                     "compress check: est={est_tokens} trigger={trigger_tokens} hard_max={} ctx_win={} chars={} msgs={before_count} force={force_compress}",
@@ -900,11 +902,13 @@ where
                 // splits oversized prompts via `progressive_merge_summary`
                 // (7K-char chunks, pairwise serial merges), which is slower
                 // but keeps every byte visible to the summarizer. The wait
-                // window (`summary_wait_secs`) must cover the merge cost:
-                // measured ≈46s for a 170K-token window, hence 60s.
+                // window (`summary_wait_secs`, 10 min) must cover the merge
+                // cost of a 1M-token window on a small local summarizer
+                // (measured ≈46s for 170K — scale superlinearly with chunk
+                // count, hence the large budget).
 
                 // P1-h: tell the UI compression STARTED before blocking on
-                // the summary model (up to 60s of otherwise-silent wait).
+                // the summary model (up to 10 min of otherwise-silent wait).
                 // after_tokens=0 is the pending marker; the final event
                 // below overwrites it with real numbers.
                 if removed_count > 0 {
@@ -2943,7 +2947,14 @@ where
                     } else {
                         pre_exit_stats.total_chars / 4
                     };
-                    if est_tokens > comp_config.hard_max_tokens {
+                    // Ceiling = configured hard cap, else win × trigger_pct
+                    // (0 hard cap = threshold is 80% of the model's window).
+                    let pre_exit_ceiling = if comp_config.hard_max_tokens > 0 {
+                        comp_config.hard_max_tokens
+                    } else {
+                        config.context_win * comp_config.trigger_pct as usize / 100
+                    };
+                    if est_tokens > pre_exit_ceiling {
                         tracing::warn!(
                             "Pre-exit compression: {} chars / {} msgs → compressing before agent exits",
                             pre_exit_stats.total_chars, messages.len()
@@ -2952,10 +2963,15 @@ where
                             .iter()
                             .filter_map(|m| serde_json::to_value(m).ok())
                             .collect();
-                        let emergency_win = if comp_config.trigger_pct > 0 {
-                            comp_config.hard_max_tokens * 100 / comp_config.trigger_pct as usize
+                        let emergency_win = if comp_config.hard_max_tokens > 0 {
+                            if comp_config.trigger_pct > 0 {
+                                comp_config.hard_max_tokens * 100
+                                    / comp_config.trigger_pct as usize
+                            } else {
+                                comp_config.hard_max_tokens
+                            }
                         } else {
-                            comp_config.hard_max_tokens
+                            config.context_win
                         };
                         let _saved = crate::compress::compress_messages(
                             &mut messages,
@@ -3228,7 +3244,13 @@ where
             } else {
                 post_tool_stats.total_chars / 4
             };
-            let emergency = est_tokens > comp_config.hard_max_tokens;
+            // Ceiling = configured hard cap, else win × trigger_pct (80%).
+            let ceiling = if comp_config.hard_max_tokens > 0 {
+                comp_config.hard_max_tokens
+            } else {
+                config.context_win * comp_config.trigger_pct as usize / 100
+            };
+            let emergency = est_tokens > ceiling;
 
             if emergency {
                 tracing::warn!(
@@ -3241,16 +3263,22 @@ where
                     .iter()
                     .filter_map(|m| serde_json::to_value(m).ok())
                     .collect();
-                // P0: The emergency flag means we've exceeded hard_max_tokens
-                // (80K by default), but compress_messages targets
-                // context_win * trigger_pct% (e.g. 256K * 80% = 205K). At
-                // 210K context, that removes only ~5K tokens — effectively
-                // a no-op. Compute an effective window so the target IS
-                // hard_max_tokens, forcing real reduction.
-                let emergency_win = if comp_config.trigger_pct > 0 {
-                    comp_config.hard_max_tokens * 100 / comp_config.trigger_pct as usize
+                // P0: The emergency flag means we've exceeded the ceiling,
+                // but compress_messages targets context_win * trigger_pct%
+                // (e.g. 256K * 80% = 205K). Just past the ceiling that
+                // removes only a few K tokens — effectively a no-op.
+                // Compute an effective window so the target forces real
+                // reduction. With no hard cap (0), the effective window is
+                // the model's own context_win.
+                let emergency_win = if comp_config.hard_max_tokens > 0 {
+                    if comp_config.trigger_pct > 0 {
+                        comp_config.hard_max_tokens * 100
+                            / comp_config.trigger_pct as usize
+                    } else {
+                        comp_config.hard_max_tokens
+                    }
                 } else {
-                    comp_config.hard_max_tokens
+                    config.context_win
                 };
                 let _saved = crate::compress::compress_messages(
                     &mut messages,
