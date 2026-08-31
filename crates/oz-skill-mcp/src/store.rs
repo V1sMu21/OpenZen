@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn reload_incremental_skips_unchanged_tree_and_picks_up_new_files() {
-        let (dir, mut store) = tmp_skill_mcp();
+        let (_dir, mut store) = tmp_skill_mcp();
         let skills_dir = store.base_dir().join("skills").join("alpha");
         std::fs::create_dir_all(&skills_dir).unwrap();
 
