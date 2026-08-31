@@ -4,13 +4,15 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    /// `docs/` is local-retention only (git-skill 维度 18) and absent in clean
-    /// checkouts — skip docs-content assertions there instead of failing CI.
+    /// `docs/` is local-retention only (git-skill 维度 18); clean checkouts
+    /// only carry `docs/bench/screenshots` and `docs/screenshots` (README
+    /// GIFs), so gate on the full local doc tree — if `risk-register.md` is
+    /// absent, skip docs-content assertions instead of failing CI.
     macro_rules! docs_only {
         () => {
-            if !docs_dir().exists() {
+            if !docs_dir().join("risk-register.md").exists() {
                 eprintln!(
-                    "[oz-tests] docs/ not present in this checkout (local-retention); skipping"
+                    "[oz-tests] full docs/ tree not present in this checkout (local-retention); skipping"
                 );
                 return;
             }
