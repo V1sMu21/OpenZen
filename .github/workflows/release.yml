@@ -9,6 +9,10 @@ on:
     tags:
       - "v*"
 
+# GITHUB_TOKEN 默认对 Release 只读（较新仓库策略），显式授予写权限
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
