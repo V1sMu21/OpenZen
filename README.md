@@ -116,7 +116,7 @@ Tauri（Rust + Svelte 5）：SSE 流式输出、`ask_user` 弹窗确认、侧边
 
 ### 9. 阿青：灵魂的可见表达
 
-OpenZen 的 Agent 默认名是**阿青**（用户可以随时自定义）。桌面端还有一只同名小猫（`idle / working / thinking / waiting / error / done` 六态动画原型），它的「心情」来自 ERME 灵魂层（`get_memory_status`），任务完成会有小鱼干——记忆与行为一致的「知行合一」，首先表现出形态。
+OpenZen 的 Agent 默认名是**阿青**（用户可以随时自定义）。桌面端还有一只同名小猫（`idle / working / thinking / waiting / error / done` 六态动画原型，动画素材由**本地部署的 ComfyUI + MiniMax H3（MLX 版）**生成），它的「心情」来自 ERME 灵魂层（`get_memory_status`），任务完成会有小鱼干——记忆与行为一致的「知行合一」，首先表现出形态。
 
 > 当前阶段：六态动画原型与灵魂可见化实验，完整桌面跑动交互仍在打磨中。
 
@@ -231,7 +231,7 @@ token 经济学 + 恒定成本渲染。系统提示词保持 ~4.4KB；Skill/SOP 
 
 ## Bench：三任务三方实测
 
-> 同一任务文案、同一本地模型后端（oMLX 中本地部署的 DeepSeek-V4-Flash-0731，MXFP4 量化版）下运行，监测脚本实时采集 tokens / 内存 / 耗时 / 交付物。表格数据均为各 agent 最后一次优化轮次的实测结果。Codex CLI 曾参与部分任务，因监测数据异常未纳入。
+> 同一任务文案、同一本地模型后端（oMLX 中本地部署的 DeepSeek-V4-Flash-0731，MXFP4 量化版）下运行，任务所需素材全部由**本地部署的 ComfyUI** 生成，监测脚本实时采集 tokens / 内存 / 耗时 / 交付物。表格数据均为各 agent 最后一次优化轮次的实测结果。Codex 桌面端曾参与部分任务，已从本次 Bench 移除：本地部署的 DeepSeek-V4-Flash 没有视觉能力，测试任务说明因此要求「不读取图片、可使用像素监测等方法」，而 Codex 无视规则频繁读取图片，上下文暴涨至 1M+ 导致 oMLX 直接拒绝请求。
 > 交付物截图见每格下方。
 
 ### TASK 1 · 网页小游戏《星海拾遗》
@@ -289,7 +289,7 @@ OpenZen 借鉴前人的优秀经验一路走来，借鉴清单（逐项明确来
 - **GenericAgent（起源）** — OpenZen 最初是 Python 版 GenericAgent 框架的 Rust 重写（单一静态二进制，体积与内存降低一到两个数量级）；经多轮重构（删除启发式 narration.rs 375 行、content.rs 559 行、协议适配层，新增 checkpoint / ERME / 质量门）后已与原框架判若两物，只继承了「极简自主 Agent + 技能结晶」的精神内核；
 - **EverMind** — 用户画像（Portrait）与自进化（空闲联想 / 检疫进化）机制的启发来源；
 - **Claude Code** — `<system-reminder>` 动态注入、MEMORY.md 自动记忆、Agent Skills 渐进披露、四层 CLAUDE.md 层级；
-- **Codex CLI** — 两阶段记忆管线、收工前 diff 自检纪律、per-env profiles 概念；
+- **Codex 桌面端** — 两阶段记忆管线、收工前 diff 自检纪律、per-env profiles 概念；
 - **ZCode** — submit_plan + 待办清单双轨、verify-check 四级管道（cargo check → test → clippy → E2E）；
 - **Hermes（Nous）** — prompt caching 神圣原则（系统提示词字节稳定）、任务后学习循环、中文全文检索思路；
 - **Prime Agent** — harness_refine（启示账本 / 自我精化）机制；

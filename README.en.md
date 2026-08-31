@@ -98,7 +98,7 @@ Tauri (Rust + Svelte 5): SSE streaming, `ask_user` confirmation dialogs, sidebar
 
 ### 9. A-Qing: the soul made visible
 
-OpenZen's agent is named **A-Qing by default** (users may rename it anytime). There's also a desktop kitten of the same name — a six-state animation prototype (`idle / working / thinking / waiting / error / done`). Its "mood" comes from the ERME soul layer (`get_memory_status`); finished tasks earn it a fish cracker — "unity of knowing and doing" made visible.
+OpenZen's agent is named **A-Qing by default** (users may rename it anytime). There's also a desktop kitten of the same name — a six-state animation prototype (`idle / working / thinking / waiting / error / done`), with the animation assets produced by a **locally deployed ComfyUI + MiniMax H3 (MLX build)**. Its "mood" comes from the ERME soul layer (`get_memory_status`); finished tasks earn it a fish cracker — "unity of knowing and doing" made visible.
 
 > Current stage: six-state animation prototype and a soul-visibility experiment; full desktop interactions are still being polished.
 
@@ -213,7 +213,7 @@ Each has its strengths (CJK full-text search, recursive summarization, 4-way ret
 
 ## Bench: Three Tasks × Three Agents
 
-> Identical task prompts, identical local model backend (DeepSeek-V4-Flash-0731 locally deployed in oMLX, MXFP4-quantized); a monitor script collected tokens / memory / duration / deliverables in real time. All metrics are from each agent's final optimization round. Codex CLI joined some tasks but was excluded due to unreliable monitoring data.
+> Identical task prompts, identical local model backend (DeepSeek-V4-Flash-0731 locally deployed in oMLX, MXFP4-quantized); all task assets were produced by a **locally deployed ComfyUI**; a monitor script collected tokens / memory / duration / deliverables in real time. All metrics are from each agent's final optimization round. The Codex desktop app joined some tasks but was removed from this bench: the locally deployed DeepSeek-V4-Flash has no vision capability, so the task prompts forbid reading images while permitting pixel-level monitoring — Codex ignored the rule and kept reading images, ballooning its context past 1M tokens until oMLX refused the requests.
 > Deliverable screenshots below each cell.
 
 ### TASK 1 · Web game "Star Salvage"
@@ -271,7 +271,7 @@ OpenZen follows the excellent experience of preceding harnesses, with explicit c
 - **GenericAgent (origin)** — OpenZen began as a Rust rewrite of the Python GenericAgent framework (a single static binary, one to two orders of magnitude lighter in size and memory); after multiple rounds of restructuring (deleting the 375-line heuristic `narration.rs`, the 559-line `content.rs`, the protocol adapter layer; adding checkpoints / ERME / quality gates) it diverged completely, inheriting only the spirit: "a minimal autonomous agent with skill crystallization";
 - **EverMind** — inspiration for the user-portrait (Portrait) and self-evolution (idle rambling / quarantine evolution) mechanisms;
 - **Claude Code** — `<system-reminder>` dynamic injection, MEMORY.md auto-memory, Agent Skills progressive disclosure, 4-layer CLAUDE.md hierarchy;
-- **Codex CLI** — two-phase memory pipeline, pre-finish diff self-check discipline, per-env profiles;
+- **Codex desktop app** — two-phase memory pipeline, pre-finish diff self-check discipline, per-env profiles;
 - **ZCode** — submit_plan + checklist dual track, the verify-check four-stage pipeline (cargo check → test → clippy → E2E);
 - **Hermes (Nous)** — sacred prompt caching (byte-stable system prompt), post-task learning loop, CJK full-text search ideas;
 - **Prime Agent** — the harness refine mechanism (lessons ledger / self-refinement);
