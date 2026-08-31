@@ -59,6 +59,8 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           body_path: CHANGELOG.md
+          update_release: true
+          overwrite: true
           files: |
             target/release/bundle/dmg/*.dmg
             target/release/bundle/macos/*.app
