@@ -96,9 +96,9 @@ The desktop is not a "software panel" — it's a **Ru-ware porcelain**: the "sky
 
 Tauri (Rust + Svelte 5): SSE streaming, `ask_user` confirmation dialogs, sidebar + right panel, settings panel (models / skills / MCP / **soul status** / token stats), auto-update. Long tasks don't cause progress anxiety — the timeline folds itself into a scroll.
 
-### 9. A-Qing: the soul made visible
+### 9. Ah-Qing: the soul made visible
 
-OpenZen's agent is named **A-Qing by default** (users may rename it anytime). There's also a desktop kitten of the same name — a six-state animation prototype (`idle / working / thinking / waiting / error / done`), with the animation assets produced by a **locally deployed ComfyUI + MiniMax H3 (MLX build)**. Its "mood" comes from the ERME soul layer (`get_memory_status`); finished tasks earn it a fish cracker — "unity of knowing and doing" made visible.
+OpenZen's agent is named **Ah-Qing by default** (users may rename it anytime). There's also a desktop kitten of the same name — a six-state animation prototype (`idle / working / thinking / waiting / error / done`), with the animation assets produced by a **locally deployed ComfyUI + MiniMax H3 (MLX build)**. Its "mood" comes from the ERME soul layer (`get_memory_status`) — "unity of knowing and doing" made visible.
 
 > Current stage: six-state animation prototype and a soul-visibility experiment; full desktop interactions are still being polished.
 
@@ -114,7 +114,7 @@ A real runtime capture (local model **DeepSeek-V4-Flash-0731 · locally deployed
 
 <img src="docs/screenshots/runtime-demo.gif" width="100%">
 
-You can see: the **thinking blocks** in Kai-style handwriting, **tool calls** as underglaze patterns (one write initially rejected, then auto-relocated and succeeded), tokens **streaming into the glaze**, the 2/2 checklist closing out, the 📋 **delivery contract**, and **A-Qing** in the bottom-right corner changing states — settling back into its "done" form when the task finishes.
+You can see: the **thinking blocks** in Kai-style handwriting, **tool calls** as underglaze patterns (one write initially rejected, then auto-relocated and succeeded), tokens **streaming into the glaze**, the 2/2 checklist closing out, the 📋 **delivery contract**, and **Ah-Qing** in the bottom-right corner changing states — settling back into its "done" form when the task finishes.
 
 ---
 
@@ -184,7 +184,7 @@ Quality is a loop, not a checkpoint: failure → reflection log → ledger lesso
 | Delivery quality | Assertions / independent review / diff self-check / delivery contract | submit_plan + checklist | No system | No explicit mechanism |
 | Checkpoint resume | MmapWal + git snapshot + crash recovery | None | None | In-session compact |
 | Loop protection | Breaker loop detection | None | None | None |
-| Desktop | Tauri artifact-grammar UI + A-Qing | IDE | — | — |
+| Desktop | Tauri artifact-grammar UI + Ah-Qing | IDE | — | — |
 | Weight | 29MB binary / ~180MB idle RSS | IDE-class | Python-based | Heavy |
 
 In one line: ZCode and Hermes also support local models and both have memory — **OpenZen's difference is turning memory into an evolving compounding loop (lessons ledger + reflection + async distillation) and turning delivery quality into a regression-tested engineering system** — the line between a companion and a tool.
@@ -211,7 +211,7 @@ Each has its strengths (CJK full-text search, recursive summarization, 4-way ret
 
 ---
 
-## Bench: Three Tasks × Three Agents
+## Bench: Three Tasks × Three Harnesses
 
 > Identical task prompts, identical local model backend (DeepSeek-V4-Flash-0731 locally deployed in oMLX, MXFP4-quantized); all task assets were produced by a **locally deployed ComfyUI**; a monitor script collected tokens / memory / duration / deliverables in real time. All metrics are from each agent's final optimization round. The Codex desktop app joined some tasks but was removed from this bench: the locally deployed DeepSeek-V4-Flash has no vision capability, so the task prompts forbid reading images while permitting pixel-level monitoring — Codex ignored the rule and kept reading images, ballooning its context past 1M tokens until oMLX refused the requests.
 > Deliverable screenshots below each cell.
@@ -309,7 +309,7 @@ OpenZen follows the excellent experience of preceding harnesses, with explicit c
 **v0.1.0 released 2026-08**, followed by: full ERME integration (M1–M4 + P0–P4), QA–QE quality gates (five groups, twelve items), artifact-grammar UI migration, settings panel, and the harness ledger loop.
 
 - ✅ Done: streaming protocol, desktop app, Codex-style harness upgrades (U1–U6), ERME integration, quality gates, artifact-grammar migration
-- 🚧 In progress: artifact-grammar complexity audit (10h soak RSS ≤ 350MB), long-task bench validation, A-Qing animation
+- 🚧 In progress: artifact-grammar complexity audit (10h soak RSS ≤ 350MB), long-task bench validation, Ah-Qing animation
 
 ---
 

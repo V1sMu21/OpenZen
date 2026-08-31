@@ -116,7 +116,7 @@ Tauri（Rust + Svelte 5）：SSE 流式输出、`ask_user` 弹窗确认、侧边
 
 ### 9. 阿青：灵魂的可见表达
 
-OpenZen 的 Agent 默认名是**阿青**（用户可以随时自定义）。桌面端还有一只同名小猫（`idle / working / thinking / waiting / error / done` 六态动画原型，动画素材由**本地部署的 ComfyUI + MiniMax H3（MLX 版）**生成），它的「心情」来自 ERME 灵魂层（`get_memory_status`），任务完成会有小鱼干——记忆与行为一致的「知行合一」，首先表现出形态。
+OpenZen 的 Agent 默认名是**阿青**（用户可以随时自定义）。桌面端还有一只同名小猫（`idle / working / thinking / waiting / error / done` 六态动画原型，动画素材由**本地部署的 ComfyUI + MiniMax H3（MLX 版）**生成），它的「心情」来自 ERME 灵魂层（`get_memory_status`）——记忆与行为一致的「知行合一」，首先表现出形态。
 
 > 当前阶段：六态动画原型与灵魂可见化实验，完整桌面跑动交互仍在打磨中。
 
