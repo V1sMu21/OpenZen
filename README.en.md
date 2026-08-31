@@ -114,7 +114,7 @@ A real runtime capture (local model **DeepSeek-V4-Flash-0731 · locally deployed
 
 <img src="docs/screenshots/runtime-demo.gif" width="100%">
 
-You can see: the **thinking blocks** in Kai-style handwriting, **tool calls** as underglaze patterns (one write initially rejected, then auto-relocated and succeeded), tokens **streaming into the glaze**, the 2/2 checklist closing out, the 📋 **delivery contract**, and **A-Qing** in the top-right corner changing states — settling back into its "done" form when the task finishes.
+You can see: the **thinking blocks** in Kai-style handwriting, **tool calls** as underglaze patterns (one write initially rejected, then auto-relocated and succeeded), tokens **streaming into the glaze**, the 2/2 checklist closing out, the 📋 **delivery contract**, and **A-Qing** in the bottom-right corner changing states — settling back into its "done" form when the task finishes.
 
 ---
 
@@ -269,6 +269,7 @@ An illustrated report; ≥4 ComfyUI images; volume & completeness judged by revi
 OpenZen follows the excellent experience of preceding harnesses, with explicit credits:
 
 - **GenericAgent (origin)** — OpenZen began as a Rust rewrite of the Python GenericAgent framework (a single static binary, one to two orders of magnitude lighter in size and memory); after multiple rounds of restructuring (deleting the 375-line heuristic `narration.rs`, the 559-line `content.rs`, the protocol adapter layer; adding checkpoints / ERME / quality gates) it diverged completely, inheriting only the spirit: "a minimal autonomous agent with skill crystallization";
+- **EverMind** — inspiration for the user-portrait (Portrait) and self-evolution (idle rambling / quarantine evolution) mechanisms;
 - **Claude Code** — `<system-reminder>` dynamic injection, MEMORY.md auto-memory, Agent Skills progressive disclosure, 4-layer CLAUDE.md hierarchy;
 - **Codex CLI** — two-phase memory pipeline, pre-finish diff self-check discipline, per-env profiles;
 - **ZCode** — submit_plan + checklist dual track, the verify-check four-stage pipeline (cargo check → test → clippy → E2E);
@@ -277,7 +278,7 @@ OpenZen follows the excellent experience of preceding harnesses, with explicit c
 - **Pi** — the minimal-harness philosophy (just loop / tools / context / sessions);
 - **Gemini CLI / opencode / MiMo** — minimal save_memory, tool registry & declarative permissions, spec-driven workflows.
 
-> We took the clay of our predecessors and fired it with Rust into a piece of Chinese porcelain that remembers you.
+> We took the clay of our predecessors and fired it with Rust into a piece of porcelain that remembers you.
 
 ---
 

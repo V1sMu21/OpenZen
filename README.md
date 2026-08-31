@@ -132,7 +132,7 @@ OpenZen 的 Agent 默认名是**阿青**（用户可以随时自定义）。桌�
 
 <img src="docs/screenshots/runtime-demo.gif" width="100%">
 
-画面里可以看到：楷体手迹的**思考块**、釉下暗纹式的**工具调用**（一次落笔失败后自动改道成功）、token **流式入釉**、待办清单 2/2 收束、📋 **交付说明**契约，以及右上角「阿青」的状态变化——任务完成后它会回到「完成」形态。
+画面里可以看到：楷体手迹的**思考块**、釉下暗纹式的**工具调用**（一次落笔失败后自动改道成功）、token **流式入釉**、待办清单 2/2 收束、📋 **交付说明**契约，以及右下角「阿青」的状态变化——任务完成后它会回到「完成」形态。
 
 ---
 
@@ -287,6 +287,7 @@ token 经济学 + 恒定成本渲染。系统提示词保持 ~4.4KB；Skill/SOP 
 OpenZen 借鉴前人的优秀经验一路走来，借鉴清单（逐项明确来源）：
 
 - **GenericAgent（起源）** — OpenZen 最初是 Python 版 GenericAgent 框架的 Rust 重写（单一静态二进制，体积与内存降低一到两个数量级）；经多轮重构（删除启发式 narration.rs 375 行、content.rs 559 行、协议适配层，新增 checkpoint / ERME / 质量门）后已与原框架判若两物，只继承了「极简自主 Agent + 技能结晶」的精神内核；
+- **EverMind** — 用户画像（Portrait）与自进化（空闲联想 / 检疫进化）机制的启发来源；
 - **Claude Code** — `<system-reminder>` 动态注入、MEMORY.md 自动记忆、Agent Skills 渐进披露、四层 CLAUDE.md 层级；
 - **Codex CLI** — 两阶段记忆管线、收工前 diff 自检纪律、per-env profiles 概念；
 - **ZCode** — submit_plan + 待办清单双轨、verify-check 四级管道（cargo check → test → clippy → E2E）；
@@ -295,7 +296,7 @@ OpenZen 借鉴前人的优秀经验一路走来，借鉴清单（逐项明确来
 - **Pi** — 最小 harness 哲学（只做 loop / tools / context / sessions 四件事）；
 - **Gemini CLI / opencode / MiMo** — save_memory 极简记忆、tool registry 与声明式权限、规格驱动工作流。
 
-> 取前人之土，用 Rust 作窑火，烧成一件会记住你的中国瓷器。
+> 取前人之土，用 Rust 作窑火，烧成一件会记住你的瓷器。
 
 ---
 
