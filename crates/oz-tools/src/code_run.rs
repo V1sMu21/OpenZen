@@ -64,11 +64,11 @@ impl ToolHandler for CodeRunTool {
     }
 
     fn description(&self) -> String {
-        "Execute shell commands or python code (type: bash|python). Contract: on failure do NOT blind-retry — change approach or ask_user. Independent read-only commands may run concurrently; writes last. Long-running tasks: launch with nohup in the background and poll.".to_string()
+        "Execute shell commands or python code (type: bash|python). Contract: on failure do NOT blind-retry — change approach or ask_user. Independent read-only commands may run concurrently; writes last. Long-running commands: pass `timeout` (up to 1800s); beyond that, launch with nohup in the background and poll.".to_string()
     }
 
     fn description_zh(&self) -> String {
-        "执行 shell 命令或 python 代码（type: bash|python）。契约：失败勿盲目重试——换路径或 ask_user；无依赖的只读命令可并发执行，写操作放最后；长任务用 nohup 后台启动并轮询结果。".to_string()
+        "执行 shell 命令或 python 代码（type: bash|python）。契约：失败勿盲目重试——换路径或 ask_user；无依赖的只读命令可并发执行，写操作放最后；长命令用 timeout 参数（上限 1800 秒），更久的任务用 nohup 后台启动并轮询结果。".to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
@@ -85,7 +85,7 @@ impl ToolHandler for CodeRunTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds"
+                    "description": "Timeout in seconds (default 60, max 1800). Set a larger value for long-running commands."
                 },
                 "mode": {
                     "type": "string",
@@ -114,7 +114,17 @@ impl ToolHandler for CodeRunTool {
         }
 
         let code_type = args.get("type").and_then(|v| v.as_str()).unwrap_or("bash");
-        let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(60);
+        // Inner cap. The agent loop's outer cap honors a declared `timeout`
+        // (+30s grace) up to 1830s, so the inner kill fires first with its
+        // structured timeout result. Clamp here so a runaway value can't
+        // outrun the outer cap and get killed by the loop's blunt error.
+        // 30s outer caps from `tool_timeout_secs` no longer bite: even the
+        // default (60s) is honored.
+        let timeout = args
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(60)
+            .clamp(1, 1800);
         let mode = args
             .get("mode")
             .and_then(|v| v.as_str())

@@ -690,10 +690,20 @@ where
                 items
             };
             for intervention in &interventions {
+                // Char-safe truncation: byte-slicing `content[..100]` panics
+                // whenever the user's intervention contains CJK text (a 3-byte
+                // char straddling byte 100). That panic killed the whole agent
+                // task silently — no done/error SSE event, the UI froze with
+                // no new cards (observed 2026-09-02, session 6bbea6ed).
+                let content_head: String = intervention
+                    .content
+                    .chars()
+                    .take(100)
+                    .collect();
                 tracing::info!(
                     "Applying intervention '{}': {}",
                     intervention.kind,
-                    &intervention.content[..intervention.content.len().min(100)]
+                    content_head
                 );
                 crate::checkpoint::apply_intervention(&mut messages, intervention);
 
@@ -1774,12 +1784,34 @@ where
                                 }
                             }
 
+                            // Per-tool outer cap. `tool_timeout_secs` is a
+                            // fail-fast default for quick tools; a tool that
+                            // declares its own `timeout` argument (code_run
+                            // et al.) is granted its declared duration plus a
+                            // grace window so the TOOL's inner timeout fires
+                            // first with its structured timeout result
+                            // instead of the loop's blunt error. The hard
+                            // ceiling keeps a runaway args value from
+                            // stalling the turn forever (genuinely longer
+                            // work belongs in nohup background jobs).
+                            const TOOL_TIMEOUT_HARD_CEILING_SECS: u64 = 1830;
+                            let declared_timeout = args.get("timeout").and_then(|v| {
+                                v.as_u64()
+                                    .or_else(|| v.as_i64().map(|i| i.max(0) as u64))
+                                    .or_else(|| v.as_f64().map(|f| f.max(0.0) as u64))
+                            });
+                            let tool_timeout = declared_timeout
+                                .map(|t| t.saturating_add(30))
+                                .unwrap_or(cfg.tool_timeout_secs)
+                                .max(cfg.tool_timeout_secs)
+                                .min(TOOL_TIMEOUT_HARD_CEILING_SECS);
+
                             let dispatch_fut =
                                 handler_ref.dispatch(&tool_name, args, resp, ii as u32, cx);
                             // Race the dispatch against both the tool timeout AND a
                             // user stop-signal poll, so cancelling the session
                             // actually interrupts an in-flight tool instead of
-                            // waiting for its 30s timeout to fire.
+                            // waiting for its timeout to fire.
                             let stop_poll = cancel.clone();
                             let stop_wait = async move {
                                 loop {
@@ -1797,13 +1829,13 @@ where
                                     Err(ToolError::Custom("interrupted by user stop".into()))
                                 }
                                 timed = tokio::time::timeout(
-                                    Duration::from_secs(cfg.tool_timeout_secs),
+                                    Duration::from_secs(tool_timeout),
                                     dispatch_fut,
                                 ) => match timed {
                                     Ok(outcome) => outcome,
                                     Err(_elapsed) => Err(ToolError::Custom(format!(
-                                        "tool '{}' timed out after {}s",
-                                        tool_name, cfg.tool_timeout_secs,
+                                        "tool '{}' timed out after {}s (pass a smaller `timeout` argument or run it with nohup in the background)",
+                                        tool_name, tool_timeout,
                                     ))),
                                 }
                             };
@@ -4606,6 +4638,105 @@ mod tests {
             elapsed.as_secs()
         );
         // max_turns=2 runs out after the timed-out turn; honest exit reason.
+        assert_eq!(outcome.exit_reason, "max_turns_exhausted");
+    }
+
+    #[tokio::test]
+    async fn test_declared_timeout_extends_outer_cap() {
+        // Regression (user report 2026-09-03): `code_run` declares its own
+        // `timeout` argument, but the loop's outer 30s default bit first —
+        // `sleep 30` died at 30s no matter what the tool was told. A tool
+        // that declares `timeout: 5` under a 1s loop default must now be
+        // granted its declared duration (+grace) and COMPLETE.
+        struct DeclaredTimeoutHandler {
+            working: WorkingMemory,
+        }
+        #[async_trait]
+        impl Handler for DeclaredTimeoutHandler {
+            fn working(&self) -> &WorkingMemory {
+                &self.working
+            }
+            fn working_mut(&mut self) -> &mut WorkingMemory {
+                &mut self.working
+            }
+            fn turn_end(
+                &mut self,
+                _r: &MockResponse,
+                _tc: &[MockToolCall],
+                _tr: &[ToolResultItem],
+                _t: u32,
+                np: String,
+                _er: Option<String>,
+            ) -> String {
+                np
+            }
+            async fn dispatch(
+                &self,
+                name: &str,
+                _a: serde_json::Value,
+                _r: &MockResponse,
+                _i: u32,
+                _c: &ToolContext,
+            ) -> Result<StepOutcome, oz_core_types::ToolError> {
+                if name != "slow_tool" {
+                    return Ok(StepOutcome::success(serde_json::json!({"status": "ok"})));
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok(StepOutcome::success(serde_json::json!({"status": "ok"})))
+            }
+        }
+        let resp = {
+            let mut r = MockResponse::new("declared timeout turn");
+            r.tool_calls = vec![oz_core_types::MockToolCall::with_id(
+                "slow_tool",
+                // The tool declares it needs 5s — outer cap must extend.
+                serde_json::json!({"timeout": 5}),
+                "call_slow",
+            )];
+            r
+        };
+        let mut client = MockLlm::new(vec![resp, MockResponse::new("after tool")]);
+        let mut handler = DeclaredTimeoutHandler {
+            working: WorkingMemory::default(),
+        };
+        let signal = AtomicBool::new(false);
+        let config = LoopConfig {
+            max_turns: 2,
+            verbose: false,
+            max_concurrent_tools: 8,
+            tool_timeout_secs: 1,
+            ..Default::default()
+        };
+
+        let start = std::time::Instant::now();
+        let outcome = run_agent_loop(
+            &mut client,
+            "sys".into(),
+            "user".into(),
+            vec![],
+            &mut handler,
+            &[],
+            &default_ctx(),
+            &config,
+            &signal,
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        // The 2s tool must have been allowed to finish (outer cap extended
+        // to declared 5s + grace), not killed by the 1s loop default.
+        assert!(
+            elapsed.as_secs() >= 2,
+            "tool was killed early after {}s — declared timeout not honored",
+            elapsed.as_secs()
+        );
+        assert!(
+            elapsed.as_secs() < 8,
+            "tool took {}s, expected ~2s",
+            elapsed.as_secs()
+        );
+        // max_turns=2 runs out after the tool turn — same honest exit as
+        // test_parallel_tool_timeout; the point is the tool COMPLETED.
         assert_eq!(outcome.exit_reason, "max_turns_exhausted");
     }
 

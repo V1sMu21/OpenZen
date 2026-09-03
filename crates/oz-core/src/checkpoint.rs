@@ -783,10 +783,13 @@ pub fn apply_intervention(messages: &mut Vec<Message>, intervention: &Interventi
     );
     // Inject as user message so the LLM sees it naturally in context
     messages.push(Message::user(&intervention_msg));
+    // Char-safe truncation — byte-slicing CJK content panics (see agent_loop
+    // intervention check for the incident this same pattern caused).
+    let content_head: String = intervention.content.chars().take(100).collect();
     tracing::info!(
         "Applied intervention '{}': {}",
         intervention.kind,
-        &intervention.content[..intervention.content.len().min(100)]
+        content_head
     );
 }
 
