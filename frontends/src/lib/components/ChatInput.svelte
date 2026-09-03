@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { chat } from "../stores/chat";
-  import { sessions } from "../stores/sessions";
-  import { compressSession } from "../api/sessions";
-  import { invoke } from "@tauri-apps/api/core";
-  import { open } from "@tauri-apps/plugin-dialog";
-  import CommandPalette from "./CommandPalette.svelte";
-  import { t, localT, locale } from "../i18n";
+import { chat } from "../stores/chat";
+import { sessions } from "../stores/sessions";
+import { compressSession, injectMessage } from "../api/sessions";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import CommandPalette from "./CommandPalette.svelte";
+import { t, localT, locale } from "../i18n";
 
 let {
   disabled = $bindable(false),
@@ -45,12 +45,31 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
     if (textareaEl) textareaEl.style.height = "auto";
 
     // If agent is still running, inject message without interrupting.
-    // The message appears as an intervention card inside the agent bubble
-    // when the agent loop picks it up at the next LLM prefill turn.
+    // The interjection renders as a card INSIDE the current agent bubble
+    // (the only live bubble) — never as a separate user message — and the
+    // agent loop picks it up before its next LLM prefill turn.
     if ($chat.isProcessing) {
       const sid = $sessions.currentId;
       if (sid) {
-        await invoke("inject_message", { sessionId: sid, text });
+        // Optimistic card: without this the interjection is invisible
+        // until the backend applies it (seconds to minutes later on a long
+        // tool call), which reads as "the message did nothing". The
+        // backend's own user_intervention event is absorbed into this
+        // card instead of duplicating it.
+        const cardId = chat.addInterventionCard(text);
+        if (cardId === null) {
+          // The run ended between the isProcessing check and here —
+          // fall back to a normal message round.
+          await chat.sendMessage(text);
+          sessions.bumpMessageCount(sid, 1);
+          return;
+        }
+        try {
+          await injectMessage(sid, text);
+        } catch (e) {
+          chat.removeInterventionCard(cardId);
+          chat.setError(e instanceof Error ? e.message : String(e));
+        }
       }
       return;
     }

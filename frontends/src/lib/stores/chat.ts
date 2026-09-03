@@ -193,6 +193,10 @@ function createChatStore() {
     at: number;
     state: {
       messages: Message[];
+      /** True when the backend reports the session still Running — restored
+       *  on switch-back so live streaming keeps rendering and the title-bar
+       *  pill doesn't flip to 完成 while a long task is in flight. */
+      isProcessing: boolean;
       todos: ChatState['todos'];
       reminders: ReminderTask[];
       pendingAskUser: PendingAskUser | null;
@@ -370,7 +374,7 @@ function createChatStore() {
   function setViewState(sessionId: string, state: SessionViewCacheEntry['state']) {
     set({
       messages: state.messages,
-      isProcessing: false,
+      isProcessing: state.isProcessing,
       error: null,
       modelInfo: state.modelInfo,
       selectedModel: null,
@@ -388,6 +392,10 @@ function createChatStore() {
       loadingEarlier: false,
       loadingSession: false,
     });
+    // A restored Running session must hold the processing watchdog open;
+    // otherwise the 30-min timer never arms and the live pill state and
+    // the streaming bubble live off a stale flag.
+    if (state.isProcessing) startProcessingWatchdog();
   }
 
   async function applySessionPage(
@@ -401,6 +409,11 @@ function createChatStore() {
     const serverTodos = (data.todos ?? []) as ChatState['todos'];
     const hasMore = data.has_more === true;
     const offset = typeof data.offset === 'number' ? data.offset : 0;
+    // The backend reports the session's live status with the page. A
+    // long-running task survives page reloads and session switches; without
+    // this restore the UI painted 完成状态 and dropped every streaming event
+    // (no live message to render into) while the agent was still working.
+    const serverRunning = /^running$/i.test(String(data.status ?? ""));
     const current = readState();
     const currentSid = get(sessions).currentId;
 
@@ -417,8 +430,11 @@ function createChatStore() {
       set({ ...current, messages: merged, hasMoreMessages: hasMore, loadingEarlier: false });
       storeSessionViewCache(sessionId, {
         messages: merged,
+        isProcessing: current.isProcessing,
         todos: current.todos,
-        reminders: scanRemindersFromMessages(merged),
+        // loadEarlierMessages refuses to run mid-task, so this cache write
+        // is always idle-context: the finished task's reminders stay gone.
+        reminders: [],
         pendingAskUser: current.pendingAskUser,
         modelInfo: current.modelInfo,
         hasMoreMessages: hasMore,
@@ -429,19 +445,30 @@ function createChatStore() {
       if (lastMsg?.role === "assistant" && lastMsg.exitReason === "ASK_USER") {
         pendingAskUser = findPendingAskUserIn(messages);
       }
+      // Restore the live Running state: the backend reports the session's
+      // status with the page, so a long task survives reloads and session
+      // switches. `current.isProcessing` only counts when the current store
+      // state actually belongs to THIS session — otherwise a running
+      // previous session would leak its flag into the newly selected one.
+      const sessionLive = (currentSid === sessionId && current.isProcessing) || serverRunning;
       const viewState = {
         messages,
+        isProcessing: sessionLive,
         todos: serverTodos,
-        reminders: scanRemindersFromMessages(messages),
+        // Only a live/running task owns reminder cards. Scanning them out
+        // of the message history for a finished session resurrected
+        // "active" cards on every reload even though the task — and the
+        // backend's pending entries — are long gone.
+        reminders: sessionLive ? scanRemindersFromMessages(messages) : [],
         pendingAskUser,
         modelInfo: null,
         hasMoreMessages: hasMore,
       };
       storeSessionViewCache(sessionId, viewState);
       if (seq !== loadSeq || currentSid !== sessionId) return;
-      if (current.isProcessing && current.messages.length > 0) {
-        // A run started while this response was in flight; the live state
-        // is newer than the persisted page. Refresh only the cache.
+      if (sessionLive && current.messages.length > 0) {
+        // An optimistic run started while this response was in flight; the
+        // live state is newer than the persisted page. Refresh only the cache.
         return;
       }
       setViewState(sessionId, viewState);
@@ -502,6 +529,75 @@ function createChatStore() {
     }
   }
 
+  /**
+   * Guarantee a streaming assistant bubble exists for the in-flight run.
+   * A restored Running session (page reload / switch-back) can end its
+   * persisted window with a USER message — the run's assistant message is
+   * only persisted at after_run. liveMessageId requires a trailing
+   * assistant message, so without this the run's streaming events had
+   * nowhere to render: the task kept running invisibly and the newest
+   * cards never appeared.
+   */
+  function ensureLiveAssistantMessage() {
+    const s = readState();
+    if (!s.isProcessing) return;
+    const last = s.messages[s.messages.length - 1];
+    if (last && last.role === "assistant" && last.streaming) return;
+    startAssistantMessageInternal();
+  }
+
+  /** Shared by the public startAssistantMessage and the restored-run
+   *  fallback above (factory scope — the public methods live on the
+   *  returned object and aren't reachable from the event flush path). */
+  function startAssistantMessageInternal() {
+    const currentSid = get(sessions).currentId;
+    if (currentSid) {
+      sessionCache.delete(currentSid);
+      // The pre-send page is no longer the truth for this session;
+      // dropping it prevents a fast switch-back from painting the
+      // conversation without the newly-started turn.
+      sessionViewCache.delete(currentSid);
+    }
+    startProcessingWatchdog();
+    cancelPendingStreamEvents();
+    partArrivalTimes.clear();
+    partArrivalOrder.length = 0;
+    const msgId = generateId();
+    update((s) => {
+      // Invariant: exactly ONE live (streaming) assistant bubble exists.
+      // Any earlier streaming message is an orphan (e.g. legacy mid-run
+      // user-message inserts) — freeze it here or its footer timer ticks
+      // forever while the run's output renders into the new bubble.
+      const frozenMessages = s.messages.map((m) => {
+        if (m.role !== "assistant" || !m.streaming) return m;
+        const startedMs = m.timestamp ? new Date(m.timestamp).getTime() : NaN;
+        return {
+          ...m,
+          streaming: false,
+          duration: m.duration ?? (Number.isFinite(startedMs) ? Math.max(0, Date.now() - startedMs) : 0),
+        };
+      });
+      return {
+        ...s,
+        isProcessing: true,
+        streamingParts: [],
+        pendingAskUser: null,
+        messages: [
+          ...frozenMessages,
+          {
+            id: msgId,
+            role: "assistant",
+            content: "",
+            timestamp: new Date().toISOString(),
+            streaming: true,
+            modelInfo: s.modelInfo ?? undefined,
+            children: [],
+          },
+        ],
+      };
+    });
+  }
+
   /** Apply all pending render events in a single store update. */
   function flushStreamingEvents() {
     streamFlushRaf = null;
@@ -509,6 +605,7 @@ function createChatStore() {
     const batch = pendingStreamEvents;
     pendingStreamEvents = [];
     resetProcessingWatchdog();
+    ensureLiveAssistantMessage();
     for (const ev of batch) recordArrivalForEvent(ev);
     update((s) => {
       const parts = [...s.streamingParts];
@@ -706,38 +803,46 @@ function createChatStore() {
       });
     },
 
-    startAssistantMessage() {
-      const currentSid = get(sessions).currentId;
-      if (currentSid) {
-        sessionCache.delete(currentSid);
-        // The pre-send page is no longer the truth for this session;
-        // dropping it prevents a fast switch-back from painting the
-        // conversation without the newly-started turn.
-        sessionViewCache.delete(currentSid);
+    /**
+     * Render a user interjection as an intervention card INSIDE the
+     * current live agent bubble (optimistic, before the backend picks
+     * it up). The run is NOT interrupted: no user bubble is appended
+     * and the streaming message keeps its identity, so `liveMessageId`
+     * stays stable and the footer timer keeps ticking on the one live
+     * bubble. Returns the card id, or null when no run is in flight.
+     */
+    addInterventionCard(text: string): string | null {
+      if (!readState().isProcessing) return null;
+      // The card must live in a streaming assistant bubble — create one
+      // if the run's bubble hasn't been started yet (restored Running
+      // session that hasn't received its first protocol event).
+      const last = readState().messages[readState().messages.length - 1];
+      if (!(last && last.role === "assistant" && last.streaming)) {
+        startAssistantMessageInternal();
       }
-      startProcessingWatchdog();
-      cancelPendingStreamEvents();
-      partArrivalTimes.clear();
-      partArrivalOrder.length = 0;
-      const msgId = generateId();
-      update((s) => ({
-        ...s,
-        isProcessing: true,
-        streamingParts: [],
-        pendingAskUser: null,
-        messages: [
-          ...s.messages,
-          {
-            id: msgId,
-            role: "assistant",
-            content: "",
-            timestamp: new Date().toISOString(),
-            streaming: true,
-            modelInfo: s.modelInfo ?? undefined,
-            children: [],
-          },
-        ],
-      }));
+      const id = `intervention_optimistic_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      update((s) => {
+        const parts: UIMessagePart[] = [
+          ...s.streamingParts,
+          { type: 'data', id, dataType: 'user_intervention', content: text, transient: false },
+        ];
+        return withStreamingParts(s, parts);
+      });
+      return id;
+    },
+
+    /** Roll back an optimistic intervention card (inject failed). */
+    removeInterventionCard(id: string) {
+      update((s) => {
+        const parts = s.streamingParts.filter(
+          (p) => !(p.type === 'data' && p.id === id)
+        );
+        return withStreamingParts(s, parts);
+      });
+    },
+
+    startAssistantMessage() {
+      startAssistantMessageInternal();
     },
 
     /**
@@ -845,23 +950,38 @@ function createChatStore() {
 
         return {
           ...s,
-          messages: s.messages.map((m, i) =>
-            i === idx
-              ? {
-                  ...m,
-                  streaming: false,
-                  content,
-                  parts: finalParts,
-                  duration: last.timestamp ? Date.now() - new Date(last.timestamp).getTime() : 0,
-                  tokensIn: tokensIn ?? m.tokensIn,
-                  tokensOut: tokensOut ?? (content ? estimateTokens(content) : m.tokensOut),
-                  contextTokens: contextTokens ?? m.contextTokens,
-                  exitReason: exitReason ?? m.exitReason,
-                }
-              : m
-          ),
+          messages: s.messages.map((m, i) => {
+            if (i === idx) {
+              return {
+                ...m,
+                streaming: false,
+                content,
+                parts: finalParts,
+                duration: last.timestamp ? Date.now() - new Date(last.timestamp).getTime() : 0,
+                tokensIn: tokensIn ?? m.tokensIn,
+                tokensOut: tokensOut ?? (content ? estimateTokens(content) : m.tokensOut),
+                contextTokens: contextTokens ?? m.contextTokens,
+                exitReason: exitReason ?? m.exitReason,
+              };
+            }
+            // Defensive: any other still-streaming message is an orphan —
+            // freeze it so its footer timer stops when the run ends.
+            if (m.streaming) {
+              const startedMs = m.timestamp ? new Date(m.timestamp).getTime() : NaN;
+              return {
+                ...m,
+                streaming: false,
+                duration: m.duration ?? (Number.isFinite(startedMs) ? Math.max(0, Date.now() - startedMs) : 0),
+              };
+            }
+            return m;
+          }),
           isProcessing: false,
           streamingParts: [],
+          // The task is over — reminders it scheduled die with it (the
+          // backend also drops its pending entries and emits
+          // reminders_cleared; this covers the local finalize path).
+          reminders: [],
         };
       });
       cancelPendingStreamEvents();
@@ -869,15 +989,17 @@ function createChatStore() {
       partArrivalOrder.length = 0;
 
       // Refresh the idle view cache with the finalized window so a later
-      // switch-back is instant and correct.
+      // switch-back is instant and correct. Reminders stay cleared — they
+      // belonged to the finished task, not to the session history.
       if (currentSid) {
         const snap = readState();
         if (!snap.isProcessing) {
           const page = sessionPageState.get(currentSid);
           storeSessionViewCache(currentSid, {
             messages: snap.messages,
+            isProcessing: false,
             todos: snap.todos,
-            reminders: scanRemindersFromMessages(snap.messages),
+            reminders: [],
             pendingAskUser: snap.pendingAskUser,
             modelInfo: snap.modelInfo,
             hasMoreMessages: page?.hasMore ?? snap.hasMoreMessages ?? false,
@@ -1181,6 +1303,7 @@ function createChatStore() {
           // Skip non-start events — they update existing parts.
           recordArrivalForEvent(protoEvent);
           resetProcessingWatchdog();
+          ensureLiveAssistantMessage();
           update((s) => {
             const parts = [...s.streamingParts];
             applyProtocolEvent(parts, protoEvent);
@@ -1277,6 +1400,13 @@ function createChatStore() {
           }
           break;
         }
+        case "reminders_cleared": {
+          // The run ended and the backend dropped this session's pending
+          // scheduled/heartbeat reminders — the right-rail cards must go
+          // with the task that created them.
+          update((s) => (s.reminders.length > 0 ? { ...s, reminders: [] } : s));
+          break;
+        }
         case "system":
           if (typeof event.data === "string" && event.data === "reminder fired") {
             const sid = get(sessions).currentId;
@@ -1321,6 +1451,17 @@ function createChatStore() {
           compressionNotice: state.compressionNotice,
           modelInfo: state.modelInfo,
         });
+      }
+      // Detach the live-processing flag from the store: the snapshot above
+      // now owns it. Without this reset the flag leaks into the NEXT
+      // session selected — applySessionPage saw isProcessing=true and
+      // either skipped painting the new page or marked an idle session
+      // as Running (the "switch away from a running session breaks the
+      // other session" symptom).
+      if (state.isProcessing) {
+        update((s) => ({ ...s, isProcessing: false, streamingParts: [] }));
+        clearProcessingWatchdog();
+        cancelPendingStreamEvents();
       }
     },
 

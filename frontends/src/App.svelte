@@ -217,15 +217,22 @@
   const NO_STREAMING_PARTS: import("./lib/stores/parts").UIMessagePart[] = [];
 
   // The single authority for "which message is live right now".
-  // This is the exact four-condition isLive predicate from
-  // docs/correct-rendering-spec.md §3.2, evaluated once per state change
-  // instead of once per ChatMessage component.
+  // This is the correct-rendering-spec §3.2 predicate, evaluated once per
+  // state change instead of once per ChatMessage component: the live
+  // bubble is the LAST STREAMING assistant message while a run is in
+  // flight. Scanning for `streaming` (instead of requiring the very last
+  // message to be an assistant) keeps the run's bubble live even if some
+  // other code path appends a message mid-run — a stale user insert used
+  // to flip this to null, which froze the streaming bubble while its
+  // footer timer kept ticking (the "气泡中断但计时还在跑" bug).
   let liveMessageId = $derived.by(() => {
     if (!$chat.isProcessing) return null;
     const msgs = $chat.messages;
-    if (msgs.length === 0) return null;
-    const last = msgs[msgs.length - 1];
-    return last.role === "assistant" ? last.id : null;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m.role === "assistant" && m.streaming) return m.id;
+    }
+    return null;
   });
 
   let regenerableMessageId = $derived.by(() => {
@@ -357,14 +364,29 @@
   // Measure rendered rows and record their real heights. Re-runs when the
   // window shifts; a settle re-check catches heights that changed after
   // the first paint (images, code highlight, card expansion).
+  //
+  // A stale measured height is worse than a missing one: while the row is
+  // mounted its REAL height is in the flow, but once it scrolls out of the
+  // virtual window the stale spacer takes over — scrollHeight jumps, the
+  // bottom clamp moves scrollTop, the window boundary flips back over the
+  // row, it remounts at its real height, and the mount/unmount cycle
+  // repeats at frame frequency (the "界面高频上下震荡" in long sessions).
+  // So every actually-rendered row is always re-recorded; rows skipped by
+  // content-visibility report a placeholder size and are ignored via
+  // checkVisibility instead of heuristics.
   function measureRowHeights() {
     let changed = false;
     for (const row of document.querySelectorAll<HTMLElement>("[data-message-id]")) {
       const id = row.dataset.messageId;
       if (!id) continue;
       const h = row.getBoundingClientRect().height;
+      if (h <= 0) continue;
+      if (typeof row.checkVisibility === "function"
+          && !row.checkVisibility({ contentVisibilityAuto: true })) {
+        continue; // cv-skipped: height is the placeholder, not real
+      }
       const known = rowHeights.get(id);
-      if (h > 0 && (known === undefined || Math.abs(known - h) > 1)) {
+      if (known === undefined || Math.abs(known - h) > 1) {
         rowHeights.set(id, h);
         changed = true;
       }
@@ -388,6 +410,19 @@
     measureRowHeights();
     const t = window.setTimeout(measureRowHeights, 150);
     return () => window.clearTimeout(t);
+  });
+
+  // While the agent streams, mounted-row heights change WITHOUT the virtual
+  // window moving: tool-card live timers, timeline folds, markdown reflow.
+  // The effect above only re-runs on window changes, so those heights go
+  // stale until the next scroll — and a stale spacer at the window
+  // boundary feeds the mount/unmount oscillation loop. A steady re-measure
+  // while a run is in flight keeps the geometry honest (a no-op pass only
+  // touches ~30 rows and bumps nothing when heights are unchanged).
+  $effect(() => {
+    if (!$chat.isProcessing) return;
+    const iv = window.setInterval(measureRowHeights, 250);
+    return () => window.clearInterval(iv);
   });
 
   function readVirtualScrollMetrics() {
@@ -534,12 +569,18 @@
     // 主窗关闭时把宠物窗一并关掉：只有最后一个窗口关闭，Tauri 才会退出
     // 应用。若只关主窗而宠物窗还开着，应用会"无窗存活"，Dock/头像再点
     // 也打不开（macOS 不会自动重建主窗）。
-    getCurrentWebviewWindow().onCloseRequested(async () => {
-      const petWin = await WebviewWindow.getByLabel("pet").catch(() => null);
-      if (petWin) {
-        petWin.close().catch(() => {});
-      }
-    });
+    // Tauri-only API：纯浏览器（HTTP webui / vite dev）下 getCurrentWebviewWindow
+    // 访问 __TAURI_INTERNALS__ 直接抛 TypeError。这里不捕获会中断整个
+    // onMount 回调链 —— Svelte 的根 effect 顺序执行，同步异常会让排在
+    // 后面的会话加载、SSE 连接、滚动观察器全部不运行（webui 白屏根因）。
+    try {
+      getCurrentWebviewWindow().onCloseRequested(async () => {
+        const petWin = await WebviewWindow.getByLabel("pet").catch(() => null);
+        if (petWin) {
+          petWin.close().catch(() => {});
+        }
+      });
+    } catch (_) { /* Not in Tauri — no window lifecycle to wire. */ }
     initLocale();
     invoke<string>("get_working_dir").then(d => workingDir = d).catch(() => {});
     invoke<boolean>("get_crystallization").then(v => crystallizationOn = v).catch(() => {});
@@ -577,7 +618,18 @@
           scrollPending = false;
           const scroller = document.querySelector<HTMLElement>('.messages-scroll');
           if (scroller) {
-            scroller.scrollTop = scroller.scrollHeight;
+            // Skip the write when already at the bottom: with virtual
+            // spacers the scrollHeight snapshot can go stale between the
+            // read and the write, and each redundant write lands on a
+            // freshly-clamped position — visible as vertical jitter.
+            const maxTop = scroller.scrollHeight - scroller.clientHeight;
+            if (Math.abs(scroller.scrollTop - maxTop) < 2) return;
+            // Clamp the write to maxTop: assigning the raw scrollHeight
+            // asks the engine to scroll PAST the end and clamp back — on
+            // WKWebView that out-of-range assignment kicks elastic
+            // overscroll / anchoring corrections every frame, which shows
+            // up as high-frequency vertical oscillation during streaming.
+            scroller.scrollTop = maxTop;
             readVirtualScrollMetrics();
           } else if (messagesEnd) {
             messagesEnd.scrollIntoView({ behavior: "auto", block: "end" });
@@ -1365,6 +1417,15 @@
     display: flex;
     align-items: flex-start;
     gap: 24px;
+    /* The scroll position here is managed exclusively by JS (virtual
+       spacers + bottom pinning). WebKit's native scroll anchoring
+       "helpfully" adjusts scrollTop whenever spacer heights above the
+       viewport change — fighting our own writes, the two corrections
+       alternate and the viewport oscillates up/down at frame frequency.
+       overscroll-behavior additionally stops the bottom-pinned stream
+       from kicking elastic rubber-banding. */
+    overflow-anchor: none;
+    overscroll-behavior-y: contain;
   }
   .head-rl {
     font-size: 12px;

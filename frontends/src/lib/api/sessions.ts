@@ -131,6 +131,23 @@ export async function stopSession(id: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to stop session: ${res.status}`);
 }
 
+/** Inject a user message into a RUNNING session without interrupting it.
+ *  Tauri uses the inject_message command; HTTP webui mode posts to the
+ *  intervene endpoint. The agent loop picks the message up before its
+ *  next LLM turn. */
+export async function injectMessage(id: string, text: string): Promise<void> {
+  if (isTauri()) {
+    await tauriInvoke("inject_message", { sessionId: id, text });
+    return;
+  }
+  const res = await fetchJson(`${BASE}/${id}/intervene`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "inject_info", content: text }),
+  });
+  if (!res.ok) throw new Error(`Failed to inject message: ${res.status}`);
+}
+
 export async function resumeSession(id: string, modelName?: string): Promise<void> {
   if (isTauri()) {
     await tauriInvoke("resume_session", { sessionId: id, modelName });

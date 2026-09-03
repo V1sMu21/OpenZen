@@ -74,12 +74,10 @@ import { t, locale, tSync } from "../i18n";
   let parts = $derived.by<UIMessagePart[]>(() => {
     if (isLive) {
       const zoneId = zoneTextPart?.id;
-      return streamingParts.filter((p) => {
-        if (p.type !== 'text') return true;
-        if (p.state === 'streaming') return false;
-        if (zoneId != null && p.id === zoneId) return false;
-        return true;
-      });
+      // Exclude ONLY the zone-owned part — every other part (including a
+      // streaming text part that has cards queued after it) renders inline
+      // at its array position.
+      return streamingParts.filter((p) => !(zoneId != null && p.id === zoneId));
     }
     if (message.parts && message.parts.length > 0) return message.parts;
     if (message.streamEvents && message.streamEvents.length > 0) return convertStreamEventsToParts(message.streamEvents);
@@ -87,26 +85,39 @@ import { t, locale, tSync } from "../i18n";
   });
 
   /** The text part currently rendered by the streaming-zone, with the
-   *  glued three-dot indicator. Priority:
-   *   1. the last `streaming` text part (live token stream);
-   *   2. the last text part when it is the FINAL part of the turn and
-   *      no tool is running — i.e. the model finished the text and is
-   *      prefilling the next action (e.g. an edit tool call).
-   *  Keeping the just-finished text in the zone keeps the dots glued
-   *  to the text end instead of dropping them into a separate line
-   *  below the card — the "dots moved down before the tool card
-   *  appears" bug. The part only leaves the zone when the next
-   *  content (tool card / next text) actually arrives, at which point
-   *  the loop renders it with the precise markdown. */
+   *  glued three-dot indicator.
+   *
+   *  Zone ownership is POSITION-based: the trailing zone renders BELOW
+   *  every inline card, so it may only own text that is the LAST CONTENT
+   *  part of the stream.
+   *
+   *  1. A streaming text part with a tool/reasoning/text part queued
+   *     after it (speculative dispatch streams the next tool call while
+   *     the text is still arriving) must render INLINE at its array
+   *     position — owning the zone would render the card ABOVE the text
+   *     (the "卡片渲染到了文字的上面" bug).
+   *  2. Transient data parts (search stages, token meters, memory events)
+   *     never render inside the bubble and are skipped by the scan —
+   *     otherwise each arrival flipped "is the last part text?" and made
+   *     the finished text teleport between the zone and its inline slot
+   *     at event frequency (the sustained vertical oscillation between
+   *     card phases that stopped whenever new text started streaming). */
   let zoneTextPart = $derived.by<{ id: string; text: string } | null>(() => {
     if (!isLive) return null;
     const arr = streamingParts;
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const p = arr[i];
-      if (p.type === 'text' && p.state === 'streaming') return { id: p.id, text: p.text };
+    let last = arr.length - 1;
+    while (last >= 0) {
+      const p = arr[last];
+      if (p.type === 'data' && p.transient) {
+        last--;
+        continue;
+      }
+      break;
     }
-    const last = arr[arr.length - 1];
-    if (last && last.type === 'text' && last.text) return { id: last.id, text: last.text };
+    const tail = arr[last];
+    if (tail && tail.type === 'text' && tail.text) {
+      return { id: tail.id, text: tail.text };
+    }
     return null;
   });
 
@@ -482,7 +493,14 @@ import { t, locale, tSync } from "../i18n";
                 <div class="intervention-content">{p.content}</div>
               </div>
             {:else if p.type === "text" && p.text}
-              <div class="markdown-content content-block">{@html renderMarkdown(p.text, { mathVersion: $mathReady })}</div>
+              {#if isLive && p.state === "streaming"}
+                <!-- Streaming text that cards were queued after: renders
+                     inline at its array position (the zone only owns the
+                     tail), still appended incrementally. -->
+                <div class="content-block"><StreamingText text={p.text} /></div>
+              {:else}
+                <div class="markdown-content content-block">{@html renderMarkdown(p.text, { mathVersion: $mathReady })}</div>
+              {/if}
             {/if}
           </div>
         {/each}
@@ -556,24 +574,13 @@ import { t, locale, tSync } from "../i18n";
     max-width: 100%;
     min-width: 0;
     position: relative;
-    /* Skip layout/paint for off-viewport messages. Long sessions
-       re-render every ChatMessage on every store update (streaming
-       deltas, ticker); content-visibility restricts rendering to
-       the viewport band, so historical rows are inert. The intrinsic
-       size placeholder keeps scrollbar geometry stable. */
-    content-visibility: auto;
-    /* Match App.svelte's VIRTUAL_ROW_ESTIMATE_PX so the placeholder and
-       the virtual spacer agree on geometry (two different estimates made
-       scrollHeight re-estimate as rows rendered). */
-    contain-intrinsic-size: auto 180px;
-  }
-  /* The streaming row must render live: content-visibility would
-     substitute the 120px placeholder for the real height while the
-     agent streams, making the cursor jump and cards below shift
-     ("text far from the thinking card, then snapping closer"). */
-  .message-row.live {
-    content-visibility: visible;
-    contain-intrinsic-size: auto;
+    /* NOTE: content-visibility: auto is deliberately NOT used here. The
+       virtual window in App.svelte already bounds the mounted row count;
+       layering cv on top makes a mounted-but-out-of-band row report its
+       180px contain-intrinsic placeholder instead of its real height, so
+       the spacer geometry (rowHeights) can never agree with the layout.
+       The mismatch flips the virtual window boundary every frame during
+       streaming — the high-frequency vertical flicker in long sessions. */
   }
   .message-row.user {
     justify-content: flex-end;
@@ -615,20 +622,17 @@ import { t, locale, tSync } from "../i18n";
   }
   .message-row.user .bubble {
     /* 釉色条: 整行淡青底 + 左缘青线 (器物刻痕)
-       去掉 620px 硬顶: 68% 随消息列等比伸展 */
+       宽度上限与 agent 气泡一致（消息列 100%, ≤1200px）: 短消息仍按
+       内容收缩（flex 项 shrink-to-fit），长消息铺满消息列而不是顶在
+       旧 68% 上限上堆行高；百分比上限随窗口拉伸自动适应。 */
     background: var(--color-primary-muted, rgba(147,195,214,0.07));
     border-left: 2px solid var(--color-primary, #93c3d6);
     border-radius: 2px;
-    max-width: clamp(280px, 68%, 100%);
+    max-width: 100%;
   }
 
-  @media (max-width: 1100px) {
-    .message-row.user .bubble { max-width: 78%; }
-  }
   @media (max-width: 720px) {
     .message-row { padding: 4px 10px; }
-    .message-row.assistant .bubble,
-    .message-row.user .bubble { max-width: 100%; }
   }
   .bubble-header {
     display: flex;

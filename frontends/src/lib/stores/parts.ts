@@ -43,6 +43,10 @@ export type DataPart = {
   dataType: string;
   content: string;
   transient: boolean;
+  /** Optimistic user_intervention cards only: set when the backend's
+   *  `user_intervention` event for the same content has been absorbed, so a
+   *  second identical interjection still gets its own card. */
+  confirmed?: boolean;
 };
 
 // ── Protocol Event Types ──

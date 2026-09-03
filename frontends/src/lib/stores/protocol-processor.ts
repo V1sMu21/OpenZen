@@ -143,6 +143,23 @@ export function applyProtocolEvent(
         break;
 
       case 'user_intervention': {
+        // The ChatInput interjection path already pushed an optimistic card
+        // into the live bubble (`intervention_optimistic_*` id). Absorb the
+        // backend's event into that card instead of appending a duplicate —
+        // but only for the FIRST unconfirmed match, so two identical
+        // interjections still render two cards.
+        const optimistic = parts.find(
+          (p) =>
+            p.type === 'data' &&
+            p.dataType === 'user_intervention' &&
+            !p.confirmed &&
+            p.id.startsWith('intervention_optimistic_') &&
+            p.content === event.content
+        );
+        if (optimistic) {
+          (optimistic as Extract<UIMessagePart, { type: 'data' }>).confirmed = true;
+          break;
+        }
         parts.push({
           type: 'data',
           id: `intervention_${Date.now()}`,
