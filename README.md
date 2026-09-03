@@ -1,7 +1,7 @@
 # OpenZen
 
-> **一只会记住你的猫**
-> 为 Apple Silicon 统一内存而生的完全本地自主 Agent Harness——本地推理（oMLX）+ 本地记忆（ERME）+ 器物语法桌面端。
+> **A cat that remembers you**
+> A fully-local autonomous agent harness built for Apple Silicon unified memory — local inference (oMLX) + local memory (ERME) + a Ru-ware celadon desktop.
 
 ![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange)
 ![Tauri](https://img.shields.io/badge/Tauri-2.x-blue)
@@ -9,333 +9,315 @@
 ![Version](https://img.shields.io/badge/version-v0.1.0-93c3d6)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-**中文** · [English](README.en.md)
+**English** · [中文](README.zh-CN.md)
 
 ---
 
-## 目录
+## Why OpenZen
 
-- [为什么会有 OpenZen](#为什么会有-openzen)
-- [主要特点](#主要特点)
-- [运行效果](#运行效果)
-- [设计哲学](#设计哲学)
-- [快速开始](#快速开始)
-- [与现有 Harness 的对比](#与现有-harness-的对比)
-- [与现有记忆引擎的对比](#与现有记忆引擎的对比)
-- [Bench：三任务三方实测](#bench三任务三方实测)
-- [设计借鉴与致谢](#设计借鉴与致谢)
-- [架构一瞥](#架构一瞥)
-- [路线与状态](#路线与状态)
-- [测试与验证](#测试与验证)
-- [License](#license)
+A Mac Studio M3 Ultra has **256GB of unified memory** — the wall between VRAM and RAM disappears. Fitting a large model used to mean budgeting a 8–48GB card; unified memory lets **model weights, vector indexes, browsers and toolchains live in one pool**.
+
+OpenZen is designed for that machine: a **fully local** autonomous agent harness —
+
+- **Local inference**: the oMLX inference server (MLX framework, OpenAI-compatible `/v1` API on `127.0.0.1:8000`) keeps multiple long-context models resident (e.g. 256K-context MXFP4 quantized models);
+- **Local memory**: the in-house ERME entropy-reduced memory engine lives entirely under `~/.openzen/` — data never leaves the machine;
+- **Local cache dividend**: prompt cache hit rate is about **96%** on typical sessions and climbs to **98%** on long-running tasks (>2h) — measured 98.05% on a 6.3-hour, 38.1M-token benchmark run. For a locally deployed model, cache hit rate measures not token cost — local cache is free — but **prefill speed**: the higher the hit rate, the fewer tokens genuinely need re-prefilling per request, dramatically accelerating prefill and therefore response speed, which keeps long local sessions responsive.
+
+It's also a **7×24 resident companion**: interrupted sessions resume from checkpoints, and every delivery — success or failure — is remembered and turned into experience for the next task. That's the compounding a session-based harness cannot do.
+
+> Current form: macOS Apple Silicon desktop app (Tauri). TUI and WebUI have been removed from the product surface; the desktop experience is the focus.
 
 ---
 
-## 为什么会有 OpenZen
+## Features
 
-一台 Mac Studio M3 Ultra 拥有 **256GB 统一内存**——显存与内存之间的墙消失了。此前「本地跑大模型」意味着要在 8–48GB 显存里精打细算；统一内存让**模型权重、向量索引、浏览器、工具链常驻同一块内存**成为现实。
+### 1. Fully local: zero-cloud inference & memory
 
-OpenZen 就是为这台机器设计的：一个**完全本地**的自主 Agent Harness——
+oMLX inference + ERME memory + all data (`workspace/`, `memory_erme/`, `harness/`, `logs/`) live on your machine. 25 configurable model slots (local oMLX primary, cloud APIs optional). Works offline.
 
-- **本地推理**：oMLX 推理服务器（MLX 框架，OpenAI 兼容 `/v1` 接口，`127.0.0.1:8000`）会在统一内存里常驻多个大上下文模型（如 256K ctx 的 MXFP4 量化模型）；
-- **本地记忆**：自研 ERME 熵减记忆引擎全程在 `~/.openzen/` 下运转，数据永不出本机；
-- **本地缓存红利**：本地推理的 prompt cache 命中率在典型会话中约 **96%**，长程任务（>2 小时）稳定到 **98%**（bench task4 实测 6.3 小时、38.1M tokens，命中 98.05%）。对本地部署的模型，缓存命中率衡量的不是 token 成本——本地缓存是免费的——而是 **prefill 速度**：命中率高意味着每次请求真正需要重新 prefill 的 token 极少，从而极大加速 prefill、进而提高响应速度，本地长会话因此更加趁手。
+### 2. ERME — entropy-reduced memory engine (in-house)
 
-它还是一只 **7×24 常驻的伙伴**：会话中断可以断点续跑，每次交付的成败会被记住并转化为下一次的经验——这是纯会话型 Harness 做不到的复利。
+A layered engine for long-term personal memory, built on the philosophy of **entropy reduction** — a hot cache layer, a semantic vector layer, and a compressed persistent layer:
 
-> 目前形态：macOS Apple Silicon 桌面端（Tauri）。TUI 与 WebUI 已从产品形态中移除，专注桌面体验。
-
----
-
-## 主要特点
-
-### 1. 完全本地：推理与记忆零云依赖
-
-oMLX 推理 + ERME 记忆 + 全部数据（`workspace/`、`memory_erme/`、`harness/`、`logs/`）都在本机。可配置 25 个模型槽位（本地 oMLX 为主，可接云端 API），离线可用。
-
-### 2. ERME 熵减记忆引擎（自研）
-
-一套为「个人长期记忆」设计的分层引擎，哲学是**熵减**——缓存层负责热数据，向量层负责语义，持久层负责压缩沉淀：
-
-| 层 | 检索延迟 | 关键实现 |
+| Layer | Recall latency | Key implementation |
 |---|---|---|
-| **L0 灵魂层** | 纳秒级（常驻内存） | Portrait、LifeNarrative、ReflectionEngine、RamblingEngine |
-| **L1 工作缓存** | 纳秒级（常驻内存） | 并发哈希 + Moka + AttentionLRU + WAL 崩溃恢复 |
-| **L2 向量索引** | 微秒级（常驻内存） | HNSW（384 维）+ MLX 嵌入（无 MLX 时纯 Rust 降级） |
-| **L3 持久层** | 毫秒级 | 预算控制（每日 token 限额 + 按重要性逐条驱逐） |
+| **L0 Soul layer** | nanosecond (resident in memory) | Portrait, LifeNarrative, ReflectionEngine, RamblingEngine |
+| **L1 Working cache** | nanosecond (resident in memory) | Concurrent hashmap + Moka + AttentionLRU + WAL crash recovery |
+| **L2 Vector index** | microsecond (resident in memory) | HNSW (384-dim) + MLX embeddings (pure-Rust fallback without MLX) |
+| **L3 Persistence** | millisecond | Budget control (daily token cap + importance-scored per-item eviction) |
 
-引擎为 Mac Studio M3 Ultra 的 256GB 统一内存**深度优化**：L0 / L1 / L2 全部内存驻留，检索分别在纳秒 / 纳秒 / 微秒级；在日均新增 256K tokens 记忆的情况下，一年的记忆量在本地存储约 **100MB**，预算控制器保证它不会无限上涨。另有冲突检测（补全 / 升华 / 推翻）、检疫区（错误猜想不污染记忆）、现实锚点。自带 221 项测试。
+Deeply optimized for the Mac Studio M3 Ultra's 256GB unified memory: L0/L1/L2 live fully resident in RAM, recalling at nanosecond / nanosecond / microsecond levels. With 256K tokens of new memory per day, a year of memory occupies only ~**100MB** locally — the budget controller guarantees it never grows unbounded. Plus conflict resolution (supplement / sublimate / overturn), a quarantine zone (bad conjectures never pollute memory) and reality anchoring. 221 tests.
 
-### 3. 记忆复利：会话型 Harness 做不到的事
+### 3. Memory compounding — what session-based harnesses can't do
 
-- **断点续跑**：MmapWal + LoopCheckpoint，进程重启后从消息级中断处继续；checkpoint 附 git 快照（sha / branch / origin）；
-- **启示账本（harness refine）**（机制借鉴自 Prime Agent）：模型把可复用教训**主动写入审计账本**（`harness_state.json`），写入需附可验证证据（evidence 强校验），支持快照回滚；每轮启动按 Jaccard 相关性自动注入 `## Persistent Harness Lessons`；
-- **反思闭环**：失败与成功都沉淀进 `reflections.jsonl`，后续会话可读取。
+- **Checkpoint resume**: MmapWal + loop checkpoints resume mid-session after process restarts; checkpoints carry git snapshots (sha / branch / origin);
+- **Harness refine** (mechanism borrowed from Prime Agent): the model **proactively writes reusable lessons into an audited ledger** (`harness_state.json`) — writes require verifiable evidence, with snapshot rollback; each session injects `## Persistent Harness Lessons` ranked by Jaccard relevance;
+- **Reflection loop**: successes and failures settle into `reflections.jsonl`, readable by future sessions.
 
-### 4. 交付质量门（QA–QE）
+### 4. Delivery quality gates (QA–QE)
 
-把「交付质量高」从意图变成可测量、可回归的工程体系：
+Turning "delivery quality" from an intention into a measurable, regression-tested engineering system:
 
-- **验收断言**：任务先立 `task_spec.md`，含真实可执行的 `[verify]` 命令，退出前必须通过（无 spec 时自动合成最小断言）；
-- **独立评审**：干净上下文（spec + 交付物 + 回复）评审，尽量换模型 / temperature=0，去自我评审盲区；
-- **Diff 自检门**：退出前对照 spec 逐文件自查 diff；
-- **交付契约**：强制三段式汇报——做了什么 / 怎么验证的 / 遗留什么；
-- **写后验证链**：按项目类型自动跑 `cargo check` / `tsc` / `py_compile` / `go vet` 等轻量检查；
-- **Harness 教训注入**：质量失败转化为账本条目，下次自动规避。
+- **Acceptance assertions**: tasks first create a `task_spec.md` with real executable `[verify]` commands, enforced before exit (minimal assertions auto-synthesized when no spec exists);
+- **Independent review**: a clean-context review (spec + deliverables + reply), preferably with a different model / temperature=0 to escape self-review blind spots;
+- **Diff self-check**: a final pass of the whole diff against the spec, file by file;
+- **Delivery contract**: a mandatory three-part report — what was done / how it was verified / what was left;
+- **Post-write verification chains**: auto-runs the lightweight check for the project type (`cargo check` / `tsc` / `py_compile` / `go vet` …);
+- **Ledger feedback**: quality failures become ledger entries that future sessions automatically avoid.
 
-### 5. 器物语法 UI：一件宋韵天青釉器
+### 5. Artifact-grammar UI: a piece of Ru-ware celadon
 
-桌面端不是「软件面板」，而是一件**汝窑瓷器**——「雨过天青云破处」的天青美学被翻译成界面语言：
+The desktop is not a "software panel" — it's a **Ru-ware porcelain**: the "sky-clearing-after-rain" celadon aesthetic translated into an interface language.
 
-- **三色克制**：全界面只有釉白（底）、天青（唯一功能色）、墨（文字），例外仅朱砂（印章与错误）；
-- **釉面即界面**：消息是釉面上的刻痕，工具调用是釉下暗纹，无卡片、无玻璃拟态；
-- **文化锚点**：宋体铭文 + 楷体手迹（思考块）、印章「禅」「言」、干支纪年「丙午 制」、落款「修砚 识」；
-- **复杂度契约**：一切「好看」都是 O(1) 恒定成本——纹理平铺 GPU 解码一次、时间线折叠不挂 DOM、动画只走合成层（10h soak 目标 RSS ≤ 350MB）。
+- **Three-color restraint**: glaze-white (surface), celadon (the only functional color), ink (text); the sole exception is cinnabar (seals and errors);
+- **Glaze as interface**: messages are carvings on the glaze, tool calls are underglaze patterns — no cards, no glassmorphism;
+- **Cultural anchors**: Song-serif epigraphy + Kai-style handwriting (thinking blocks), "Zen"/"Speak" seals, stems-and-branches dating ("Bingwu year, made"), colophon signing ("Xiuyan, inscribed");
+- **Complexity contract**: everything beautiful is O(1) — tiled textures decoded once on GPU, timeline folding that never mounts DOM, animations that only touch the compositor (10h soak target: RSS ≤ 350MB).
 
-### 6. 效率纪律
+### 6. Efficiency discipline
 
-- 系统提示词 ~4.4KB（约 1.1k tokens），对比 Claude Code 的 20k–43k tokens 体量；
-- 本地 prompt cache 典型 ~96%，长程 98%（见 Bench）；
-- 会话蒸馏**全异步**（任务队列 + 租约 + 崩溃接管），不阻塞主循环；
-- 并行工具执行；linkme 分布式切片实现工具零拷贝自动注册（20+ 内置工具 + MCP 桥接）；
-- 前端流式渲染 O(1) 恒定成本（时间线折叠 + 虚拟滚动 + 合成层动画，长会话下 DOM 恒定）——这正是峰值 RSS 低（180–240MB）、响应快、适合本地部署模型的原因。
+- System prompt ~4.4KB (~1.1k tokens) vs Claude Code's 20k–43k tokens;
+- Local prompt cache ~96% typical, 98% on long tasks (see Bench);
+- Session distillation **fully async** (job queue + leases + crash takeover), never blocking the agent loop;
+- Parallel tool execution; linkme distributed slices for zero-copy tool registration (20+ built-in tools + MCP bridge);
+- Frontend streaming rendering is O(1) (timeline folding + virtual scrolling + compositor-only animations; the DOM stays constant across long sessions) — which is why peak RSS stays low (180–240MB) and responses stay snappy, a real fit for locally deployed models.
 
-### 7. 轻量
+### 7. Lightweight
 
-| 指标 | 数值 |
+| Metric | Value |
 |---|---|
-| 单二进制 | 29MB |
-| 安装包（dmg，arm64） | 18.1MB |
-| 空载内存 | ~180MB（桌面端主进程实测） |
-| Bench 峰值内存 | 180–240MB RSS |
-| 测试规模 | workspace 600+ + ERME 221 |
+| Single binary | 29MB |
+| Installer (dmg, arm64) | 18.1MB |
+| Idle memory | ~180MB (desktop main process, measured) |
+| Peak memory in bench | 180–240MB RSS |
+| Tests | 600+ workspace + 221 ERME |
 
-### 8. 桌面端体验
+### 8. Desktop experience
 
-Tauri（Rust + Svelte 5）：SSE 流式输出、`ask_user` 弹窗确认、侧边栏 + 右侧栏、设置面板（模型 / Skills / MCP / **灵魂状态** / token 统计）、自动更新。长任务没有进度条焦虑——时间线自动折叠成「卷」。
+Tauri (Rust + Svelte 5): SSE streaming, `ask_user` confirmation dialogs, sidebar + right panel, settings panel (models / skills / MCP / **soul status** / token stats), auto-update. Long tasks don't cause progress anxiety — the timeline folds itself into a scroll.
 
-### 9. 阿青：灵魂的可见表达
+### 9. Ah-Qing: the soul made visible
 
-OpenZen 的 Agent 默认名是**阿青**（用户可以随时自定义）。桌面端还有一只同名小猫（`idle / working / thinking / waiting / error / done` 六态动画原型，动画素材由**本地部署的 ComfyUI + MiniMax H3（MLX 版）**生成），它的「心情」来自 ERME 灵魂层（`get_memory_status`）——记忆与行为一致的「知行合一」，首先表现出形态。
+OpenZen's agent is named **Ah-Qing by default** (users may rename it anytime). There's also a desktop kitten of the same name — a six-state animation prototype (`idle / working / thinking / waiting / error / done`), with the animation assets produced by a **locally deployed ComfyUI + MiniMax H3 (MLX build)**. Its "mood" comes from the ERME soul layer (`get_memory_status`) — "unity of knowing and doing" made visible.
 
-> 当前阶段：六态动画原型与灵魂可见化实验，完整桌面跑动交互仍在打磨中。
+> Current stage: six-state animation prototype and a soul-visibility experiment; full desktop interactions are still being polished.
 
-### 10. 消息平台接入：微信 / 飞书 / Telegram
+### 10. Messaging platform access: WeChat / Feishu / Telegram
 
-同一 Agent 内核可接入**微信、飞书与 Telegram** 等消息平台（`oz-platform-*` 系列 crate 桥接）——桌面上的伙伴，也守在你每天聊天的地方，7×24 常驻不止于桌面。
+The same agent kernel also connects to **WeChat, Feishu (Lark) and Telegram** via the `oz-platform-*` bridge crates — the companion on your desktop also keeps watch in the places you chat every day; 7×24 residency goes beyond the desktop.
 
 ---
 
-## 运行效果
+## Runtime demo
 
-一段真实的运行时画面（本地模型 **DeepSeek-V4-Flash-0731 · 本地部署**，任务：编写并运行打印前 20 个斐波那契数的脚本，全程约 2.5 分钟，压缩为 7 秒循环）：
+A real runtime capture (local model **DeepSeek-V4-Flash-0731 · locally deployed**; task: write and run a script printing the first 20 Fibonacci numbers; the ~2.5-minute run compressed into a 7-second loop):
 
 <img src="docs/screenshots/runtime-demo.gif" width="100%">
 
-画面里可以看到：楷体手迹的**思考块**、釉下暗纹式的**工具调用**（一次落笔失败后自动改道成功）、token **流式入釉**、待办清单 2/2 收束、📋 **交付说明**契约，以及右下角「阿青」的状态变化——任务完成后它会回到「完成」形态。
+You can see: the **thinking blocks** in Kai-style handwriting, **tool calls** as underglaze patterns (one write initially rejected, then auto-relocated and succeeded), tokens **streaming into the glaze**, the 2/2 checklist closing out, the 📋 **delivery contract**, and **Ah-Qing** in the bottom-right corner changing states — settling back into its "done" form when the task finishes.
 
 ---
 
-## 设计哲学
+## Design Philosophy
 
-### 功能设计
+### Functional design
 
-Agent Loop 是 Rust 里长出来的状态机：`exit_reason` 显式结账（stopped / paused / llm_error / EXITED）、LLM 连续错误指数退避重试（本地推理卡死防护）、`ask_user` 等待槽、**Breaker 循环检测**（识别工具调用死循环）、checkpoint 断点续跑。「先计划再动手」：任务先立 `task_spec.md` + 清单，验收断言真实执行——**环境即真相，不靠模型自述**。
+The agent loop is a state machine grown in Rust: explicit `exit_reason` accounting (stopped / paused / llm_error / EXITED), exponential-backoff retry for consecutive LLM errors (local-inference stall protection), `ask_user` wait slots, **Breaker loop detection** (catches tool-call dead loops), and checkpoint resume. "Plan before acting": tasks first create a `task_spec.md` + checklist, and acceptance assertions are executed for real — **the environment is the truth, not the model's self-report**.
 
-### 视觉设计
+### Visual design
 
-器物语法（Artifact Grammar）是设计规范，不是皮肤：三色 token、釉面三层平铺纹理、入釉动效（`cubic-bezier(.22,1,.36,1)` 350–600ms）、竖排天头、卷轴式叙事流。禁止清单同样明确：无卡片、无玻璃拟态、无整页 Canvas、无动画 layout 属性。
+Artifact Grammar is a design *spec*, not a skin: three-color tokens, three glaze layers of tiled texture, "entering-the-glaze" easing (`cubic-bezier(.22,1,.36,1)`, 350–600ms), vertical headers, scroll-shaped narrative flow. The forbidden list is equally explicit: no cards, no glassmorphism, no full-page Canvas, no animated layout properties.
 
-### 效率与轻量
+### Efficiency & lightness
 
-token 经济学 + 恒定成本渲染。系统提示词保持 ~4.4KB；Skill/SOP 渐进披露；上下文压缩阈值与摘要等待策略；前端流式渲染 O(1)（时间线折叠 + 虚拟滚动 + 合成层动画，长会话下 DOM 恒定）——这是峰值 RSS 低、响应快、适合本地部署模型的关键；内存占用由预算控制器（记忆）与复杂度契约（UI）双重约束。
+Token economics + constant-cost rendering. System prompt held at ~4.4KB; skills/SOPs progressively disclosed; compression thresholds and summary-waiting policies tuned; frontend streaming rendering stays O(1) (timeline folding + virtual scrolling + compositor-only animations, constant DOM in long sessions) — the key to low peak RSS and fast responses with locally deployed models; memory bounded by budget controllers, UI bounded by the complexity contract.
 
-### 交付质量
+### Delivery quality
 
-质量是回路的，不是检查点：失败 → 反思日志 → 账本教训 → 下次规避。**交付质量是随使用增长的数字曲线，而非单次任务的成败**——这是 7×24 常驻伙伴独有的资产。
+Quality is a loop, not a checkpoint: failure → reflection log → ledger lesson → avoided next time. **Delivery quality is a compounding curve, not a single task's pass/fail** — the unique asset of a 7×24 resident companion.
 
-### 灵魂
+### Soul
 
-**知行合一**（借自王阳明心学）：记忆与行为一致，反思驱动进化。L0 灵魂层持续演化（画像 → 偏好轨迹 → 空闲联想 → 检疫 → 进化），目标是「越来越懂你」。
+**Unity of knowing and doing** (from Wang Yangming's School of Mind): memory and behavior stay consistent; reflection drives evolution. The L0 soul layer evolves continuously (portrait → preference trajectory → idle association → quarantine → evolution), aiming at "understanding you better over time".
 
-**诚实边界**（写进设计的三盆冷水）：
+**Honest limits** (the "three buckets of cold water" written into the design):
 
-1. 所谓「灵魂层」本质是状态机 + 文本生成，不是意识；
-2. 「神奇化学反应」是记忆密度 × 交互次数 × 模型能力的**涌现品**，不是交付物——坚持使用三个月以上，是愿景成立的前提；
-3. 价值模型永远**只建议不代替**，非常谨慎地渐进。
-
----
-
-## 快速开始
-
-> 当前发布渠道：GitHub Releases 的 dmg 一键安装，无需编译。
-
-**系统要求**
-
-- macOS（Apple Silicon，arm64）
-- 建议内存 64GB+；256GB 统一内存（M3 Ultra）为理想设计目标
-- 本地推理需要 [oMLX](https://github.com/) 服务器（见步骤 3）
-
-**安装**
-
-1. 从 **GitHub Releases** 下载 `OpenZen-vX.Y.Z-aarch64.dmg`（CI 为每个版本 tag 自动构建）；
-2. 拖入 Applications，启动 OpenZen；
-3. 安装并启动 oMLX 本地推理服务器，加载模型（推荐 256K 上下文的 MXFP4 量化模型，如 Qwen3.8-Flash-Next 或 DeepSeek-V4-Flash-0731 的 MLX 版本）；
-4. 在 OpenZen **设置面板 → 模型**中选择本地 oMLX（默认 `http://127.0.0.1:8000/v1`，无需修改）；
-5. 新建会话，开始对话。
-
-**数据与隐私**：一切数据留在本机 `~/.openzen/`（`workspace/` 工作目录、`memory_erme/` 记忆库、`harness/` 教训账本、`logs/` 日志）。无需账号、无遥测。
+1. The "soul layer" is a state machine plus text generation, not consciousness;
+2. The "magic chemistry" is an **emergent** product of memory density × interaction count × model capability — not a deliverable. Persisting past three months of use is a precondition for the vision;
+3. The value model **suggests, never decides** — progressing very cautiously.
 
 ---
 
-## 与现有 Harness 的对比
+## Quick Start
 
-> 聚焦 harness 工程（脚手架）维度，不评模型能力。数据采集自各家公开文档与社区实践（2026-08）。
+> Current distribution: one-click dmg from GitHub Releases. No compilation needed.
 
-| 维度 | **OpenZen** | ZCode | Hermes (Nous) | Claude Code |
+**System requirements**
+
+- macOS on Apple Silicon (arm64)
+- 64GB+ RAM recommended; 256GB unified memory (M3 Ultra) is the design target
+- [oMLX](https://github.com/) local inference server (step 3)
+
+**Install**
+
+1. Download `OpenZen-vX.Y.Z-aarch64.dmg` from **GitHub Releases** (built automatically by CI for every version tag);
+2. Drag into Applications, launch OpenZen;
+3. Install and start the oMLX inference server, load a model (256K-context MXFP4 quantized models recommended — e.g. MLX builds of Qwen3.8-Flash-Next / DeepSeek-V4-Flash-0731);
+4. In the OpenZen **settings panel → models**, select local oMLX (defaults to `http://127.0.0.1:8000/v1`);
+5. Start a new session and talk.
+
+**Data & privacy**: everything stays on your machine under `~/.openzen/` (`workspace/`, `memory_erme/`, `harness/`, `logs/`). No accounts, no telemetry.
+
+---
+
+## Comparison with Existing Harnesses
+
+> Focusing on the harness (scaffolding) layer, not model capability. Sourced from public docs and community practice (2026-08).
+
+| Dimension | **OpenZen** | ZCode | Hermes (Nous) | Claude Code |
 |---|---|---|---|---|
-| 定位 | 7×24 本地常驻伙伴 | Goal 模式 IDE | 极简自我改进 CLI | 行业参照系 |
-| 运行模式 | **默认全本地**（oMLX + ERME），数据不出本机 | 本地 / 云均可 | 本地 / 云均可 | 云 API |
-| 系统提示词 | ~4.4KB（~1.1k tokens） | — | 字节稳定（缓存神圣） | 20k–43k tokens |
-| 记忆 | ERME 三层 + L0 灵魂层 | 有 | SessionDB（SQLite FTS5） | CLAUDE.md ×4 + MEMORY.md |
-| 记忆复利 | 启示账本注入 + 反思 + 异步蒸馏 | 无 | 任务后自动结晶 Skill | 无（手工维护） |
-| 交付质量 | 验收断言 / 独立评审 / diff 自检 / 交付契约 | submit_plan + 清单 | 无系统化 | 无显式机制 |
-| 断点续跑 | MmapWal + git 快照 + 崩溃恢复 | 无 | 无 | 会话内 compact |
-| 循环防护 | Breaker 循环检测 | 无 | 无 | 无 |
-| 桌面端 | Tauri 器物语法 + 阿青 | IDE | — | — |
-| 轻量 | 29MB 二进制 / 空载 ~180MB | IDE 级 | Python 系 | 大体积 |
+| Positioning | 7×24 local resident companion | Goal-mode IDE | Minimal self-improving CLI | Industry reference |
+| Runtime | **Local by default** (oMLX + ERME), data never leaves the machine | Local / cloud | Local / cloud | Cloud API |
+| System prompt | ~4.4KB (~1.1k tokens) | — | Byte-stable (cache-sacred) | 20k–43k tokens |
+| Memory | ERME 3 layers + L0 soul layer | Yes | SessionDB (SQLite FTS5) | CLAUDE.md ×4 + MEMORY.md |
+| Memory compounding | Ledger injection + reflection + async distillation | None | Post-task auto skill crystallization | None (manual) |
+| Delivery quality | Assertions / independent review / diff self-check / delivery contract | submit_plan + checklist | No system | No explicit mechanism |
+| Checkpoint resume | MmapWal + git snapshot + crash recovery | None | None | In-session compact |
+| Loop protection | Breaker loop detection | None | None | None |
+| Desktop | Tauri artifact-grammar UI + Ah-Qing | IDE | — | — |
+| Weight | 29MB binary / ~180MB idle RSS | IDE-class | Python-based | Heavy |
 
-一句话：ZCode 与 Hermes 同样支持本地模型、同样拥有记忆——**OpenZen 的差异在于把记忆做成会进化的复利闭环（启示账本 + 反思 + 异步蒸馏），并把交付质量变成可回归的工程体系**——这是「伙伴」与「工具」的分野。
+In one line: ZCode and Hermes also support local models and both have memory — **OpenZen's difference is turning memory into an evolving compounding loop (lessons ledger + reflection + async distillation) and turning delivery quality into a regression-tested engineering system** — the line between a companion and a tool.
 
 ---
 
-## 与现有记忆引擎的对比
+## Comparison with Existing Memory Engines
 
-**OpenZen 内置 ERME（熵减记忆引擎，自研）**——三层 + 灵魂，为 M3 Ultra 统一内存深度优化：L1 工作缓存（纳秒级，WAL 崩溃恢复）→ L2 向量索引（微秒级，HNSW 语义召回，MLX 嵌入加速 / 纯 Rust 降级）→ L3 持久层（毫秒级；预算控制：每日 token 限额 + 按重要性逐条遗忘）；L0 灵魂层（画像 / 生平叙事 / 反思 / 空闲漫游 / 检疫进化）同样内存驻留、纳秒级。日均 256K tokens 增量下，年存储仅约 100MB。冲突检测三态（补全 / 升华 / 推翻），检疫区保证错误猜想不污染记忆。221 项测试，纯 Rust 无外部服务依赖。
+**ERME (in-house)** — three layers plus a soul, deeply optimized for M3 Ultra unified memory: L1 working cache (nanosecond; WAL crash recovery) → L2 vector index (microsecond; HNSW semantic recall, MLX-accelerated embeddings / pure-Rust fallback) → L3 persistence (millisecond; budget control: daily token cap + importance-scored per-item forgetting); L0 soul layer (portrait / life narrative / reflection / idle rambling / quarantine evolution), also memory-resident at the nanosecond level. At 256K tokens of new memory per day, a year occupies only ~100MB. Three-state conflict resolution (supplement / sublimate / overturn), a quarantine zone ensuring bad conjectures never pollute memory. 221 tests, pure Rust, no external services.
 
-| 其他体系 | 机制 | 差异点 |
+| Alternative | Mechanism | Difference |
 |---|---|---|
-| **Claude Code** | 四层手工 CLAUDE.md + 自动 MEMORY.md 写回 | 无语义检索；靠章节注入 |
-| **Hermes SessionDB** | SQLite FTS5（含中文 trigram）+ LLM 摘要 | 全文检索无向量；无预算/遗忘策略 |
-| **Gemini CLI** | `~/.gemini/GEMINI.md` save_memory 追加 | 极简但零检索 |
-| **Mem0 / Zep** | 向量 + 图，Python / Go | 10–50ms；多为托管服务，数据出境 |
-| **Letta (MemGPT)** | 递归摘要 + 自编辑记忆 | LongMemEval ~85%；Python 生态 |
-| **Hindsight** | 4 路并行检索 + 重排序器 | LongMemEval 91.4% 最高；依赖外部图谱与重排模型 |
-| **OpenClaw** | Markdown 三层文件 + LLM 心跳提炼 | 零语义检索 |
-| **OpenHuman** | 本地内存存储 + TokenJuice 压缩 | 细节不公开 |
-| **GenericAgent**（起源） | JSON 文件 + 技能结晶 | 无检索、无遗忘、无限增长 |
+| **Claude Code** | 4-layer manual CLAUDE.md + auto MEMORY.md | No semantic search; section injection only |
+| **Hermes SessionDB** | SQLite FTS5 (incl. CJK trigram) + LLM summaries | Full-text only, no vectors; no budgets / forgetting |
+| **Gemini CLI** | `~/.gemini/GEMINI.md` save_memory append | Minimal but zero retrieval |
+| **Mem0 / Zep** | Vector + graph, Python / Go | 10–50ms; mostly hosted, data leaves the machine |
+| **Letta (MemGPT)** | Recursive summarization + self-editing | LongMemEval ~85%; Python ecosystem |
+| **Hindsight** | 4-way parallel retrieval + re-rankers | LongMemEval 91.4% (highest); depends on external graph & re-ranking models |
+| **OpenClaw** | 3-layer Markdown files + LLM heartbeat distillation | Zero semantic retrieval |
+| **OpenHuman** | On-disk local memory + TokenJuice compression | Details undisclosed |
+| **GenericAgent** (origin) | JSON files + skill crystallization | No retrieval, no forgetting, unbounded growth |
 
-它们各有所长（中文全文检索、递归摘要、4 路检索），但**没有一套把记忆做成「灵魂」**——L0 层 + 空闲进化 + 桌面可见的猫，是 OpenZen 独有的组合。
+Each has its strengths (CJK full-text search, recursive summarization, 4-way retrieval) — but **none has turned memory into a soul**: the L0 layer, idle evolution, and a cat you can see on your desktop are OpenZen's unique combination.
 
 ---
 
-## Bench：三任务三方实测
+## Bench: Three Tasks × Three Harnesses
 
-> 同一任务文案、同一本地模型后端（oMLX 中本地部署的 DeepSeek-V4-Flash-0731，MXFP4 量化版）下运行，任务所需素材全部由**本地部署的 ComfyUI** 生成，监测脚本实时采集 tokens / 内存 / 耗时 / 交付物。表格数据均为各 agent 最后一次优化轮次的实测结果。Codex 桌面端曾参与部分任务，已从本次 Bench 移除：本地部署的 DeepSeek-V4-Flash 没有视觉能力，测试任务说明因此要求「不读取图片、可使用像素监测等方法」，而 Codex 无视规则频繁读取图片，上下文暴涨至 1M+ 导致 oMLX 直接拒绝请求。
-> 交付物截图见每格下方。
+> Identical task prompts, identical local model backend (DeepSeek-V4-Flash-0731 locally deployed in oMLX, MXFP4-quantized); all task assets were produced by a **locally deployed ComfyUI**; a monitor script collected tokens / memory / duration / deliverables in real time. All metrics are from each agent's final optimization round. The Codex desktop app joined some tasks but was removed from this bench: the locally deployed DeepSeek-V4-Flash has no vision capability, so the task prompts forbid reading images while permitting pixel-level monitoring — Codex ignored the rule and kept reading images, ballooning its context past 1M tokens until oMLX refused the requests.
+> Deliverable screenshots below each cell.
 
-### TASK 1 · 网页小游戏《星海拾遗》
+### TASK 1 · Web game "Star Salvage"
 
-单文件 HTML/CSS/JS 游戏，需要 ComfyUI 生成 ≥6 张美术素材，裁判试玩评分。
+A single-file HTML/CSS/JS game; ≥6 ComfyUI-generated art assets required; judged by play-testing.
 
-| 指标 | **OpenZen** | ZCode | Hermes |
+| Metric | **OpenZen** | ZCode | Hermes |
 |---|---|---|---|
-| prompt tokens | **2.67M** | 12.12M | 8.18M |
-| 峰值 RSS | **192MB** | 680MB | 613MB |
-| 耗时 | **43 分钟** | 83 分钟 | 81 分钟 |
-| 交付物 | 12 素材 | 10 | 10 |
-| 交付物截图 | <img src="docs/bench/screenshots/task1-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task1-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task1-hermes.gif" width="300"> |
+| Prompt tokens | **2.67M** | 12.12M | 8.18M |
+| Peak RSS | **192MB** | 680MB | 613MB |
+| Duration | **43 min** | 83 min | 81 min |
+| Deliverables | 12 assets | 10 | 10 |
+| Screenshot | <img src="docs/bench/screenshots/task1-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task1-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task1-hermes.gif" width="300"> |
 
-### TASK 2 · 品牌营销网站「青岚茶事」
+### TASK 2 · Brand site "Qinglan Tea House"
 
-单页品牌站，需要 ComfyUI 生成 ≥8 张素材，裁判截图评分。
+A single-page brand site; ≥8 ComfyUI assets; judged by screenshots.
 
-| 指标 | **OpenZen** | ZCode | Hermes |
+| Metric | **OpenZen** | ZCode | Hermes |
 |---|---|---|---|
-| prompt tokens | **731K** | 1.07M | 721K |
-| 峰值 RSS | **195MB** | 480MB | 562MB |
-| 耗时 | **23 分钟** | 26 分钟 | 25 分钟 |
-| 交付物 | 9 | 10 | 9 |
-| 交付物截图 | <img src="docs/bench/screenshots/task2-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task2-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task2-hermes.gif" width="300"> |
+| Prompt tokens | **731K** | 1.07M | 721K |
+| Peak RSS | **195MB** | 480MB | 562MB |
+| Duration | **23 min** | 26 min | 25 min |
+| Deliverables | 9 | 10 | 9 |
+| Screenshot | <img src="docs/bench/screenshots/task2-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task2-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task2-hermes.gif" width="300"> |
 
-### TASK 3 · 独立游戏行业 2026 调研报告
+### TASK 3 · Indie game industry 2026 research report
 
-图文报告，需要 ComfyUI 生成 ≥4 张配图，报告体积与完整度由裁判评估。
+An illustrated report; ≥4 ComfyUI images; volume & completeness judged by reviewers.
 
-| 指标 | **OpenZen** | ZCode | Hermes |
+| Metric | **OpenZen** | ZCode | Hermes |
 |---|---|---|---|
-| prompt tokens | **1.33M** | 12.04M | 3.24M |
-| 峰值 RSS | **212MB** | 631MB | 827MB |
-| 耗时 | **22 分钟** | 124 分钟 | 52 分钟 |
-| 交付物 | 7 图全齐 | 7 | 6 |
-| 报告体积 | **706KB** | — | 7.16MB |
-| 交付物截图 | <img src="docs/bench/screenshots/task3-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task3-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task3-hermes.gif" width="300"> |
+| Prompt tokens | **1.33M** | 12.04M | 3.24M |
+| Peak RSS | **212MB** | 631MB | 827MB |
+| Duration | **22 min** | 124 min | 52 min |
+| Deliverables | 7 images, complete | 7 | 6 |
+| Report size | **706KB** | — | 7.16MB |
+| Screenshot | <img src="docs/bench/screenshots/task3-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task3-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task3-hermes.gif" width="300"> |
 
-**读法**：OpenZen 在三个任务里用**约 1/4–1/9 的 token 消耗、约 1/3 的内存、约为一半的耗时**交付了同等或更完整的成品。不必纠结单轮缓存命中率（90–98% 随会话结构波动，长任务更高）——**每单位工作消耗的绝对 token 数**才是效率的证据。
+**How to read this**: across the three tasks OpenZen delivered equal or more complete results with roughly **1/4–1/9 the token consumption, ~1/3 the memory, and about half the time**. Don't over-index on single-round cache hit rates — the **absolute tokens spent per unit of work** is the real evidence of efficiency.
 
-### 长程验证（仅 OpenZen 数据，task4 / task5）
+### Long-task validation (OpenZen only; task4 / task5)
 
-| 任务 | 规模 | 结果 |
+| Task | Scale | Results |
 |---|---|---|
-| TASK 4 · ICLR 论文复现（纯代码） | 6.3 小时 · 38.1M tokens · 434 轮 | 缓存命中 **98.05%** · 峰值 240MB · **零 stalled** |
-| TASK 5 · 高校博士后面试 PPT | 48 分钟 · 3.06M tokens | 缓存命中 95.2% · 峰值 204MB |
+| TASK 4 · ICLR paper reproduction (pure code) | 6.3h · 38.1M tokens · 434 turns | Cache hit **98.05%** · peak 240MB · **zero stalls** |
+| TASK 5 · PhD postdoc interview deck | 48 min · 3.06M tokens | Cache hit 95.2% · peak 204MB |
 
 ---
 
-## 设计借鉴与致谢
+## Design Borrowings & Credits
 
-OpenZen 借鉴前人的优秀经验一路走来，借鉴清单（逐项明确来源）：
+OpenZen follows the excellent experience of preceding harnesses, with explicit credits:
 
-- **GenericAgent（起源）** — OpenZen 最初是 Python 版 GenericAgent 框架的 Rust 重写（单一静态二进制，体积与内存降低一到两个数量级）；经多轮重构（删除启发式 narration.rs 375 行、content.rs 559 行、协议适配层，新增 checkpoint / ERME / 质量门）后已与原框架判若两物，只继承了「极简自主 Agent + 技能结晶」的精神内核；
-- **EverMind** — 用户画像（Portrait）与自进化（空闲联想 / 检疫进化）机制的启发来源；
-- **Claude Code** — `<system-reminder>` 动态注入、MEMORY.md 自动记忆、Agent Skills 渐进披露、四层 CLAUDE.md 层级；
-- **Codex 桌面端** — 两阶段记忆管线、收工前 diff 自检纪律、per-env profiles 概念；
-- **ZCode** — submit_plan + 待办清单双轨、verify-check 四级管道（cargo check → test → clippy → E2E）；
-- **Hermes（Nous）** — prompt caching 神圣原则（系统提示词字节稳定）、任务后学习循环、中文全文检索思路；
-- **Prime Agent** — harness_refine（启示账本 / 自我精化）机制；
-- **Pi** — 最小 harness 哲学（只做 loop / tools / context / sessions 四件事）；
-- **Gemini CLI / opencode / MiMo** — save_memory 极简记忆、tool registry 与声明式权限、规格驱动工作流。
+- **GenericAgent (origin)** — OpenZen began as a Rust rewrite of the Python GenericAgent framework (a single static binary, one to two orders of magnitude lighter in size and memory); after multiple rounds of restructuring (deleting the 375-line heuristic `narration.rs`, the 559-line `content.rs`, the protocol adapter layer; adding checkpoints / ERME / quality gates) it diverged completely, inheriting only the spirit: "a minimal autonomous agent with skill crystallization";
+- **EverMind** — inspiration for the user-portrait (Portrait) and self-evolution (idle rambling / quarantine evolution) mechanisms;
+- **Claude Code** — `<system-reminder>` dynamic injection, MEMORY.md auto-memory, Agent Skills progressive disclosure, 4-layer CLAUDE.md hierarchy;
+- **Codex desktop app** — two-phase memory pipeline, pre-finish diff self-check discipline, per-env profiles;
+- **ZCode** — submit_plan + checklist dual track, the verify-check four-stage pipeline (cargo check → test → clippy → E2E);
+- **Hermes (Nous)** — sacred prompt caching (byte-stable system prompt), post-task learning loop, CJK full-text search ideas;
+- **Prime Agent** — the harness refine mechanism (lessons ledger / self-refinement);
+- **Pi** — the minimal-harness philosophy (just loop / tools / context / sessions);
+- **Gemini CLI / opencode / MiMo** — minimal save_memory, tool registry & declarative permissions, spec-driven workflows.
 
-> 取前人之土，用 Rust 作窑火，烧成一件会记住你的瓷器。
+> We took the clay of our predecessors and fired it with Rust into a piece of porcelain that remembers you.
 
 ---
 
-## 架构一瞥
+## Architecture at a Glance
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ OpenZen.app（Tauri 桌面端 · Rust + Svelte 5 · 器物语法）      │
+│ OpenZen.app (Tauri desktop · Rust + Svelte 5 · Artifact UI) │
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐ │
 │  │ oz-core      │  │ oz-tools     │  │ oz-memory + ERME  │ │
-│  │ agent_loop   │  │ 20+ 内置工具  │  │ L0 灵魂层         │ │
-│  │ checkpoint   │  │ oz-mcp 桥接   │  │ L1/L2/L3 记忆     │ │
-│  │ 质量门 QA    │  │ oz-skill-mcp  │  │ harness 账本      │ │
+│  │ agent_loop   │  │ 20+ built-in │  │ L0 soul layer     │ │
+│  │ checkpoints  │  │ oz-mcp bridge│  │ L1/L2/L3 memory   │ │
+│  │ quality gates│  │ oz-skill-mcp │  │ harness ledger    │ │
 │  └──────────────┘  └──────────────┘  └───────────────────┘ │
 └──────────────────────────┬─────────────────────────────────┘
-                           │ http://127.0.0.1:8000/v1 (OpenAI 兼容)
+                           │ http://127.0.0.1:8000/v1 (OpenAI-compatible)
 ┌──────────────────────────▼─────────────────────────────────┐
-│ oMLX 本地推理服务器（MLX · MXFP4 量化 · 256K 上下文）          │
+│ oMLX local inference server (MLX · MXFP4 · 256K context)    │
 └────────────────────────────────────────────────────────────┘
 ```
 
-`oz-core` 是内核（agent loop / 检查点 / 压缩 / 质量门 / 反思）；`oz-tools` 用 linkme 分布式切片自动注册工具；`oz-memory` 接入 vendored 自研 ERME 引擎；`oz-mcp` / `oz-skill-mcp` 桥接外部工具与技能库；`oz-platform-feishu / oz-platform-telegram / oz-platform-wechat` 提供消息平台接入；`src-tauri + frontends` 是器物语法壳。全部 21 个 oz-* crate 组成一个 Rust workspace（[Cargo.toml](Cargo.toml)）。
+`oz-core` is the kernel (agent loop / checkpoints / compression / quality gates / reflection); `oz-tools` registers tools automatically via linkme distributed slices; `oz-memory` integrates the vendored in-house ERME engine; `oz-mcp` / `oz-skill-mcp` bridge external tools and skill stores; `oz-platform-feishu / oz-platform-telegram / oz-platform-wechat` provide messaging platform access; `src-tauri + frontends` is the artifact-grammar shell. 21 `oz-*` crates form one Rust workspace ([Cargo.toml](Cargo.toml)).
 
 ---
 
-## 路线与状态
+## Roadmap & Status
 
-**v0.1.0 已于 2026-08 发布**，此后迭代包括：ERME 全量接入（M1–M4 + P0–P4）、质量门 QA–QE 五组十二项、器物语法 UI 迁移、设置面板、harness 账本闭环。
+**v0.1.0 released 2026-08**, followed by: full ERME integration (M1–M4 + P0–P4), QA–QE quality gates (five groups, twelve items), artifact-grammar UI migration, settings panel, and the harness ledger loop.
 
-- ✅ 已完成：流协议、桌面端、Codex 风格 harness 升级（U1–U6）、ERME 接入、质量门、器物语法迁移
-- 🚧 进行中：器物语法复杂度审计（10h soak RSS ≤ 350MB）、长程 bench 验证、阿青动画完善
+- ✅ Done: streaming protocol, desktop app, Codex-style harness upgrades (U1–U6), ERME integration, quality gates, artifact-grammar migration
+- 🚧 In progress: artifact-grammar complexity audit (10h soak RSS ≤ 350MB), long-task bench validation, Ah-Qing animation
 
 ---
 
-## 测试与验证
+## Testing & Verification
 
-- **四级验证管道**：`cargo check` → `cargo test`（workspace 600+ 测试）→ `cargo clippy` → Tauri E2E（CGEvent 驱动真实桌面交互 + 截图验证）；
-- **ERME 自带 221 项测试**；
-- **发布流程**：版本号由 git-cliff 从 Conventional Commits 派生；release 脚本先过测试门禁再打 tag；GitHub Actions 自动构建 dmg 并挂到 Release。
+- **Four-stage verification pipeline**: `cargo check` → `cargo test` (600+ workspace tests) → `cargo clippy` → Tauri E2E (CGEvent-driven real desktop interaction + screenshot verification);
+- **ERME ships 221 tests**;
+- **Release flow**: versions derived from Conventional Commits via git-cliff; the release script gates on the test suite before tagging; GitHub Actions builds the dmg and attaches it to the Release.
 
 ---
 
