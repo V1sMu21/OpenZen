@@ -1095,6 +1095,11 @@ pub async fn run_agent_for_session(
         map.remove(session_id);
     }
 
+    // Task finished (completed / stopped / errored) → its scheduled and
+    // heartbeat reminders die with it: drop session-scoped pending entries
+    // and tell the UI to clear the right-rail cards.
+    crate::commands::clear_session_reminders(state, app, session_id);
+
     // Mark idle and persist assistant message
     let full_response = outcome
         .data

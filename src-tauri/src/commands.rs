@@ -1255,6 +1255,26 @@ pub async fn stop_session(
 /// session store (P3/A8).
 const MAX_MESSAGE_CHARS: usize = 1_000_000;
 
+/// Session-store body for an injected message. A live interjection is
+/// persisted with the SAME `[USER INTERVENTION - inject_info]` prefix the
+/// agent loop pushes into the LLM context (checkpoint::apply_intervention):
+/// the web layer's parseSessionMessages folds those into the preceding
+/// assistant bubble, so a reload shows the card inside the agent turn
+/// instead of a separate user bubble, and the next run's rebuilt history
+/// carries the interjection verbatim. Without a running agent the message
+/// is a plain user turn.
+fn intervention_stored_content(agent_running: bool, text: &str) -> String {
+    if agent_running {
+        format!(
+            "[USER INTERVENTION - {}]\n{}",
+            oz_core::checkpoint::InterventionKind::InjectInfo,
+            text
+        )
+    } else {
+        text.to_string()
+    }
+}
+
 /// Inject a user message into a running agent session without interrupting it.
 /// The message is appended to the session store and pushed to the agent's
 /// intervention queue — the agent loop picks it up before the next LLM turn.
@@ -1271,20 +1291,10 @@ pub fn inject_message(
             MAX_MESSAGE_CHARS
         ));
     }
-    // 1. Append to session store so the UI shows it immediately
-    {
-        let mut store = lock_poison_guard(&state.sessions);
-        if let Some(entry) = store.get_mut(&session_id) {
-            entry.messages.push(serde_json::json!({
-                "role": "user",
-                "content": text,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            }));
-        }
-        store.save();
-    }
 
-    // 2. Push intervention into the agent's queue
+    // 1. Push intervention into the agent's queue (before the store write:
+    //    whether a queue exists decides how the message is persisted).
+    let mut agent_running = false;
     {
         let queues = lock_poison_guard(&state.intervention_queues);
         if let Some(queue) = queues.get(&session_id) {
@@ -1295,17 +1305,32 @@ pub fn inject_message(
                 content: text.clone(),
             };
             lock_poison_guard(queue).push_back(intervention);
+            agent_running = true;
             debug_log(&format!(
                 "inject_message: pushed intervention to session={}",
                 session_id
             ));
         } else {
-            // Agent not running — just added to store, that's fine
+            // Agent not running — plain message, no interjection semantics.
             debug_log(&format!(
                 "inject_message: no running agent for session={}, stored only",
                 session_id
             ));
         }
+    }
+
+    // 2. Append to the session store.
+    let stored_content = intervention_stored_content(agent_running, &text);
+    {
+        let mut store = lock_poison_guard(&state.sessions);
+        if let Some(entry) = store.get_mut(&session_id) {
+            entry.messages.push(serde_json::json!({
+                "role": "user",
+                "content": stored_content,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }));
+        }
+        store.save();
     }
 
     // 3. Notify frontend to re-render
@@ -1320,11 +1345,63 @@ pub fn inject_message(
     Ok(serde_json::json!({"status": "ok"}))
 }
 
+/// Drop a session's pending scheduled/heartbeat reminders and tell the UI.
+/// Reminders are scoped to the task that created them: when the run ends
+/// (completed, stopped, or errored) its `schedule_reminder` entries must
+/// not keep firing in the background — otherwise a finished task's
+/// heartbeat keeps emitting `[Reminder]` events forever and the right-rail
+/// cards stay "运行中" (user report 2026-09-03).
+pub(crate) fn clear_session_reminders(state: &Arc<AppState>, app: &AppHandle, session_id: &str) {
+    let removed = {
+        let mut pending = lock_poison_guard(&state.pending_reminders);
+        let before = pending.len();
+        pending.retain(|r| r.session_id != session_id);
+        before - pending.len()
+    };
+    if removed > 0 {
+        debug_log(&format!(
+            "clear_session_reminders: dropped {} pending reminder(s) for session={}",
+            removed, session_id
+        ));
+    }
+    let _ = app.emit(
+        "sse_event",
+        serde_json::json!({
+            "session_id": session_id,
+            "event_type": "reminders_cleared",
+            "data": "{}",
+        }),
+    );
+}
+
+/// Unified run-failure path: reset Running → Idle in the store and emit an
+/// error SSE event so the frontend's isProcessing clears. Used by the
+/// send/regenerate/resume spawn wrappers for both `Err` returns and panics.
+fn emit_agent_run_error(state: &Arc<AppState>, app: &AppHandle, session_id: &str, msg: &str) {
+    // Safety net: an early error return (config parse, session missing, panic
+    // mid-loop, …) skips the runner's own status writeback — reset
+    // Running → Idle here so the UI can't be stuck on "Running".
+    {
+        let mut store = lock_poison_guard(&state.sessions);
+        if let Some(s) = store.get_mut(session_id) {
+            if s.status == SessionStatus::Running {
+                s.status = SessionStatus::Idle;
+            }
+        }
+        store.save();
+    }
+    let _ = app.emit(
+        "sse_event",
+        serde_json::to_value(SseEvent::error(session_id, msg)).unwrap_or_default(),
+    );
+    // The task is dead — its scheduled reminders die with it.
+    clear_session_reminders(state, app, session_id);
+}
+
 /// Gracefully stop a running agent: signal → wait → detach if unresponsive.
 /// Never force-aborts — the stop signal causes the agent loop to exit cleanly,
 /// and `after_run` must execute to persist messages.
-async fn stop_running_agent(session_id: &str, state: &Arc<AppState>) {
-    {
+async fn stop_running_agent(session_id: &str, state: &Arc<AppState>) {    {
         let map = lock_poison_guard(&state.stop_signals);
         if let Some(sig) = map.get(session_id) {
             sig.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1476,33 +1553,41 @@ pub async fn send_message(
             state: state_clone.clone(),
             session_id: session_id_clone.clone(),
         };
-        if let Err(e) = runner::run_agent_for_session(
-            &app_clone,
-            &state_clone,
-            &session_id_clone,
-            model_name_clone.as_deref(),
-            false,
-        )
-        .await
-        {
-            debug_log(&format!("run_agent error: {e}"));
-            // Safety net: an early error return (config parse, session
-            // missing, …) skips the runner's own status writeback — reset
-            // Running → Idle here so the UI can't be stuck on "Running".
-            {
-                let mut store = lock_poison_guard(&state_clone.sessions);
-                if let Some(s) = store.get_mut(&session_id_clone) {
-                    if s.status == SessionStatus::Running {
-                        s.status = SessionStatus::Idle;
-                    }
-                }
-                store.save();
+        // Panic isolation: run the loop in an inner task so a panic (e.g. a
+        // byte-slice on CJK user input) still reaches the frontend as an
+        // error SSE event. Without this the UI stays isProcessing forever —
+        // no new cards ever render and the stop pill never flips back
+        // (observed 2026-09-02: intervention with Chinese content panicked
+        // agent_loop and the session silently died).
+        let inner_session = session_id_clone.clone();
+        let inner_state = state_clone.clone();
+        let inner_app = app_clone.clone();
+        let inner_model = model_name_clone.clone();
+        let inner = tokio::spawn(async move {
+            runner::run_agent_for_session(
+                &inner_app,
+                &inner_state,
+                &inner_session,
+                inner_model.as_deref(),
+                false,
+            )
+            .await
+        });
+        match inner.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug_log(&format!("run_agent error: {e}"));
+                emit_agent_run_error(&state_clone, &app_clone, &session_id_clone, &e.to_string());
             }
-            let _ = app_clone.emit(
-                "sse_event",
-                serde_json::to_value(SseEvent::error(&session_id_clone, &e.to_string()))
-                    .unwrap_or_default(),
-            );
+            Err(join_err) => {
+                let msg = if join_err.is_panic() {
+                    "agent task panicked (see openzen.log for the backtrace)".to_string()
+                } else {
+                    format!("agent task cancelled: {join_err}")
+                };
+                debug_log(&msg);
+                emit_agent_run_error(&state_clone, &app_clone, &session_id_clone, &msg);
+            }
         }
     });
 
@@ -1567,23 +1652,29 @@ pub async fn regenerate(
             state: state_clone.clone(),
             session_id: sid.clone(),
         };
-        if let Err(e) =
-            runner::run_agent_for_session(&app_clone, &state_clone, &sid, None, false).await
-        {
-            debug_log(&format!("regenerate agent error: {e}"));
-            {
-                let mut store = lock_poison_guard(&state_clone.sessions);
-                if let Some(s) = store.get_mut(&sid) {
-                    if s.status == SessionStatus::Running {
-                        s.status = SessionStatus::Idle;
-                    }
-                }
-                store.save();
+        // Panic isolation (see send_message): a panicking loop must still
+        // clear the frontend's isProcessing via an error event.
+        let inner = tokio::spawn({
+            let app = app_clone.clone();
+            let state = state_clone.clone();
+            let sid = sid.clone();
+            async move { runner::run_agent_for_session(&app, &state, &sid, None, false).await }
+        });
+        match inner.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug_log(&format!("regenerate agent error: {e}"));
+                emit_agent_run_error(&state_clone, &app_clone, &sid, &e.to_string());
             }
-            let _ = app_clone.emit(
-                "sse_event",
-                serde_json::to_value(SseEvent::error(&sid, &e.to_string())).unwrap_or_default(),
-            );
+            Err(join_err) => {
+                let msg = if join_err.is_panic() {
+                    "agent task panicked (see openzen.log for the backtrace)".to_string()
+                } else {
+                    format!("agent task cancelled: {join_err}")
+                };
+                debug_log(&msg);
+                emit_agent_run_error(&state_clone, &app_clone, &sid, &msg);
+            }
         }
     });
 
@@ -1657,29 +1748,32 @@ pub async fn resume_session(
             state: state_clone.clone(),
             session_id: sid.clone(),
         };
-        if let Err(e) = runner::run_agent_for_session(
-            &app_clone,
-            &state_clone,
-            &sid,
-            model_name.as_deref(),
-            true,
-        )
-        .await
-        {
-            debug_log(&format!("resume_agent error: {e}"));
-            {
-                let mut store = lock_poison_guard(&state_clone.sessions);
-                if let Some(s) = store.get_mut(&sid) {
-                    if s.status == SessionStatus::Running {
-                        s.status = SessionStatus::Idle;
-                    }
-                }
-                store.save();
+        // Panic isolation (see send_message): a panicking loop must still
+        // clear the frontend's isProcessing via an error event.
+        let inner = tokio::spawn({
+            let app = app_clone.clone();
+            let state = state_clone.clone();
+            let sid = sid.clone();
+            let model = model_name.clone();
+            async move {
+                runner::run_agent_for_session(&app, &state, &sid, model.as_deref(), true).await
             }
-            let _ = app_clone.emit(
-                "sse_event",
-                serde_json::to_value(SseEvent::error(&sid, &e.to_string())).unwrap_or_default(),
-            );
+        });
+        match inner.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug_log(&format!("resume_agent error: {e}"));
+                emit_agent_run_error(&state_clone, &app_clone, &sid, &e.to_string());
+            }
+            Err(join_err) => {
+                let msg = if join_err.is_panic() {
+                    "agent task panicked (see openzen.log for the backtrace)".to_string()
+                } else {
+                    format!("agent task cancelled: {join_err}")
+                };
+                debug_log(&msg);
+                emit_agent_run_error(&state_clone, &app_clone, &sid, &msg);
+            }
         }
     });
 
@@ -2319,5 +2413,28 @@ mod tests {
         );
         // Todos restored from checkpoint.
         assert!(!entry.todos.is_empty(), "todos must be restored");
+    }
+
+    /// A live interjection persists with the apply_intervention prefix so
+    /// the web layer folds it into the preceding assistant bubble on
+    /// reload (no separate user bubble) and the next run's history
+    /// carries it verbatim.
+    #[test]
+    fn intervention_stored_content_uses_prefix_when_agent_running() {
+        let stored = intervention_stored_content(true, "先跑完测试再部署");
+        assert_eq!(stored, "[USER INTERVENTION - inject_info]\n先跑完测试再部署");
+        assert!(stored.starts_with("[USER INTERVENTION"));
+        // The web layer's folding regex strips everything up to the first
+        // newline — the user text must survive it untouched.
+        let stripped = stored
+            .split_once('\n')
+            .map(|(_, rest)| rest)
+            .unwrap_or(&stored);
+        assert_eq!(stripped, "先跑完测试再部署");
+    }
+
+    #[test]
+    fn intervention_stored_content_is_plain_when_agent_idle() {
+        assert_eq!(intervention_stored_content(false, "普通消息"), "普通消息");
     }
 }
