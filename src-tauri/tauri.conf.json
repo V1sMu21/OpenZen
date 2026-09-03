@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/v2/tooling/cli/schema.json",
   "productName": "OpenZen",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.openzen.app",
   "build": {
     "frontendDist": "../frontends/dist",
