@@ -126,7 +126,16 @@
       }
       return "";
     } catch {
-      return "";
+      // Args still streaming (or truncated by the model): JSON.parse
+      // fails but the card must not read as an empty "运行中…". Show the
+      // streaming content itself — same key priority as above, else the
+      // raw fragment.
+      const keys = ["file_path", "pattern", "path", "url", "content", "prompt", "data", "goal", "question", "query", "code", "name"];
+      for (const k of keys) {
+        const v = extractStringField(args, k);
+        if (v && v.trim()) return oneLine(v, 48);
+      }
+      return oneLine(args, 48);
     }
   }
 
@@ -150,6 +159,60 @@
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Extract a top-level string field from (possibly INCOMPLETE) JSON args.
+   *
+   * Tool args arrive as streamed fragments (`tool_input_delta`), so while a
+   * long `code` value is still streaming the object can't be parsed and
+   * `JSON.parse` fails — the run-code card then showed nothing but
+   * "运行中…" for the whole args-streaming window (and forever when the
+   * model truncated the JSON). This scanner reads `field` directly,
+   * tolerating a missing closing quote / trailing escape, and unescapes
+   * standard JSON escapes. Preview use only — never feed the result back
+   * into the tool.
+   */
+  function extractStringField(raw: string, field: string): string | null {
+    if (!raw) return null;
+    const keyIdx = raw.indexOf(`"${field}"`);
+    if (keyIdx < 0) return null;
+    let i = raw.indexOf(":", keyIdx + field.length + 2);
+    if (i < 0) return null;
+    i++;
+    while (i < raw.length && /\s/.test(raw[i])) i++;
+    if (raw[i] !== '"') return null;
+    i++;
+    let out = "";
+    while (i < raw.length) {
+      const ch = raw[i];
+      if (ch === "\\") {
+        const next = raw[i + 1];
+        if (next === undefined) break; // escape cut mid-stream
+        if (next === "n") out += "\n";
+        else if (next === "t") out += "\t";
+        else if (next === "r") out += "\r";
+        else if (next === "u") {
+          const hex = raw.slice(i + 2, i + 6);
+          if (hex.length < 4) break;
+          out += String.fromCharCode(parseInt(hex, 16));
+          i += 6;
+          continue;
+        } else out += next; // \" \\ \/ etc.
+        i += 2;
+        continue;
+      }
+      if (ch === '"') break; // closing quote — value complete
+      out += ch;
+      i++;
+    }
+    return out;
+  }
+
+  /** Collapse whitespace for one-line raw previews. */
+  function oneLine(s: string, max: number): string {
+    const flat = s.replace(/\s+/g, " ").trim();
+    return flat.length > max ? flat.slice(0, max - 3) + "..." : flat;
   }
 
   function truncate(s: string, max: number): string {
@@ -178,7 +241,13 @@
   function mainArg(args: string, name: string): { key: string; value: string } | null {
     if (!RUN_TOOLS.has(name)) return null;
     const parsed = parseArgs(args);
-    if (!parsed) return null;
+    if (!parsed) {
+      // Partial-args fallback while the JSON is still streaming.
+      const p = extractStringField(args, "file_path") ?? extractStringField(args, "path");
+      if (p && p.trim()) return { key: paramLabel("path"), value: truncate(displayPath(p), 60) };
+      if (workingDir) return { key: paramLabel("path"), value: truncate(displayPath(workingDir), 60) };
+      return null;
+    }
     const p = parsed["file_path"] ?? parsed["path"];
     if (typeof p === "string" && p.trim()) return { key: paramLabel("path"), value: truncate(displayPath(p), 60) };
     if (workingDir) return { key: paramLabel("path"), value: truncate(displayPath(workingDir), 60) };
@@ -190,7 +259,14 @@
    *  其余按参数原序. */
   function paramRows(args: string): { key: string; value: string }[] {
     const parsed = parseArgs(args);
-    if (!parsed) return [];
+    if (!parsed) {
+      // Partial-args fallback: show the streaming fragment as one raw row
+      // instead of an empty parameter block.
+      if (args && args !== "{}") {
+        return [{ key: "args", value: oneLine(args, 100) }];
+      }
+      return [];
+    }
     const rank = (k: string): number => {
       if (k === "file_path" || k === "path") return 0;
       if (k === "content") return 1;
@@ -282,14 +358,23 @@
   }
 
   /** 展开体第二行: 运行命令 (仅运行类工具). code_run/bash 的 `code`
-   *  参数即命令本身; python 显示实际的 python3 调用形式. */
+   *  参数即命令本身; python 显示实际的 python3 调用形式.
+   *  Args 仍在流式时 JSON 不可解析 — 直接从片段中抽取 code 值实时预览. */
   function cmdLine(args: string, name: string): string | null {
     if (!RUN_TOOLS.has(name)) return null;
     const parsed = parseArgs(args);
-    if (!parsed) return null;
-    const code = parsed["code"];
-    if (typeof code !== "string" || !code.trim()) return null;
-    const type = typeof parsed["type"] === "string" ? parsed["type"] : "bash";
+    if (parsed) {
+      const code = parsed["code"];
+      if (typeof code !== "string" || !code.trim()) return null;
+      const type = typeof parsed["type"] === "string" ? parsed["type"] : "bash";
+      if (type === "python" || type === "py") {
+        return `python3 -X utf8 -u <<'PY'\n${code.trim()}\nPY`;
+      }
+      return code.trim();
+    }
+    const code = extractStringField(args, "code");
+    if (!code || !code.trim()) return null;
+    const type = extractStringField(args, "type") ?? "bash";
     if (type === "python" || type === "py") {
       return `python3 -X utf8 -u <<'PY'\n${code.trim()}\nPY`;
     }
