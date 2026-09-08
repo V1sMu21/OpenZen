@@ -18,7 +18,7 @@ pub struct ClaudeSession {
 
 impl ClaudeSession {
     pub fn new(config: SessionConfig) -> Self {
-        let http_client = crate::build_http_client(&config.apibase, config.timeout.unwrap_or(120));
+        let http_client = crate::build_session_http_client(&config, config.timeout.unwrap_or(120));
         ClaudeSession {
             config,
             history: Mutex::new(Vec::new()),

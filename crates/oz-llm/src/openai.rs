@@ -33,7 +33,7 @@ fn http_timeout(apibase: &str) -> std::time::Duration {
 impl OaiSession {
     pub fn new(config: SessionConfig) -> Self {
         let http_client =
-            crate::build_http_client(&config.apibase, http_timeout(&config.apibase).as_secs());
+            crate::build_session_http_client(&config, http_timeout(&config.apibase).as_secs());
         OaiSession {
             config,
             history: Mutex::new(Vec::new()),

@@ -802,6 +802,9 @@ async fn call_summary_llm(
         llm_nos: None,
         base_delay: None,
         spring_back: None,
+        extra_headers: None,
+        // One-shot summarization call: no conversation affinity needed.
+        session_tag: None,
     };
     let backend: Box<dyn oz_llm::Session> = Box::new(oz_llm::NativeOAISession::new(config));
     let instruction = if lang == "zh" {

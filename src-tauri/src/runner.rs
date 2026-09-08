@@ -403,10 +403,14 @@ pub async fn run_agent_for_session(
         .or(profile.default_model.as_deref())
         .or(cfg.default_session.as_deref())
         .unwrap_or("claude_sonnet");
-    let sess_config = cfg
+    let mut sess_config = cfg
         .get(session_name)
         .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found"))?
         .clone();
+    // Stable conversation tag for provider session-routing headers
+    // (opencode.ai x-opencode-session): one OpenZen conversation = one
+    // gateway session, so routing + prompt cache survive across runs.
+    sess_config.session_tag = Some(session_id.to_string());
     let sess_type = cfg.session_type(session_name);
 
     let mut ctx = tauri_ctx();

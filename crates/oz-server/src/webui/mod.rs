@@ -808,9 +808,12 @@ async fn run_agent_for_session(
     let session_name = model_name
         .or(cfg.default_session.as_deref())
         .unwrap_or("claude_sonnet");
-    let sess_config = cfg
+    let mut sess_config = cfg
         .get(session_name)
-        .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found in config"))?;
+        .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found in config"))?
+        .clone();
+    // Provider session-routing tag (opencode.ai x-opencode-session).
+    sess_config.session_tag = Some(session_id.to_string());
     let sess_type = cfg.session_type(session_name);
 
     // Broadcast model info

@@ -53,6 +53,17 @@ pub struct SessionConfig {
     pub llm_nos: Option<Vec<usize>>,
     pub base_delay: Option<f64>,
     pub spring_back: Option<u64>,
+
+    /// Per-model extra HTTP headers appended (as default headers) to every
+    /// LLM request — escape hatch for gateway routing/auth quirks without a
+    /// rebuild. TOML: `["name".extra_headers]` table.
+    #[serde(default)]
+    pub extra_headers: Option<HashMap<String, String>>,
+    /// Stable conversation tag for provider session-routing headers
+    /// (opencode.ai `x-opencode-session`). Wired from the OpenZen session
+    /// id at session-construction sites, never parsed from TOML.
+    #[serde(skip)]
+    pub session_tag: Option<String>,
 }
 
 /// Default SessionConfig context window (serde fallback + UI form default).
@@ -377,6 +388,26 @@ mod tests {
         .unwrap();
         let mode: ApiMode = cfg.api_mode;
         assert_eq!(mode, ApiMode::ChatCompletions);
+    }
+
+    #[test]
+    fn session_config_extra_headers_and_no_session_tag_from_toml() {
+        let cfg: SessionConfig = toml::from_str(
+            r#"
+            apikey = "sk-test"
+            apibase = "https://opencode.ai/zen/go/v1"
+            model = "glm-5.3-flash"
+            extra_headers = { "x-opencode-session" = "sess-1" }
+            "#,
+        )
+        .unwrap();
+        let extra = cfg.extra_headers.expect("extra_headers parsed from TOML");
+        assert_eq!(
+            extra.get("x-opencode-session").map(String::as_str),
+            Some("sess-1")
+        );
+        // session_tag is runtime-wired only, never parsed from TOML.
+        assert!(cfg.session_tag.is_none());
     }
 
     #[test]

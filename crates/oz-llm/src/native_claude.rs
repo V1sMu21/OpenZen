@@ -146,7 +146,7 @@ impl Session for NativeClaudeSession {
                         headers.insert("authorization", HeaderValue::from_str(&format!("Bearer {}", cfg.apikey)).unwrap());
                     }
 
-                    let client = crate::build_http_client(&cfg.apibase, 600);
+                    let client = crate::build_session_http_client(&cfg, 600);
                     let resp = client.post(&url).headers(headers).json(&payload).send().await
                         .map_err(LlmError::RequestFailed)?;
                     let status = resp.status().as_u16();
@@ -260,7 +260,7 @@ impl Session for NativeClaudeSession {
                         headers.insert("authorization", HeaderValue::from_str(&format!("Bearer {}", cfg.apikey)).unwrap());
                     }
 
-                    let client = crate::build_http_client(&cfg.apibase, 600);
+                    let client = crate::build_session_http_client(&cfg, 600);
                     let resp = client.post(&url).headers(headers).json(&payload).send().await
                         .map_err(LlmError::RequestFailed)?;
                     let status = resp.status().as_u16();
