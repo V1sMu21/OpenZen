@@ -141,8 +141,6 @@
   "thinking.word": "1 字",
   "thinking.paused": "已暂停",
   "thinking.pausedTitle": "过去 3 秒未收到新 token — 模型可能仍在计算，计时器已冻结",
-  "thinking.toolRunning": "正在{tool}中",
-  "thinking.preparing": "准备中...",
   "thinking.intervention": "用户插话",
   "cmd.help.desc": "显示可用命令",
   "cmd.clear.desc": "清空当前对话",

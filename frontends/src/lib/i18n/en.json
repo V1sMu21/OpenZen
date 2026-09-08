@@ -141,8 +141,6 @@
   "thinking.word": "1 word",
   "thinking.paused": "paused",
   "thinking.pausedTitle": "No new tokens received in the last 3s — model is likely still computing. Timer is frozen.",
-  "thinking.toolRunning": "Running {tool}…",
-  "thinking.preparing": "Preparing…",
   "thinking.intervention": "User intervention",
   "cmd.help.desc": "Show available commands",
   "cmd.clear.desc": "Clear current conversation",

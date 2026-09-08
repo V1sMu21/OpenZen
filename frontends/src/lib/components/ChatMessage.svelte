@@ -78,31 +78,6 @@ import { t, locale, tSync } from "../i18n";
     return [];
   });
 
-  // Current running tool — show any tool that hasn't completed yet.
-  // Reads the effective parts list (streaming parts while live, saved
-  // parts otherwise) so the label reflects real tool state regardless
-  // of isProcessing (an agent that errored mid-tool still shows which
-  // tool it was on, instead of a permanent "准备中").
-  let runningToolLabel = $derived.by(() => {
-    const source = (isLive ? streamingParts : parts) as UIMessagePart[];
-    const tool = source
-      .filter((p) => p.type === "tool-invocation")
-      .filter((p) => {
-        const t = p as ToolInvocationPart;
-        const st = t.state as string;
-        const hasResult = !!t.result;
-        return st !== "output-available" && st !== "output-error"
-          && (st !== "done" || !hasResult);
-      })
-      .slice(-1)[0] as ToolInvocationPart | undefined;
-    if (tool) {
-      const tKey = `toolname.${tool.name}`;
-      const toolName = $t(tKey) !== tKey ? $t(tKey) : tool.name;
-      return $t("thinking.toolRunning").replace("{tool}", toolName);
-    }
-    return "";
-  });
-
   /** Show the "Running" pill in the header while the backend is
    *  actively working on this turn.  Delegates entirely to `isLive`
    *  which guarantees "latest assistant turn only". */
@@ -309,15 +284,6 @@ import { t, locale, tSync } from "../i18n";
     return merged;
   });
 
-  /** 只有最后一个 reasoning part 才接收运行状态标签 —
-   *  多个思考卡片不应同时显示"准备中/正在xx中"。 */
-  let lastReasoningIdx = $derived.by(() => {
-    for (let i = visibleGroups.length - 1; i >= 0; i--) {
-      if (visibleGroups[i].type === "reasoning") return i;
-    }
-    return -1;
-  });
-
   let foldedStats = $derived.by(() => {
     const folded = foldedGroups;
     let totalMs = 0;
@@ -407,7 +373,7 @@ import { t, locale, tSync } from "../i18n";
             {/if}
           </button>
         {/if}
-        {#each visibleGroups as p, i (p.type === 'tool-invocation' ? p.toolCallId : p.id)}
+        {#each visibleGroups as p (p.type === 'tool-invocation' ? p.toolCallId : p.id)}
           <div class="event-item">
             {#if p.type === "reasoning"}
               <ThinkingBlock
@@ -416,7 +382,6 @@ import { t, locale, tSync } from "../i18n";
                 durationMs={("durationMs" in p) ? p.durationMs : undefined}
                 streaming={isLive && p.state === "streaming"}
                 showTimer={showTimer}
-                runningTool={i === lastReasoningIdx ? runningToolLabel : ""}
                 showPausedWarning={!isLive}
               />
             {:else if p.type === "tool-invocation" && (p.name === "edit" || p.name === "patch" || p.name === "write")}

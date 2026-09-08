@@ -10,7 +10,6 @@
     durationMs = undefined as number | undefined,
     streaming = false,
     showTimer = false,
-    runningTool = "",
     showPausedWarning = true,
   } = $props();
 
@@ -227,9 +226,7 @@
       {#if headerDurationLabel && showTimer}
         <span class="thinking-duration">{headerDurationLabel}</span>
       {/if}
-      {#if runningTool}
-        <span class="thinking-paused thinking-tool-active" title={runningTool}>{runningTool}</span>
-      {:else if isPaused && showPausedWarning}
+      {#if isPaused && showPausedWarning}
         <span class="thinking-paused" title={$t("thinking.pausedTitle")}>{$t("thinking.paused")}</span>
       {/if}
       <span class="thinking-words">{wordsLabel}</span>
@@ -322,14 +319,6 @@
     border-radius: 2px;
     font-weight: 500;
     animation: pausedBlink 1.6s ease-in-out infinite;
-  }
-
-  .thinking-tool-active {
-    color: #10b981;
-    background: rgba(16, 185, 129, 0.10);
-    animation: none;
-    text-transform: none;
-    letter-spacing: normal;
   }
 
   @keyframes pausedBlink {
