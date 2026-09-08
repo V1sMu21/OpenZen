@@ -238,7 +238,13 @@
       <div class="thinking-inner">
         <div class="thinking-content">{cleanDisplay}</div>
         {#if streaming}
-          <span class="wave" aria-hidden="true"><span>∿</span><span>∿</span><span>∿</span></span>
+          <!-- Three CSS-drawn dots (DESIGN.md §133 loader spec). This used
+               to be three text glyphs "∿" — WKWebView's Kaiti fallback has
+               no U+223F, so the missing glyph rendered as three thin
+               vertical bars that bobbed with the wave animation: read as
+               a glitch ("三条细竖线/震荡") until the reply text appeared.
+               Empty spans + background:currentColor are font-independent. -->
+          <span class="wave" aria-hidden="true"><span></span><span></span><span></span></span>
         {/if}
       </div>
     </div>
@@ -356,16 +362,19 @@
 
   .wave {
     display: inline-flex;
-    gap: 2px;
+    align-items: center;
+    gap: 4px;
     margin-left: 2px;
+    height: 13px; /* inline: keeps the dots glued to the thinking text line */
     color: var(--color-primary);
-    font-size: 13px;
-    line-height: 1;
     vertical-align: baseline;
     user-select: none;
   }
   .wave span {
-    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
     animation: waveBounce 1.2s ease-in-out infinite;
   }
   .wave span:nth-child(1) { animation-delay: 0s; }
