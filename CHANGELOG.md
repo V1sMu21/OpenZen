@@ -3,6 +3,16 @@
 
 ### 🐛 Bug Fixes
 
+- **app:** Stop thinking-phase viewport oscillation during streaming
+
+### 🚀 Features
+
+- **llm:** Per-session extra headers + opencode.ai session routing
+- **app:** Drop soul card, floating todo-rail under 1100px
+## v0.1.1 (2026-09-03)
+
+### 🐛 Bug Fixes
+
 - **core:** Honor tool-declared timeouts, cap code_run at 1800s
 - **app:** Session-scoped reminder cleanup on task end
 - **app:** Stable streaming UI — live bubble, interjections, scroll
