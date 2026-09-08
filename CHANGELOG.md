@@ -1,6 +1,15 @@
 
 ## Unreleased
 
+### 🎨 Styling
+
+- Cargo fmt
+
+### 🐛 Bug Fixes
+
+- **app:** Replace sine-glyph wave with CSS dots in ThinkingBlock
+## v0.2.0 (2026-09-08)
+
 ### 🐛 Bug Fixes
 
 - **app:** Stop thinking-phase viewport oscillation during streaming
