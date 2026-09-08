@@ -695,11 +695,7 @@ where
                 // char straddling byte 100). That panic killed the whole agent
                 // task silently — no done/error SSE event, the UI froze with
                 // no new cards (observed 2026-09-02, session 6bbea6ed).
-                let content_head: String = intervention
-                    .content
-                    .chars()
-                    .take(100)
-                    .collect();
+                let content_head: String = intervention.content.chars().take(100).collect();
                 tracing::info!(
                     "Applying intervention '{}': {}",
                     intervention.kind,
@@ -798,8 +794,7 @@ where
             // value still forces compression regardless of percentage, for
             // a configured window larger than the model's real capacity.
             let force_compress = est_tokens > trigger_tokens
-                || (comp_config.hard_max_tokens > 0
-                    && est_tokens > comp_config.hard_max_tokens);
+                || (comp_config.hard_max_tokens > 0 && est_tokens > comp_config.hard_max_tokens);
             if config.verbose {
                 let msg = format!(
                     "compress check: est={est_tokens} trigger={trigger_tokens} hard_max={} ctx_win={} chars={} msgs={before_count} force={force_compress}",
@@ -2997,8 +2992,7 @@ where
                             .collect();
                         let emergency_win = if comp_config.hard_max_tokens > 0 {
                             if comp_config.trigger_pct > 0 {
-                                comp_config.hard_max_tokens * 100
-                                    / comp_config.trigger_pct as usize
+                                comp_config.hard_max_tokens * 100 / comp_config.trigger_pct as usize
                             } else {
                                 comp_config.hard_max_tokens
                             }
@@ -3304,8 +3298,7 @@ where
                 // the model's own context_win.
                 let emergency_win = if comp_config.hard_max_tokens > 0 {
                     if comp_config.trigger_pct > 0 {
-                        comp_config.hard_max_tokens * 100
-                            / comp_config.trigger_pct as usize
+                        comp_config.hard_max_tokens * 100 / comp_config.trigger_pct as usize
                     } else {
                         comp_config.hard_max_tokens
                     }

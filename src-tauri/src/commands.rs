@@ -1401,7 +1401,8 @@ fn emit_agent_run_error(state: &Arc<AppState>, app: &AppHandle, session_id: &str
 /// Gracefully stop a running agent: signal → wait → detach if unresponsive.
 /// Never force-aborts — the stop signal causes the agent loop to exit cleanly,
 /// and `after_run` must execute to persist messages.
-async fn stop_running_agent(session_id: &str, state: &Arc<AppState>) {    {
+async fn stop_running_agent(session_id: &str, state: &Arc<AppState>) {
+    {
         let map = lock_poison_guard(&state.stop_signals);
         if let Some(sig) = map.get(session_id) {
             sig.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2422,7 +2423,10 @@ mod tests {
     #[test]
     fn intervention_stored_content_uses_prefix_when_agent_running() {
         let stored = intervention_stored_content(true, "先跑完测试再部署");
-        assert_eq!(stored, "[USER INTERVENTION - inject_info]\n先跑完测试再部署");
+        assert_eq!(
+            stored,
+            "[USER INTERVENTION - inject_info]\n先跑完测试再部署"
+        );
         assert!(stored.starts_with("[USER INTERVENTION"));
         // The web layer's folding regex strips everything up to the first
         // newline — the user text must survive it untouched.

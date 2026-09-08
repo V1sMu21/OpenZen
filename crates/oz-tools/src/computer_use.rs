@@ -194,12 +194,7 @@ mod cg {
         // SAFETY: CGEventCreateMouseEvent with a null source uses the default
         // event source; the event is released immediately after posting.
         unsafe {
-            let ev = CGEventCreateMouseEvent(
-                std::ptr::null(),
-                event_type,
-                point,
-                button,
-            );
+            let ev = CGEventCreateMouseEvent(std::ptr::null(), event_type, point, button);
             if ev.is_null() {
                 return;
             }
@@ -253,12 +248,24 @@ struct ShotMeta {
 #[cfg(target_os = "macos")]
 fn png_dims(path: &Path) -> Result<(u32, u32), ToolError> {
     let out = std::process::Command::new("/usr/bin/sips")
-        .args(["-g", "pixelWidth", "-g", "pixelHeight", path.to_string_lossy().as_ref()])
+        .args([
+            "-g",
+            "pixelWidth",
+            "-g",
+            "pixelHeight",
+            path.to_string_lossy().as_ref(),
+        ])
         .output()
         .map_err(|e| ToolError::Custom(format!("sips launch failed: {e}")))?;
     let text = String::from_utf8_lossy(&out.stdout);
     let num = |key: &str| -> Option<u32> {
-        text.lines().find(|l| l.contains(key))?.split(':').nth(1)?.trim().parse().ok()
+        text.lines()
+            .find(|l| l.contains(key))?
+            .split(':')
+            .nth(1)?
+            .trim()
+            .parse()
+            .ok()
     };
     match (num("pixelWidth"), num("pixelHeight")) {
         (Some(w), Some(h)) => Ok((w, h)),
@@ -312,8 +319,8 @@ fn capture_screenshot(work_dir: &str, display: u32) -> Result<(PathBuf, u64, u32
 
     // Record the pixel↔point mapping so clicks can convert coordinates.
     let (png_w, png_h) = png_dims(&path)?;
-    let (point_w, point_h) = cg::display_point_size(display - 1)
-        .unwrap_or((png_w as f64, png_h as f64));
+    let (point_w, point_h) =
+        cg::display_point_size(display - 1).unwrap_or((png_w as f64, png_h as f64));
     let meta = ShotMeta {
         png_w,
         png_h,
@@ -363,8 +370,7 @@ fn latest_shot_meta(work_dir: &str) -> Result<ShotMeta, ToolError> {
     };
     let raw = std::fs::read_to_string(&meta_path)
         .map_err(|e| ToolError::Custom(format!("meta read failed: {e}")))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| ToolError::Custom(format!("meta parse failed: {e}")))
+    serde_json::from_str(&raw).map_err(|e| ToolError::Custom(format!("meta parse failed: {e}")))
 }
 
 /// Convert screenshot pixels → display points via a sidecar's scale.
@@ -451,9 +457,9 @@ fn parse_key_combo(combo: &str) -> Result<(Vec<enigo::Key>, enigo::Key), ToolErr
 
     let mut modifiers: Vec<Key> = Vec::new();
     for t in &tokens[..tokens.len() - 1] {
-        modifiers.push(modifier_key(t).ok_or_else(|| {
-            ToolError::Custom(format!("unknown modifier: {t}"))
-        })?);
+        modifiers.push(
+            modifier_key(t).ok_or_else(|| ToolError::Custom(format!("unknown modifier: {t}")))?,
+        );
     }
 
     let key_token = tokens.last().unwrap().as_str();
@@ -465,8 +471,7 @@ fn parse_key_combo(combo: &str) -> Result<(Vec<enigo::Key>, enigo::Key), ToolErr
         "alt" | "option" | "opt" => Key::Alt,
         "plus" => {
             return Err(ToolError::Custom(
-                "use computer_type for '+' — layout-dependent keys fall back to 'a'"
-                    .into(),
+                "use computer_type for '+' — layout-dependent keys fall back to 'a'".into(),
             ))
         }
         other => {
@@ -664,7 +669,11 @@ fn read_screen_tree(
                 "{}[{}] {}{}",
                 "  ".repeat(depth),
                 idx,
-                if role.is_empty() { "Element" } else { role.trim_start_matches("AX") },
+                if role.is_empty() {
+                    "Element"
+                } else {
+                    role.trim_start_matches("AX")
+                },
                 if label.is_empty() {
                     String::new()
                 } else {
@@ -714,8 +723,7 @@ struct ClickArgs {
 fn do_click(a: &ClickArgs) -> Result<serde_json::Value, ToolError> {
     require_accessibility()?;
     use cg::{
-        post_mouse, LEFT_DOWN, LEFT_UP, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, RIGHT_DOWN,
-        RIGHT_UP,
+        post_mouse, LEFT_DOWN, LEFT_UP, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, RIGHT_DOWN, RIGHT_UP,
     };
 
     let move_event = cg::MOUSE_MOVED;
@@ -831,8 +839,8 @@ impl ToolHandler for ComputerScreenshotTool {
             let path_str = path.to_string_lossy().to_string();
             // doc_reader derives the mime (png) and runs base64 — same output
             // as a hand-rolled encode, and it keeps the read off the workers.
-            let data_uri = crate::doc_reader::read_image_base64(&path_str)
-                .map_err(ToolError::Custom)?;
+            let data_uri =
+                crate::doc_reader::read_image_base64(&path_str).map_err(ToolError::Custom)?;
             Ok((path_str, bytes, png_w, png_h, data_uri))
         })
         .await?;
@@ -891,15 +899,10 @@ impl ToolHandler for ComputerReadScreenTool {
     ) -> Result<ToolOutput, ToolError> {
         require_macos()?;
         let max_depth = args["max_depth"].as_u64().unwrap_or(12).clamp(1, 30) as usize;
-        let max_elements = args["max_elements"]
-            .as_u64()
-            .unwrap_or(300)
-            .clamp(10, 2000) as usize;
+        let max_elements = args["max_elements"].as_u64().unwrap_or(300).clamp(10, 2000) as usize;
         let session_id = ctx.session_id.clone();
-        let (tree, count) = run_blocking(move || {
-            read_screen_tree(&session_id, max_depth, max_elements)
-        })
-        .await?;
+        let (tree, count) =
+            run_blocking(move || read_screen_tree(&session_id, max_depth, max_elements)).await?;
         Ok(ToolOutput::success(json!({
             "status": "ok",
             "elements": count,

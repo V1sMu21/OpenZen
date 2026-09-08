@@ -68,9 +68,7 @@ fn session_default_headers(cfg: &oz_config::SessionConfig) -> reqwest::header::H
             }
         }
     }
-    if cfg.apibase.contains(OPENCODE_API_HOST)
-        && !headers.contains_key(OPENCODE_SESSION_HEADER)
-    {
+    if cfg.apibase.contains(OPENCODE_API_HOST) && !headers.contains_key(OPENCODE_SESSION_HEADER) {
         let tag = cfg
             .session_tag
             .clone()
@@ -134,7 +132,8 @@ mod tests {
     }
 
     fn header_str(map: &HeaderMap, name: &str) -> Option<String> {
-        map.get(name).and_then(|v| v.to_str().ok().map(String::from))
+        map.get(name)
+            .and_then(|v| v.to_str().ok().map(String::from))
     }
 
     #[test]
