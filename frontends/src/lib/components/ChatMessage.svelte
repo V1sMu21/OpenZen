@@ -68,61 +68,15 @@ import { t, locale, tSync } from "../i18n";
   );
 
   /** The parts to render: streaming parts for live messages, saved
-   *  parts otherwise.  The part currently rendered by the
-   *  streaming-zone (see `zoneTextPart`) is excluded here to avoid
-   *  double-rendering — StreamingText handles it exclusively. */
+   *  parts otherwise.  Live text parts render at their OWN array
+   *  position via StreamingText (see the template) — there is no
+   *  trailing zone anymore, so nothing is excluded here. */
   let parts = $derived.by<UIMessagePart[]>(() => {
-    if (isLive) {
-      const zoneId = zoneTextPart?.id;
-      // Exclude ONLY the zone-owned part — every other part (including a
-      // streaming text part that has cards queued after it) renders inline
-      // at its array position.
-      return streamingParts.filter((p) => !(zoneId != null && p.id === zoneId));
-    }
+    if (isLive) return streamingParts;
     if (message.parts && message.parts.length > 0) return message.parts;
     if (message.streamEvents && message.streamEvents.length > 0) return convertStreamEventsToParts(message.streamEvents);
     return [];
   });
-
-  /** The text part currently rendered by the streaming-zone, with the
-   *  glued three-dot indicator.
-   *
-   *  Zone ownership is POSITION-based: the trailing zone renders BELOW
-   *  every inline card, so it may only own text that is the LAST CONTENT
-   *  part of the stream.
-   *
-   *  1. A streaming text part with a tool/reasoning/text part queued
-   *     after it (speculative dispatch streams the next tool call while
-   *     the text is still arriving) must render INLINE at its array
-   *     position — owning the zone would render the card ABOVE the text
-   *     (the "卡片渲染到了文字的上面" bug).
-   *  2. Transient data parts (search stages, token meters, memory events)
-   *     never render inside the bubble and are skipped by the scan —
-   *     otherwise each arrival flipped "is the last part text?" and made
-   *     the finished text teleport between the zone and its inline slot
-   *     at event frequency (the sustained vertical oscillation between
-   *     card phases that stopped whenever new text started streaming). */
-  let zoneTextPart = $derived.by<{ id: string; text: string } | null>(() => {
-    if (!isLive) return null;
-    const arr = streamingParts;
-    let last = arr.length - 1;
-    while (last >= 0) {
-      const p = arr[last];
-      if (p.type === 'data' && p.transient) {
-        last--;
-        continue;
-      }
-      break;
-    }
-    const tail = arr[last];
-    if (tail && tail.type === 'text' && tail.text) {
-      return { id: tail.id, text: tail.text };
-    }
-    return null;
-  });
-
-  /** The text content of the streaming zone. */
-  let liveStreamingText = $derived(zoneTextPart?.text ?? "");
 
   // Current running tool — show any tool that hasn't completed yet.
   // Reads the effective parts list (streaming parts while live, saved
@@ -291,6 +245,12 @@ import { t, locale, tSync } from "../i18n";
       // Drop parts that would produce empty <div class="event-item"> bubbles
       if (p.type === "data" && p.dataType !== "user_intervention") continue;
       if (p.type === "text" && !p.text?.trim()) continue;
+      // Same for reasoning: an empty reasoning part renders a 0px wrapper,
+      // but it still COUNTS toward the fold window — the window then evicts
+      // its oldest group one step BEFORE the new thinking block has any
+      // height, so the live bubble collapses and refills at every cycle
+      // boundary (the per-cycle -33px downward blip while thinking).
+      if (p.type === "reasoning" && !p.text?.trim()) continue;
       const last = groups.length > 0 ? groups[groups.length - 1] : null;
       if (last && last.type === p.type && last.type !== 'tool-invocation') {
         if (p.type === 'text') {
@@ -493,10 +453,17 @@ import { t, locale, tSync } from "../i18n";
                 <div class="intervention-content">{p.content}</div>
               </div>
             {:else if p.type === "text" && p.text}
-              {#if isLive && p.state === "streaming"}
-                <!-- Streaming text that cards were queued after: renders
-                     inline at its array position (the zone only owns the
-                     tail), still appended incrementally. -->
+              {#if isLive}
+                <!-- Live text renders via the incremental StreamingText at
+                     its OWN array position for its whole lifetime — the
+                     keyed-each entry (key = part id) never moves, so tool
+                     cards queued after it append BELOW without remounting
+                     the text. The old trailing streaming-zone dissolved
+                     the moment a card arrived and teleported the text to
+                     its inline slot, shrinking the row 22-43px per cycle
+                     and bouncing the bottom-pinned viewport (the
+                     "思考阶段高频震荡"). The full markdown render takes
+                     over once, at finalize. -->
                 <div class="content-block"><StreamingText text={p.text} /></div>
               {:else}
                 <div class="markdown-content content-block">{@html renderMarkdown(p.text, { mathVersion: $mathReady })}</div>
@@ -504,11 +471,7 @@ import { t, locale, tSync } from "../i18n";
             {/if}
           </div>
         {/each}
-        {#if isLive && liveStreamingText}
-          <div class="bubble-content streaming-zone">
-            <StreamingText text={liveStreamingText} />
-          </div>
-        {:else if !isLive && message.content && !parts.some((p) => p.type === "text" && p.text)}
+        {#if !isLive && message.content && !parts.some((p) => p.type === "text" && p.text)}
           <div class="bubble-content">
             <div class="markdown-content">{@html renderMarkdown(message.content, { mathVersion: $mathReady })}</div>
           </div>
@@ -734,10 +697,6 @@ import { t, locale, tSync } from "../i18n";
     max-width: 100%;
     overflow-wrap: break-word;
     word-break: break-word;
-  }
-  .streaming-zone {
-    /* 光标/打字点紧跟最后一张卡片, 不再预留空行 */
-    min-height: 0;
   }
   .markdown-content {
     line-height: 1.7;

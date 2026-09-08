@@ -85,7 +85,15 @@
     const cleaned = decompressText(
       raw
         .replace(/\[Pasted ~[^\]]+\]/g, "")
-        .replace(/<[^>]*>/g, "")
+        // Only strip tags that LOOK like tags (`<summary>`, `</think>`,
+        // `<br/>`). The previous `<[^>]*>` also matched prose like
+        // "a < b and c > d" and, while streaming, chopped everything
+        // after an unclosed `<` — the displayed thinking text then
+        // shrank and regrew at every 50ms batch (the thinking-phase
+        // text flicker). Requiring a tag-name first char keeps
+        // comparisons/generics visible and makes the clean pass
+        // prefix-stable while tokens stream in.
+        .replace(/<\/?[a-zA-Z/][^<>]*>/g, "")
         .replace(/^\s+/, "")
         .trim()
     );
