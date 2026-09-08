@@ -20,7 +20,6 @@
   import SidePanel from "./lib/components/SidePanel.svelte";
   import TodoProgress from "./lib/components/TodoProgress.svelte";
   import ReminderCard from "./lib/components/ReminderCard.svelte";
-  import SoulCard from "./lib/components/SoulCard.svelte";
   import UpdateButton from "./lib/components/UpdateButton.svelte";
   import { initLocale } from "./lib/i18n";
   import { t, locale } from "./lib/i18n";
@@ -1183,10 +1182,10 @@
             <div bind:this={messagesEnd}></div>
           </div>
 
-          <!-- 右侧状态栏：待办 / 提醒 / 灵魂卡垂直堆叠于同一栏。
-               三张卡片共享同一流式布局（互斥于构造层面，不可能重叠），
+          <!-- 右侧状态栏：待办 / 定时提醒垂直堆叠于同一栏。
+               两张卡片共享同一流式布局（互斥于构造层面，不可能重叠），
                随滚动区 sticky 置顶。栏内无可见卡片时 :has() 整栏隐藏，
-               归还消息列宽度。 -->
+               归还消息列宽度。灵魂状态只在设置面板呈现（此处不再重复）。 -->
           <div class="todo-rail">
             {#if $chat.todos.length > 0}
               <TodoProgress items={$chat.todos} />
@@ -1195,7 +1194,6 @@
               <!-- 定时/心跳任务卡片：位于待办事项卡片下方 -->
               <ReminderCard items={$chat.reminders} />
             {/if}
-            <SoulCard />
           </div>
         </div>
       {/if}
@@ -1526,10 +1524,11 @@
     pointer-events: none;
   }
 
-  /* 右侧状态栏: 待办/提醒/灵魂卡垂直堆叠, sticky 固定于滚动区右上角。
+  /* 右侧状态栏: 待办/定时提醒垂直堆叠, sticky 固定于滚动区右上角。
      margin-left:auto 把它吸附到滚动区右缘 —— 消息列有 max-width 上限,
      剩余 flex 空间若无 auto margin 会滞留在行尾。卡片全部隐藏时
-     :has() 整栏 display:none, 把宽度还给消息列。 */
+     :has() 整栏 display:none, 把宽度还给消息列。
+     ≤1100px 时整栏转为悬浮模式(见下方媒体查询), 不再占用会话宽度。 */
   .todo-rail {
     flex: none;
     width: 320px;
@@ -1867,9 +1866,44 @@
     background: var(--color-primary);
   }
 
+  /* 窄窗口悬浮模式 (≤1100px): 状态栏不再占用会话宽度 —— 折叠为聊天区
+     右上角的紧凑药丸(只留 图标+标题+进度, 隐藏次要明细文字), 点击仍可
+     展开查看待办进度 / 定时任务详情; 展开详情以固定宽度浮层面板呈现,
+     不会把整栏撑宽遮住消息。
+     定位锚点是 .chat-container(position: relative)而非滚动容器
+     .messages-scroll, 因此悬浮药丸不随消息滚动走, 始终钉在原位。 */
   @media (max-width: 1100px) {
     .todo-rail {
+      position: absolute;
+      top: 4px;
+      right: 16px;
+      width: auto;
+      margin: 0;
+      align-items: flex-end;
+      gap: 6px;
+      z-index: 40;
+    }
+    .todo-rail :global(.todo-detail),
+    .todo-rail :global(.reminder-detail) {
       display: none;
+    }
+    /* 悬浮在消息之上需要实底表面 + 发丝边框
+       (设计规范: 深度来自表面阶梯与边框, 不加阴影) */
+    .todo-rail :global(.todo-toggle),
+    .todo-rail :global(.reminder-toggle) {
+      width: auto;
+      background: var(--color-surface-overlay);
+      border: 1px solid var(--color-hairline-strong);
+    }
+    /* 展开详情为固定宽度浮层面板; 提醒条目数不定, 限高内滚 */
+    .todo-rail :global(.todo-bubble),
+    .todo-rail :global(.reminder-list) {
+      width: 300px;
+      max-width: calc(100vw - 40px);
+    }
+    .todo-rail :global(.reminder-list) {
+      max-height: 320px;
+      overflow-y: auto;
     }
   }
 

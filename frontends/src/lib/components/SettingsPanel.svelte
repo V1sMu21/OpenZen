@@ -48,8 +48,8 @@
   let servers = $state<McpServerItem[]>([]);
 
   // ── soul tab ──
-  // Shared store: renaming here also updates the title bar and the rail
-  // SoulCard instantly (they read the same signal).
+  // Shared store: renaming here also updates the window title bar
+  // instantly (they read the same signal).
   let soul = $derived(soulStore.status);
   let nameDraft = $state("");
   let renaming = $state(false);
