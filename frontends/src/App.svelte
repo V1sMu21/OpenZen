@@ -688,8 +688,18 @@
         let shouldScroll = false;
         for (const m of mutations) {
           if (m.type === "characterData") {
-            shouldScroll = true;
-            break;
+            // Text changes only yank the viewport when they happen inside
+            // the LIVE message row (streaming deltas). Historical rows
+            // mutate characterData too — card timers that kept ticking on
+            // restored sessions, syntax highlight, etc. — and treating
+            // those as "content grew" re-pinned the scroll every 200ms,
+            // feeding the mount/unmount oscillation loop.
+            const host = (m.target.parentElement as HTMLElement | null)?.closest("[data-message-id]");
+            if (!host || host.getAttribute("data-message-id") === liveMessageId) {
+              shouldScroll = true;
+              break;
+            }
+            continue;
           }
           for (const node of m.addedNodes) {
             if (node.nodeType !== Node.ELEMENT_NODE) continue;

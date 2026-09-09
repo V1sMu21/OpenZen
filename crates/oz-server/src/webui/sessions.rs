@@ -245,24 +245,48 @@ impl SessionStore {
         }
     }
 
-    /// Remove idle/stopped sessions older than `threshold`, archiving each
-    /// first (same as capacity eviction). Runs in-process against the
-    /// authoritative map — a disk-side cleanup would be resurrected by the
-    /// next save. Returns the number removed.
+    /// Remove sessions idle past `threshold`, archiving each first (same
+    /// as capacity eviction). Runs in-process against the authoritative
+    /// map — a disk-side cleanup would be resurrected by the next save.
+    /// Returns the number removed.
     ///
-    /// Invariant: sessions carrying any message content are NEVER auto-
-    /// removed — they are user history, and pruning by `created_at` (not
-    /// last-use) once silently deleted an actively-used session that was
-    /// merely old. Cleanup exists to clear empty debris only.
+    /// Staleness is measured from the LAST MESSAGE timestamp, falling back
+    /// to `created_at` only for message-less sessions. Pruning by
+    /// `created_at` once deleted an actively-used session that was merely
+    /// old; measuring by last activity keeps every session the user still
+    /// touches while still clearing truly stale ones.
+    ///
+    /// Also flips ghost runs: a session can stay marked `Running` forever
+    /// when its run was killed by an app quit (the runner's "always mark
+    /// idle" path never executed). Sessions Running with no activity for
+    /// 30 minutes are reset to Stopped; the runner re-marks its own
+    /// transitions, and a real long run is re-marked Running/Idle at its
+    /// boundaries anyway.
     pub fn prune_expired(&mut self, threshold: chrono::DateTime<chrono::Utc>) -> usize {
+        let now = chrono::Utc::now();
+        fn last_activity(s: &SessionEntry) -> chrono::DateTime<chrono::Utc> {
+            s.messages
+                .iter()
+                .filter_map(|m| m.get("timestamp").and_then(|v| v.as_str()))
+                .filter_map(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .max()
+                .unwrap_or(s.created_at)
+        }
+        let mut ghosts = 0;
+        for entry in self.sessions.values_mut() {
+            if entry.status == SessionStatus::Running
+                && (now - last_activity(entry)).num_seconds() > 30 * 60
+            {
+                entry.status = SessionStatus::Stopped;
+                entry.info.status = "stopped".to_string();
+                ghosts += 1;
+            }
+        }
         let ids: Vec<String> = self
             .sessions
             .iter()
-            .filter(|(_, s)| {
-                s.messages.is_empty()
-                    && s.status != SessionStatus::Running
-                    && s.created_at < threshold
-            })
+            .filter(|(_, s)| s.status != SessionStatus::Running && last_activity(s) < threshold)
             .map(|(id, _)| id.clone())
             .collect();
         for id in &ids {
@@ -273,7 +297,7 @@ impl SessionStore {
             self.archive_entry(id, json);
             self.sessions.remove(id);
         }
-        if !ids.is_empty() {
+        if !ids.is_empty() || ghosts > 0 {
             self.save();
         }
         ids.len()

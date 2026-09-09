@@ -263,6 +263,32 @@ function createChatStore() {
   };
 
   function parseSessionMessages(sessionId: string, raw: ServerSessionMessage[]): Message[] {
+    // The loop-checkpoint store format saves tool results on the FOLLOWING
+    // user message (`tool_results`), not on the assistant message that
+    // issued the call. Build a reference-keyed pool (assistant message →
+    // result strings, in FIFO call order) so restored sessions render
+    // historical tool results instead of blank "done" cards. References
+    // survive the filter/map chain below, so no index realignment is
+    // needed.
+    const resultsPool = new Map<ServerSessionMessage, Array<{ id?: string; content: string }>>();
+    for (let i = 0; i < raw.length; i++) {
+      const m = raw[i];
+      if (m.role !== "assistant") continue;
+      for (let j = i + 1; j < raw.length; j++) {
+        const nxt = raw[j];
+        if (nxt.role === "system") continue; // e.g. compression summaries
+        if (nxt.role === "user" && nxt.tool_results?.length) {
+          const outs = (nxt.tool_results as Array<{ tool_use_id?: unknown; content?: unknown }>)
+            .map((tr) => ({
+              id: typeof tr?.tool_use_id === "string" ? tr.tool_use_id : undefined,
+              content: typeof tr?.content === "string" ? tr.content : "",
+            }))
+            .filter((tr) => tr.content.length > 0);
+          if (outs.length) resultsPool.set(m, outs);
+        }
+        break; // first non-system message after the assistant turn
+      }
+    }
     const messages: Message[] = raw
       .filter((m) => {
         const hasText = (m.content?.trim()?.length ?? 0) > 0;
@@ -280,6 +306,32 @@ function createChatStore() {
             parts = m.parts;
           } else if (m.streamEvents && m.streamEvents.length > 0) {
             parts = convertStreamEventsToParts(m.streamEvents as import("./types").StreamEventItem[]);
+          }
+          // Pair the results saved on the following user message into this
+          // message's unpaired tool invocations. Match by the LLM's
+          // tool_use_id where the stream parts carry it, then FIFO over
+          // what's left (same order the results were produced).
+          // convertStreamEventsToParts has already closed unmatched tools
+          // out as finalized; this re-attaches the actual saved outputs.
+          const outs = resultsPool.get(m);
+          if (parts && outs?.length) {
+            const pending = [...outs];
+            for (const p of parts) {
+              if (p.type !== "tool-invocation" || p.result != null) continue;
+              // Exact match by the LLM's tool_use_id first; otherwise
+              // consume the first id-less result (FIFO). Results carrying
+              // an id that matches nothing stay reserved — mispairing
+              // outputs is worse than showing a blank done card.
+              let idx = p.toolCallId
+                ? pending.findIndex((tr) => tr.id === p.toolCallId)
+                : -1;
+              if (idx < 0) idx = pending.findIndex((tr) => !tr.id);
+              if (idx >= 0) {
+                p.result = pending[idx].content;
+                p.state = "output-available";
+                pending.splice(idx, 1);
+              }
+            }
           }
         }
         // Prefer the server-assigned global idx. It keeps Svelte keys

@@ -404,6 +404,22 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
     }
   }
 
+  // Replay close-out: a saved event list can end mid-turn (run
+  // interrupted by quit/error, truncated save). A tool invocation that
+  // never received its result event must not render as "运行中…" forever —
+  // this is a historical message, no result event will ever arrive, and
+  // each stuck card also keeps a live timer + settle watchdog running,
+  // mutating the DOM every 200ms (row-height churn under the virtual
+  // window → mount/unmount oscillation). Mark them finalized; results
+  // stay empty (honest: not captured). chat.ts pairs results saved on
+  // the following user message into these parts before render.
+  for (const p of parts) {
+    if (p.type !== 'tool-invocation') continue;
+    if (p.result == null && p.state !== 'output-available' && p.state !== 'output-error') {
+      p.state = 'output-available';
+    }
+  }
+
   // The agent loop's synthetic `respond` tool (legacy name `no_tool`)
   // carries the user's final reply in args.response. Render it as
   // plain text rather than a tool card so the chat reads naturally.

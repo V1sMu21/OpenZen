@@ -74,11 +74,6 @@ impl ScheduledTask for SessionCleanup {
             let keys_to_remove: Vec<String> = map
                 .iter()
                 .filter_map(|(id, sess)| {
-                    let created = sess
-                        .get("info")
-                        .and_then(|i| i.get("created_at"))
-                        .and_then(|c| c.as_str())
-                        .and_then(|c| chrono::DateTime::parse_from_rfc3339(c).ok());
                     let status = sess
                         .get("status")
                         .and_then(|s| s.as_str())
@@ -88,17 +83,34 @@ impl ScheduledTask for SessionCleanup {
                     // matched, so nothing was ever removed.
                     let is_idle = status.eq_ignore_ascii_case("idle")
                         || status.eq_ignore_ascii_case("stopped");
-                    // Never remove sessions carrying message content: they
-                    // are user history (created_at is creation time, not
-                    // last-use, so an actively-used old session must not be
-                    // pruned). Cleanup clears empty debris only.
-                    let is_empty = sess
+                    // Staleness is measured from the LAST MESSAGE timestamp
+                    // (falls back to created_at for message-less sessions).
+                    // created_at is the session's birth time, not last use —
+                    // pruning on it once deleted an actively-used old
+                    // session. Messages are user history; only truly stale
+                    // sessions are archived and removed.
+                    let created = sess
+                        .get("info")
+                        .and_then(|i| i.get("created_at"))
+                        .and_then(|c| c.as_str())
+                        .and_then(|c| chrono::DateTime::parse_from_rfc3339(c).ok())
+                        .map(|d| d.with_timezone(&chrono::Utc));
+                    let activity = sess
                         .get("messages")
                         .and_then(|m| m.as_array())
-                        .map(|a| a.is_empty())
-                        .unwrap_or(false);
-                    match created {
-                        Some(d) if d < threshold && is_idle && is_empty => Some(id.clone()),
+                        .and_then(|msgs| {
+                            msgs.iter()
+                                .filter_map(|msg| {
+                                    msg.get("timestamp")
+                                        .and_then(|t| t.as_str())
+                                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                                        .map(|d| d.with_timezone(&chrono::Utc))
+                                })
+                                .max()
+                                .or(created)
+                        });
+                    match activity {
+                        Some(d) if d < threshold && is_idle => Some(id.clone()),
                         _ => None,
                     }
                 })
