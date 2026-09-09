@@ -1088,7 +1088,12 @@ where
                                             name: name.clone(),
                                             args: args.clone(),
                                         });
-                                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&args) {
+                                        if let Ok(parsed_raw) = serde_json::from_str::<serde_json::Value>(&args) {
+                                            // Same degenerate-shape recovery the
+                                            // stream terminator applies, so
+                                            // speculatively executed read-only
+                                            // tools see the real payload too.
+                                            let parsed = oz_llm::stream::normalize_tool_args(parsed_raw);
                                             // Gate speculative execution with the
                                             // exact same guard Phase 2 applies —
                                             // tools needing approval or blocked are

@@ -998,8 +998,10 @@ pub async fn parse_openai_sse(
             }
             let raw_args = t.args.clone();
             let tc_id = t.id.clone();
-            let parsed_args: serde_json::Value = serde_json::from_str(&raw_args)
-                .unwrap_or_else(|_| serde_json::Value::String(raw_args.clone()));
+            let parsed_args: serde_json::Value = normalize_tool_args(
+                serde_json::from_str(&raw_args)
+                    .unwrap_or_else(|_| serde_json::Value::String(raw_args.clone())),
+            );
             emit(
                 &event_tx,
                 StreamEvent::ToolInputAvailable {
@@ -1017,6 +1019,35 @@ pub async fn parse_openai_sse(
     }
 
     Ok((content_blocks, usage))
+}
+
+/// Recover degenerate tool-argument shapes some models emit, so tools get a
+/// schema-shaped object and clean history stops teaching the model the bad
+/// pattern:
+/// - doubly-JSON-encoded arguments: the accumulated `arguments` string parses
+///   to a JSON string whose text is the real argument object;
+/// - single-key `{"content": "<json text>"}` wrappers (imitated by models
+///   that saw sanitized history): the inner text is the real object.
+/// Left unfixed, tools fail with "missing code argument"-style errors and the
+/// wrapped shape propagates through history. Unrecognized shapes pass through
+/// unchanged.
+pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
+    match &v {
+        serde_json::Value::String(s) => match serde_json::from_str::<serde_json::Value>(s) {
+            Ok(inner) if inner.is_object() => inner,
+            _ => v,
+        },
+        serde_json::Value::Object(m) if m.len() == 1 => {
+            match m.get("content").and_then(|c| c.as_str()) {
+                Some(s) => match serde_json::from_str::<serde_json::Value>(s) {
+                    Ok(inner) if inner.is_object() => inner,
+                    _ => v,
+                },
+                None => v,
+            }
+        }
+        _ => v,
+    }
 }
 
 #[cfg(test)]
@@ -1053,5 +1084,46 @@ mod tests {
         assert_eq!(t.id, "");
         assert_eq!(t.name, "");
         assert_eq!(t.args, "");
+    }
+
+    #[test]
+    fn normalize_unwraps_double_encoded_arguments() {
+        let inner = serde_json::json!({"code": "cd /tmp"});
+        let wrapped = serde_json::Value::String(inner.to_string());
+        assert_eq!(normalize_tool_args(wrapped), inner);
+    }
+
+    #[test]
+    fn normalize_unwraps_single_content_wrapper() {
+        let inner = serde_json::json!({"code": "ls"});
+        let wrapped = serde_json::json!({"content": inner.to_string()});
+        assert_eq!(normalize_tool_args(wrapped), inner);
+    }
+
+    #[test]
+    fn normalize_leaves_plain_content_string_alone() {
+        // A write call's file body is not JSON — must pass through untouched.
+        let v = serde_json::json!({"content": "#!/usr/bin/env node\nplain text"});
+        assert_eq!(normalize_tool_args(v.clone()), v);
+    }
+
+    #[test]
+    fn normalize_leaves_valid_objects_alone() {
+        let v = serde_json::json!({"code": "echo hi", "timeout": 30});
+        assert_eq!(normalize_tool_args(v.clone()), v);
+    }
+
+    #[test]
+    fn normalize_leaves_unparseable_string_alone() {
+        // Truncated stream salvage: keep the string so the tool reports a
+        // structured missing-arg error instead of executing guessed input.
+        let v = serde_json::Value::String("{\"code\":\"cd ~/x".into());
+        assert_eq!(normalize_tool_args(v.clone()), v);
+    }
+
+    #[test]
+    fn normalize_leaves_non_json_content_wrapper_alone() {
+        let v = serde_json::json!({"content": "{\"code\": broken"});
+        assert_eq!(normalize_tool_args(v.clone()), v);
     }
 }
