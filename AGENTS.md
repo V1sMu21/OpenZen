@@ -217,3 +217,6 @@ Rules:
   touching the user's window.
 - Background build tasks are not cancellable mid-command: never bundle
   `osascript quit` into a backgrounded build+install chain.
+- Frontend-only changes do NOT trigger a Rust rebuild (assets embed at
+  compile time): `touch src-tauri/src/main.rs src-tauri/src/lib.rs` before
+  `cargo tauri build`, or the .app ships with the stale frontend.
