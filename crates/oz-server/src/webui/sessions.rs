@@ -249,11 +249,20 @@ impl SessionStore {
     /// first (same as capacity eviction). Runs in-process against the
     /// authoritative map — a disk-side cleanup would be resurrected by the
     /// next save. Returns the number removed.
+    ///
+    /// Invariant: sessions carrying any message content are NEVER auto-
+    /// removed — they are user history, and pruning by `created_at` (not
+    /// last-use) once silently deleted an actively-used session that was
+    /// merely old. Cleanup exists to clear empty debris only.
     pub fn prune_expired(&mut self, threshold: chrono::DateTime<chrono::Utc>) -> usize {
         let ids: Vec<String> = self
             .sessions
             .iter()
-            .filter(|(_, s)| s.status != SessionStatus::Running && s.created_at < threshold)
+            .filter(|(_, s)| {
+                s.messages.is_empty()
+                    && s.status != SessionStatus::Running
+                    && s.created_at < threshold
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in &ids {

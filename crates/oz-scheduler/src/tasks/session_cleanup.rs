@@ -88,8 +88,17 @@ impl ScheduledTask for SessionCleanup {
                     // matched, so nothing was ever removed.
                     let is_idle = status.eq_ignore_ascii_case("idle")
                         || status.eq_ignore_ascii_case("stopped");
+                    // Never remove sessions carrying message content: they
+                    // are user history (created_at is creation time, not
+                    // last-use, so an actively-used old session must not be
+                    // pruned). Cleanup clears empty debris only.
+                    let is_empty = sess
+                        .get("messages")
+                        .and_then(|m| m.as_array())
+                        .map(|a| a.is_empty())
+                        .unwrap_or(false);
                     match created {
-                        Some(d) if d < threshold && is_idle => Some(id.clone()),
+                        Some(d) if d < threshold && is_idle && is_empty => Some(id.clone()),
                         _ => None,
                     }
                 })
