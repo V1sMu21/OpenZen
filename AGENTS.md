@@ -205,3 +205,15 @@ Rules:
   `/Applications/OpenZen.app` wholesale with
   `target/release/bundle/macos/OpenZen.app` (quit the running app first).
   Never swap just the `MacOS/openzen-tauri` binary.
+
+## OpenZen lifecycle rules for AI assistants (2026-09-09)
+
+- **Never quit/restart the running OpenZen app while a task is executing.**
+  Check `~/.openzen/logs/openzen.log` for an active run (compress check /
+  usage lines within the last minute, or the UI badge 运行中) before any
+  quit. Background commands that include a `quit` may fire late and kill a
+  run the user just started — sequence installs only in confirmed idle
+  windows, or launch a SEPARATE app instance for testing instead of
+  touching the user's window.
+- Background build tasks are not cancellable mid-command: never bundle
+  `osascript quit` into a backgrounded build+install chain.

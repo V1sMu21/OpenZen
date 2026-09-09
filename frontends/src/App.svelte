@@ -1412,6 +1412,13 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    /* Reserve the scrollbar gutter permanently: during streaming the content
+       height hovers at the scrollbar threshold, and the scrollbar appearing/
+       disappearing re-wraps long single-line tool JSON, changing height again
+       — a layout loop the user sees as violent shaking. Expanding a tool card
+       (much taller content) hides it, collapsing brings it back. A stable
+       gutter removes the toggle entirely. */
+    scrollbar-gutter: stable;
     display: flex;
     align-items: flex-start;
     gap: 24px;
