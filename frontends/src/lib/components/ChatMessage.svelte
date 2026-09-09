@@ -227,10 +227,19 @@ import { t, locale, tSync } from "../i18n";
       // boundary (the per-cycle -33px downward blip while thinking).
       if (p.type === "reasoning" && !p.text?.trim()) continue;
       const last = groups.length > 0 ? groups[groups.length - 1] : null;
-      if (last && last.type === p.type && last.type !== 'tool-invocation') {
+      // Only text/reasoning parts merge. The type-equality guard MUST be
+      // scoped to them: a data part (user_intervention card) adjacent to
+      // another data part — two interjections queued during one long tool
+      // call — used to enter this branch, match neither merge case, and be
+      // silently dropped, so only the FIRST interjection ever rendered.
+      if (
+        last
+        && (p.type === "text" || p.type === "reasoning")
+        && last.type === p.type
+      ) {
         if (p.type === 'text') {
           groups[groups.length - 1] = { ...last, text: (last as any).text + (p as any).text, state: p.state } as UIMessagePart;
-        } else if (p.type === 'reasoning') {
+        } else {
           groups[groups.length - 1] = { ...last, text: (last as any).text + (p as any).text, state: p.state } as UIMessagePart;
         }
       } else {
