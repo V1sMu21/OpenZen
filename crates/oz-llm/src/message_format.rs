@@ -22,12 +22,27 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
                             text_parts.push(serde_json::json!({"type": "text", "text": text}));
                         }
                         ContentBlock::ToolUse { id, name, input } => {
+                            // A stream truncated mid-arguments is salvaged as a
+                            // non-object input (e.g. a bare string). Some
+                            // gateways (opencode.ai zen / GLM) validate the
+                            // (tool_call, tool_result) pair and reject the
+                            // whole request when `arguments` doesn't decode
+                            // to a JSON object — deterministically, so retries
+                            // never recover. Wrap non-object inputs.
+                            let args_val = match input {
+                                serde_json::Value::String(s) => {
+                                    serde_json::json!({ "content": s })
+                                }
+                                other => serde_json::json!({
+                                    "content": serde_json::to_string(other).unwrap_or_default()
+                                }),
+                            };
                             tool_calls.push(serde_json::json!({
                                 "id": id,
                                 "type": "function",
                                 "function": {
                                     "name": name,
-                                    "arguments": serde_json::to_string(input).unwrap_or_default(),
+                                    "arguments": serde_json::to_string(&args_val).unwrap_or_default(),
                                 }
                             }));
                         }
@@ -380,6 +395,25 @@ mod tests {
         let result = msgs_claude2oai(&[msg], "gpt-4");
         assert_eq!(result.len(), 1);
         assert!(result[0].get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn test_claude2oai_non_object_tool_input_wrapped() {
+        // A stream truncated mid-arguments is salvaged as a bare string input.
+        // The OAI encoding must still yield `arguments` that decodes to an
+        // object, or strict gateways (zen/GLM) reject the request outright.
+        let msg = Message::assistant_with_blocks(vec![ContentBlock::tool_use(
+            "tu_1",
+            "write",
+            serde_json::json!(" truncated file body..."),
+        )]);
+        let result = msgs_claude2oai(&[msg], "glm-5.3-flash");
+        let args = result[0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(args).unwrap();
+        assert!(parsed.is_object(), "arguments must decode to an object");
+        assert_eq!(parsed["content"], " truncated file body...");
     }
 
     #[test]
