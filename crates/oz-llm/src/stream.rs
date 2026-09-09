@@ -596,8 +596,10 @@ pub async fn parse_openai_sse(
                         if t.available_emitted {
                             continue;
                         }
-                        let parsed_args: serde_json::Value = serde_json::from_str(&t.args)
-                            .unwrap_or_else(|_| serde_json::Value::String(t.args.clone()));
+                        let parsed_args: serde_json::Value = normalize_tool_args(
+                            serde_json::from_str(&t.args)
+                                .unwrap_or_else(|_| serde_json::Value::String(t.args.clone())),
+                        );
                         emit(
                             &event_tx,
                             StreamEvent::ToolInputAvailable {
@@ -909,11 +911,23 @@ pub async fn parse_openai_sse(
                                                         .get(&idx)
                                                         .map(|t| t.id.as_str())
                                                         .unwrap_or("");
+                                                    // Normalize degenerate shapes here
+                                                    // so the speculative executor AND
+                                                    // the ToolInputAvailable event the
+                                                    // UI/history see carry the real
+                                                    // payload, not a content-wrapped
+                                                    // imitation.
+                                                    let normalized = normalize_tool_args(
+                                                        serde_json::from_str::<serde_json::Value>(
+                                                            tc_args,
+                                                        )
+                                                        .unwrap_or_default(),
+                                                    );
                                                     let _ =
                                                         spec_tx.send(StreamEvent::ToolCallReady {
                                                             id: tc_id.to_string(),
                                                             name: tc_name.to_string(),
-                                                            args: tc_args.to_string(),
+                                                            args: normalized.to_string(),
                                                         });
                                                     tool_call_dispatched.insert(idx);
                                                 }
@@ -1028,26 +1042,43 @@ pub async fn parse_openai_sse(
 ///   to a JSON string whose text is the real argument object;
 /// - single-key `{"content": "<json text>"}` wrappers (imitated by models
 ///   that saw sanitized history): the inner text is the real object.
-/// Left unfixed, tools fail with "missing code argument"-style errors and the
-/// wrapped shape propagates through history. Unrecognized shapes pass through
-/// unchanged.
+/// Applied repeatedly so multi-level wrappers collapse fully. Unrecognized
+/// shapes pass through unchanged.
 pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
-    match &v {
-        serde_json::Value::String(s) => match serde_json::from_str::<serde_json::Value>(s) {
-            Ok(inner) if inner.is_object() => inner,
-            _ => v,
-        },
-        serde_json::Value::Object(m) if m.len() == 1 => {
-            match m.get("content").and_then(|c| c.as_str()) {
-                Some(s) => match serde_json::from_str::<serde_json::Value>(s) {
-                    Ok(inner) if inner.is_object() => inner,
-                    _ => v,
-                },
-                None => v,
+    let mut current = v;
+    for _ in 0..4 {
+        let next = match &current {
+            serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
+                .ok()
+                .filter(|inner| inner.is_object()),
+            serde_json::Value::Object(m) if m.len() == 1 => {
+                match m.get("content") {
+                    // Wrapper with the payload as a JSON-encoded string…
+                    Some(serde_json::Value::String(s)) => {
+                        serde_json::from_str::<serde_json::Value>(s)
+                            .ok()
+                            .filter(|inner| inner.is_object())
+                    }
+                    // …or directly as an object.
+                    Some(inner @ serde_json::Value::Object(_)) => Some(inner.clone()),
+                    _ => None,
+                }
             }
+            _ => None,
+        };
+        match next {
+            Some(inner) => {
+                tracing::warn!(
+                    "[oz-llm] normalized degenerate tool args: {} -> {}",
+                    serde_json::to_string(&current).unwrap_or_default().chars().take(120).collect::<String>(),
+                    serde_json::to_string(&inner).unwrap_or_default().chars().take(120).collect::<String>(),
+                );
+                current = inner;
+            }
+            None => break,
         }
-        _ => v,
     }
+    current
 }
 
 #[cfg(test)]

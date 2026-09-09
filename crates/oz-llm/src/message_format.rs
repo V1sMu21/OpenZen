@@ -2,8 +2,25 @@ use oz_core_types::{ContentBlock, ContentContainer, Message, Role};
 
 /// Convert Claude content-block format messages to OpenAI format.
 /// Matches Python _msgs_claude2oai
+///
+/// Tool calls whose input is not a JSON object (streams truncated
+/// mid-arguments, salvaged as a bare string) are dropped together with their
+/// tool results. Encoding them as wrapper objects made strict gateways
+/// (opencode.ai zen / GLM) reject the request, and wrapping taught the model
+/// the malformed shape, which it then imitated for healthy calls. The call
+/// was already a lost cause (its result is an error), so removal is lossless.
 pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Value> {
     let mut result: Vec<serde_json::Value> = Vec::new();
+    // Calls with non-object inputs, collected up front so the call block and
+    // its result are dropped in the same pass.
+    let poisoned: std::collections::HashSet<&str> = messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, input, .. } if !input.is_object() => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
     for msg in messages {
         let _role = msg.role.as_str();
         let content = &msg.content;
@@ -22,27 +39,15 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
                             text_parts.push(serde_json::json!({"type": "text", "text": text}));
                         }
                         ContentBlock::ToolUse { id, name, input } => {
-                            // A stream truncated mid-arguments is salvaged as a
-                            // non-object input (e.g. a bare string). Some
-                            // gateways (opencode.ai zen / GLM) validate the
-                            // (tool_call, tool_result) pair and reject the
-                            // whole request when `arguments` doesn't decode
-                            // to a JSON object — deterministically, so retries
-                            // never recover. Wrap non-object inputs.
-                            let args_val = match input {
-                                serde_json::Value::String(s) => {
-                                    serde_json::json!({ "content": s })
-                                }
-                                other => serde_json::json!({
-                                    "content": serde_json::to_string(other).unwrap_or_default()
-                                }),
-                            };
+                            if poisoned.contains(id.as_str()) {
+                                continue;
+                            }
                             tool_calls.push(serde_json::json!({
                                 "id": id,
                                 "type": "function",
                                 "function": {
                                     "name": name,
-                                    "arguments": serde_json::to_string(&args_val).unwrap_or_default(),
+                                    "arguments": serde_json::to_string(input).unwrap_or_default(),
                                 }
                             }));
                         }
@@ -75,6 +80,9 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
                             content,
                             ..
                         } => {
+                            if poisoned.contains(tool_use_id.as_str()) {
+                                continue;
+                            }
                             if !text_parts.is_empty() {
                                 result.push(
                                     serde_json::json!({"role": "user", "content": text_parts}),
@@ -398,22 +406,27 @@ mod tests {
     }
 
     #[test]
-    fn test_claude2oai_non_object_tool_input_wrapped() {
+    fn test_claude2oai_non_object_tool_input_dropped_with_result() {
         // A stream truncated mid-arguments is salvaged as a bare string input.
-        // The OAI encoding must still yield `arguments` that decodes to an
-        // object, or strict gateways (zen/GLM) reject the request outright.
-        let msg = Message::assistant_with_blocks(vec![ContentBlock::tool_use(
-            "tu_1",
+        // The call cannot execute (its result is an error), and encoding it
+        // makes strict gateways reject the request — or teaches the model the
+        // malformed shape. Drop the call and its result together.
+        let call_id = "tu_1";
+        let assistant = Message::assistant_with_blocks(vec![ContentBlock::tool_use(
+            call_id,
             "write",
             serde_json::json!(" truncated file body..."),
         )]);
-        let result = msgs_claude2oai(&[msg], "glm-5.3-flash");
-        let args = result[0]["tool_calls"][0]["function"]["arguments"]
-            .as_str()
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(args).unwrap();
-        assert!(parsed.is_object(), "arguments must decode to an object");
-        assert_eq!(parsed["content"], " truncated file body...");
+        let user = Message::user_with_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: call_id.into(),
+            content: oz_core_types::ContentContainer::Text("{\"error\":\"write: missing file_path\"}".into()),
+            is_error: Some(true),
+        }]);
+        let result = msgs_claude2oai(&[assistant, user], "glm-5.3-flash");
+        for m in &result {
+            assert!(m.get("tool_calls").is_none(), "poisoned call must be dropped: {m}");
+            assert!(m["role"] != "tool", "poisoned result must be dropped: {m}");
+        }
     }
 
     #[test]
