@@ -724,12 +724,15 @@ pub async fn run_agent_for_session(
         300
     };
     // Engine-pool contention (other sessions swapping models mid-stream)
-    // aborts in-flight requests; give local engines double the retry
-    // budget so a wedge doesn't kill the whole long task.
+    // aborts in-flight requests; give local engines extra retry budget so a
+    // wedge doesn't kill the whole long task. Cloud gateways fail in bursts
+    // too (e.g. opencode.ai zen upstream 400s lasting tens of seconds), so
+    // cloud gets an even wider budget — with the 60s outage backoff this
+    // rides out multi-minute provider episodes.
     loop_config.llm_error_retries = if crate::is_local_deploy(&sess_config.apibase) {
         6
     } else {
-        3
+        8
     };
     loop_config.skill_mcp_dir = state.skill_mcp_dir.clone();
     // P1-j: per-session tool concurrency cap. The process-wide semaphore

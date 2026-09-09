@@ -366,7 +366,10 @@ impl Default for LoopConfig {
             summary_apikey: None,
             log_fn: None,
             stream_timeout_secs: 300,
-            llm_error_retries: 3,
+            // Wide default so embedded entry points (web/IM bridges that
+            // don't override it) survive gateway outage bursts too; with the
+            // 60s outage backoff this spans multi-minute provider episodes.
+            llm_error_retries: 8,
             rollout_dir: None,
             memory_scheduler: None,
             hooks: None,

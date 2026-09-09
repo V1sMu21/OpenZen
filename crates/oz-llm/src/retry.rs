@@ -50,6 +50,16 @@ pub fn compute_delay(attempt: usize, timeout: Option<u64>) -> f64 {
     delay.min(cap)
 }
 
+/// Backoff for the agent loop's turn-level retry of LLM transport failures:
+/// 1.5s × 2^attempt capped at 60s. Unlike `compute_delay` (per-request,
+/// capped at 30s), this spans gateway/provider outage windows, which in the
+/// field last tens of seconds to a few minutes; a 30s cap let the whole
+/// retry budget expire inside a single outage burst and killed long runs.
+pub fn outage_backoff_delay(attempt: usize) -> f64 {
+    let delay = 1.5 * (2u64.pow(attempt.min(16) as u32) as f64);
+    delay.min(60.0)
+}
+
 pub fn trim_history(history: &mut Vec<Message>, context_win: usize) {
     let cost = estimate_chars(history);
     if cost <= context_win * 3 {
@@ -155,6 +165,17 @@ mod tests {
         // A generous timeout (e.g. default 120s) must not raise the 30s cap.
         let delay = compute_delay(10, Some(120));
         assert!((delay - 30.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_outage_backoff_delay() {
+        assert!((outage_backoff_delay(0) - 1.5).abs() < f64::EPSILON);
+        assert!((outage_backoff_delay(1) - 3.0).abs() < f64::EPSILON);
+        assert!((outage_backoff_delay(2) - 6.0).abs() < f64::EPSILON);
+        assert!((outage_backoff_delay(5) - 48.0).abs() < f64::EPSILON);
+        // Cap sits at 60s and huge attempt indices do not overflow/panic.
+        assert!((outage_backoff_delay(10) - 60.0).abs() < f64::EPSILON);
+        assert!((outage_backoff_delay(10_000) - 60.0).abs() < f64::EPSILON);
     }
 
     #[test]

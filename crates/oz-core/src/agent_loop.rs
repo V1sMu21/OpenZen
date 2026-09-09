@@ -86,9 +86,12 @@ async fn save_stop_checkpoint_async(
 
 /// Sleep for the exponential backoff delay of a failed LLM attempt,
 /// aborting early when the stop signal fires (stop must stay responsive).
-/// `consecutive` is the 1-based consecutive-error count.
+/// `consecutive` is the 1-based consecutive-error count. Uses the 60s-capped
+/// outage backoff (not the 30s per-request cap): gateway/provider outage
+/// windows outlast the per-request budget, and the turn-level retry is the
+/// only layer that rides them out.
 async fn backoff_or_stop(stop_signal: &AtomicBool, consecutive: u32) {
-    let delay = oz_llm::retry::compute_delay(consecutive.saturating_sub(1) as usize, None);
+    let delay = oz_llm::retry::outage_backoff_delay(consecutive.saturating_sub(1) as usize);
     let mut waited = 0.0_f64;
     while waited < delay {
         if stop_signal.load(Ordering::Relaxed) {
