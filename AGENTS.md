@@ -187,3 +187,21 @@ Version fields that must stay in sync: `src-tauri/tauri.conf.json` +
   `max_conjectures=3` the second cycle legitimately promotes fresh ids.
   Now asserts the promoted-id set only grows and its delta equals
   `second.promoted` (true dedup invariant, deterministic under randomness).
+
+## Building / installing the macOS app — always `cargo tauri build` (2026-09-09)
+
+`cargo build --release -p openzen-tauri` + copying the binary into an existing
+`OpenZen.app` bundle produces a **white-screen app**: the frontend assets
+(`frontends/dist`, wired via `frontendDist` in `src-tauri/tauri.conf.json`) are
+rebuilt by `beforeBuildCommand` (`npm ci && npm run build`) and embedded by the
+tauri CLI pipeline; a bare cargo build embeds nothing (the artifact is ~4MB
+smaller than a correct one — exactly the missing embedded frontend assets).
+
+Rules:
+
+- Compile/lint/test: `cargo check` / `cargo test` / `cargo clippy` — fine.
+- Produce or update the runnable app: `cargo tauri build` (or
+  `cargo tauri build --bundles app` to skip the dmg), then replace
+  `/Applications/OpenZen.app` wholesale with
+  `target/release/bundle/macos/OpenZen.app` (quit the running app first).
+  Never swap just the `MacOS/openzen-tauri` binary.
