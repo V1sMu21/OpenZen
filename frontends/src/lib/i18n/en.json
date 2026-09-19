@@ -355,5 +355,7 @@
   "soul.forgetFact": "Forget this",
   "status.done.short": "done",
   "status.error.short": "error",
-  "message.folded": "{count} folded · {tools} tools"
+  "message.folded": "{count} folded · {tools} tools",
+  "session.deleteConfirm": "Delete session \"{name}\"? This cannot be undone.",
+  "session.renameHint": "Double-click to rename"
 }

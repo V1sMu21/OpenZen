@@ -2,7 +2,7 @@
   import { sessions } from "../stores/sessions";
   import { projects } from "../stores/projects";
   import type { SessionInfo } from "../api/sessions";
-  import { t } from "../i18n";
+  import { t, localT } from "../i18n";
 
   let {
     items = $bindable([] as SessionInfo[]),
@@ -13,6 +13,52 @@
   } = $props();
 
   let focusedIndex = $state(-1);
+  // P2-22: inline rename (double-click the name). Deleting a session is
+  // destructive and was one click with no confirmation anywhere.
+  let renamingId = $state<string | null>(null);
+  let renameDraft = $state("");
+
+  function confirmDelete(name: string): boolean {
+    const label = name || localT("session.defaultName", "session");
+    return window.confirm(
+      localT("session.deleteConfirm", "Delete this session?").replace("{name}", label),
+    );
+  }
+
+  function startRename(e: Event, session: SessionInfo) {
+    e.stopPropagation();
+    renamingId = session.id;
+    renameDraft = session.name || "";
+  }
+
+  async function commitRename(e: KeyboardEvent | FocusEvent, session: SessionInfo) {
+    if (renamingId !== session.id) return;
+    const name = renameDraft.trim();
+    renamingId = null;
+    if (!name || name === session.name) return;
+    try {
+      await sessions.rename(session.id, name);
+      const target = items.find((i) => i.id === session.id);
+      if (target) target.name = name;
+      items = [...items];
+    } catch (err) {
+      console.error("[SessionList] rename failed:", err);
+    }
+  }
+
+  function onRenameKey(e: KeyboardEvent, session: SessionInfo) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void commitRename(e, session);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      renamingId = null;
+    } else {
+      // Keep list-level navigation from hijacking typing.
+      e.stopPropagation();
+    }
+  }
 
   function formatDate(iso: string): string {
     try {
@@ -30,6 +76,10 @@
 
   async function handleDelete(e: Event, id: string) {
     e.stopPropagation();
+    const labeled = items.find((item) => item.id === id);
+    if (!confirmDelete(labeled?.name ?? "")) {
+      return;
+    }
     // Get project_id before removing from local list
     const target = items.find(item => item.id === id);
     const projectId = target?.project_id;
@@ -75,8 +125,10 @@
       case "Backspace":
         e.preventDefault();
         if (focusedIndex >= 0 && focusedIndex < items.length) {
-          sessions.remove(items[focusedIndex].id);
-          focusedIndex = Math.max(0, Math.min(focusedIndex, items.length - 2));
+          const target = items[focusedIndex];
+          if (confirmDelete(target.name ?? "")) {
+            void handleDelete(new Event("keyboard"), target.id);
+          }
         }
         break;
       case "Escape":
@@ -115,7 +167,35 @@
       onclick={() => { onSelectSession(session.id); focusedIndex = idx; }}
     >
       <div class="session-info">
-        <div class="session-name">{session.name || $t("session.defaultName")}</div>
+        {#if renamingId === session.id}
+          <input
+            class="session-rename-input"
+            bind:value={renameDraft}
+            onkeydown={(e) => onRenameKey(e, session)}
+            onblur={(e) => void commitRename(e, session)}
+            onfocus={(e) => e.currentTarget.select()}
+            aria-label={$t("session.renameHint")}
+          />
+        {:else}
+          <div
+            class="session-name"
+            role="button"
+            tabindex="-1"
+            ondblclick={(e) => startRename(e, session)}
+            onkeydown={(e) => {
+              // Keyboard path for rename: F2 (the list itself owns
+              // arrow/Enter/Delete handling).
+              if (e.key === "F2") {
+                e.preventDefault();
+                e.stopPropagation();
+                startRename(e, session);
+              } else {
+                e.stopPropagation();
+              }
+            }}
+            title={$t("session.renameHint")}
+          >{session.name || $t("session.defaultName")}</div>
+        {/if}
         <div class="session-meta">
           <span>{session.message_count} {$t("session.msgs")}</span>
           <span>{formatDate(session.created_at)}</span>
@@ -243,5 +323,15 @@
     text-align: center;
     font-size: 13px;
     color: var(--color-muted);
+  }
+
+  .session-rename-input {
+    width: 100%;
+    font: inherit;
+    color: inherit;
+    background: var(--color-surface-soft);
+    border: 1px solid var(--color-primary);
+    border-radius: 4px;
+    padding: 1px 4px;
   }
 </style>
