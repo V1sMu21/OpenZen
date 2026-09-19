@@ -1042,6 +1042,7 @@ pub async fn parse_openai_sse(
 ///   to a JSON string whose text is the real argument object;
 /// - single-key `{"content": "<json text>"}` wrappers (imitated by models
 ///   that saw sanitized history): the inner text is the real object.
+///
 /// Applied repeatedly so multi-level wrappers collapse fully. Unrecognized
 /// shapes pass through unchanged.
 pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
