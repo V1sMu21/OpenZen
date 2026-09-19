@@ -103,6 +103,18 @@ impl HarnessState {
         if evidence.is_empty() {
             return Err("refine rejected: evidence is empty (must cite observed behavior)".into());
         }
+        // Bounded ledger: the model can write lessons every turn, and each
+        // injected lesson costs prompt budget (observed 454KB / 100 entries
+        // and still growing). Cap entry size and per-kind count, evicting
+        // the least-recently-updated entries of the same kind, so the
+        // ledger stays a curated set instead of an append-only log.
+        const MAX_ENTRY_CHARS: usize = 2_000;
+        const MAX_ENTRIES_PER_KIND: usize = 200;
+        if content.chars().count() > MAX_ENTRY_CHARS {
+            return Err(format!(
+                "refine rejected: content exceeds {MAX_ENTRY_CHARS} chars — split it or shorten"
+            ));
+        }
         let now = chrono::Utc::now().to_rfc3339();
 
         match mode {
@@ -166,6 +178,30 @@ impl HarnessState {
                         };
                         self.entries.push(entry);
                         self.refinements.push(rec.clone());
+                        // Evict the oldest-updated entries of this kind
+                        // beyond the cap (curated, not append-only).
+                        let mut same_kind: Vec<(usize, String)> = self
+                            .entries
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, e)| e.kind == kind)
+                            .map(|(i, e)| (i, e.updated_at.clone()))
+                            .collect();
+                        if same_kind.len() > MAX_ENTRIES_PER_KIND {
+                            same_kind.sort_by(|a, b| a.1.cmp(&b.1));
+                            let excess = same_kind.len() - MAX_ENTRIES_PER_KIND;
+                            let mut to_remove: Vec<usize> =
+                                same_kind.into_iter().take(excess).map(|(i, _)| i).collect();
+                            to_remove.sort_unstable_by(|a, b| b.cmp(a));
+                            for i in to_remove {
+                                let removed = self.entries.remove(i);
+                                tracing::info!(
+                                    "[harness] evicted oldest {} entry beyond cap: {}…",
+                                    format!("{:?}", kind),
+                                    removed.content.chars().take(40).collect::<String>()
+                                );
+                            }
+                        }
                         rec
                     }
                 };
@@ -394,6 +430,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn test_refine_rejects_oversized_content() {
+        let dir = tmp_dir("oversized");
+        let huge = "x".repeat(2_001);
+        let r = refine(
+            &dir,
+            HarnessKind::Memory,
+            &huge,
+            "evidence",
+            "test",
+            "upsert",
+        );
+        assert!(r.is_err(), "oversized entry must be rejected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ledger_evicts_beyond_cap() {
+        let dir = tmp_dir("evict");
+        // Write cap+5 entries; the ledger must not exceed the cap and the
+        // oldest-updated ones must be the ones dropped.
+        for i in 0..205 {
+            let rec = refine(
+                &dir,
+                HarnessKind::Memory,
+                &format!("lesson number {i}"),
+                "evidence",
+                "test",
+                "upsert",
+            );
+            assert!(rec.is_ok(), "insert {i} failed");
+        }
+        let state = HarnessState::load(&dir);
+        let count = state.entries_of(HarnessKind::Memory).len();
+        assert!(count <= 200, "ledger exceeded cap: {count}");
+        // Newest entry survives.
+        assert!(state
+            .entries
+            .iter()
+            .any(|e| e.content == "lesson number 204"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
