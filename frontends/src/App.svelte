@@ -1916,7 +1916,22 @@
     user-select: none;
   }
   .crystallization-switch input {
-    display: none;
+    /* Visually hidden but FOCUSABLE: display:none removed the safety
+       toggles (incl. full-access) from the tab order entirely. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .crystallization-switch input:focus-visible + .switch-track {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: 4px;
   }
   .switch-label {
     font-family: var(--font-serif);

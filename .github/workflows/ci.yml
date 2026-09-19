@@ -29,6 +29,14 @@ jobs:
         run: cargo fmt --check
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontends/package-lock.json
+      - name: Frontend type check (svelte-check, errors fail the build)
+        working-directory: frontends
+        run: npm ci && npm run check
 
   test:
     name: Run tests

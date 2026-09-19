@@ -41,7 +41,9 @@ export interface ReminderTask {
   /** When the next fire happens (ms epoch) */
   fireAtMs: number;
   /** active until all repeats fired, then done */
-  status: "active" | "done";
+  /** "cancelled" is emitted by the backend when a run dies before the
+   *  reminder fired; the card renders it in the finished bucket. */
+  status: "active" | "done" | "cancelled";
 }
 
 // ── Streaming event coalescing ──
