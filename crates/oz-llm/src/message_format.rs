@@ -3,25 +3,66 @@ use oz_core_types::{ContentBlock, ContentContainer, Message, Role};
 /// Convert Claude content-block format messages to OpenAI format.
 /// Matches Python _msgs_claude2oai
 ///
-/// Tool calls whose input is not a JSON object (streams truncated
-/// mid-arguments, salvaged as a bare string) are dropped together with their
-/// tool results. Encoding them as wrapper objects made strict gateways
-/// (opencode.ai zen / GLM) reject the request, and wrapping taught the model
-/// the malformed shape, which it then imitated for healthy calls. The call
-/// was already a lost cause (its result is an error), so removal is lossless.
+/// Strict gateways (opencode.ai zen "Go", GLM) validate the tool protocol the
+/// way OpenAI defines it: a `tool` message must directly answer the assistant
+/// `tool_calls` that precedes it, and every `tool_calls` entry must be
+/// answered before the next non-tool message. Persisted history can violate
+/// all of it — a terminal control call (`respond`) is stored as a tool_use
+/// with no result, a result can outlive its call, and user text that travelled
+/// with a batch of tool results used to be emitted before them, which put a
+/// `user` message between `tool_calls` and its `tool` responses.
+///
+/// Repair rules: drop `tool_calls` whose input is not a JSON object (a stream
+/// truncated mid-arguments was salvaged as a bare string, so the call could
+/// never have run — removal is lossless); answer any remaining unpaired call
+/// with a synthetic `tool` response; drop `tool` results whose call is not the
+/// immediately preceding assistant's; emit tool responses before any user text
+/// that shared the message.
 pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Value> {
     let mut result: Vec<serde_json::Value> = Vec::new();
-    // Calls with non-object inputs, collected up front so the call block and
-    // its result are dropped in the same pass.
-    let poisoned: std::collections::HashSet<&str> = messages
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, input, .. } if !input.is_object() => Some(id.as_str()),
-            _ => None,
-        })
-        .collect();
-    for msg in messages {
+    // Synthetic `tool` responses for calls whose result was never recorded.
+    // They are inserted directly after the assistant message that made them.
+    let mut pending_synth: Vec<serde_json::Value> = Vec::new();
+
+    // Ids answered by the turn at `i + 1` (a user turn carrying tool results).
+    let answered_after = |i: usize| -> Vec<&str> {
+        let Some(next) = messages.get(i + 1) else {
+            return Vec::new();
+        };
+        if next.role != Role::User {
+            return Vec::new();
+        }
+        next.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    };
+    // Replayable call ids declared by the assistant message at `i`.
+    let declared_at = |i: usize| -> Vec<&str> {
+        let Some(prev) = messages.get(i) else {
+            return Vec::new();
+        };
+        if prev.role != Role::Assistant {
+            return Vec::new();
+        }
+        prev.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, input, .. } if input.is_object() => Some(id.as_str()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    for (i, msg) in messages.iter().enumerate() {
+        // A synthetic response belongs directly after its assistant message;
+        // flush it before any message that is not the user turn it pairs with.
+        if msg.role != Role::User && !pending_synth.is_empty() {
+            result.append(&mut pending_synth);
+        }
         let _role = msg.role.as_str();
         let content = &msg.content;
         let blocks: Vec<ContentBlock> = content.clone();
@@ -30,6 +71,7 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
             Role::Assistant => {
                 let mut text_parts: Vec<serde_json::Value> = Vec::new();
                 let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+                let mut emitted_ids: Vec<String> = Vec::new();
                 let mut reasoning = String::new();
 
                 for b in &blocks {
@@ -39,9 +81,14 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
                             text_parts.push(serde_json::json!({"type": "text", "text": text}));
                         }
                         ContentBlock::ToolUse { id, name, input } => {
-                            if poisoned.contains(id.as_str()) {
+                            // Non-object input: the stream was truncated
+                            // mid-arguments and salvaged as a bare string. The
+                            // call never ran, and emitting it makes strict
+                            // gateways reject the whole request.
+                            if !input.is_object() {
                                 continue;
                             }
+                            emitted_ids.push(id.clone());
                             tool_calls.push(serde_json::json!({
                                 "id": id,
                                 "type": "function",
@@ -68,10 +115,33 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
                     m["tool_calls"] = serde_json::json!(tool_calls);
                 }
                 result.push(m);
+
+                // A call with no recorded result leaves the batch incomplete,
+                // which strict gateways reject. Answer it synthetically so the
+                // `tool_calls` block is self-contained.
+                let answered = answered_after(i);
+                for id in emitted_ids {
+                    if !answered.contains(&id.as_str()) {
+                        pending_synth.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": id,
+                            "content": "(no result recorded)",
+                        }));
+                    }
+                }
             }
             Role::User => {
                 let mut text_parts: Vec<serde_json::Value> = Vec::new();
                 let mut tool_items: Vec<serde_json::Value> = Vec::new();
+
+                // Replay a result only when its call is the immediately
+                // preceding assistant's — an orphan `tool` message is exactly
+                // what strict gateways reject.
+                let declared = if i > 0 {
+                    declared_at(i - 1)
+                } else {
+                    Vec::new()
+                };
 
                 for b in &blocks {
                     match b {
@@ -80,14 +150,8 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
                             content,
                             ..
                         } => {
-                            if poisoned.contains(tool_use_id.as_str()) {
+                            if !declared.contains(&tool_use_id.as_str()) {
                                 continue;
-                            }
-                            if !text_parts.is_empty() {
-                                result.push(
-                                    serde_json::json!({"role": "user", "content": text_parts}),
-                                );
-                                text_parts = Vec::new();
                             }
                             let tr_content = match content {
                                 ContentContainer::Text(t) => t.clone(),
@@ -118,10 +182,15 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
                         _ => {}
                     }
                 }
+                // Tool responses must directly follow the assistant
+                // `tool_calls`; user text that shared the message goes after,
+                // never between the calls and their responses.
+                let mut items = std::mem::take(&mut pending_synth);
+                items.extend(tool_items);
+                result.extend(items);
                 if !text_parts.is_empty() {
                     result.push(serde_json::json!({"role": "user", "content": text_parts}));
                 }
-                result.extend(tool_items);
             }
             _ => {
                 result.push(serde_json::json!({
@@ -131,6 +200,9 @@ pub fn msgs_claude2oai(messages: &[Message], _model: &str) -> Vec<serde_json::Va
             }
         }
     }
+    // An assistant message that ended the history leaves its synthetic
+    // responses unflushed — emit them so the batch is complete.
+    result.append(&mut pending_synth);
     result
 }
 
@@ -401,8 +473,12 @@ mod tests {
             serde_json::json!({"path": "/tmp/x.txt"}),
         )]);
         let result = msgs_claude2oai(&[msg], "gpt-4");
-        assert_eq!(result.len(), 1);
+        // The call is kept and, with no result following, answered
+        // synthetically so the batch is valid on its own.
+        assert_eq!(result.len(), 2);
         assert!(result[0].get("tool_calls").is_some());
+        assert_eq!(result[1]["role"], "tool");
+        assert_eq!(result[1]["tool_call_id"], "tu_1");
     }
 
     #[test]
@@ -419,12 +495,17 @@ mod tests {
         )]);
         let user = Message::user_with_blocks(vec![ContentBlock::ToolResult {
             tool_use_id: call_id.into(),
-            content: oz_core_types::ContentContainer::Text("{\"error\":\"write: missing file_path\"}".into()),
+            content: oz_core_types::ContentContainer::Text(
+                "{\"error\":\"write: missing file_path\"}".into(),
+            ),
             is_error: Some(true),
         }]);
         let result = msgs_claude2oai(&[assistant, user], "glm-5.3-flash");
         for m in &result {
-            assert!(m.get("tool_calls").is_none(), "poisoned call must be dropped: {m}");
+            assert!(
+                m.get("tool_calls").is_none(),
+                "poisoned call must be dropped: {m}"
+            );
             assert!(m["role"] != "tool", "poisoned result must be dropped: {m}");
         }
     }
@@ -435,6 +516,111 @@ mod tests {
         let result = msgs_claude2oai(&msgs, "gpt-4");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "system");
+    }
+
+    /// Assert the OpenAI tool protocol across a converted history: every
+    /// `tool` message directly follows the assistant `tool_calls` declaring
+    /// its id, every declared id is answered before the next non-tool
+    /// message, and no `tool` message floats on its own.
+    fn assert_tool_protocol(msgs: &[serde_json::Value]) {
+        let mut i = 0;
+        while i < msgs.len() {
+            if msgs[i]["role"] != "assistant" {
+                i += 1;
+                continue;
+            }
+            let declared: Vec<&str> = msgs[i]["tool_calls"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|c| c["id"].as_str()).collect())
+                .unwrap_or_default();
+            if declared.is_empty() {
+                i += 1;
+                continue;
+            }
+            let mut answered: Vec<&str> = Vec::new();
+            let mut j = i + 1;
+            while j < msgs.len() && msgs[j]["role"] == "tool" {
+                let id = msgs[j]["tool_call_id"].as_str().unwrap_or("");
+                assert!(
+                    declared.contains(&id),
+                    "tool message answers an id the preceding assistant did not declare: {id}"
+                );
+                answered.push(id);
+                j += 1;
+            }
+            for id in &declared {
+                assert!(answered.contains(id), "tool_calls id never answered: {id}");
+            }
+            i = j;
+        }
+        for (idx, m) in msgs.iter().enumerate() {
+            if m["role"] == "tool" {
+                let follows = idx > 0
+                    && (msgs[idx - 1]["role"] == "assistant" || msgs[idx - 1]["role"] == "tool");
+                assert!(follows, "orphan tool message at index {idx}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_claude2oai_tool_results_precede_accompanying_user_text() {
+        // The failing opencode.ai shape: a user turn carries a batch of tool
+        // results AND the user's next question (build_history merges them).
+        // The text must not land between `tool_calls` and its `tool` responses.
+        let assistant = Message::assistant_with_blocks(vec![ContentBlock::tool_use(
+            "call_1",
+            "read_file",
+            serde_json::json!({"path": "/tmp/x"}),
+        )]);
+        let user = Message::user_with_blocks(vec![
+            ContentBlock::tool_result("call_1", "file body"),
+            ContentBlock::text("now do the next thing"),
+        ]);
+        let out = msgs_claude2oai(&[assistant, user], "deepseek-flash");
+        assert_tool_protocol(&out);
+        assert_eq!(out[0]["role"], "assistant");
+        assert_eq!(out[1]["role"], "tool");
+        assert_eq!(out[2]["role"], "user");
+        assert_eq!(out[2]["content"][0]["text"], "now do the next thing");
+    }
+
+    #[test]
+    fn test_claude2oai_unanswered_tool_call_gets_synthetic_response() {
+        // A terminal control call (`respond`) is persisted as a tool_use with
+        // no result. The batch must still be complete or strict gateways 400.
+        let assistant = Message::assistant_with_blocks(vec![
+            ContentBlock::tool_use("call_a", "read_file", serde_json::json!({})),
+            ContentBlock::tool_use(
+                "call_respond",
+                "respond",
+                serde_json::json!({"response": "done"}),
+            ),
+        ]);
+        let user = Message::user_with_blocks(vec![ContentBlock::tool_result("call_a", "ok")]);
+        let out = msgs_claude2oai(&[assistant, user], "deepseek-flash");
+        assert_tool_protocol(&out);
+        let answered: Vec<&str> = out
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .filter_map(|m| m["tool_call_id"].as_str())
+            .collect();
+        assert!(
+            answered.contains(&"call_respond"),
+            "unpaired call must be answered: {answered:?}"
+        );
+    }
+
+    #[test]
+    fn test_claude2oai_orphan_tool_result_is_dropped() {
+        // A result with no preceding assistant call would serialize as a bare
+        // `tool` message — exactly the error the gateway reports.
+        let user =
+            Message::user_with_blocks(vec![ContentBlock::tool_result("call_ghost", "stale")]);
+        let out = msgs_claude2oai(&[user], "deepseek-flash");
+        assert!(
+            out.iter().all(|m| m["role"] != "tool"),
+            "orphan result must be dropped: {out:?}"
+        );
     }
 
     // ---- msgs_oai2claude ----

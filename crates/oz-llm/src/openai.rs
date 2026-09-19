@@ -1,4 +1,5 @@
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use oz_config::{ApiMode, SessionConfig};
 use oz_core_types::{ContentBlock, LlmError, Message, StreamEvent, TokenUsage, ToolDefinition};
@@ -19,6 +20,45 @@ pub struct OaiSession {
     /// previous code rebuilt the client (and its connection pool) for
     /// every request, defeating keep-alive (P3/A3).
     http_client: reqwest::Client,
+    /// Set once an endpoint rejects a forced `tool_choice: "required"`.
+    /// opencode.ai's Go gateway runs reasoning models in thinking mode,
+    /// which only accepts `auto`; after the first rejection the session
+    /// stops probing and sends `auto` directly.
+    tool_choice_relaxed: Arc<AtomicBool>,
+}
+
+/// Value to send for `tool_choice` when tools are present. Forcing
+/// `"required"` makes the agent loop act on every turn, but a thinking-mode
+/// model rejects it outright, so a session that has already hit that
+/// rejection falls back to `"auto"`.
+fn tool_choice_value(relaxed: &AtomicBool) -> serde_json::Value {
+    if relaxed.load(Ordering::Relaxed) {
+        serde_json::json!("auto")
+    } else {
+        serde_json::json!("required")
+    }
+}
+
+/// Detect the thinking-mode rejection of a forced tool choice
+/// (`400 ... Thinking mode does not support this tool_choice`). When it
+/// matches, mark the session relaxed and rewrite the payload to `"auto"`
+/// so the caller can resend; returns whether that happened.
+fn relax_tool_choice(
+    status: u16,
+    body: &str,
+    payload: &mut serde_json::Value,
+    relaxed: &AtomicBool,
+) -> bool {
+    if status == 400
+        && payload.get("tool_choice").is_some()
+        && (body.contains("tool_choice") || body.contains("tool choice"))
+    {
+        relaxed.store(true, Ordering::Relaxed);
+        payload["tool_choice"] = serde_json::json!("auto");
+        true
+    } else {
+        false
+    }
 }
 
 /// Total request timeout for streaming responses. reqwest's `.timeout()`
@@ -40,6 +80,7 @@ impl OaiSession {
             system: None,
             tools: None,
             http_client,
+            tool_choice_relaxed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -119,6 +160,7 @@ impl Session for OaiSession {
             let cfg_chat = cfg_responses.clone();
             let cfg_for_chat = cfg_chat.clone();
             let http_client = self.http_client.clone();
+            let tool_choice_relaxed = Arc::clone(&self.tool_choice_relaxed);
 
             retry_with_backoff(
                 move || {
@@ -129,6 +171,7 @@ impl Session for OaiSession {
                     let model_lower = model_lower.clone();
                     let system = system.clone();
                     let http_client = http_client.clone();
+                    let tool_choice_relaxed = Arc::clone(&tool_choice_relaxed);
                     Box::pin(async move {
                         if let Some(ref sys) = system {
                             oai_msgs
@@ -160,18 +203,43 @@ impl Session for OaiSession {
                         }
                         if let Some(ref tw) = tools {
                             payload["tools"] = serde_json::to_value(tw).unwrap_or_default();
-                            payload["tool_choice"] = serde_json::json!("required");
+                            payload["tool_choice"] = tool_choice_value(&tool_choice_relaxed);
                         }
-                        let resp = http_client
+                        let mut resp = http_client
                             .post(&url)
                             .bearer_auth(&cfg.apikey)
                             .json(&payload)
                             .send()
                             .await
                             .map_err(LlmError::RequestFailed)?;
-                        let status = resp.status().as_u16();
+                        let mut status = resp.status().as_u16();
                         if status >= 400 {
                             let body = resp.text().await.unwrap_or_default();
+                            // Thinking-mode endpoints reject a forced tool
+                            // choice; relax to "auto" and resend once.
+                            if relax_tool_choice(status, &body, &mut payload, &tool_choice_relaxed)
+                            {
+                                resp = http_client
+                                    .post(&url)
+                                    .bearer_auth(&cfg.apikey)
+                                    .json(&payload)
+                                    .send()
+                                    .await
+                                    .map_err(LlmError::RequestFailed)?;
+                                status = resp.status().as_u16();
+                                if status >= 400 {
+                                    let body = resp.text().await.unwrap_or_default();
+                                    return Err(LlmError::HttpError { status, body });
+                                }
+                                return parse_openai_sse(
+                                    resp,
+                                    "chat_completions",
+                                    None,
+                                    None,
+                                    &cfg.apibase,
+                                )
+                                .await;
+                            }
                             return Err(LlmError::HttpError { status, body });
                         }
                         parse_openai_sse(resp, "chat_completions", None, None, &cfg.apibase).await
@@ -273,6 +341,7 @@ impl Session for OaiSession {
             let cfg_chat = cfg_responses.clone();
             let cfg_for_chat = cfg_chat.clone();
             let http_client = self.http_client.clone();
+            let tool_choice_relaxed = Arc::clone(&self.tool_choice_relaxed);
 
             // Retry only the send/status phase — mid-stream failures are
             // surfaced to the agent loop, not re-sent (see responses branch).
@@ -285,6 +354,7 @@ impl Session for OaiSession {
                     let model_lower = model_lower.clone();
                     let system = system.clone();
                     let http_client = http_client.clone();
+                    let tool_choice_relaxed = Arc::clone(&tool_choice_relaxed);
                     Box::pin(async move {
                         if let Some(ref sys) = system {
                             oai_msgs
@@ -316,7 +386,7 @@ impl Session for OaiSession {
                         }
                         if let Some(ref tw) = tools {
                             payload["tools"] = serde_json::to_value(tw).unwrap_or_default();
-                            payload["tool_choice"] = serde_json::json!("required");
+                            payload["tool_choice"] = tool_choice_value(&tool_choice_relaxed);
                         }
                         // Send-phase timeout (see responses branch).
                         let header_timeout = if is_local_apibase(&cfg.apibase) {
@@ -324,7 +394,7 @@ impl Session for OaiSession {
                         } else {
                             60
                         };
-                        let resp = match tokio::time::timeout(
+                        let mut resp = match tokio::time::timeout(
                             std::time::Duration::from_secs(header_timeout),
                             http_client
                                 .post(&url)
@@ -342,9 +412,38 @@ impl Session for OaiSession {
                                 )))
                             }
                         };
-                        let status = resp.status().as_u16();
+                        let mut status = resp.status().as_u16();
                         if status >= 400 {
                             let body = resp.text().await.unwrap_or_default();
+                            // Thinking-mode endpoints reject a forced tool
+                            // choice; relax to "auto" and resend once.
+                            if relax_tool_choice(status, &body, &mut payload, &tool_choice_relaxed)
+                            {
+                                resp = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(header_timeout),
+                                    http_client
+                                        .post(&url)
+                                        .bearer_auth(&cfg.apikey)
+                                        .json(&payload)
+                                        .send(),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(r)) => r,
+                                    Ok(Err(e)) => return Err(LlmError::RequestFailed(e)),
+                                    Err(_) => {
+                                        return Err(LlmError::StreamError(format!(
+                                            "no response headers within {header_timeout}s"
+                                        )))
+                                    }
+                                };
+                                status = resp.status().as_u16();
+                                if status >= 400 {
+                                    let body = resp.text().await.unwrap_or_default();
+                                    return Err(LlmError::HttpError { status, body });
+                                }
+                                return Ok(resp);
+                            }
                             return Err(LlmError::HttpError { status, body });
                         }
                         Ok(resp)
@@ -405,5 +504,57 @@ impl Session for OaiSession {
 
     fn format_messages(&self, messages: &[Message]) -> Vec<serde_json::Value> {
         msgs_claude2oai(messages, &self.config.model)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_choice_is_required_until_relaxed() {
+        let relaxed = AtomicBool::new(false);
+        assert_eq!(tool_choice_value(&relaxed), serde_json::json!("required"));
+        relaxed.store(true, Ordering::Relaxed);
+        assert_eq!(tool_choice_value(&relaxed), serde_json::json!("auto"));
+    }
+
+    #[test]
+    fn thinking_mode_rejection_relaxes_to_auto() {
+        let relaxed = AtomicBool::new(false);
+        let mut payload = serde_json::json!({"tool_choice": "required"});
+        let body = r#"{"error":{"message":"Error from provider (Console Go): Upstream request failed: [invalid_request_error] Thinking mode does not support this tool_choice"}}"#;
+        assert!(relax_tool_choice(400, body, &mut payload, &relaxed));
+        assert_eq!(payload["tool_choice"], serde_json::json!("auto"));
+        assert!(relaxed.load(Ordering::Relaxed), "session must stay relaxed");
+    }
+
+    #[test]
+    fn unrelated_400_keeps_forced_tool_choice() {
+        let relaxed = AtomicBool::new(false);
+        let mut payload = serde_json::json!({"tool_choice": "required"});
+        assert!(!relax_tool_choice(
+            400,
+            "invalid_request_error: bad model",
+            &mut payload,
+            &relaxed
+        ));
+        assert_eq!(payload["tool_choice"], serde_json::json!("required"));
+        assert!(!relaxed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn rejection_without_tool_choice_field_is_not_relaxed() {
+        // e.g. a 400 about tool *arguments* on a request that never forced a
+        // choice — nothing to relax, so the error must surface unchanged.
+        let relaxed = AtomicBool::new(false);
+        let mut payload = serde_json::json!({"messages": []});
+        assert!(!relax_tool_choice(
+            400,
+            "tool_choice is not supported",
+            &mut payload,
+            &relaxed
+        ));
+        assert!(!relaxed.load(Ordering::Relaxed));
     }
 }
