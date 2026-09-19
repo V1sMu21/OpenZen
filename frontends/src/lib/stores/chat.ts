@@ -682,6 +682,10 @@ function createChatStore() {
     cancelPendingStreamEvents();
     partArrivalTimes.clear();
     partArrivalOrder.length = 0;
+    // New live turn: any cached join state belongs to the previous
+    // message (the messageId guard would catch it, but invalidating here
+    // keeps the invariant explicit).
+    invalidateStreamJoinCache();
     const msgId = generateId();
     update((s) => {
       // Invariant: exactly ONE live (streaming) assistant bubble exists.
@@ -852,8 +856,24 @@ function createChatStore() {
   // Incremental join state for the streaming fast path: the common flush
   // only appends to the last text part, so content grows by the delta
   // instead of re-walking every part (O(delta) vs O(total) per frame).
-  let streamJoinCache: { partsLen: number; lastPartText: string; content: string } | null =
-    null;
+  //
+  // `messageId` is part of the guard: without it, a flush whose parts
+  // length coincided with the cached one could splice the PREVIOUS
+  // session's content into the current bubble (the ''-prefix case made
+  // `startsWith` always pass). Session switches, regenerate and
+  // new-turn boundaries all change the live message id, so the cache
+  // can never leak across them.
+  let streamJoinCache: {
+    messageId: string;
+    partsLen: number;
+    lastPartText: string;
+    content: string;
+  } | null = null;
+
+  /** Explicit invalidation for paths that mutate the live message. */
+  function invalidateStreamJoinCache() {
+    streamJoinCache = null;
+  }
 
   function withStreamingParts(s: ChatState, parts: UIMessagePart[]): ChatState {
     const last = s.messages[s.messages.length - 1];
@@ -863,6 +883,7 @@ function createChatStore() {
       const lastPart = parts[parts.length - 1];
       if (
         streamJoinCache &&
+        streamJoinCache.messageId === last.id &&
         streamJoinCache.partsLen === parts.length &&
         lastPart &&
         lastPart.type === 'text' &&
@@ -877,6 +898,7 @@ function createChatStore() {
       } else {
         last.content = contentFromParts(parts);
         streamJoinCache = {
+          messageId: last.id,
           partsLen: parts.length,
           lastPartText:
             lastPart && lastPart.type === 'text' && typeof lastPart.text === 'string'
