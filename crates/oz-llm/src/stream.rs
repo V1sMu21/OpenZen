@@ -1070,8 +1070,16 @@ pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
             Some(inner) => {
                 tracing::warn!(
                     "[oz-llm] normalized degenerate tool args: {} -> {}",
-                    serde_json::to_string(&current).unwrap_or_default().chars().take(120).collect::<String>(),
-                    serde_json::to_string(&inner).unwrap_or_default().chars().take(120).collect::<String>(),
+                    serde_json::to_string(&current)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(120)
+                        .collect::<String>(),
+                    serde_json::to_string(&inner)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(120)
+                        .collect::<String>(),
                 );
                 current = inner;
             }

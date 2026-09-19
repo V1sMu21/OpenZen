@@ -95,20 +95,22 @@ impl ScheduledTask for SessionCleanup {
                         .and_then(|c| c.as_str())
                         .and_then(|c| chrono::DateTime::parse_from_rfc3339(c).ok())
                         .map(|d| d.with_timezone(&chrono::Utc));
-                    let activity = sess
-                        .get("messages")
-                        .and_then(|m| m.as_array())
-                        .and_then(|msgs| {
-                            msgs.iter()
-                                .filter_map(|msg| {
-                                    msg.get("timestamp")
-                                        .and_then(|t| t.as_str())
-                                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                                        .map(|d| d.with_timezone(&chrono::Utc))
-                                })
-                                .max()
-                                .or(created)
-                        });
+                    let activity =
+                        sess.get("messages")
+                            .and_then(|m| m.as_array())
+                            .and_then(|msgs| {
+                                msgs.iter()
+                                    .filter_map(|msg| {
+                                        msg.get("timestamp")
+                                            .and_then(|t| t.as_str())
+                                            .and_then(|t| {
+                                                chrono::DateTime::parse_from_rfc3339(t).ok()
+                                            })
+                                            .map(|d| d.with_timezone(&chrono::Utc))
+                                    })
+                                    .max()
+                                    .or(created)
+                            });
                     match activity {
                         Some(d) if d < threshold && is_idle => Some(id.clone()),
                         _ => None,
