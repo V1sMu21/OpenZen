@@ -64,9 +64,22 @@ pub struct CdpClient {
 
 impl CdpClient {
     pub async fn launch(chrome_path: &str, port: u16) -> Result<Self, ToolError> {
-        let actual_port = if port == 0 { 0 } else { port };
+        // Unique scratch profile: without it, a running Chrome instance
+        // would just forward the launch to itself and never open a debug
+        // port (wait_for_chrome then timed out with no explanation).
+        let profile_dir = std::env::temp_dir().join(format!(
+            "openzen-chrome-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&profile_dir);
+
         let mut cmd = Command::new(chrome_path);
-        cmd.arg(format!("--remote-debugging-port={}", actual_port))
+        cmd.arg(format!("--remote-debugging-port={port}"))
+            .arg(format!("--user-data-dir={}", profile_dir.display()))
             .arg("--headless")
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
@@ -76,10 +89,45 @@ impl CdpClient {
             .arg("--disable-sync")
             .arg("--disable-translate")
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let child = cmd
+            // stderr carries the authoritative "DevTools listening on
+            // ws://..." line when port == 0; keep it piped for parsing.
+            .stderr(if port == 0 {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
+        let mut child = cmd
             .spawn()
             .map_err(|e| ToolError::Custom(format!("Failed to launch Chrome: {e}")))?;
+
+        // Port 0 => Chrome picks a free port and announces it on stderr.
+        // The old code scanned the fixed 9222-9230 range instead — which
+        // could connect to an UNRELATED Chrome (the user's own browser)
+        // and then kill the instance we just started.
+        let (report_tx, report_rx) = std::sync::mpsc::channel::<u16>();
+        if port == 0 {
+            if let Some(stderr) = child.stderr.take() {
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let reader = std::io::BufReader::new(stderr);
+                    for line in reader.lines().map_while(Result::ok) {
+                        if let Some(idx) = line.find("DevTools listening on ws://") {
+                            let rest = &line[idx + "DevTools listening on ws://".len()..];
+                            if let Some(colon) = rest.find(':') {
+                                let digits: String = rest[colon + 1..]
+                                    .chars()
+                                    .take_while(|c| c.is_ascii_digit())
+                                    .collect();
+                                if let Ok(p) = digits.parse::<u16>() {
+                                    let _ = report_tx.send(p);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+        }
         // Kill the Chrome we just spawned if any step below fails —
         // otherwise every failed launch orphans a browser process.
         struct ChildGuard(Option<std::process::Child>);
@@ -93,7 +141,11 @@ impl CdpClient {
         }
         let mut guard = ChildGuard(Some(child));
         let debug_port = if port == 0 {
-            Self::find_debug_port().await?
+            report_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|_| {
+                    ToolError::Custom("Chrome did not report a DevTools port within 10s".into())
+                })?
         } else {
             port
         };
@@ -354,10 +406,22 @@ impl CdpClient {
                 .await
                 .map_err(|e| ToolError::Custom(format!("CDP send error: {e}")))?;
         }
-        let result = rx
-            .await
-            .map_err(|_| ToolError::Custom("CDP response channel closed".into()))?
-            .map_err(ToolError::Custom)?;
+        // Bounded wait: a page whose promise never resolves (evaluate_js
+        // sends awaitPromise) or a wedged target used to hang the agent
+        // turn forever. On timeout the pending entry is removed so a late
+        // response is dropped instead of leaking the sender.
+        const CDP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let result = match tokio::time::timeout(CDP_TIMEOUT, rx).await {
+            Ok(Ok(res)) => res.map_err(ToolError::Custom)?,
+            Ok(Err(_)) => return Err(ToolError::Custom("CDP response channel closed".into())),
+            Err(_) => {
+                inner.lock().await.pending.remove(&id);
+                return Err(ToolError::Custom(format!(
+                    "CDP command '{method}' timed out after {}s",
+                    CDP_TIMEOUT.as_secs()
+                )));
+            }
+        };
         Ok(result)
     }
 
@@ -380,19 +444,6 @@ impl CdpClient {
         }
     }
 
-    async fn find_debug_port() -> Result<u16, ToolError> {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        for port in [9222, 9223, 9224, 9225, 9229, 9230] {
-            if TcpStream::connect(format!("127.0.0.1:{port}"))
-                .await
-                .is_ok()
-            {
-                return Ok(port);
-            }
-        }
-        Err(ToolError::Custom("Could not find Chrome debug port".into()))
-    }
-
     async fn wait_for_chrome(port: u16) -> Result<(), ToolError> {
         for _ in 0..30 {
             if TcpStream::connect(format!("127.0.0.1:{port}"))
@@ -409,8 +460,18 @@ impl CdpClient {
     }
 
     async fn get_websocket_url(port: u16) -> Result<String, ToolError> {
+        // Bounded HTTP client: a port that accepts connections but never
+        // answers used to hang this await indefinitely.
+        static CDP_HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        });
         let url_str = format!("http://127.0.0.1:{port}/json/version");
-        let resp = reqwest::get(&url_str)
+        let resp = CDP_HTTP
+            .get(&url_str)
+            .send()
             .await
             .map_err(|e| ToolError::Custom(format!("Chrome version req failed: {e}")))?;
         let data: serde_json::Value = resp
