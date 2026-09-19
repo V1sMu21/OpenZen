@@ -360,5 +360,9 @@
   "session.renameHint": "双击重命名",
   "shortcuts.esc": "取消当前任务（连按 3 次强制复位）",
   "shortcuts.rename": "重命名会话（双击亦可）",
-  "shortcuts.paletteNav": "命令面板上下选择 / Enter 执行"
+  "shortcuts.paletteNav": "命令面板上下选择 / Enter 执行",
+  "soul.welcomeBack": "欢迎回来",
+  "soul.pendingWork": "项未完成的事",
+  "soul.newborn": "记忆体",
+  "status.todos": "件事"
 }

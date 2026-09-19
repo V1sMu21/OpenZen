@@ -10,6 +10,7 @@
   import { formatTokenCount, type Message } from "./lib/stores/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import ChatMessage from "./lib/components/ChatMessage.svelte";
+  import SoulCard from "./lib/components/SoulCard.svelte";
   import ChatInput from "./lib/components/ChatInput.svelte";
   import AskUserDialog from "./lib/components/AskUserDialog.svelte";
   import ModelSwitcher from "./lib/components/ModelSwitcher.svelte";
@@ -1213,6 +1214,7 @@
     <!-- Chat messages -->
     <div class="chat-container" class:session-loading={$chat.loadingSession === true}>
       {#if $chat.messages.length === 0}
+        <SoulCard />
         <div class="empty-chat">
           <div class="empty-icon">
             <svg width="40" height="40" viewBox="0 0 40 40" fill="none">

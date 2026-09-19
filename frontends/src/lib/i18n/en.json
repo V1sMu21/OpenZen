@@ -360,5 +360,9 @@
   "session.renameHint": "Double-click to rename",
   "shortcuts.esc": "Cancel the running task (3x = force reset)",
   "shortcuts.rename": "Rename session (or double-click)",
-  "shortcuts.paletteNav": "Move in the command palette / Enter to run"
+  "shortcuts.paletteNav": "Move in the command palette / Enter to run",
+  "soul.welcomeBack": "Welcome back",
+  "soul.pendingWork": "open item(s) from last time",
+  "soul.newborn": "memory-being",
+  "status.todos": "todos"
 }
