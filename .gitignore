@@ -110,3 +110,6 @@ frontends/public/pet/frames/
 
 # Local design source materials (pet-godot project)
 design/
+
+# 3.2GB of vendored long-task fixtures under tests/longtask/ — never tracked.
+tests/

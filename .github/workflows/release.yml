@@ -18,6 +18,20 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # 门禁 1: 与 CI 相同的静态检查（此前 release 只跑 test，弱于 CI）
+  check:
+    name: Check gate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+      - name: cargo fmt
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+
   # 测试闸门: 发布前强制全绿（macOS 与运行环境一致）
   test:
     name: Test gate
@@ -28,9 +42,26 @@ jobs:
       - name: cargo test
         run: cargo test --workspace -- --test-threads=1
 
+  # 门禁 3: tag 与三处版本字段一致（版本号曾经互不一致）
+  version-check:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches tauri.conf.json and package.json
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          TAURI_V=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          NPM_V=$(python3 -c "import json;print(json.load(open('frontends/package.json'))['version'])")
+          echo "tag=$TAG tauri=$TAURI_V npm=$NPM_V"
+          if [ "$TAG" != "$TAURI_V" ] || [ "$TAG" != "$NPM_V" ]; then
+            echo "::error::version mismatch — tag v$TAG but tauri.conf.json=$TAURI_V / package.json=$NPM_V"
+            exit 1
+          fi
+
   build-macos:
     name: Build macOS dmg
-    needs: [test]
+    needs: [check, test, version-check]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +83,9 @@ jobs:
         run: npm ci || npm install --no-audit --no-fund || true
 
       - name: Install tauri-cli
-        run: cargo install tauri-cli --locked
+        # Pinned: an upstream tauri-cli change used to break releases with
+        # no local repro. Bump deliberately together with the tauri crate.
+        run: cargo install tauri-cli --version "^2.11" --locked
 
       - name: Build release bundle
         run: cargo tauri build

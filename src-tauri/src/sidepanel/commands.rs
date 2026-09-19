@@ -467,104 +467,126 @@ pub fn read_file_content(state: State<'_, Arc<AppState>>, path: String) -> Resul
 /// hostile spreadsheet can't blow up the IPC payload or the frontend grid
 /// (P3/A8).
 #[tauri::command]
-pub fn parse_excel(
+pub async fn parse_excel(
     path: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<Vec<String>>, String> {
-    use calamine::{open_workbook_auto, open_workbook_auto_from_rs, Reader};
-    const MAX_EXCEL_ROWS: usize = 50_000;
-    const MAX_EXCEL_CELLS_PER_ROW: usize = 2_000;
+    // Phase 1 (async side): whitelist check + bounded read of the pinned
+    // fd. 50k-row workbooks then parse on the blocking pool — the parse
+    // is CPU-heavy and used to occupy the command path for seconds.
     let resolved = std::fs::canonicalize(&path).map_err(|e| format!("Cannot resolve path: {e}"))?;
     if !is_artifact_allowed(&state, &resolved) {
         return Err("Access denied: only files opened in the side panel can be read".into());
     }
-
     let ext = resolved
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
 
+    let payload = match ext.as_str() {
+        "csv" | "tsv" => {
+            let mut file = open_whitelisted(&path, &state, MAX_BYTES_FILE)?;
+            let mut content = String::new();
+            file.read_to_string(&mut content)
+                .map_err(|e| format!("Cannot read CSV: {e}"))?;
+            ExcelPayload::Text(content)
+        }
+        "xls" | "xlsx" => {
+            let mut file = open_whitelisted(&path, &state, MAX_BYTES_FILE)?;
+            let mut data = Vec::new();
+            file.read_to_end(&mut data)
+                .map_err(|e| format!("Cannot read workbook: {e}"))?;
+            ExcelPayload::Bytes(data)
+        }
+        _ => {
+            let meta =
+                std::fs::metadata(&resolved).map_err(|e| format!("Cannot stat file: {e}"))?;
+            if meta.len() > MAX_BYTES_FILE {
+                return Err("File too large to preview (max 32 MB)".into());
+            }
+            ExcelPayload::Path(resolved)
+        }
+    };
+
+    tokio::task::spawn_blocking(move || parse_excel_payload(&ext, payload))
+        .await
+        .map_err(|e| format!("excel parse task failed: {e}"))?
+}
+
+enum ExcelPayload {
+    Text(String),
+    Bytes(Vec<u8>),
+    Path(std::path::PathBuf),
+}
+
+fn parse_excel_payload(ext: &str, payload: ExcelPayload) -> Result<Vec<Vec<String>>, String> {
+    use calamine::{open_workbook_auto, open_workbook_auto_from_rs, Reader};
+    const MAX_EXCEL_ROWS: usize = 50_000;
+    const MAX_EXCEL_CELLS_PER_ROW: usize = 2_000;
+
     let mut rows: Vec<Vec<String>> = Vec::new();
-
-    if ext == "csv" || ext == "tsv" {
-        // Open-once (fd pins the inode — no TOCTOU re-open by path).
-        let mut file = open_whitelisted(&path, &state, MAX_BYTES_FILE)?;
-        let mut content = String::new();
-        file.read_to_string(&mut content)
-            .map_err(|e| format!("Cannot read CSV: {e}"))?;
-        let sep = if ext == "tsv" { '\t' } else { ',' };
-        for line in content.lines() {
-            if line.trim().is_empty() {
-                continue;
+    match (ext, payload) {
+        ("csv" | "tsv", ExcelPayload::Text(content)) => {
+            let sep = if ext == "tsv" { '\t' } else { ',' };
+            for line in content.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let mut row: Vec<String> = line
+                    .split(sep)
+                    .map(|c| c.trim().trim_matches('"').to_string())
+                    .collect();
+                row.truncate(MAX_EXCEL_CELLS_PER_ROW);
+                rows.push(row);
+                if rows.len() >= MAX_EXCEL_ROWS {
+                    break;
+                }
             }
-            let mut row: Vec<String> = line
-                .split(sep)
-                .map(|c| c.trim().trim_matches('"').to_string())
-                .collect();
-            row.truncate(MAX_EXCEL_CELLS_PER_ROW);
-            rows.push(row);
-            if rows.len() >= MAX_EXCEL_ROWS {
-                break;
+            Ok(rows)
+        }
+        ("xls" | "xlsx", ExcelPayload::Bytes(data)) => {
+            let mut wb = open_workbook_auto_from_rs(std::io::Cursor::new(data))
+                .map_err(|e| format!("Cannot open workbook: {e}"))?;
+            let sheet_names = wb.sheet_names().to_vec();
+            if sheet_names.is_empty() {
+                return Err("No sheets found".into());
             }
-        }
-        return Ok(rows);
-    }
-
-    if ext == "xls" || ext == "xlsx" {
-        // Open once, read the pinned fd fully (≤32MB), then parse from
-        // memory — the workbook reader never touches the filesystem again,
-        // eliminating the canonicalize→open TOCTOU window entirely.
-        let mut file = open_whitelisted(&path, &state, MAX_BYTES_FILE)?;
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)
-            .map_err(|e| format!("Cannot read workbook: {e}"))?;
-        let mut wb = open_workbook_auto_from_rs(std::io::Cursor::new(data))
-            .map_err(|e| format!("Cannot open workbook: {e}"))?;
-        let sheet_names = wb.sheet_names().to_vec();
-        if sheet_names.is_empty() {
-            return Err("No sheets found".into());
-        }
-        let range = wb
-            .worksheet_range(&sheet_names[0])
-            .map_err(|e| format!("Cannot read sheet: {e}"))?;
-        for r in range.rows() {
-            let mut row: Vec<String> = r.iter().map(|cell| cell.to_string()).collect();
-            row.truncate(MAX_EXCEL_CELLS_PER_ROW);
-            rows.push(row);
-            if rows.len() >= MAX_EXCEL_ROWS {
-                break;
+            let range = wb
+                .worksheet_range(&sheet_names[0])
+                .map_err(|e| format!("Cannot read sheet: {e}"))?;
+            for r in range.rows() {
+                let mut row: Vec<String> = r.iter().map(|cell| cell.to_string()).collect();
+                row.truncate(MAX_EXCEL_CELLS_PER_ROW);
+                rows.push(row);
+                if rows.len() >= MAX_EXCEL_ROWS {
+                    break;
+                }
             }
+            Ok(rows)
         }
-        return Ok(rows);
-    }
-
-    // .xlsb has no reader-from-file-handle variant in calamine — path-based
-    // read (whitelisted + size-capped). `open_workbook_auto` picks the
-    // correct reader by file extension.
-    let meta = std::fs::metadata(&resolved).map_err(|e| format!("Cannot stat file: {e}"))?;
-    if meta.len() > MAX_BYTES_FILE {
-        return Err("File too large to preview (max 32 MB)".into());
-    }
-    let mut wb = open_workbook_auto(&resolved).map_err(|e| format!("Cannot open workbook: {e}"))?;
-    let sheet_names = wb.sheet_names().to_vec();
-    if sheet_names.is_empty() {
-        return Err("No sheets found".into());
-    }
-    let range = wb
-        .worksheet_range(&sheet_names[0])
-        .map_err(|e| format!("Cannot read sheet: {e}"))?;
-
-    for r in range.rows() {
-        let mut row: Vec<String> = r.iter().map(|cell| cell.to_string()).collect();
-        row.truncate(MAX_EXCEL_CELLS_PER_ROW);
-        rows.push(row);
-        if rows.len() >= MAX_EXCEL_ROWS {
-            break;
+        (_, ExcelPayload::Path(p)) => {
+            let mut wb =
+                open_workbook_auto(&p).map_err(|e| format!("Cannot open workbook: {e}"))?;
+            let sheet_names = wb.sheet_names().to_vec();
+            if sheet_names.is_empty() {
+                return Err("No sheets found".into());
+            }
+            let range = wb
+                .worksheet_range(&sheet_names[0])
+                .map_err(|e| format!("Cannot read sheet: {e}"))?;
+            for r in range.rows() {
+                let mut row: Vec<String> = r.iter().map(|cell| cell.to_string()).collect();
+                row.truncate(MAX_EXCEL_CELLS_PER_ROW);
+                rows.push(row);
+                if rows.len() >= MAX_EXCEL_ROWS {
+                    break;
+                }
+            }
+            Ok(rows)
         }
+        _ => Err("Unsupported workbook".into()),
     }
-
-    Ok(rows)
 }
 
 // ─── Git diff command (Phase 4) ──────────────────────────────────────────
@@ -580,11 +602,42 @@ pub fn get_git_diff(state: State<'_, Arc<AppState>>, path: String) -> Result<Str
     let workdir = std::fs::canonicalize(&state.working_dir)
         .unwrap_or_else(|_| std::path::PathBuf::from(&state.working_dir));
 
-    let output = std::process::Command::new("git")
-        .args(["diff", "--", &resolved.to_string_lossy()])
+    // Bounded git invocation: an external diff tool (diff.external /
+    // textconv) or a huge repo could otherwise hang the command forever.
+    let mut child = std::process::Command::new("git")
+        .args([
+            "--no-pager",
+            "-c",
+            "core.pager=cat",
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--",
+            &resolved.to_string_lossy(),
+        ])
         .current_dir(&workdir)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("git command failed: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("git diff timed out after 15s".into());
+            }
+            Err(e) => return Err(format!("git diff wait failed: {e}")),
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git output failed: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
