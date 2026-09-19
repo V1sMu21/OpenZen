@@ -1819,8 +1819,12 @@ async fn handle_compress(
                      continue the conversation.\n\n{summary}"
                 ));
                 let msgs = [prompt];
+                // Match the agent loop's summary budget (`summary_wait_secs`,
+                // 600s): the local summary model needs minutes for a large
+                // removed window, so the old 10s cap degraded manual
+                // compaction to the template.
                 if let Ok(Ok(resp)) =
-                    tokio::time::timeout(Duration::from_secs(10), client.chat(&msgs, &[])).await
+                    tokio::time::timeout(Duration::from_secs(600), client.chat(&msgs, &[])).await
                 {
                     if !resp.content.is_empty() {
                         llm_summary = Some(resp.content);

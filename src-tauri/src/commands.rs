@@ -2071,8 +2071,13 @@ async fn generate_compact_summary(state: &AppState, template: &str) -> Option<St
          continue the conversation.\n\n{template}"
     ));
     let msgs = [prompt];
+    // Manual /compact runs the same small local summarizer as the agent
+    // loop's auto-compression (e.g. LFM2.5-230M), which needs minutes for
+    // a large removed window — match `summary_wait_secs` (600s) instead of
+    // the old 10s that silently degraded every manual compaction to the
+    // template.
     let result =
-        tokio::time::timeout(std::time::Duration::from_secs(10), client.chat(&msgs, &[])).await;
+        tokio::time::timeout(std::time::Duration::from_secs(600), client.chat(&msgs, &[])).await;
     match result {
         Ok(Ok(resp)) if !resp.content.is_empty() => Some(resp.content),
         _ => None,
