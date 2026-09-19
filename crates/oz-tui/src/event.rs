@@ -262,6 +262,9 @@ pub fn handle_stream_event(app: &mut App, evt: StreamEvent) {
             app.session_store.save();
         }
 
+        // Heartbeat from a long-running tool: the TUI has no watchdog to
+        // keep alive, so it needs no rendering yet.
+        StreamEvent::ToolProgress { .. } => {}
         StreamEvent::Error { message } => {
             app.is_processing = false;
             app.stop_signal = None;
