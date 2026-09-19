@@ -2,7 +2,7 @@
   import { sessions } from "../stores/sessions";
   import { projects } from "../stores/projects";
   import type { SessionInfo } from "../api/sessions";
-  import { t, localT } from "../i18n";
+  import { t, locale, localT } from "../i18n";
 
   let {
     items = $bindable([] as SessionInfo[]),
@@ -62,13 +62,15 @@
 
   function formatDate(iso: string): string {
     try {
-      const d = new Date(iso);
-      const yyyy = d.getFullYear();
-      const mm = String(d.getMonth() + 1).padStart(2, "0");
-      const dd = String(d.getDate()).padStart(2, "0");
-      const hh = String(d.getHours()).padStart(2, "0");
-      const mi = String(d.getMinutes()).padStart(2, "0");
-      return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+      // App-locale aware (P2-24); the manual YYYY-MM-DD HH:mm pattern
+      // ignored the locale entirely.
+      return new Intl.DateTimeFormat($locale, {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(new Date(iso));
     } catch {
       return "";
     }

@@ -132,7 +132,9 @@ import { t, locale, tSync } from "../i18n";
 
   function formatTime(iso: string): string {
     try {
-      return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      // Follow the APP locale (not the OS default) so the timestamp has
+      // the same hour cycle/format as the rest of the UI.
+      return new Date(iso).toLocaleTimeString($locale, { hour: "2-digit", minute: "2-digit" });
     } catch {
       return "";
     }

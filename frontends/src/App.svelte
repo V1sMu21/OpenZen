@@ -207,10 +207,11 @@
     return ctxWin > 0 ? Math.min(100, Math.max(0, (ctxTokens / ctxWin) * 100)) : 0;
   });
 
+  // Semantic status tokens (P2-23) instead of neon hex literals.
   let ctxColor = $derived(
-    ctxPct < 70 ? "#0bf4e1" :
-    ctxPct < 90 ? "#f3a90c" :
-    "#f60934"
+    ctxPct < 78 ? "var(--color-status-ok)" :
+    ctxPct < 92 ? "var(--color-status-warn)" :
+    "var(--color-status-danger)"
   );
 
   // Module-level stable array for non-live ChatMessage props. Using one
@@ -1787,7 +1788,7 @@
   }
   .run-state.waiting {
     --state-color: #f59e0b;
-    color: #f59e0b;
+    color: var(--color-status-wait);
   }
   .run-state.done {
     color: var(--color-dim);

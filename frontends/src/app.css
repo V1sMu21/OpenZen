@@ -70,6 +70,13 @@ html {
   --bg-tertiary: var(--color-surface-overlay);
   --bg-user-bubble: #221e17;
   --text-secondary: var(--color-body);
+  /* Status semantics (P2-23): one place for the running/wait/danger hues.
+   Previously the context bar used neon cyan/amber/red hex values, the
+   waiting state another amber, and danger a third red. */
+  --color-status-ok: var(--color-primary);
+  --color-status-warn: #c8862a;
+  --color-status-danger: #c0392b;
+  --color-status-wait: #b8860b;
   --text-tertiary: var(--color-dim);
   --text-bright: #d6cfc0;
 
