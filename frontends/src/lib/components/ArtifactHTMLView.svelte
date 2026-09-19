@@ -89,6 +89,15 @@
     </div>
   {:else if isTauri()}
     {#key refreshKey}
+      <!-- Security model (verified 2026-09-19): artifacts are served from
+           the distinct `ozfile://` origin, and Tauri injects its IPC
+           initialization scripts with for_main_frame_only: true — a
+           subframe gets neither `__TAURI__` nor `__TAURI_INTERNALS__`,
+           and cross-origin `parent.__TAURI__` access is blocked. So
+           allow-same-origin is safe here AND required: it lets a
+           multi-file artifact load its sibling css/js through the custom
+           scheme. Re-verify if the artifact origin ever changes to the
+           app origin, or if tauri's injection becomes all-frames. -->
       <iframe
         class="html-iframe"
         src={iframeSrc}
@@ -98,10 +107,14 @@
       ></iframe>
     {/key}
   {:else}
+    <!-- WebUI fallback renders inlined srcdoc, which INHERITS the app
+         origin: allow-same-origin would let artifact scripts read the
+         parent context (including the auth token fetched from /api/health).
+         The content is self-contained, so an opaque origin costs nothing. -->
     <iframe
       class="html-iframe"
       srcdoc={htmlContent}
-      sandbox="allow-scripts allow-same-origin allow-modals"
+      sandbox="allow-scripts allow-modals"
       referrerpolicy="no-referrer"
       title={artifact.label}
     ></iframe>
