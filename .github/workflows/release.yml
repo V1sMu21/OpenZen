@@ -58,10 +58,10 @@ jobs:
         run: cargo tauri build
 
       - name: Extract current version notes
-        # CHANGELOG.md keeps the full history; the Release page must only show
-        # the section of the tag being published — everything from its
-        # `## vX.Y.Z` heading until the next `## ` heading.
-        run: awk '/^## /{n++} n==1' CHANGELOG.md > RELEASE_NOTES.md
+        # CHANGELOG.md keeps the full history. The Release page shows only the
+        # published tag's Bug Fixes and Features: its `## vX.Y.Z` section with
+        # every other group (chore/style/docs/...) dropped.
+        run: awk '/^## / { if (++ver > 1) exit; print; next } /^### / { keep = ($0 ~ /Bug Fixes|Features/); if (keep) { print ""; print; pending = 1 } next } keep { if ($0 == "") next; if (pending) { print ""; pending = 0 } print }' CHANGELOG.md > RELEASE_NOTES.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
