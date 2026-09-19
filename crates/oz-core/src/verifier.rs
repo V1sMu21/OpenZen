@@ -9,7 +9,7 @@ use std::time::Duration;
 /// no word boundaries).
 fn keyword_matches(content_lower: &str, keyword: &str) -> bool {
     let kw = keyword.to_lowercase();
-    if kw.chars().any(|c| !c.is_ascii()) {
+    if !kw.is_ascii() {
         return content_lower.contains(&kw);
     }
     let bytes = content_lower.as_bytes();
