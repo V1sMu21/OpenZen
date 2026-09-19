@@ -44,7 +44,7 @@ impl ToolHandler for WebFetchTool {
             .as_str()
             .ok_or_else(|| ToolError::Custom("missing 'url' parameter".into()))?;
 
-        if !super::web_scan::is_url_safe(url) {
+        if !super::web_scan::is_url_safe(url).await {
             return Ok(ToolOutput::bad_json(format!(
                 "web_fetch: URL `{url}` targets a blocked address for security reasons."
             )));
@@ -78,6 +78,22 @@ static FETCH_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock:
     reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; OpenZen/1.0)")
         .timeout(std::time::Duration::from_secs(15))
+        // Validate every redirect hop against the SSRF literal check:
+        // a public URL must not bounce into a private/loopback target.
+        // (Hostname resolution happens for the initial URL in
+        // is_url_safe; the sync redirect callback can only inspect
+        // literals, which is what matters for the classic metadata-IP
+        // redirect attack.)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.error("too many redirects");
+            }
+            if super::web_scan::is_url_safe_literal(attempt.url().as_str()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 });
@@ -95,10 +111,25 @@ async fn fetch_and_extract(url: &str, max_chars: usize) -> Result<PageContent, S
         return Err(format!("HTTP {}", resp.status()));
     }
 
-    let html = resp
-        .text()
+    // Streamed body with a hard byte cap: resp.text() read the WHOLE body
+    // into memory first, so a multi-GB file or an endless chunked stream
+    // could OOM the resident process (the 15s timeout bounds time, not
+    // size). Head is kept; the extractor only needs the first part.
+    const MAX_FETCH_BYTES: usize = 8 * 1024 * 1024;
+    let mut body: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut resp = resp;
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| format!("read body failed: {e}"))?;
+        .map_err(|e| format!("read body failed: {e}"))?
+    {
+        let remaining = MAX_FETCH_BYTES.saturating_sub(body.len());
+        if remaining == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    let html = String::from_utf8_lossy(&body).to_string();
 
     let title = extract_title(&html);
     let text = extract_text(&html, max_chars);

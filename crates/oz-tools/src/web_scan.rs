@@ -34,14 +34,122 @@ const BLOCKED_IP_RANGES: &[&str] = &[
     "metadata.google.internal",
 ];
 
-pub fn is_url_safe(url: &str) -> bool {
+/// Literal-only check (no DNS): blocks the substrings AND any IP literal
+/// that parses to a private/loopback/link-local/ULA address. Used for
+/// redirect hops where an async DNS lookup is not possible.
+pub fn is_url_safe_literal(url: &str) -> bool {
     let lower = url.to_lowercase();
     for blocked in BLOCKED_IP_RANGES {
         if lower.contains(&blocked.to_lowercase()) {
             return false;
         }
     }
+    // Parse the host as a literal IP when possible: decimal/hex encodings
+    // (http://2130706433/), IPv4-mapped IPv6, and bracketed forms all
+    // bypassed the substring list. Unparseable URLs fail closed.
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if let Some(host) = parsed.host_str() {
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+            return is_public_ip(&ip);
+        }
+    }
     true
+}
+
+/// Full check: literal rules PLUS DNS resolution — every resolved address
+/// must be public. A DNS name pointing at 127.0.0.1 or 169.254.169.254
+/// (metadata) is rejected. Unresolvable hosts are rejected (fail closed).
+pub async fn is_url_safe(url: &str) -> bool {
+    if !is_url_safe_literal(url) {
+        return false;
+    }
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    // Owned copy: `parsed` must be droppable before the .await below.
+    let bare = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    if bare.parse::<std::net::IpAddr>().is_ok() {
+        // Already validated as a literal above.
+        return true;
+    }
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let lookup = tokio::net::lookup_host((bare.as_str(), port)).await;
+    match lookup {
+        Ok(addrs) => {
+            let resolved: Vec<std::net::SocketAddr> = addrs.collect();
+            if resolved.is_empty() {
+                return false;
+            }
+            resolved.iter().all(|sa| is_public_ip(&sa.ip()))
+        }
+        Err(e) => {
+            tracing::warn!("[ssrf] DNS resolution failed for {bare}: {e}");
+            false
+        }
+    }
+}
+
+/// Public (routable, non-internal) address check.
+fn is_public_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || v4.is_documentation()
+                || o[0] == 0
+                // CGNAT 100.64.0.0/10
+                || (o[0] == 100 && (64..=127).contains(&o[1]))
+                // 198.18.0.0/15 benchmarking
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+                // 192.0.0.0/24 IETF protocol assignments
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0))
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_public_ip(&std::net::IpAddr::V4(mapped));
+            }
+            !(v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local())
+        }
+    }
+}
+
+#[cfg(test)]
+mod ssrf_tests {
+    use super::*;
+
+    #[test]
+    fn literal_bypasses_rejected() {
+        assert!(!is_url_safe_literal("http://127.0.0.1/admin"));
+        assert!(!is_url_safe_literal("http://localhost:8000/"));
+        assert!(!is_url_safe_literal("http://2130706433/")); // decimal 127.0.0.1
+        assert!(!is_url_safe_literal("http://0x7f000001/"));
+        assert!(!is_url_safe_literal("http://[::ffff:127.0.0.1]/"));
+        assert!(!is_url_safe_literal(
+            "http://169.254.169.254/latest/meta-data"
+        ));
+        assert!(!is_url_safe_literal("http://192.168.1.1/"));
+        assert!(!is_url_safe_literal("http://[::1]/"));
+        assert!(is_url_safe_literal("https://example.com/path"));
+        assert!(is_url_safe_literal("https://8.8.8.8/"));
+    }
+
+    #[test]
+    fn garbage_rejected() {
+        assert!(!is_url_safe_literal("not a url"));
+    }
 }
 
 /// Fetch and simplify HTML from a URL using the browser.
@@ -109,7 +217,7 @@ impl ToolHandler for WebScanTool {
         let url = args["url"]
             .as_str()
             .ok_or_else(|| ToolError::Custom("missing url".into()))?;
-        if !is_url_safe(url) {
+        if !is_url_safe(url).await {
             return Ok(ToolOutput::bad_json(format!(
                 "web_scan: URL `{url}` targets a blocked address for security reasons."
             )));
