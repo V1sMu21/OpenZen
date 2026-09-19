@@ -15,18 +15,67 @@
   }
 
   let { show = $approval.showModal }: { show?: boolean } = $props();
+
+  // a11y: this is a security dialog with a 30s auto-deny countdown — if
+  // the user does not notice it, the task is silently rejected. It gets
+  // alertdialog semantics, a focus trap, Esc=deny (the same path the
+  // countdown uses) and returns focus to the chat input on close.
+  let dialogEl: HTMLElement | undefined = $state();
+
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      approval.respond("deny");
+      return;
+    }
+    if (e.key !== "Tab" || !dialogEl) return;
+    const focusables = Array.from(
+      dialogEl.querySelectorAll<HTMLElement>("button:not([disabled])"),
+    );
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === dialogEl)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  $effect(() => {
+    if ($approval.showModal) {
+      queueMicrotask(() => dialogEl?.focus());
+    }
+    return () => {
+      // Focus returns to the chat input when the dialog closes.
+      if ($approval.showModal === false) {
+        document.querySelector<HTMLElement>(".input-area textarea")?.focus();
+      }
+    };
+  });
 </script>
 
 {#if $approval.showModal && $approval.current}
   {@const req = $approval.current}
-  <div class="approval-overlay" role="dialog" aria-modal="true">
-    <div class="approval-modal">
+  <div class="approval-overlay">
+    <div
+      class="approval-modal"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="approval-title"
+      tabindex="-1"
+      bind:this={dialogEl}
+      onkeydown={onKeydown}
+    >
       <!-- Header -->
       <div class="approval-header">
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none" class="approval-icon">
           <path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16zm0 3.5a.75.75 0 0 1 .75.75v4a.75.75 0 0 1-1.5 0v-4A.75.75 0 0 1 10 5.5zm0 8a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" fill="currentColor"/>
         </svg>
-        <h3 class="approval-title">{$t("approval.title")}</h3>
+        <h3 class="approval-title" id="approval-title">{$t("approval.title")}</h3>
         <span class="approval-countdown">{$approval.countdown}s</span>
       </div>
 

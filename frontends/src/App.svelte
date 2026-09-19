@@ -872,6 +872,12 @@
 
   async function handleSelectSession(id: string) {
     const prevId = $sessions.currentId;
+    // P2-26: artifacts belong to the conversation that opened them — a
+    // side panel left over from another session showed A's files while
+    // the user was in B (the docs promised this clear; no caller existed).
+    if (prevId !== id) {
+      sidepanel.clearAll();
+    }
     // Persist unconditionally — including when `prevId === id`. ⌘[ / ⌘] and
     // the "new chat" path advance `sessions.currentId` BEFORE this handler
     // runs, so the id comparison alone skipped the snapshot and the running
@@ -1278,7 +1284,7 @@
 
       <!-- Error banner -->
       {#if $chat.error}
-        <div class="error-banner">
+        <div class="error-banner" role="alert" aria-live="assertive">
           <span>{$chat.error}</span>
           <button class="dismiss-btn" onclick={() => chat.setError("")} aria-label="Dismiss">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -1290,7 +1296,7 @@
 
       <!-- Compression notice banner -->
       {#if $chat.compressionNotice}
-        <div class="compression-banner">
+        <div class="compression-banner" role="status" aria-live="polite">
           <span>{$chat.compressionNotice}</span>
         </div>
       {/if}
