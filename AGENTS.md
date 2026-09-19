@@ -1,3 +1,21 @@
+# ⛔ 硬性规则：绝不关闭用户正在使用的 OpenZen
+
+**NEVER quit, kill, or restart the user's running OpenZen process.**
+
+用户会把 OpenZen 用于正在执行的任务。修改代码、重建、重新打包时：
+
+- **允许**：编辑源码、`cargo check/test/clippy`、`cargo tauri build`、生成 bundle、校验签名。
+- **禁止**：`osascript -e 'quit app "OpenZen"'`、`pkill -f OpenZen`、`killall OpenZen`、
+  `kill <pid>`，以及任何等价手段（包括安装脚本里默认执行这些动作）。
+- **替换 `/Applications/OpenZen.app` 前**：如果 OpenZen 正在运行，先构建好产物就**停下来**，
+  把产物路径和「请自行退出后重装」的提示告诉用户，由用户决定何时操作。
+- **唯一例外**：用户明确说「可以关掉/重启 OpenZen」时才可退出。
+
+正确做法见 `scripts/install-macos.sh`：默认只构建+校验，检测到运行中就跳过安装并提示；
+仅当显式传入 `--restart` 时才执行退出→安装→重启。
+
+---
+
 # Tauri E2E driving — lessons from the ask_user test (2026-06-17)
 
 The `ask_user` tool flow was first verified in the real Tauri webview
