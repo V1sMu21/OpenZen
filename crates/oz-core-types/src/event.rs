@@ -114,6 +114,15 @@ pub enum StreamEvent {
 
     StartStep {},
     FinishStep {},
+
+    /// Heartbeat emitted while a long-running tool executes: resets the
+    /// frontend's processing watchdog (which otherwise fires after 30
+    /// silent minutes and freezes the bubble while the backend is still
+    /// working) and gives the UI something to render (elapsed time).
+    ToolProgress {
+        tool_name: String,
+        elapsed_secs: u64,
+    },
     FinishMessage {
         stop_reason: String,
     },

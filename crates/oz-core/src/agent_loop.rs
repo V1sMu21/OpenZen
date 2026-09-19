@@ -1809,6 +1809,32 @@ where
                                 .max(cfg.tool_timeout_secs)
                                 .min(TOOL_TIMEOUT_HARD_CEILING_SECS);
 
+                            // Heartbeat for long tools: a single code_run
+                            // can legitimately run ~30 minutes with ZERO
+                            // events, and the frontend's processing watchdog
+                            // then declares "Processing timed out" and
+                            // freezes the bubble while the backend is still
+                            // working. One ToolProgress per minute keeps the
+                            // UI alive and gives it elapsed-time to show.
+                            let heartbeat_done = Arc::new(AtomicBool::new(false));
+                            let heartbeat_handle = cfg.event_tx.clone().map(|tx| {
+                                let hb_name = tool_name.clone();
+                                let hb_done = heartbeat_done.clone();
+                                tokio::spawn(async move {
+                                    let started = std::time::Instant::now();
+                                    loop {
+                                        tokio::time::sleep(Duration::from_secs(60)).await;
+                                        if hb_done.load(Ordering::Relaxed) {
+                                            break;
+                                        }
+                                        let _ = tx.send(StreamEvent::ToolProgress {
+                                            tool_name: hb_name.clone(),
+                                            elapsed_secs: started.elapsed().as_secs(),
+                                        });
+                                    }
+                                })
+                            });
+
                             let dispatch_fut =
                                 handler_ref.dispatch(&tool_name, args, resp, ii as u32, cx);
                             // Race the dispatch against both the tool timeout AND a
@@ -1842,6 +1868,12 @@ where
                                     ))),
                                 }
                             };
+
+                            // Stop the heartbeat with the tool.
+                            heartbeat_done.store(true, Ordering::Relaxed);
+                            if let Some(h) = heartbeat_handle {
+                                h.abort();
+                            }
 
                             // If this tool requested exit, signal others to cancel
                             if let Ok(ref outcome) = result {
