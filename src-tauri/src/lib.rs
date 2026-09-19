@@ -1026,8 +1026,13 @@ pub fn run() {
             *lock_poison_guard(&state.approval_handler) = Some(handler);
 
             let mut scheduler = oz_scheduler::Scheduler::new();
+            // Auto-archive of idle sessions is disabled: the 7-day window
+            // silently moved older conversations out of the list (they were
+            // archived to sessions_archive/ but never surfaced again). Keep
+            // the task registered with an effectively unreachable window so
+            // no conversation is ever pulled from under the user.
             scheduler.register(Box::new(oz_scheduler::SessionCleanup {
-                max_idle_days: 7,
+                max_idle_days: 36500,
                 interval_secs: 3600,
             }));
             scheduler.register(Box::new(oz_scheduler::TrustDecay::default()));
