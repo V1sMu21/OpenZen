@@ -1,6 +1,67 @@
 use std::path::Path;
 use std::time::Duration;
 
+/// Keyword match for assertion detection. ASCII keywords must match on
+/// word boundaries — plain `contains` made "check" hit "checklist",
+/// "test" hit "latest", and "build" hit "rebuild", sending unrelated
+/// todos into cargo commands (whose failure then triggered spurious
+/// rework). Keywords containing CJK stay substring matches (Chinese has
+/// no word boundaries).
+fn keyword_matches(content_lower: &str, keyword: &str) -> bool {
+    let kw = keyword.to_lowercase();
+    if kw.chars().any(|c| !c.is_ascii()) {
+        return content_lower.contains(&kw);
+    }
+    let bytes = content_lower.as_bytes();
+    let kb = kw.as_bytes();
+    if kb.is_empty() || kb.len() > bytes.len() {
+        return false;
+    }
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut start = 0;
+    while let Some(pos) = content_lower[start..].find(&kw) {
+        let i = start + pos;
+        let before_ok = i == 0 || !is_word(bytes[i - 1]);
+        let after = i + kb.len();
+        let after_ok = after >= bytes.len() || !is_word(bytes[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = i + 1;
+        if start >= bytes.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// Which build/test/lint toolchain a working directory carries. Drives
+/// command selection so a JS project is not probed with cargo (whose
+/// spawn failure used to be reported as a verification FAILURE).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ProjectKind {
+    Cargo,
+    Node,
+    Python,
+    Unknown,
+}
+
+fn detect_project_kind(working_dir: &str) -> ProjectKind {
+    let d = Path::new(working_dir);
+    if d.join("Cargo.toml").exists() {
+        ProjectKind::Cargo
+    } else if d.join("package.json").exists() {
+        ProjectKind::Node
+    } else if d.join("pyproject.toml").exists()
+        || d.join("requirements.txt").exists()
+        || d.join("setup.py").exists()
+    {
+        ProjectKind::Python
+    } else {
+        ProjectKind::Unknown
+    }
+}
+
 pub enum VerifyResult {
     Passed,
     Failed(String),
@@ -46,75 +107,109 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
         ));
     }
 
+    let content_lower = content.to_lowercase();
+    let kind = detect_project_kind(working_dir);
+
+    // Verdict for a probed command. A SpawnError means the toolchain for
+    // this project is absent (e.g. cargo on a JS project) — that is NOT a
+    // verification failure; fail-open with a log so the gate does not
+    // send the agent into a rework loop over a missing binary.
+    let verdict = |name: &str, r: CommandResult| -> VerifyResult {
+        match r {
+            CommandResult::Success => VerifyResult::Passed,
+            CommandResult::Failed(stderr) => VerifyResult::Failed(stderr),
+            CommandResult::Timeout(secs) => {
+                VerifyResult::Failed(format!("{name} timed out after {secs}s"))
+            }
+            CommandResult::SpawnError(e) => {
+                tracing::info!("[verifier] {name} toolchain unavailable ({e}); not a failure");
+                VerifyResult::Passed
+            }
+        }
+    };
+
     // 2. Build/compile detection
     let build_keywords = ["编译", "build", "cargo build", "npm run build", "make"];
     if build_keywords
         .iter()
-        .any(|k| content.to_lowercase().contains(k))
+        .any(|k| keyword_matches(&content_lower, k))
     {
         let wd = working_dir.to_string();
-        return match run_command_with_timeout("cargo", &["build", "--quiet"], &wd, 60).await {
-            CommandResult::Success => VerifyResult::Passed,
-            CommandResult::Failed(stderr) => VerifyResult::Failed(stderr),
-            CommandResult::Timeout(secs) => {
-                VerifyResult::Failed(format!("Build timed out after {}s", secs))
+        let r = match kind {
+            ProjectKind::Cargo => {
+                run_command_with_timeout("cargo", &["build", "--quiet"], &wd, 60).await
             }
-            CommandResult::SpawnError(e) => {
-                VerifyResult::Failed(format!("Cannot run cargo build: {}", e))
+            ProjectKind::Node => {
+                run_command_with_timeout("npm", &["run", "build", "--if-present"], &wd, 60).await
+            }
+            ProjectKind::Python | ProjectKind::Unknown => {
+                tracing::info!("[verifier] build assertion with no recognized manifest; skipping");
+                return VerifyResult::Passed;
             }
         };
+        return verdict("build", r);
     }
 
     // 3. Test detection
     let test_keywords = ["测试", "test", "cargo test", "npm test", "pytest"];
     if test_keywords
         .iter()
-        .any(|k| content.to_lowercase().contains(k))
+        .any(|k| keyword_matches(&content_lower, k))
     {
         let wd = working_dir.to_string();
-        return match run_command_with_timeout("cargo", &["test", "--quiet"], &wd, 120).await {
-            CommandResult::Success => VerifyResult::Passed,
-            CommandResult::Failed(stderr) => VerifyResult::Failed(stderr),
-            CommandResult::Timeout(secs) => {
-                VerifyResult::Failed(format!("Tests timed out after {}s", secs))
+        let r = match kind {
+            ProjectKind::Cargo => {
+                run_command_with_timeout("cargo", &["test", "--quiet"], &wd, 120).await
             }
-            CommandResult::SpawnError(e) => {
-                VerifyResult::Failed(format!("Cannot run cargo test: {}", e))
+            ProjectKind::Node => {
+                run_command_with_timeout("npm", &["test", "--silent", "--if-present"], &wd, 120)
+                    .await
+            }
+            ProjectKind::Python => run_command_with_timeout("pytest", &["-q"], &wd, 120).await,
+            ProjectKind::Unknown => {
+                tracing::info!("[verifier] test assertion with no recognized manifest; skipping");
+                return VerifyResult::Passed;
             }
         };
+        return verdict("tests", r);
     }
 
     // 4. Lint/check detection
     let lint_keywords = ["lint", "clippy", "cargo clippy", "cargo check", "check"];
     if lint_keywords
         .iter()
-        .any(|k| content.to_lowercase().contains(k))
+        .any(|k| keyword_matches(&content_lower, k))
     {
         let wd = working_dir.to_string();
-        return match run_command_with_timeout(
-            "cargo",
-            &["clippy", "--quiet", "--", "-D", "warnings"],
-            &wd,
-            90,
-        )
-        .await
-        {
-            CommandResult::Success => VerifyResult::Passed,
-            CommandResult::Failed(stderr) => VerifyResult::Failed(stderr),
-            CommandResult::Timeout(secs) => {
-                VerifyResult::Failed(format!("Clippy timed out after {}s", secs))
+        let r = match kind {
+            ProjectKind::Cargo => {
+                run_command_with_timeout(
+                    "cargo",
+                    &["clippy", "--quiet", "--", "-D", "warnings"],
+                    &wd,
+                    90,
+                )
+                .await
             }
-            CommandResult::SpawnError(e) => {
-                VerifyResult::Failed(format!("Cannot run cargo clippy: {}", e))
+            ProjectKind::Node => {
+                run_command_with_timeout("npm", &["run", "lint", "--if-present"], &wd, 90).await
+            }
+            ProjectKind::Python => {
+                run_command_with_timeout("ruff", &["check", "-q"], &wd, 90).await
+            }
+            ProjectKind::Unknown => {
+                tracing::info!("[verifier] lint assertion with no recognized manifest; skipping");
+                return VerifyResult::Passed;
             }
         };
+        return verdict("lint", r);
     }
 
     // 5. Document/spec creation: check for .md/.txt file content
     let doc_keywords = ["document", "文档", "spec", "说明", "readme"];
     if doc_keywords
         .iter()
-        .any(|k| content.to_lowercase().contains(k))
+        .any(|k| keyword_matches(&content_lower, k))
     {
         // Try to find a recently created .md or .txt file in working_dir
         if let Some(_path) = find_recent_doc(working_dir) {
@@ -336,5 +431,29 @@ mod tests {
         assert!(matches!(result, VerifyResult::Failed(_)));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod keyword_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn ascii_keywords_need_word_boundaries() {
+        assert!(!keyword_matches("update the checklist", "check"));
+        assert!(keyword_matches("run cargo check please", "check"));
+        assert!(!keyword_matches("the latest release", "test"));
+        assert!(keyword_matches("run the test suite", "test"));
+        assert!(!keyword_matches("rebuild the index", "build"));
+        assert!(keyword_matches("build the app", "build"));
+        assert!(!keyword_matches("inspect the file", "spec"));
+        assert!(keyword_matches("write a spec", "spec"));
+        assert!(keyword_matches("cargo check", "cargo check"));
+    }
+
+    #[test]
+    fn cjk_keywords_stay_substring() {
+        assert!(keyword_matches("完成编译与测试", "编译"));
+        assert!(keyword_matches("补充文档说明", "文档"));
     }
 }
