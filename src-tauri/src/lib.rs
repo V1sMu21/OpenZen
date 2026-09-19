@@ -952,6 +952,64 @@ fn graceful_shutdown(state: &AppState) {
     tracing::info!("[openzen] graceful shutdown complete");
 }
 
+/// Durable reminders live in `{data_dir}/openzen/pending_reminders.json`:
+/// run-scoped ones (persist=false) are deliberately excluded so the
+/// existing lifecycles (heartbeats die with their run) are unchanged.
+fn reminders_persist_path() -> std::path::PathBuf {
+    data_dir().join("openzen").join("pending_reminders.json")
+}
+
+fn save_persistent_reminders(state: &AppState) {
+    let durable: Vec<oz_core_types::Reminder> = {
+        let pending = lock_poison_guard(&state.pending_reminders);
+        pending.iter().filter(|r| r.persist).cloned().collect()
+    };
+    let path = reminders_persist_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(&durable) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                tracing::warn!("[reminder] persist failed: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("[reminder] serialize failed: {e}"),
+    }
+}
+
+/// Restore durable reminders on startup. Past-due entries are kept with
+/// their original fire time so the 2s tick fires them immediately (the
+/// user sees "while you were away" instead of silence).
+fn load_persistent_reminders(state: &AppState) -> usize {
+    let Ok(raw) = std::fs::read_to_string(reminders_persist_path()) else {
+        return 0;
+    };
+    match serde_json::from_str::<Vec<oz_core_types::Reminder>>(&raw) {
+        Ok(restored) => {
+            let count = restored.len();
+            if count > 0 {
+                let mut pending = lock_poison_guard(&state.pending_reminders);
+                for r in restored {
+                    if !pending.iter().any(|p| {
+                        p.message == r.message
+                            && p.session_id == r.session_id
+                            && p.fire_at_ms == r.fire_at_ms
+                    }) {
+                        pending.push(r);
+                    }
+                }
+                tracing::info!("[reminder] restored {count} durable reminder(s)");
+            }
+            count
+        }
+        Err(e) => {
+            tracing::warn!("[reminder] durable file unreadable ({e}); starting empty");
+            0
+        }
+    }
+}
+
 pub fn run() {
     // Initialize tracing into the size-rotated log file (stderr is
     // invisible in a GUI app and grew unbounded where redirected).
@@ -1247,12 +1305,15 @@ pub fn run() {
             tracing::info!("[reminder] REMINDER_TX.set() ok={}", set_result.is_ok());
 
             let state_for_reminders = Arc::clone(&state);
+            let state_for_restore = Arc::clone(&state);
             debug_log("reminder checker: starting");
             tokio::spawn(async move {
                 let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(2));
                 loop {
                     tokio::select! {
                         Some(reminder) = reminder_rx.recv() => {
+                            // Captured before the branches consume `reminder`.
+                            let persist_hint = reminder.persist;
                             debug_log(&format!("reminder received: sid={} msg='{}' fire_at={}", 
                                 reminder.session_id, reminder.message, reminder.fire_at_ms));
                             if reminder.session_id.is_empty() {
@@ -1287,6 +1348,7 @@ pub fn run() {
                                                 fire_at_ms: now + (reminder.repeat_interval_secs * 1000),
                                                 repeat_count: reminder.repeat_count - 1,
                                                 repeat_interval_secs: reminder.repeat_interval_secs,
+                                                persist: reminder.persist,
                                             })
                                         } else { None };
                                         if let Some(r) = next_reminder {
@@ -1301,18 +1363,25 @@ pub fn run() {
                                     lock_poison_guard(&state_for_reminders.pending_reminders).push(reminder);
                                 }
                             }
+                            if persist_hint {
+                                save_persistent_reminders(&state_for_reminders);
+                            }
                         }
                         _ = check_interval.tick() => {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_millis() as u64)
                                 .unwrap_or(0);
-                            let mut pending = lock_poison_guard(&state_for_reminders.pending_reminders);
+                            // Drop the lock before persisting (save re-locks).
+                            let fired_any = {
+                                let mut pending = lock_poison_guard(&state_for_reminders.pending_reminders);
                             let mut i = 0;
+                            let mut fired = false;
                             while i < pending.len() {
                                 let reminder = &pending[i];
                                 if reminder.fire_at_ms <= now + 100 {
                                     let reminder = pending.remove(i);
+                                    fired = true;
                                     let session_id = reminder.session_id.clone();
                                     let message = reminder.message.clone();
                                     let app = lock_poison_guard(&state_for_reminders.app_handle).clone();
@@ -1337,6 +1406,7 @@ pub fn run() {
                                                 fire_at_ms: now + (reminder.repeat_interval_secs * 1000),
                                                 repeat_count: reminder.repeat_count - 1,
                                                 repeat_interval_secs: reminder.repeat_interval_secs,
+                                                persist: reminder.persist,
                                             })
                                         } else { None };
                                         if let Some(r) = next_reminder {
@@ -1352,10 +1422,24 @@ pub fn run() {
                                     i += 1;
                                 }
                             }
+                                fired
+                            };
+                            if fired_any {
+                                save_persistent_reminders(&state_for_reminders);
+                            }
                         }
                     }
                 }
             });
+
+            // Restore durable reminders (persist=true) saved by a previous
+            // process; past-due ones fire on the next 2s tick.
+            {
+                let restored = load_persistent_reminders(&state_for_restore);
+                if restored > 0 {
+                    debug_log(&format!("restored {restored} durable reminder(s)"));
+                }
+            }
 
             Ok(())
         })

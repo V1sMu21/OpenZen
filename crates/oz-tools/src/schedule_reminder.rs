@@ -50,10 +50,10 @@ impl ToolHandler for ScheduleReminderTool {
         "schedule_reminder".to_string()
     }
     fn description(&self) -> String {
-        "Schedule a reminder message after a delay. Supports repeating at intervals: repeat_count>0 means a periodic heartbeat task (each fire resumes the session and injects the message).".to_string()
+        "Schedule a reminder message. By default it is run-scoped (dies when this task finishes). Pass persist=true for reminders that must outlive the run and app restarts (e.g. 'remind me in 30 minutes'); repeat_count>0 makes it a periodic heartbeat.".to_string()
     }
     fn description_zh(&self) -> String {
-        "在指定延迟后触发提醒消息。支持周期重复：repeat_count>0 表示周期心跳任务（每次触发都会恢复会话并注入消息）。".to_string()
+        "安排提醒消息。默认随本任务结束而清除；persist=true 时跨任务与重启存活（适用于「30 分钟后提醒我」）；repeat_count>0 为周期心跳任务。".to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
@@ -74,9 +74,17 @@ impl ToolHandler for ScheduleReminderTool {
                 "repeat_interval_seconds": {
                     "type": "integer",
                     "description": "Seconds between repeats"
+                },
+                "persist": {
+                    "type": "boolean",
+                    "description": "true = the reminder survives this run finishing and app restarts (use for 'remind me in 20 minutes' style requests). Default false = run-scoped (heartbeats for the current task)."
+                },
+                "at_unix_ms": {
+                    "type": "integer",
+                    "description": "Optional absolute fire time (unix millis, overrides delay_seconds) — lets the user ask for a specific clock time."
                 }
             },
-            "required": ["delay_seconds", "message"]
+            "required": ["message"]
         })
     }
 
@@ -88,6 +96,10 @@ impl ToolHandler for ScheduleReminderTool {
         let delay_secs = args["delay_seconds"].as_u64().unwrap_or(60).clamp(5, 3600);
         let message = args["message"].as_str().unwrap_or("").to_string();
         let repeat_count = args["repeat_count"].as_u64().unwrap_or(0).min(10) as u32;
+        let persist = args
+            .get("persist")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let repeat_interval = args["repeat_interval_seconds"]
             .as_u64()
             .unwrap_or(delay_secs)
@@ -103,7 +115,11 @@ impl ToolHandler for ScheduleReminderTool {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let fire_at_ms = now_ms + (delay_secs * 1000);
+        let fire_at_ms = args
+            .get("at_unix_ms")
+            .and_then(|v| v.as_u64())
+            .filter(|t| *t > now_ms)
+            .unwrap_or(now_ms + (delay_secs * 1000));
 
         // Session identity travels on ToolContext (per-run) instead of a
         // process-global that concurrent sessions overwrote.
@@ -115,6 +131,7 @@ impl ToolHandler for ScheduleReminderTool {
             fire_at_ms,
             repeat_count,
             repeat_interval_secs: repeat_interval,
+            persist,
         };
 
         let sent = REMINDER_TX

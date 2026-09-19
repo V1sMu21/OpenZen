@@ -16,6 +16,12 @@ pub struct Reminder {
     pub fire_at_ms: u64,
     pub repeat_count: u32,
     pub repeat_interval_secs: u64,
+    /// Durable reminder: survives the run that scheduled it AND process
+    /// restart (persisted to {data_dir}/openzen/pending_reminders.json).
+    /// Run-scoped reminders (persist=false) keep the original semantics —
+    /// they die with the run. #[serde(default)] keeps old records loadable.
+    #[serde(default)]
+    pub persist: bool,
 }
 
 /// Global channel for sending reminders from the `schedule_reminder` tool

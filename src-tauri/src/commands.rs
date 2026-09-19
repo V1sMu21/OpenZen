@@ -1417,7 +1417,9 @@ pub(crate) fn clear_session_reminders(state: &Arc<AppState>, app: &AppHandle, se
     let removed = {
         let mut pending = lock_poison_guard(&state.pending_reminders);
         let before = pending.len();
-        pending.retain(|r| r.session_id != session_id);
+        // Durable reminders (persist=true) survive the run by design:
+        // "remind me in 30 minutes" must outlive the task that asked.
+        pending.retain(|r| r.session_id != session_id || r.persist);
         before - pending.len()
     };
     if removed > 0 {
