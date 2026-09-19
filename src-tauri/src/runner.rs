@@ -444,7 +444,65 @@ pub async fn run_agent_for_session(
             Box::new(oz_llm::NativeClaudeSession::new(sess_config.clone()))
         }
         SessionType::NativeOai => Box::new(oz_llm::NativeOAISession::new(sess_config.clone())),
-        SessionType::Mixin => anyhow::bail!("Mixin session not supported in Tauri"),
+        // Cross-model failover in the desktop app (previously a hard
+        // bail: a wedged local model failed the whole run — only the CLI
+        // could use mixin). Mirrors the CLI construction: member sessions
+        // are every non-mixin entry (sorted by name), selectable via
+        // llm_nos; the mixin entry itself carries retry/spring-back knobs.
+        SessionType::Mixin => {
+            let mut session_list: Vec<(String, &oz_config::mykey::SessionConfig)> = cfg
+                .sessions
+                .iter()
+                .filter(|(name, _)| !name.to_lowercase().contains("mixin"))
+                .map(|(k, v)| (k.clone(), v))
+                .collect();
+            session_list.sort_by(|a, b| a.0.cmp(&b.0));
+            let indices: Vec<usize> = sess_config
+                .llm_nos
+                .clone()
+                .unwrap_or_else(|| (0..session_list.len()).collect());
+            if indices.is_empty() {
+                anyhow::bail!("Mixin session '{session_name}' has no referenced sessions");
+            }
+            let mut members: Vec<Box<dyn oz_llm::Session>> = Vec::new();
+            for &idx in &indices {
+                let (member_name, member_cfg) = session_list.get(idx).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Mixin index {idx} out of range (max {})",
+                        session_list.len().saturating_sub(1)
+                    )
+                })?;
+                let st = SessionType::from_key_name(member_name);
+                let member: Box<dyn oz_llm::Session> = match st {
+                    SessionType::Claude => {
+                        Box::new(oz_llm::ClaudeSession::new((*member_cfg).clone()))
+                    }
+                    SessionType::Oai => Box::new(oz_llm::OaiSession::new((*member_cfg).clone())),
+                    SessionType::NativeClaude => {
+                        Box::new(oz_llm::NativeClaudeSession::new((*member_cfg).clone()))
+                    }
+                    SessionType::NativeOai => {
+                        Box::new(oz_llm::NativeOAISession::new((*member_cfg).clone()))
+                    }
+                    SessionType::Mixin => anyhow::bail!(
+                        "Mixin cannot reference another mixin session '{member_name}'"
+                    ),
+                };
+                members.push(member);
+            }
+            let member_count = members.len();
+            tracing::info!(
+                "[mixin] desktop session '{session_name}' mixing {member_count} backend(s): {:?}",
+                indices
+            );
+            Box::new(oz_llm::MixinSession::new(
+                members,
+                None,
+                sess_config.max_retries,
+                sess_config.base_delay,
+                sess_config.spring_back,
+            ))
+        }
     };
     let mut client = oz_llm::NativeToolClient::new(backend);
 

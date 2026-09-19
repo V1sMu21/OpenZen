@@ -46,10 +46,19 @@ impl MixinSession {
 
     /// Record which session served the last successful call so `pick()`
     /// stays on it until the spring-back window elapses.
+    ///
+    /// A success on a backup (idx != 0) refreshes the timestamp
+    /// UNCONDITIONALLY: after the spring-back window expired once, the
+    /// old `f.0 != idx` guard left `switched_at` stale, so `pick()` kept
+    /// returning 0 and every turn re-rammed the dead primary — the
+    /// failover never re-armed itself. A success on the primary records
+    /// the return to primary.
     fn record_success(&self, idx: usize) {
         let mut f = self.failover.lock().unwrap_or_else(|e| e.into_inner());
-        if f.0 != idx {
+        if idx != 0 {
             *f = (idx, Instant::now());
+        } else if f.0 != 0 {
+            *f = (0, Instant::now());
         }
     }
 }
@@ -298,5 +307,44 @@ mod tests {
         );
         mixin.record_success(1);
         assert_eq!(mixin.pick(), 0, "must spring back to primary after window");
+    }
+
+    /// Regression: after the spring-back window elapses and the backup
+    /// succeeds AGAIN, the switch must re-arm (refresh switched_at) so
+    /// subsequent turns stay on the healthy backup. The old guard
+    /// (`if f.0 != idx`) skipped the refresh on a repeat success, so
+    /// pick() kept springing back to the dead primary on every turn.
+    #[tokio::test]
+    async fn failover_rearms_after_spring_back() {
+        let mixin = MixinSession::new(
+            vec![
+                FakeSession::named("primary", 100),
+                FakeSession::named("backup", 0),
+            ],
+            None,
+            Some(3),
+            Some(0.0),
+            Some(300),
+        );
+        mixin.record_success(1);
+        // Simulate the spring-back window having elapsed (tests may touch
+        // the private state directly).
+        {
+            let mut f = mixin.failover.lock().unwrap_or_else(|e| e.into_inner());
+            *f = (1, Instant::now() - Duration::from_secs(301));
+        }
+        assert_eq!(mixin.pick(), 0, "elapsed window springs back to primary");
+
+        // The primary fails again and the backup serves the retry:
+        mixin.record_success(1);
+        assert_eq!(
+            mixin.pick(),
+            1,
+            "repeat backup success must re-arm the switch, not leave it stale"
+        );
+
+        // A primary success records the return to primary.
+        mixin.record_success(0);
+        assert_eq!(mixin.pick(), 0, "primary success records the return");
     }
 }
