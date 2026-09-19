@@ -82,6 +82,25 @@ export function generatePartId(): string {
   return `part_${++_partIdCounter}_${Date.now()}`;
 }
 
+/** True when two strings are the SAME assistant reply rather than two
+ *  different statements: identical, one a prefix of the other, or sharing an
+ *  identical long head.
+ *
+ *  An exact match is not enough to recognise the duplicate: the backend
+ *  appends a delivery-contract block (「📋 交付说明」/quality note) to
+ *  `done.full_response`, which re-quotes a truncated head of the very same
+ *  reply. Comparing by equality then treats the two as different texts and
+ *  the reply renders twice. */
+export function isSameReplyText(a: string, b: string): boolean {
+  const na = a.replace(/\s+/g, " ").trim();
+  const nb = b.replace(/\s+/g, " ").trim();
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.startsWith(nb) || nb.startsWith(na)) return true;
+  const HEAD = 60;
+  return na.length >= HEAD && nb.length >= HEAD && na.slice(0, HEAD) === nb.slice(0, HEAD);
+}
+
 /** Loose union: accepts both legacy StreamEventItem and the new
  *  protocol_v1 events saved to disk by the backend. Server-side
  *  events have a `duration_ms` field added at save time that we
@@ -440,11 +459,24 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
       } catch { replyText = p.result; }
     }
     if (replyText.trim().length === 0) continue;
+    // A respond round can stream the same text as `text_delta` earlier in the
+    // same round (the model writes the answer, then calls respond with it).
+    // Replaying both as separate text parts showed the reply twice after a
+    // reload / session switch; fold them into the preceding text part.
+    const prev = i > 0 ? parts[i - 1] : undefined;
+    if (prev && prev.type === "text" && isSameReplyText(prev.text, replyText)) {
+      prev.text = replyText;
+      prev.state = "done";
+      if (p.durationMs !== undefined) prev.durationMs = p.durationMs;
+      parts.splice(i, 1);
+      i--;
+      continue;
+    }
     parts[i] = {
-      type: 'text',
+      type: "text",
       id: p.toolCallId,
       text: replyText,
-      state: 'done',
+      state: "done",
       durationMs: p.durationMs,
     } as TextPart;
   }

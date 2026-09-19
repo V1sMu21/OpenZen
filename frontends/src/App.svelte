@@ -183,7 +183,10 @@
 
   let ctxWin = $derived.by(() => {
     const cfgWin = $chat.modelInfo?.contextWindow ?? 0;
-    return cfgWin > 0 ? cfgWin : 200_000;
+    // Fallback used before a session reports its real window: most local
+    // models here run 256K–1M, so the old 200K made a session that had not
+    // started yet show a red (≥90%) bar. 1M matches the common case.
+    return cfgWin > 0 ? cfgWin : 1_000_000;
   });
 
   let ctxTokens = $derived.by(() => {
@@ -293,6 +296,19 @@
   const VIRTUAL_ROW_ESTIMATE_PX = 180; // average row + list gap
   let scrollTop = $state(0);
   let viewportHeight = $state(0);
+  let scrollHeight = $state(0);
+  // Latched "the viewport is parked at the end of the conversation" flag.
+  // While it is true the render window is anchored to the END of the list
+  // (start derived purely from the model heights), never to the DOM
+  // `scrollTop`. The DOM total is not a stable function of the model: a
+  // mounted row contributes its real height + the list gap, while the spacer
+  // that replaces it contributes a possibly-stale measured height. Feeding
+  // that total back in made the top boundary flip by a row, which changed the
+  // total again and flipped it back — the mount/unmount limit cycle the user
+  // sees as shaking while streaming or resizing. End-anchoring breaks the
+  // loop: the window can only slide monotonically as content grows. The
+  // latch's wide dead zone keeps the two modes from alternating.
+  let bottomPinned = $state(true);
 
   // Measured per-message heights (px). Rows record their real height once
   // rendered; unmeasured rows fall back to the estimate. Long code blocks
@@ -330,20 +346,47 @@
     const count = msgs.length;
     const total = offsets[count] || 0;
     const overscan = Math.max(VIRTUAL_ROW_ESTIMATE_PX, viewportHeight * 2);
-    // Binary search the first row whose bottom passes the overscanned
-    // top edge; extend the window until the overscanned bottom edge.
-    let lo = 0;
-    let hi = count;
-    const topEdge = scrollTop - overscan;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (offsets[mid + 1] < topEdge) lo = mid + 1;
-      else hi = mid;
+    // Two candidate windows, unioned:
+    //   1. end-anchored (bottom pinned) — `end` is the live tail and `start`
+    //      is found by walking backwards over the model heights. No
+    //      `scrollTop` term, so the DOM total churning under the
+    //      mount/unmount cycle cannot move the boundary (the oscillation fix).
+    //   2. viewport-anchored — the rows covering the visible region.
+    // The union is required: the end-anchored window ALONE collapses to the
+    // last row whenever that row is taller than the overscanned viewport (a
+    // long final answer injected at `done`). The rows that were still on
+    // screen — the user's own message right above the live bubble — were then
+    // unmounted and replaced by an empty spacer: the bubbles "vanished" until
+    // the next scroll. A row intersecting the viewport must never be dropped.
+    let aStart = count;
+    let aEnd = 0;
+    if (bottomPinned) {
+      aEnd = count;
+      const target = viewportHeight + overscan;
+      aStart = count;
+      while (aStart > 0 && total - offsets[aStart] < target) aStart--;
     }
-    let start = lo;
-    const bottomEdge = scrollTop + viewportHeight + overscan;
-    let end = start;
-    while (end < count && offsets[end] < bottomEdge) end++;
+    let bStart = count;
+    let bEnd = 0;
+    if (viewportHeight > 0) {
+      // Positioned by the real scroll offset: binary search the first row
+      // whose bottom passes the overscanned top edge, then extend until the
+      // overscanned bottom edge.
+      let lo = 0;
+      let hi = count;
+      const topEdge = scrollTop - overscan;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (offsets[mid + 1] < topEdge) lo = mid + 1;
+        else hi = mid;
+      }
+      bStart = lo;
+      const bottomEdge = scrollTop + viewportHeight + overscan;
+      bEnd = bStart;
+      while (bEnd < count && offsets[bEnd] < bottomEdge) bEnd++;
+    }
+    let start = Math.min(aStart, bStart);
+    let end = Math.max(aEnd, bEnd);
     // Never hand back an empty window while messages exist. Measured
     // heights go stale when a row grows in place (timeline/card
     // expansion, late image load), so scrollTop can land past the
@@ -358,6 +401,19 @@
       beforeHeight: offsets[start],
       afterHeight: Math.max(0, total - offsets[end]),
     };
+  });
+
+  // Latch the bottom-anchored mode with a one-screen dead zone. The two
+  // thresholds differ so a transient distance reading near the boundary
+  // cannot toggle the mode (which would itself re-position the window).
+  $effect(() => {
+    if (viewportHeight <= 0) return;
+    const dist = scrollHeight - scrollTop - viewportHeight;
+    if (bottomPinned) {
+      if (dist > viewportHeight * 1.5) bottomPinned = false;
+    } else if (dist < viewportHeight * 0.5) {
+      bottomPinned = true;
+    }
   });
 
   // Measure rendered rows and record their real heights. Re-runs when the
@@ -429,6 +485,7 @@
     if (!scroller) return;
     scrollTop = scroller.scrollTop;
     viewportHeight = scroller.clientHeight;
+    scrollHeight = scroller.scrollHeight;
   }
 
   function findMessageElement(id: string | undefined): HTMLElement | null {
@@ -586,6 +643,7 @@
     invoke<boolean>("get_full_access").then(v => fullAccessOn = v).catch(() => {});
     let prevMessageCount = 0;
     let prevStreamingTextLen = 0;
+    let prevProcessing = false;
     let userScrolledUp = false;
     const SCROLL_THRESHOLD = 80; // px from bottom to consider "at bottom"
 
@@ -764,11 +822,17 @@
       }
       const grew = count > prevMessageCount;
       const streamed = streamingTextLen > prevStreamingTextLen;
+      // The turn's final answer is only injected at `done` (respond rounds
+      // don't stream it), which appends it BELOW the fold: without this the
+      // reply the user waited for stays off-screen until they scroll.
+      const justFinished = prevProcessing && !s.isProcessing;
 
       if (grew) {
         // New message arrived — always scroll to the bottom and
         // reset the user's scroll intent so they see the new msg.
         userScrolledUp = false;
+        scrollToBottom();
+      } else if (justFinished && !userScrolledUp) {
         scrollToBottom();
       } else if (streamed && !userScrolledUp) {
         // Tokens streaming — only scroll if the user is already
@@ -779,6 +843,7 @@
 
       prevMessageCount = count;
       prevStreamingTextLen = streamingTextLen;
+      prevProcessing = s.isProcessing;
     });
 
     return () => {
@@ -807,9 +872,12 @@
 
   async function handleSelectSession(id: string) {
     const prevId = $sessions.currentId;
-    if (prevId && prevId !== id) {
-      chat.saveSessionState(prevId);
-    }
+    // Persist unconditionally — including when `prevId === id`. ⌘[ / ⌘] and
+    // the "new chat" path advance `sessions.currentId` BEFORE this handler
+    // runs, so the id comparison alone skipped the snapshot and the running
+    // session's bubble + cards were dropped instead of cached. The store
+    // resolves the real owner (liveSessionId) internally.
+    chat.saveSessionState(prevId ?? undefined);
     sessions.select(id);
     localStorage.setItem("currentSessionId", id);
     chat.loadSession(id);

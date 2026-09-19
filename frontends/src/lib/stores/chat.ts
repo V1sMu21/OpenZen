@@ -4,7 +4,7 @@ import type { ModelEntry } from "../api/chat";
 import { estimateTokens, formatTokenCount } from "./types";
 import type { UIMessagePart, ProtocolV1Event, ToolInvocationPart, DataPart } from "./parts";
 import { sidepanel } from "./sidepanel.svelte";
-import { convertStreamEventsToParts, generatePartId } from "./parts";
+import { convertStreamEventsToParts, generatePartId, isSameReplyText } from "./parts";
 import { applyProtocolEvent, clearReasoningTimers } from "./protocol-processor";
 import { sessions } from "./sessions";
 import { isTauri, tauriInvoke } from "../api/tauri";
@@ -146,6 +146,48 @@ function scanRemindersFromMessages(messages: Message[]): ReminderTask[] {
   return out;
 }
 
+/**
+ * Read the ask_user payload out of either envelope shape the backend uses:
+ *  - protocol_v1: `{ type: "ask_user_pending", data: "<json string>" }` where
+ *    the string is `{ tool_use_id, payload }` and `payload` is the tool's own
+ *    output (`{ status, intent, data: { question, candidates } }`).
+ *  - top-level `ask_user_pending`: `{ payload: { data: { question, ... } } }`.
+ * Returns null when the event carries no usable question.
+ */
+function parseAskUserPending(protoEvent: unknown): PendingAskUser | null {
+  const ev = protoEvent as {
+    data?: unknown;
+    payload?: { data?: { question?: unknown; candidates?: unknown } };
+  };
+  if (typeof ev?.data === "string" && ev.data) {
+    try {
+      const outer = JSON.parse(ev.data) as {
+        tool_use_id?: string;
+        payload?: { data?: { question?: unknown; candidates?: unknown } };
+      };
+      const inner = outer.payload?.data;
+      if (inner && typeof inner.question === "string") {
+        return {
+          question: inner.question,
+          candidates: Array.isArray(inner.candidates) ? (inner.candidates as string[]) : [],
+          askId: typeof outer.tool_use_id === "string" ? outer.tool_use_id : undefined,
+        };
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  const inner = ev?.payload?.data;
+  if (inner && typeof inner.question === "string") {
+    return {
+      question: inner.question,
+      candidates: Array.isArray(inner.candidates) ? (inner.candidates as string[]) : [],
+    };
+  }
+  return null;
+}
+
 function createChatStore() {
   const { subscribe, set, update } = writable<ChatState>({
     messages: [],
@@ -180,6 +222,19 @@ function createChatStore() {
     compressionNotice: string | null;
     modelInfo: ModelInfo | null;
   }>();
+
+  // Which session the conversation currently in the store belongs to.
+  // `sessions.currentId` cannot be trusted for this: ⌘[ / ⌘] and the
+  // "new chat" path mutate it BEFORE handleSelectSession runs, so the
+  // prevId comparison there silently skipped saveSessionState — the live
+  // run's bubble and cards were dropped instead of cached, and switching
+  // back painted the persisted page (which has no in-flight assistant
+  // message) plus a fresh bubble carrying only the newest cards.
+  let liveSessionId: string | null = null;
+
+  function setStateOwner(sessionId: string | null) {
+    liveSessionId = sessionId;
+  }
 
   // ── Idle-session view cache (T3.6) ──────────────────────────────
   // Bounded LRU of the last SESSION_CACHE_MAX fully-loaded session pages.
@@ -355,6 +410,10 @@ function createChatStore() {
           parts,
           streaming: false,
           duration: m.duration,
+          // The backend saves the assistant message when the run ends, so the
+          // persisted `timestamp` IS the turn's finish time — recording it as
+          // such keeps the footer from adding `duration` on top of it.
+          completedAt: m.timestamp || undefined,
           tokensIn: m.tokensIn,
           tokensOut: m.tokensOut,
           contextTokens: m.contextTokens,
@@ -424,6 +483,7 @@ function createChatStore() {
   }
 
   function setViewState(sessionId: string, state: SessionViewCacheEntry['state']) {
+    setStateOwner(sessionId);
     set({
       messages: state.messages,
       isProcessing: state.isProcessing,
@@ -499,10 +559,12 @@ function createChatStore() {
       }
       // Restore the live Running state: the backend reports the session's
       // status with the page, so a long task survives reloads and session
-      // switches. `current.isProcessing` only counts when the current store
-      // state actually belongs to THIS session — otherwise a running
-      // previous session would leak its flag into the newly selected one.
-      const sessionLive = (currentSid === sessionId && current.isProcessing) || serverRunning;
+      // switches. `current.isProcessing` only counts when the store's state
+      // actually belongs to THIS session (`liveSessionId`) — otherwise a
+      // running previous session would leak its flag into the newly selected
+      // one and the freshly fetched page would never be painted.
+      const belongsToTarget = liveSessionId === sessionId;
+      const sessionLive = (belongsToTarget && current.isProcessing) || serverRunning;
       const viewState = {
         messages,
         isProcessing: sessionLive,
@@ -518,9 +580,14 @@ function createChatStore() {
       };
       storeSessionViewCache(sessionId, viewState);
       if (seq !== loadSeq || currentSid !== sessionId) return;
-      if (sessionLive && current.messages.length > 0) {
-        // An optimistic run started while this response was in flight; the
-        // live state is newer than the persisted page. Refresh only the cache.
+      if (belongsToTarget && sessionLive && current.messages.length > 0) {
+        // The store already holds this session's live run, which is newer
+        // than the persisted page (the in-flight assistant message is only
+        // persisted at after_run). Painting the page here dropped the live
+        // bubble and every card it had accumulated, leaving only the cards
+        // that arrived afterwards. Keep the live state; just drop the veil.
+        update((s) => ({ ...s, loadingSession: false }));
+        if (sessionLive) startProcessingWatchdog();
         return;
       }
       setViewState(sessionId, viewState);
@@ -604,6 +671,7 @@ function createChatStore() {
   function startAssistantMessageInternal() {
     const currentSid = get(sessions).currentId;
     if (currentSid) {
+      setStateOwner(currentSid);
       sessionCache.delete(currentSid);
       // The pre-send page is no longer the truth for this session;
       // dropping it prevents a fast switch-back from painting the
@@ -978,11 +1046,39 @@ function createChatStore() {
         // the final answer never renders live (it only appears after a
         // refresh, when the persisted stream events re-convert the respond
         // call into a text part).
-        if (
-          preferredContent
-          && !finalParts.some((p) => p.type === 'text' && p.text && p.text.trim() === preferredContent.trim())
-        ) {
-          finalParts.push({ type: 'text', id: generatePartId(), text: preferredContent, state: 'done' as const });
+        //
+        // When the turn's trailing text IS this reply (the backend appended a
+        // delivery-contract / quality note to `full_response`, or cleaned the
+        // streamed text), REPLACE that part instead of appending: an equality
+        // check treated the two as different texts and the whole final answer
+        // rendered twice, once with the note and once without.
+        if (preferredContent) {
+          const norm = (t: string) => t.replace(/\s+/g, " ").trim();
+          const target = norm(preferredContent);
+          // Byte-identical text already on screen: nothing to add. Only an
+          // EXACT match short-circuits — a "same reply" match must still
+          // supersede the streamed version, because the backend appends the
+          // delivery-contract block to `full_response` and dropping that
+          // would silently delete the 交付说明 section.
+          const alreadyShown = finalParts.some(
+            (p) => p.type === 'text' && p.text && norm(p.text) === target,
+          );
+          if (!alreadyShown) {
+            let tailIdx = -1;
+            for (let i = finalParts.length - 1; i >= 0; i--) {
+              const p = finalParts[i];
+              if (p.type === 'text' || p.type === 'tool-invocation') {
+                tailIdx = i;
+                break;
+              }
+            }
+            const tail = tailIdx >= 0 ? finalParts[tailIdx] : undefined;
+            if (tail && tail.type === 'text' && isSameReplyText(tail.text, preferredContent)) {
+              finalParts[tailIdx] = { ...tail, text: preferredContent, state: 'done' as const };
+            } else {
+              finalParts.push({ type: 'text', id: generatePartId(), text: preferredContent, state: 'done' as const });
+            }
+          }
         }
 
         // Auto-title
@@ -1010,6 +1106,7 @@ function createChatStore() {
                 content,
                 parts: finalParts,
                 duration: last.timestamp ? Date.now() - new Date(last.timestamp).getTime() : 0,
+                completedAt: new Date().toISOString(),
                 tokensIn: tokensIn ?? m.tokensIn,
                 tokensOut: tokensOut ?? (content ? estimateTokens(content) : m.tokensOut),
                 contextTokens: contextTokens ?? m.contextTokens,
@@ -1255,27 +1352,11 @@ function createChatStore() {
           // surface it so the dialog opens without a new run.
           if (protoEvent.type === 'ask_user_pending') {
             // The server-side StreamEvent::AskUserPending serialises as
-            // `{ type: "ask_user_pending", data: "<json string>" }`,
-            // where the JSON string is `{ tool_use_id, tool_name, payload }`
-            // and `payload` is the ask_user tool's own output
-            // (`{ status, intent, data: { question, candidates } }`).
-            const raw = protoEvent as unknown as { data?: string };
-            let question = "";
-            let candidates: string[] = [];
-            let toolUseId: string | undefined;
-            if (typeof raw.data === "string" && raw.data) {
-              try {
-                const outer = JSON.parse(raw.data) as {
-                  tool_use_id?: string;
-                  payload?: { data?: { question?: string; candidates?: string[] } };
-                };
-                const inner = outer.payload?.data;
-                if (inner && typeof inner.question === "string") question = inner.question;
-                if (Array.isArray(inner?.candidates)) candidates = inner!.candidates as string[];
-                if (typeof outer.tool_use_id === "string") toolUseId = outer.tool_use_id;
-              } catch { /* malformed JSON — fall through with empty values */ }
-            }
-            this.setPendingAskUser({ question, candidates, askId: toolUseId });
+            // `{ type: "ask_user_pending", data: "<json string>" }`, where the
+            // JSON string is `{ tool_use_id, tool_name, payload }` and
+            // `payload` is the ask_user tool's own output.
+            const pending = parseAskUserPending(protoEvent);
+            if (pending) this.setPendingAskUser(pending);
           }
           if (protoEvent.type === 'data_todo_update') {
             const ev = protoEvent as unknown as { items: Array<{id:string;content:string;status:string;priority:string;order:number}>; current: number; total: number };
@@ -1480,20 +1561,28 @@ function createChatStore() {
           // The agent loop is blocked waiting for the user — pop the
           // dialog so they can answer. The existing streaming message
           // stays in `isProcessing=true`; we DON'T start a new run.
-          const q = event.data?.payload?.data?.question ?? "";
-          const cands = Array.isArray(event.data?.payload?.data?.candidates)
-            ? (event.data!.payload!.data!.candidates as string[])
-            : [];
-          this.setPendingAskUser({ question: q, candidates: cands });
+          const pending = parseAskUserPending(event.data);
+          if (pending) this.setPendingAskUser(pending);
           break;
         }
       }
     },
 
-    saveSessionState(sessionId: string) {
+    /**
+     * Snapshot the in-flight run before the view switches away, so switching
+     * back can restore the bubble + every card accumulated so far.
+     *
+     * `sessionId` is only a hint: the snapshot is keyed by the session the
+     * store's state actually belongs to (`liveSessionId`), because ⌘[ / ⌘]
+     * and "new chat" have already advanced `sessions.currentId` by the time
+     * the caller runs. Relying on the hint alone made this a no-op on those
+     * paths — the live run was dropped instead of cached.
+     */
+    saveSessionState(sessionId?: string) {
       const state = readState();
-      if (state.isProcessing && state.messages.length > 0) {
-        sessionCache.set(sessionId, {
+      const owner = liveSessionId ?? sessionId ?? null;
+      if (owner && state.isProcessing && state.messages.length > 0) {
+        sessionCache.set(owner, {
           messages: state.messages,
           streamingParts: state.streamingParts,
           isProcessing: state.isProcessing,
@@ -1515,6 +1604,33 @@ function createChatStore() {
         clearProcessingWatchdog();
         cancelPendingStreamEvents();
       }
+      liveSessionId = null;
+    },
+
+    /**
+     * Fold a protocol event of a RUNNING session the user is not looking at
+     * into that session's cached snapshot. Without this the events emitted
+     * while the user was viewing another session were dropped on the floor:
+     * switching back restored the pre-switch snapshot and the cards produced
+     * in between only ever appeared if their own start event arrived again.
+     */
+    applyBackgroundProtocolEvent(sessionId: string, protoEvent: ProtocolV1Event) {
+      const cached = sessionCache.get(sessionId);
+      if (!cached || !cached.isProcessing) return;
+      if (protoEvent.type === 'data_todo_update') {
+        const ev = protoEvent as unknown as { items?: ChatState['todos'] };
+        if (Array.isArray(ev.items)) cached.todos = ev.items;
+        return;
+      }
+      if (protoEvent.type === 'ask_user_pending') {
+        const pending = parseAskUserPending(protoEvent);
+        if (pending) cached.pendingAskUser = pending;
+        return;
+      }
+      if (!RENDER_ONLY_EVENTS.has(protoEvent.type)) return;
+      // Parts only — `message.content` is derived at finalize and the live
+      // bubble renders from parts, so no message walk is needed here.
+      applyProtocolEvent(cached.streamingParts, protoEvent);
     },
 
     async loadSession(sessionId: string) {
@@ -1524,6 +1640,7 @@ function createChatStore() {
       // the streaming bubble from disappearing when switching sessions.
       const cached = sessionCache.get(sessionId);
       if (cached && cached.isProcessing) {
+        setStateOwner(sessionId);
         set({
           messages: cached.messages,
           isProcessing: cached.isProcessing,
@@ -1624,6 +1741,7 @@ function createChatStore() {
       clearProcessingWatchdog();
       clearReasoningTimers();
       cancelPendingStreamEvents();
+      liveSessionId = null;
       const currentSid = get(sessions).currentId;
       if (currentSid) {
         sessionCache.delete(currentSid);

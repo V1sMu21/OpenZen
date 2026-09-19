@@ -3,6 +3,7 @@ import { get, writable } from "svelte/store";
 import { sessions } from "./sessions";
 import { approval } from "./approval";
 import type { SSEEvent } from "./types";
+import type { ProtocolV1Event } from "./parts";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri, tauriInvoke } from "../api/tauri";
 
@@ -37,6 +38,19 @@ function tryParseJSON(s: string): unknown {
   }
 }
 
+/** Unwrap a protocol_v1 payload into the bare protocol event. The SSE path
+ *  sends the event as a JSON string; the Tauri path wraps it in the full
+ *  SseEvent object whose `data` field holds that string. */
+function protocolEventFrom(rawData: unknown): ProtocolV1Event | null {
+  let inner: unknown = rawData;
+  if (inner && typeof inner === "object" && "data" in (inner as Record<string, unknown>)) {
+    inner = (inner as { data: unknown }).data;
+  }
+  if (typeof inner === "string") inner = tryParseJSON(inner);
+  if (inner && typeof inner === "object") return inner as ProtocolV1Event;
+  return null;
+}
+
 let eventSource: EventSource | null = null;
 let reconnectAttempts = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -64,6 +78,11 @@ function handleTauriEvent(raw: { session_id?: string; event_type?: string; data?
     // from the processing cache (T3.6 stale-stream fix).
     if (raw.event_type === "done" || raw.event_type === "error") {
       chat.noteSessionFinished(raw.session_id);
+    } else if (raw.event_type === "protocol_v1") {
+      // Keep the background run's cached snapshot current so switching back
+      // shows the cards produced while the user was elsewhere.
+      const protoEvent = protocolEventFrom(raw.data);
+      if (protoEvent) chat.applyBackgroundProtocolEvent(raw.session_id, protoEvent);
     }
     return;
   }
@@ -109,6 +128,9 @@ function handleSSEEvent(event: MessageEvent) {
     if (raw.session_id && currentId && raw.session_id !== currentId) {
       if (raw.event_type === "done" || raw.event_type === "error") {
         chat.noteSessionFinished(raw.session_id);
+      } else if (raw.event_type === "protocol_v1") {
+        const protoEvent = protocolEventFrom(raw.data);
+        if (protoEvent) chat.applyBackgroundProtocolEvent(raw.session_id, protoEvent);
       }
       return;
     }

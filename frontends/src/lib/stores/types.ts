@@ -35,6 +35,18 @@ export interface Message {
   contextUsed?: number;
   contextWindow?: number;
   duration?: number;
+  /**
+   * Wall-clock time this turn FINISHED.
+   *
+   * `timestamp` is the turn's START for live turns (the live footer timer
+   * counts `now - timestamp`), but the backend persists the assistant message
+   * only at after_run — so a saved message's `timestamp` IS its finish time.
+   * Deriving the footer time as `timestamp + duration` therefore pushed
+   * restored turns up to a whole task-length into the future (a 34-minute run
+   * displayed a time 34 minutes late). Set explicitly at finalize; messages
+   * loaded from disk carry their persisted timestamp here.
+   */
+  completedAt?: string;
   streaming?: boolean;
   modelInfo?: ModelInfo;
   /** Why the agent loop finished (e.g. "end_turn", "EXITED", "max_turns", "error") */

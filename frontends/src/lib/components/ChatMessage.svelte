@@ -110,11 +110,23 @@ import { t, locale, tSync } from "../i18n";
       : 0;
   });
 
-  let completedAt = $derived(
-    !isLive && message.duration != null && message.timestamp
-      ? new Date(new Date(message.timestamp).getTime() + message.duration).toISOString()
-      : null
-  );
+  /** Wall-clock time this turn finished, or null when the turn is live or
+   *  carries no timing at all.
+   *
+   *  `message.completedAt` is authoritative (set at finalize for live turns,
+   *  and by the session parser for turns restored from disk, where the saved
+   *  `timestamp` already IS the finish time). Only fall back to
+   *  `timestamp + duration` — correct solely for an in-memory turn whose
+   *  timestamp is its start — so a restored 34-minute turn no longer displays
+   *  a time 34 minutes in the future. */
+  let completedAt = $derived.by(() => {
+    if (isLive) return null;
+    if (message.completedAt) return message.completedAt;
+    if (message.duration != null && message.timestamp) {
+      return new Date(new Date(message.timestamp).getTime() + message.duration).toISOString();
+    }
+    return null;
+  });
 
   // ── Helpers ──
 
@@ -459,7 +471,7 @@ import { t, locale, tSync } from "../i18n";
 
         {#if !isBackendStillWorking}
           <div class="bubble-footer" class:running={isBackendStillWorking}>
-            <span class="footer-time-group" title="System time when this turn started">
+            <span class="footer-time-group" title="System time when this turn finished">
               <span class="footer-inscription">{roleLabel(message.role)}{$t("message.sig", "识")}</span>
               <span class="footer-time-text">
                 {#if completedAt}
