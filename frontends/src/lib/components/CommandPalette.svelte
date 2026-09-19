@@ -1,38 +1,34 @@
 <script lang="ts">
-  import { t, locale, tSync } from "../i18n";
+  import { locale } from "../i18n";
+  import { filterCommands } from "../utils/slashCommands";
+
   let lang = $state("zh");
   $effect(() => { lang = $locale; });
 
-  interface Command {
-    command: string;
-    description: string;
-    action: () => void;
-  }
+  let {
+    show = $bindable(false),
+    filter = $bindable(""),
+    activeIndex = 0,
+    onSelect = $bindable((cmd: string) => {}),
+  }: {
+    show?: boolean;
+    filter?: string;
+    /** Highlighted row (owned by the input's keyboard navigation). */
+    activeIndex?: number;
+    onSelect?: (cmd: string) => void;
+  } = $props();
 
-  let { show = $bindable(false), filter = $bindable(""), onSelect = $bindable((cmd: string) => {}) } = $props();
-
-  const commands = $derived([
-    { command: "/help", description: tSync(lang, "cmd.help.desc"), action: () => onSelect("/help") },
-    { command: "/clear", description: tSync(lang, "cmd.clear.desc"), action: () => onSelect("/clear") },
-    { command: "/new", description: tSync(lang, "cmd.new.desc"), action: () => onSelect("/new") },
-    { command: "/model", description: tSync(lang, "cmd.model.desc"), action: () => onSelect("/model") },
-    { command: "/sessions", description: tSync(lang, "cmd.sessions.desc"), action: () => onSelect("/sessions") },
-    { command: "/export", description: tSync(lang, "cmd.export.desc"), action: () => onSelect("/export") },
-    { command: "/compact", description: tSync(lang, "cmd.compact.desc"), action: () => onSelect("/compact") },
-    { command: "/resume", description: tSync(lang, "cmd.resume.desc"), action: () => onSelect("/resume") },
-  ]);
-
-  let filtered = $derived(
-    filter
-      ? commands.filter((c) => c.command.includes(filter.toLowerCase()))
-      : commands,
-  );
+  let filtered = $derived(filterCommands(lang, filter));
 </script>
 
 {#if show && filtered.length > 0}
   <div class="command-palette">
-    {#each filtered as cmd}
-      <button class="command-item" onclick={cmd.action}>
+    {#each filtered as cmd, i (cmd.command)}
+      <button
+        class="command-item"
+        class:active={i === activeIndex}
+        onclick={() => onSelect(cmd.command)}
+      >
         <span class="cmd-text">{cmd.command}</span>
         <span class="cmd-desc">{cmd.description}</span>
       </button>
@@ -89,5 +85,10 @@
     font-size: 12px;
     color: var(--color-muted);
     margin-left: auto;
+  }
+
+  .command-item.active {
+    background: var(--color-surface-soft);
+    outline: 1px solid var(--color-hairline-strong);
   }
 </style>

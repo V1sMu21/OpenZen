@@ -357,5 +357,8 @@
   "status.error.short": "error",
   "message.folded": "{count} folded · {tools} tools",
   "session.deleteConfirm": "Delete session \"{name}\"? This cannot be undone.",
-  "session.renameHint": "Double-click to rename"
+  "session.renameHint": "Double-click to rename",
+  "shortcuts.esc": "Cancel the running task (3x = force reset)",
+  "shortcuts.rename": "Rename session (or double-click)",
+  "shortcuts.paletteNav": "Move in the command palette / Enter to run"
 }

@@ -45,6 +45,9 @@
         <div class="shortcut-row">
           <kbd>⌘⇧D</kbd> <span>{$t("shortcuts.deleteSession")}</span>
         </div>
+        <div class="shortcut-row">
+          <kbd>F2</kbd> <span>{$t("shortcuts.rename")}</span>
+        </div>
       </div>
 
       <div class="shortcuts-section">
@@ -54,6 +57,12 @@
         </div>
         <div class="shortcut-row">
           <kbd>↑</kbd> <span>{$t("shortcuts.focusSidebar")}</span>
+        </div>
+        <div class="shortcut-row">
+          <kbd>Esc</kbd> <span>{$t("shortcuts.esc")}</span>
+        </div>
+        <div class="shortcut-row">
+          <kbd>↑</kbd> <kbd>↓</kbd> <span>{$t("shortcuts.paletteNav")}</span>
         </div>
       </div>
 

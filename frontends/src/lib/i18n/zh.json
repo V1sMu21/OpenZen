@@ -357,5 +357,8 @@
   "status.error.short": "朱砂 ✕",
   "message.folded": "折叠 {count} 事 · {tools} 工具",
   "session.deleteConfirm": "删除会话「{name}」？此操作不可撤销。",
-  "session.renameHint": "双击重命名"
+  "session.renameHint": "双击重命名",
+  "shortcuts.esc": "取消当前任务（连按 3 次强制复位）",
+  "shortcuts.rename": "重命名会话（双击亦可）",
+  "shortcuts.paletteNav": "命令面板上下选择 / Enter 执行"
 }

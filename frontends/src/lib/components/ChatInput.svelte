@@ -5,6 +5,7 @@ import { compressSession, injectMessage } from "../api/sessions";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import CommandPalette from "./CommandPalette.svelte";
+import { filterCommands } from "../utils/slashCommands";
 import { t, localT, locale } from "../i18n";
 
 let {
@@ -229,7 +230,39 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
     } catch (_) {}
   }
 
+  // Slash-command palette state is shared with the palette component so
+  // ArrowUp/Down/Enter work while focus stays in the textarea.
+  let paletteIndex = $state(0);
+  let paletteMatches = $derived(filterCommands($locale, showCommands ? inputText.slice(1) : ""));
+  $effect(() => {
+    // Reset the highlight when the filtered set changes.
+    paletteMatches;
+    paletteIndex = 0;
+  });
+
   function handleKeydown(e: KeyboardEvent) {
+    if (showCommands && paletteMatches.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        paletteIndex = Math.min(paletteIndex + 1, paletteMatches.length - 1);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        paletteIndex = Math.max(paletteIndex - 1, 0);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        onCommandSelect(paletteMatches[paletteIndex]?.command ?? paletteMatches[0].command);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        showCommands = false;
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -267,6 +300,7 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
   <CommandPalette
     bind:show={showCommands}
     filter={inputText.slice(1)}
+    activeIndex={paletteIndex}
     onSelect={onCommandSelect}
   />
 
