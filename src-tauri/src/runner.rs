@@ -662,6 +662,18 @@ pub async fn run_agent_for_session(
                         // honestly so the model reads it correctly.
                         buf.push_str(&format!("- [dist {score:.2}] {text}\n"));
                     }
+                    // Same budget discipline as the facts block: raw L2
+                    // entries can be long, and five of them must not blow
+                    // the prompt. Head-keep, char-safe.
+                    const MAX_RECALL_CONTEXT_BYTES: usize = 4 * 1024;
+                    if buf.len() > MAX_RECALL_CONTEXT_BYTES {
+                        let mut end = MAX_RECALL_CONTEXT_BYTES;
+                        while end > 0 && !buf.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        buf.truncate(end);
+                        buf.push_str("\n…[recall truncated]");
+                    }
                     debug_log(&format!("ERME recall injected {} memories", recalls.len()));
                     buf
                 }

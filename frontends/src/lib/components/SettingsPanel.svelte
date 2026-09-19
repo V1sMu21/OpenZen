@@ -396,6 +396,13 @@
             <span class="stat-key">{$t("soul.recalls")}</span><span class="stat-val">{soul.store?.recalls ?? 0} · {$t("soul.hitRate")} {Math.round((soul.store?.recall_hit_rate ?? 0) * 100)}%</span>
             <span class="stat-key">{$t("soul.portraitFacts")}</span><span class="stat-val">{soul.soul.portrait_facts}</span>
             <span class="stat-key">{$t("soul.narrative")}</span><span class="stat-val">{soul.soul.narrative_chapters} {$t("soul.chapters")}</span>
+            <span class="stat-key">{$t("soul.embeddings")}</span><span class="stat-val">{soul.embedding_kind ?? "—"}</span>
+            {#if soul.store?.l3_storage_bytes != null}
+              <span class="stat-key">{$t("soul.storage")}</span><span class="stat-val">{Math.round((soul.store.l3_storage_bytes ?? 0) / 1024)} KB</span>
+            {/if}
+            {#if soul.harness}
+              <span class="stat-key">{$t("soul.harness")}</span><span class="stat-val">{soul.harness.entry_count}</span>
+            {/if}
           </div>
         {:else}
           <div class="settings-empty">{$t("settings.empty")}</div>

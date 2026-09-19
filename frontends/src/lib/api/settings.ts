@@ -17,6 +17,10 @@ import type {
 /** Minimal mirror of the get_memory_status soul section (commands.rs). */
 export interface SoulStatus {
   enabled: boolean;
+  /** Which embedder the L2 layer actually uses. "hash" is the silent
+   *  degradation when the local MLX model is unavailable — semantic
+   *  recall quality drops to near-random, so the UI surfaces it. */
+  embedding_kind?: string;
   soul?: {
     identity: string;
     mood: string;
@@ -33,7 +37,12 @@ export interface SoulStatus {
     recalls: number;
     recall_hits: number;
     recall_hit_rate: number;
+    l3_storage_bytes?: number;
+    hnsw_entries?: number;
+    /** Unix nanos of the last consolidation, when one has run. */
+    last_consolidation?: number | null;
   };
+  harness?: { entry_count: number };
 }
 
 type MutationResult = { status?: string; error?: string };

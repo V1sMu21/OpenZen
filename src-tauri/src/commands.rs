@@ -234,6 +234,11 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
             "l2_entries": stats.l2_entries,
             "l3_entries": stats.l3_entries,
             "l3_storage_bytes": stats.l3_storage_bytes,
+            // Index-health signals: hnsw index growth and the last
+            // consolidation time (both computed but previously invisible).
+            "hnsw_entries": stats.hnsw_entries,
+            "last_consolidation": stats.last_consolidation,
+            "l3_tokens_used_today": stats.l3_tokens_used_today,
             "stores": counters.stores,
             "recalls": counters.recalls,
             "recall_hits": counters.recall_hits,
