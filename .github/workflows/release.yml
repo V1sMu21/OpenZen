@@ -57,12 +57,18 @@ jobs:
       - name: Build release bundle
         run: cargo tauri build
 
+      - name: Extract current version notes
+        # CHANGELOG.md keeps the full history; the Release page must only show
+        # the section of the tag being published — everything from its
+        # `## vX.Y.Z` heading until the next `## ` heading.
+        run: awk '/^## /{n++} n==1' CHANGELOG.md > RELEASE_NOTES.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body_path: CHANGELOG.md
+          body_path: RELEASE_NOTES.md
           update_release: true
           overwrite: true
           files: |
