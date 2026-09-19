@@ -816,12 +816,44 @@ pub fn get_quality_report(state: State<'_, Arc<AppState>>) -> serde_json::Value 
         }
     }
 
+    // P2-12: denominators and rates, not just counts. The counts alone
+    // could not answer "is delivery quality improving": a pass count
+    // means nothing without attempts, and rework was invisible.
+    let count_of = |map: &std::collections::BTreeMap<String, u64>, key: &str| -> u64 {
+        map.get(key).copied().unwrap_or(0)
+    };
+    let rates_for = |map: &std::collections::BTreeMap<String, u64>| -> serde_json::Value {
+        let passed = count_of(map, "review_passed");
+        let failed = count_of(map, "review_failed");
+        let attempts = passed + failed;
+        let deliveries = count_of(map, "delivery_success");
+        let assertion_failures = count_of(map, "assertion_failed");
+        let rate = |num: u64, den: u64| -> Option<f64> {
+            if den == 0 {
+                None
+            } else {
+                Some((num as f64 / den as f64 * 1000.0).round() / 1000.0)
+            }
+        };
+        serde_json::json!({
+            "review_attempts": attempts,
+            "review_pass_rate": rate(passed, attempts),
+            "review_rework_rate": rate(failed, attempts),
+            "deliveries": deliveries,
+            // How often a delivery needed an assertion-failure round.
+            "assertion_failure_rate": rate(assertion_failures, deliveries),
+            "review_coverage": rate(attempts, deliveries),
+        })
+    };
+
     let report = serde_json::json!({
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "projects_scanned": dirs.len(),
         "window_days": 7,
         "week": week,
         "total": total,
+        "rates_week": rates_for(&week),
+        "rates_total": rates_for(&total),
     });
     let out_dir = crate::data_dir().join("openzen");
     let _ = std::fs::create_dir_all(&out_dir);
