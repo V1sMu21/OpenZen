@@ -1,15 +1,25 @@
 # OpenZen
 
-> **A cat that remembers you**
-> A fully-local autonomous agent harness built for Apple Silicon unified memory — local inference (oMLX) + local memory (ERME) + a Ru-ware celadon desktop.
+> **A cat that remembers you.**
+> A fully-local AI agent that lives on your Mac — it runs your tasks on your own machine, remembers between sessions, and never phones home.
 
-![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange)
-![Tauri](https://img.shields.io/badge/Tauri-2.x-blue)
+[![Release](https://img.shields.io/github/v/release/V1sMu21/OpenZen)](https://github.com/V1sMu21/OpenZen/releases/latest)
+[![CI](https://github.com/V1sMu21/OpenZen/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/V1sMu21/OpenZen/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-93c3d6)
-![Version](https://img.shields.io/badge/version-v0.1.0-93c3d6)
-![License](https://img.shields.io/badge/License-MIT-lightgrey)
+[![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
 **English** · [中文](README.zh-CN.md)
+
+<img src="docs/screenshots/runtime-demo.gif" width="100%">
+
+*Real runtime capture — a local model, a ~2.5-minute task compressed into a 7-second loop: Kai-style handwriting **thinking blocks**, **tool calls** as underglaze patterns (one write fails, auto-relocates and succeeds), tokens **streaming into the glaze**, a 2/2 checklist closing out, the 📋 **delivery contract**, and Ah-Qing settling back into its "done" pose.*
+
+**⬇️ [Download the latest dmg](https://github.com/V1sMu21/OpenZen/releases/latest)** — drag into Applications, point OpenZen at a local model server, and go. No account, no telemetry, works offline.
+
+- 🔒 **Fully local** — inference (oMLX / LM Studio / Ollama / any OpenAI-compatible server, or a cloud API), memory and every file stay on your machine;
+- 🧠 **Memory that compounds** — a 7×24 resident companion: checkpoint resume, a lessons ledger, reflection loops; your history is an asset, not a scrollback buffer;
+- ✅ **Quality-gated delivery** — acceptance assertions, independent review and a mandatory delivery contract before a task may call itself done;
+- 🏺 **A desktop you can live in** — Song-celadon "artifact grammar" UI, a streaming timeline that folds itself, and a desktop kitten; the same agent also answers on WeChat / Feishu / Telegram.
 
 ---
 
@@ -26,6 +36,19 @@ OpenZen is designed for that machine: a **fully local** autonomous agent harness
 It's also a **7×24 resident companion**: interrupted sessions resume from checkpoints, and every delivery — success or failure — is remembered and turned into experience for the next task. That's the compounding a session-based harness cannot do.
 
 > Current form: macOS Apple Silicon desktop app (Tauri). TUI and WebUI have been removed from the product surface; the desktop experience is the focus.
+
+---
+
+## Quick Start
+
+1. **Download** the latest [dmg](https://github.com/V1sMu21/OpenZen/releases/latest) (CI builds one for every release) and drag it into Applications;
+2. **Bring a model** — start any OpenAI-compatible local server: oMLX on Apple Silicon (MLX, up to 256K context), LM Studio, Ollama or `llama.cpp-server`; a cloud API works too (25 model slots, local-first);
+3. **Point OpenZen at it** — settings → models (defaults to `http://127.0.0.1:8000/v1`);
+4. **Talk** — the agent plans, runs tools, verifies its own delivery, and remembers.
+
+**System requirements**: macOS on Apple Silicon (arm64). 16GB RAM runs 7–14B models comfortably; 64GB+ unlocks the large-context models this design targets (the 256GB M3 Ultra is the sweet spot).
+
+**Data & privacy**: everything stays on your machine under `~/.openzen/` (`workspace/`, `memory_erme/`, `harness/`, `logs/`). No accounts, no telemetry.
 
 ---
 
@@ -108,16 +131,6 @@ The same agent kernel also connects to **WeChat, Feishu (Lark) and Telegram** vi
 
 ---
 
-## Runtime demo
-
-A real runtime capture (local model **DeepSeek-V4-Flash-0731 · locally deployed**; task: write and run a script printing the first 20 Fibonacci numbers; the ~2.5-minute run compressed into a 7-second loop):
-
-<img src="docs/screenshots/runtime-demo.gif" width="100%">
-
-You can see: the **thinking blocks** in Kai-style handwriting, **tool calls** as underglaze patterns (one write initially rejected, then auto-relocated and succeeded), tokens **streaming into the glaze**, the 2/2 checklist closing out, the 📋 **delivery contract**, and **Ah-Qing** in the bottom-right corner changing states — settling back into its "done" form when the task finishes.
-
----
-
 ## Design Philosophy
 
 ### Functional design
@@ -145,28 +158,6 @@ Quality is a loop, not a checkpoint: failure → reflection log → ledger lesso
 1. The "soul layer" is a state machine plus text generation, not consciousness;
 2. The "magic chemistry" is an **emergent** product of memory density × interaction count × model capability — not a deliverable. Persisting past three months of use is a precondition for the vision;
 3. The value model **suggests, never decides** — progressing very cautiously.
-
----
-
-## Quick Start
-
-> Current distribution: one-click dmg from GitHub Releases. No compilation needed.
-
-**System requirements**
-
-- macOS on Apple Silicon (arm64)
-- 64GB+ RAM recommended; 256GB unified memory (M3 Ultra) is the design target
-- [oMLX](https://github.com/) local inference server (step 3)
-
-**Install**
-
-1. Download `OpenZen-vX.Y.Z-aarch64.dmg` from **GitHub Releases** (built automatically by CI for every version tag);
-2. Drag into Applications, launch OpenZen;
-3. Install and start the oMLX inference server, load a model (256K-context MXFP4 quantized models recommended — e.g. MLX builds of Qwen3.8-Flash-Next / DeepSeek-V4-Flash-0731);
-4. In the OpenZen **settings panel → models**, select local oMLX (defaults to `http://127.0.0.1:8000/v1`);
-5. Start a new session and talk.
-
-**Data & privacy**: everything stays on your machine under `~/.openzen/` (`workspace/`, `memory_erme/`, `harness/`, `logs/`). No accounts, no telemetry.
 
 ---
 
@@ -318,6 +309,12 @@ OpenZen follows the excellent experience of preceding harnesses, with explicit c
 - **Four-stage verification pipeline**: `cargo check` → `cargo test` (600+ workspace tests) → `cargo clippy` → Tauri E2E (CGEvent-driven real desktop interaction + screenshot verification);
 - **ERME ships 221 tests**;
 - **Release flow**: versions derived from Conventional Commits via git-cliff; the release script gates on the test suite before tagging; GitHub Actions builds the dmg and attaches it to the Release.
+
+---
+
+## Feedback
+
+Found a bug or want a feature? [Open an issue](https://github.com/V1sMu21/OpenZen/issues) — and if OpenZen earns a place on your Mac, a ⭐ helps others find it too.
 
 ---
 

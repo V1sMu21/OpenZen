@@ -1,25 +1,34 @@
 # OpenZen
 
-> **一只会记住你的猫**
-> 为 Apple Silicon 统一内存而生的完全本地自主 Agent Harness——本地推理（oMLX）+ 本地记忆（ERME）+ 器物语法桌面端。
+> **一只会记住你的猫。**
+> 完全跑在你 Mac 上的本地 AI Agent——任务在你自己的机器上执行，跨会话记得你，永不上传。
 
-![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange)
-![Tauri](https://img.shields.io/badge/Tauri-2.x-blue)
+[![Release](https://img.shields.io/github/v/release/V1sMu21/OpenZen)](https://github.com/V1sMu21/OpenZen/releases/latest)
+[![CI](https://github.com/V1sMu21/OpenZen/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/V1sMu21/OpenZen/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-93c3d6)
-![Version](https://img.shields.io/badge/version-v0.1.0-93c3d6)
-![License](https://img.shields.io/badge/License-MIT-lightgrey)
+[![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
 [English](README.md) · **中文**
+
+<img src="docs/screenshots/runtime-demo.gif" width="100%">
+
+*真实运行画面——本地模型，约 2.5 分钟的任务压缩为 7 秒循环：楷体手迹的**思考块**、釉下暗纹式的**工具调用**（一次落笔失败后自动改道成功）、token **流式入釉**、清单 2/2 收束、📋 **交付说明**契约，以及阿青回到「完成」形态。*
+
+**⬇️ [下载最新 dmg](https://github.com/V1sMu21/OpenZen/releases/latest)**——拖入 Applications，指向本地模型服务即可开始。无账号、无遥测、可离线。
+
+- 🔒 **完全本地** —— 推理（oMLX / LM Studio / Ollama / 任意 OpenAI 兼容服务，也可接云端 API）、记忆与文件全部留在你的机器上；
+- 🧠 **会复利的记忆** —— 7×24 常驻伙伴：断点续跑、教训账本、反思回路；历史是资产，不是滚动缓冲区；
+- ✅ **带质量门的交付** —— 验收断言 + 独立评审 + 交付说明，任务不能自说自话地「完成」；
+- 🏺 **值得住下来的桌面** —— 宋韵天青「器物语法」UI、自动折叠的时间线、桌面小猫；同一内核也接微信 / 飞书 / Telegram。
 
 ---
 
 ## 目录
 
 - [为什么会有 OpenZen](#为什么会有-openzen)
-- [主要特点](#主要特点)
-- [运行效果](#运行效果)
-- [设计哲学](#设计哲学)
 - [快速开始](#快速开始)
+- [主要特点](#主要特点)
+- [设计哲学](#设计哲学)
 - [与现有 Harness 的对比](#与现有-harness-的对比)
 - [与现有记忆引擎的对比](#与现有记忆引擎的对比)
 - [Bench：三任务三方实测](#bench三任务三方实测)
@@ -27,6 +36,7 @@
 - [架构一瞥](#架构一瞥)
 - [路线与状态](#路线与状态)
 - [测试与验证](#测试与验证)
+- [反馈](#反馈)
 - [License](#license)
 
 ---
@@ -44,6 +54,19 @@ OpenZen 就是为这台机器设计的：一个**完全本地**的自主 Agent H
 它还是一只 **7×24 常驻的伙伴**：会话中断可以断点续跑，每次交付的成败会被记住并转化为下一次的经验——这是纯会话型 Harness 做不到的复利。
 
 > 目前形态：macOS Apple Silicon 桌面端（Tauri）。TUI 与 WebUI 已从产品形态中移除，专注桌面体验。
+
+---
+
+## 快速开始
+
+1. **下载**最新 [dmg](https://github.com/V1sMu21/OpenZen/releases/latest)（CI 为每个 release 自动构建），拖入 Applications；
+2. **准备一个模型**——启动任意 OpenAI 兼容的本地推理服务：Apple Silicon 上的 oMLX（MLX，最高 256K 上下文）、LM Studio、Ollama 或 `llama.cpp-server` 都可以；接云端 API 也行（25 个模型槽位，本地优先）；
+3. **指向它**——OpenZen 设置面板 → 模型（默认 `http://127.0.0.1:8000/v1`）；
+4. **开始对话**——Agent 会先计划、再跑工具、自验交付，并记住这次合作。
+
+**系统要求**：macOS（Apple Silicon，arm64）。16GB 内存可流畅跑 7–14B 模型；64GB+ 才能发挥本设计目标的大上下文模型（256GB 统一内存的 M3 Ultra 是理想形态）。
+
+**数据与隐私**：所有数据都留在你机器上的 `~/.openzen/`（`workspace/`、`memory_erme/`、`harness/`、`logs/`）。无账号、无遥测。
 
 ---
 
@@ -126,16 +149,6 @@ OpenZen 的 Agent 默认名是**阿青**（用户可以随时自定义）。桌�
 
 ---
 
-## 运行效果
-
-一段真实的运行时画面（本地模型 **DeepSeek-V4-Flash-0731 · 本地部署**，任务：编写并运行打印前 20 个斐波那契数的脚本，全程约 2.5 分钟，压缩为 7 秒循环）：
-
-<img src="docs/screenshots/runtime-demo.gif" width="100%">
-
-画面里可以看到：楷体手迹的**思考块**、釉下暗纹式的**工具调用**（一次落笔失败后自动改道成功）、token **流式入釉**、待办清单 2/2 收束、📋 **交付说明**契约，以及右下角「阿青」的状态变化——任务完成后它会回到「完成」形态。
-
----
-
 ## 设计哲学
 
 ### 功能设计
@@ -163,28 +176,6 @@ token 经济学 + 恒定成本渲染。系统提示词保持 ~4.4KB；Skill/SOP 
 1. 所谓「灵魂层」本质是状态机 + 文本生成，不是意识；
 2. 「神奇化学反应」是记忆密度 × 交互次数 × 模型能力的**涌现品**，不是交付物——坚持使用三个月以上，是愿景成立的前提；
 3. 价值模型永远**只建议不代替**，非常谨慎地渐进。
-
----
-
-## 快速开始
-
-> 当前发布渠道：GitHub Releases 的 dmg 一键安装，无需编译。
-
-**系统要求**
-
-- macOS（Apple Silicon，arm64）
-- 建议内存 64GB+；256GB 统一内存（M3 Ultra）为理想设计目标
-- 本地推理需要 [oMLX](https://github.com/) 服务器（见步骤 3）
-
-**安装**
-
-1. 从 **GitHub Releases** 下载 `OpenZen-vX.Y.Z-aarch64.dmg`（CI 为每个版本 tag 自动构建）；
-2. 拖入 Applications，启动 OpenZen；
-3. 安装并启动 oMLX 本地推理服务器，加载模型（推荐 256K 上下文的 MXFP4 量化模型，如 Qwen3.8-Flash-Next 或 DeepSeek-V4-Flash-0731 的 MLX 版本）；
-4. 在 OpenZen **设置面板 → 模型**中选择本地 oMLX（默认 `http://127.0.0.1:8000/v1`，无需修改）；
-5. 新建会话，开始对话。
-
-**数据与隐私**：一切数据留在本机 `~/.openzen/`（`workspace/` 工作目录、`memory_erme/` 记忆库、`harness/` 教训账本、`logs/` 日志）。无需账号、无遥测。
 
 ---
 
@@ -336,6 +327,12 @@ OpenZen 借鉴前人的优秀经验一路走来，借鉴清单（逐项明确来
 - **四级验证管道**：`cargo check` → `cargo test`（workspace 600+ 测试）→ `cargo clippy` → Tauri E2E（CGEvent 驱动真实桌面交互 + 截图验证）；
 - **ERME 自带 221 项测试**；
 - **发布流程**：版本号由 git-cliff 从 Conventional Commits 派生；release 脚本先过测试门禁再打 tag；GitHub Actions 自动构建 dmg 并挂到 Release。
+
+---
+
+## 反馈
+
+发现 Bug 或想要新功能？欢迎 [提 issue](https://github.com/V1sMu21/OpenZen/issues)——如果 OpenZen 在你的 Mac 上住了下来，一个 ⭐ 也能帮更多人找到它。
 
 ---
 
