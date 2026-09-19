@@ -77,9 +77,15 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
     let mut restart_count = 0u32;
     let max_restarts = config.max_restarts;
 
-    // Start background scheduler
+    // Start background scheduler.
+    //
+    // SessionCleanup is deliberately NOT registered here: daemon mode has
+    // no in-process session store, so the task would do a disk-side
+    // read-modify-write of sessions.json while the serve child owns the
+    // authoritative in-memory copy — the next serve save() resurrects
+    // every "deleted" session. Cleanup runs where the store lives
+    // (desktop app / an explicit API call).
     let mut scheduler = oz_scheduler::Scheduler::new();
-    scheduler.register(Box::new(oz_scheduler::SessionCleanup::default()));
     scheduler.register(Box::new(oz_scheduler::TrustDecay::default()));
     if config.dir.join(oz_skill_mcp::SKILL_MCP_DIR).exists() {
         scheduler.register(Box::new(oz_scheduler::SkillMcpScan::default()));
@@ -117,15 +123,21 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
             .await
             .context("Failed to write PID file")?;
         tracing::info!("PID {} written to {}", pid, pid_path.display());
+    }
 
-        let pid_path_cleanup = pid_path.clone();
+    // ONE Ctrl+C listener for the whole daemon lifetime: it removes the
+    // pid file (if configured) and requests a graceful shutdown through
+    // the command channel. Previously a listener was spawned per
+    // monitor_child_with_commands call, so every restart leaked a
+    // never-exiting task holding its own stale flag.
+    {
+        let pid_path_cleanup = config.pid_file.clone();
         let cmd_tx_for_ctrlc = config.cmd_tx.clone();
         tokio::spawn(async move {
-            // Remove the pid file, then signal the supervisor loop to shut
-            // down gracefully. A raw process::exit(0) here raced the graceful
-            // stop path and could orphan the serve child process.
             signal::ctrl_c().await.ok();
-            tokio::fs::remove_file(&pid_path_cleanup).await.ok();
+            if let Some(path) = &pid_path_cleanup {
+                tokio::fs::remove_file(path).await.ok();
+            }
             let _ = cmd_tx_for_ctrlc.send(Some(DaemonCommand::Shutdown));
         });
     }
@@ -144,11 +156,11 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
         let mut child = spawn_serve(&config).await?;
 
         // Wait for child to be ready (health check)
+        let spawned_at = std::time::Instant::now();
         let health_ok = wait_for_health(config.port, Duration::from_secs(30)).await;
         if !health_ok {
             tracing::warn!("Health check failed, killing unresponsive child");
-            child.kill().await?;
-            child.wait().await?;
+            reap_child(&mut child).await;
         } else {
             tracing::info!("Serve process is healthy on port {}", config.port);
         }
@@ -161,6 +173,19 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
         )
         .await;
 
+        // A child that ran healthily for a while is not a crash-loop:
+        // reset the counter so one bad day months later doesn't trip the
+        // give-up threshold accumulated across restarts.
+        if spawned_at.elapsed() >= Duration::from_secs(300) {
+            if restart_count > 0 {
+                tracing::info!(
+                    "[daemon] child stayed up for {:?}; resetting restart counter (was {restart_count})",
+                    spawned_at.elapsed()
+                );
+            }
+            restart_count = 0;
+        }
+
         match monitor_result {
             MonitorOutcome::Exited(status) => {
                 tracing::warn!("Serve process exited with status: {status}");
@@ -172,20 +197,22 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
             }
             MonitorOutcome::Unhealthy => {
                 tracing::warn!("Health check failed, restarting...");
-                child.kill().await?;
-                child.wait().await?;
+                reap_child(&mut child).await;
                 restart_count += 1;
             }
             MonitorOutcome::ShutdownRequested => {
                 tracing::info!("Shutdown requested, stopping daemon");
-                child.kill().await?;
-                child.wait().await?;
+                reap_child(&mut child).await;
+                // Clean exit path: remove a stale pid file if the signal
+                // did not come through the Ctrl+C listener (Terminate).
+                if let Some(path) = &config.pid_file {
+                    tokio::fs::remove_file(path).await.ok();
+                }
                 return Ok(());
             }
             MonitorOutcome::UpgradePerformed => {
                 tracing::info!("Upgrade performed, will restart with new binary");
-                child.kill().await?;
-                child.wait().await?;
+                reap_child(&mut child).await;
                 // Reset restart count on successful upgrade
                 restart_count = 0;
                 // Fall through to restart the loop which will use the new binary
@@ -200,11 +227,30 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
         }
 
         if restart_count > max_restarts {
+            // Leave the port/pid breadcrumbs for diagnosis instead of a
+            // silent bail.
+            tracing::error!(
+                "[daemon] max restarts ({max_restarts}) exceeded; last exit={monitor_result:?}; giving up (pid file left in place for diagnosis)"
+            );
             anyhow::bail!("Max restarts ({max_restarts}) exceeded, giving up");
         }
 
-        tracing::info!("Restarting in 2 seconds...");
-        sleep(Duration::from_secs(2)).await;
+        // Exponential backoff: a crash loop must not hammer spawn every 2s.
+        let backoff_secs = (2u64 << restart_count.min(5)).min(60);
+        tracing::info!("Restarting in {backoff_secs} seconds...");
+        sleep(Duration::from_secs(backoff_secs)).await;
+    }
+}
+
+/// Best-effort child reaping: a kill() racing a natural exit returns ESRCH/
+/// ECHILD and must NEVER terminate the supervisor — only spawn failures are
+/// fatal (`?` on spawn in the loop above).
+async fn reap_child(child: &mut Child) {
+    if let Err(e) = child.kill().await {
+        tracing::debug!("[daemon] kill on already-exited child: {e}");
+    }
+    if let Err(e) = child.wait().await {
+        tracing::debug!("[daemon] wait on already-reaped child: {e}");
     }
 }
 
@@ -257,10 +303,11 @@ async fn wait_for_health(port: u16, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
         match client.get(&url).send().await {
+            // 2xx only: /api/health is always registered, so a 404 means
+            // a DIFFERENT process owns the port (treating it as healthy
+            // made the daemon adopt a stranger's server and restart-loop
+            // against a child that failed to bind).
             Ok(resp) if resp.status().is_success() => return true,
-            Ok(resp) if resp.status().as_u16() == 404 => {
-                return true;
-            }
             _ => {}
         }
         sleep(Duration::from_millis(500)).await;
@@ -282,16 +329,6 @@ async fn monitor_child_with_commands(
         .ok()
         .unwrap_or_default();
 
-    let mut shutdown = false;
-
-    // Spawn a task to catch Ctrl+C
-    let shutdown_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = shutdown_flag.clone();
-    tokio::spawn(async move {
-        signal::ctrl_c().await.ok();
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    });
-
     loop {
         tokio::select! {
             // Check if child exited
@@ -303,15 +340,8 @@ async fn monitor_child_with_commands(
             }
             // Periodic health check + command polling
             _ = sleep(Duration::from_secs(check_interval_secs)) => {
-                if shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    shutdown = true;
-                }
-
-                if shutdown {
-                    return MonitorOutcome::ShutdownRequested;
-                }
-
-                // Poll for daemon commands
+                // Poll for daemon commands (Ctrl+C arrives as a Shutdown
+                // command through the single outer listener)
                 let cmd = {
                     let mut guard = cmd_rx.lock().await;
                     // Check if there's a new value without blocking
@@ -353,10 +383,12 @@ async fn monitor_child_with_commands(
                     None => {}
                 }
 
-                // Health check
+                // Health check. Only 2xx counts: /api/health is always
+                // registered, so a 404 means the port belongs to something
+                // else (often a leftover serve) — treating it as healthy
+                // produced endless "restart -> occupied port" loops.
                 match client.get(&health_url).send().await {
                     Ok(resp) if resp.status().is_success() => {}
-                    Ok(resp) if resp.status().as_u16() == 404 => {}
                     _ => {
                         tracing::warn!("Health check failed for port {}", port);
                         return MonitorOutcome::Unhealthy;

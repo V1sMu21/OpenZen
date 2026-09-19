@@ -76,8 +76,12 @@ impl PlatformAdapter for WechatAdapter {
         loop {
             match bot.get_updates(30).await {
                 Ok(msgs) => {
-                    // Every completed long-poll proves the loop is alive.
-                    conn.report_activity();
+                    // Every completed long-poll proves the loop is alive —
+                    // and RESTORES connected: a single transient error
+                    // marks the adapter disconnected, and without this
+                    // self-heal the health stayed permanently UNHEALTHY
+                    // until process restart even though polling resumed.
+                    conn.report_connected();
                     for msg in &msgs {
                         if !WxBotClient::is_user_msg(msg) {
                             continue;

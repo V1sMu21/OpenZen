@@ -146,10 +146,11 @@ impl PlatformAdapter for TelegramAdapter {
     }
 
     async fn health(&self) -> PlatformHealth {
-        // The connected flag (repl exited = disconnected) is the
-        // authoritative signal; staleness is lenient because an idle bot
-        // legitimately receives no updates.
-        let (connected, last) = self.conn.snapshot(1800);
+        // Only the connected flag is authoritative (repl exited =
+        // disconnected). No staleness window: an idle bot legitimately
+        // receives no updates for hours, and a 30-minute window used to
+        // report false UNHEALTHY transitions every quiet night.
+        let (connected, last) = self.conn.snapshot(i64::MAX);
         if connected {
             PlatformHealth::healthy()
         } else {
