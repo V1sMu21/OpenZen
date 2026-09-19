@@ -225,6 +225,37 @@ function hashMarkdownText(text: string): number {
   return hash >>> 0;
 }
 
+// Block-level tags produced by the replacements above (lists, code fences,
+// tables, quotes, headings, rules) plus the KaTeX display container. A `<p>`
+// may not contain any of them: when the old wrap step wrapped a chunk that
+// mixed inline text with block markup, the browser hoisted the blocks out of
+// the `<p>` and every interior `\n`→`<br>` became a stray empty line.
+const MD_BLOCK_TOKEN =
+  /<(?:ul|ol|pre|table|blockquote|div|h[1-5])\b[^>]*>[\s\S]*?<\/(?:ul|ol|pre|table|blockquote|div|h[1-5])>|<hr\b[^>]*>/g;
+
+function wrapInlineSegment(seg: string): string {
+  seg = seg.trim();
+  if (!seg) return "";
+  return `<p>${seg.replace(/\n/g, "<br>")}</p>`;
+}
+
+/** Split a `\n\n`-delimited chunk into block elements (passed through) and
+ *  inline runs (wrapped in `<p>`). Markup emitted by this renderer never
+ *  nests the same block tag, so the non-greedy close scan is exact. */
+function wrapParagraphChunk(chunk: string): string {
+  chunk = chunk.trim();
+  if (!chunk) return "";
+  const out: string[] = [];
+  let last = 0;
+  for (const m of chunk.matchAll(MD_BLOCK_TOKEN)) {
+    if (m.index > last) out.push(wrapInlineSegment(chunk.slice(last, m.index)));
+    out.push(m[0]);
+    last = m.index + m[0].length;
+  }
+  if (last < chunk.length) out.push(wrapInlineSegment(chunk.slice(last)));
+  return out.join("");
+}
+
 export function renderMarkdown(
   text: string,
   opts?: { highlight?: boolean; mathVersion?: boolean },
@@ -310,8 +341,14 @@ export function renderMarkdown(
   html = html.replace(/^&gt; (.+)$/gm, "<blockquote>$1</blockquote>");
   html = html.replace(/<\/blockquote>\n<blockquote>/g, "\n");
 
+  // The `\n(?!\n)` lookahead keeps the newline that precedes a blank line:
+  // consuming it merged the paragraph break after a list into the list match,
+  // so the following text lost its `\n\n` boundary and the paragraph step
+  // below wrapped list + rest-of-message into one giant `<p>` (invalid
+  // p>ul nesting; the browser's reflow turned the interior `\n`→`<br>`s
+  // into stray empty lines — the "uneven paragraph spacing" bug).
   html = html.replace(
-    /(?:^- \[[ x]\] .+(?:\n|$))+/gm,
+    /(?:^- \[[ x]\] .+(?:\n(?!\n)|$))+/gm,
     (match) => `<ul>${match.replace(/^- \[([ x])\] (.+)$/gm, (_m: string, checked: string, item: string) => {
       const attr = checked === "x" ? ' checked=""' : "";
       return `<li><input type="checkbox" disabled${attr}> ${item}</li>`;
@@ -319,14 +356,22 @@ export function renderMarkdown(
   );
 
   html = html.replace(
-    /(?:^- .+(?:\n|$))+/gm,
+    /(?:^- .+(?:\n(?!\n)|$))+/gm,
     (match) => `<ul>${match.replace(/^- (.+)$/gm, "<li>$1</li>")}</ul>`,
   );
 
   html = html.replace(
-    /(?:^\d+\. .+(?:\n|$))+/gm,
+    /(?:^\d+\. .+(?:\n(?!\n)|$))+/gm,
     (match) => `<ol>${match.replace(/^\d+\. (.+)$/gm, "<li>$1</li>")}</ol>`,
   );
+
+  // A blank line between items ends the capture above, so one logical list
+  // (CommonMark "loose list") could come out as adjacent same-tag blocks
+  // with inter-list margins between every pair of items. Whitespace-only
+  // adjacency means it is one list — merge the blocks back together. The
+  // separator re-enters as a single `\n` so the `\n\n` paragraph split
+  // below cannot cut the merged list open.
+  html = html.replace(/<\/(ul|ol)>\s*<\1>/g, "\n");
 
   html = html.replace(
     /^\|(.+)\|\n\|([-| :]+)\|\n((?:\|.+\|\n?)+)/gm,
@@ -411,14 +456,7 @@ export function renderMarkdown(
     },
   );
   const paragraphs = html.split(/\n\n+/);
-  html = paragraphs
-    .map((p) => {
-      p = p.trim();
-      if (!p) return "";
-      if (/^<(?:h[1-5]|hr|ul|ol|li|blockquote)/.test(p) || p.startsWith("%%PH")) return p;
-      return `<p>${p.replace(/\n/g, "<br>")}</p>`;
-    })
-    .join("");
+  html = paragraphs.map(wrapParagraphChunk).join("");
   html = html.replace(/%%PH(\d+)%%/g, (_m: string, idx: string) => placeholders[parseInt(idx)] ?? "");
 
   // Replacing an existing (verified-mismatch) entry must first release

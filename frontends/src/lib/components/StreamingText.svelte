@@ -14,6 +14,14 @@
   let containerEl: HTMLDivElement | undefined = $state();
   let renderedLen = 0;
   let pendingText = "";
+  // Trailing '\n's that are consumed (renderedLen advanced past them) but
+  // deliberately NOT painted as <br>. A text part almost always ends with
+  // "\n\n" right before the next part (tool call) arrives — painting them
+  // showed one-to-two blank lines between the reply and the first card
+  // below it, a gap that vanished only at finalize (renderMarkdown trims).
+  // Held newlines are restored on the next append: once content follows
+  // them they are interior paragraph breaks again.
+  let tailHold = 0;
   let rafId: number | undefined;
   // Full re-render is triggered when a large jump happens (e.g.
   // historical session restore) or when the pending slice grows
@@ -23,27 +31,30 @@
   function commitAppend() {
     rafId = undefined;
     if (!containerEl || pendingText.length === 0) return;
+    // Restore held newlines: with new content following they are interior.
+    let slice = "\n".repeat(tailHold) + pendingText;
+    tailHold = 0;
+    // Hold back the new trailing newlines (see tailHold above).
+    const tail = slice.match(/\n+$/);
+    if (tail) {
+      tailHold = tail[0].length;
+      slice = slice.slice(0, slice.length - tailHold);
+    }
     // Block-level syntax in a large slice needs a structural render;
     // plain-text bulk (fast local prefill) appends in segments so the
     // work per frame stays O(delta) instead of re-rendering the whole
     // message (which made long prefills quadratic).
     const BLOCK_TRIGGER =
       /(?:^|\n)(?:#{1,6} |```|> |\| |-{3,}|={3,}|\*\*\*|\d+\. )/;
-    if (pendingText.length > INLINE_WINDOW && BLOCK_TRIGGER.test(pendingText)) {
-      // Strip leading whitespace to match the final `renderMarkdown`
-      // pass (it trims the text), so the live view has the same
-      // top spacing as the finalized one.
-      containerEl.innerHTML = renderStreamingFragment(text.replace(/^\s+/, ""));
-    } else if (pendingText.length > INLINE_WINDOW) {
-      let slice = pendingText;
-      if (containerEl.childNodes.length === 0) {
-        slice = slice.replace(/^\s+/, "");
-        if (slice.length === 0) {
-          renderedLen = text.length;
-          pendingText = "";
-          return;
-        }
-      }
+    if (slice.length > INLINE_WINDOW && BLOCK_TRIGGER.test(slice)) {
+      // Full repaint matching the final `renderMarkdown` pass: it trims
+      // both ends, so strip leading whitespace and drop the trailing
+      // run entirely (nothing is held after a full repaint).
+      containerEl.innerHTML = renderStreamingFragment(
+        text.replace(/^\s+/, "").replace(/\s+$/, ""),
+      );
+      tailHold = 0;
+    } else if (slice.length > INLINE_WINDOW) {
       for (let off = 0; off < slice.length; off += INLINE_WINDOW) {
         containerEl.insertAdjacentHTML(
           "beforeend",
@@ -57,12 +68,12 @@
       // from the thinking card" gap that disappears once the part is
       // finalized (renderMarkdown trims). Subsequent slices keep
       // their newlines so paragraph breaks still render.
-      let slice = pendingText;
       if (containerEl.childNodes.length === 0) {
         slice = slice.replace(/^\s+/, "");
         if (slice.length === 0) {
-          // First frame was only whitespace — advance the pointer so
-          // the skipped newlines are not re-rendered on the next delta.
+          // First frame was only whitespace — drop it permanently (it is
+          // leading whitespace of the eventual text, not a trailing run).
+          tailHold = 0;
           renderedLen = text.length;
           pendingText = "";
           return;
@@ -81,6 +92,7 @@
       if (containerEl) containerEl.innerHTML = "";
       renderedLen = 0;
       pendingText = "";
+      tailHold = 0;
     }
     if (text.length > renderedLen) {
       pendingText = text.slice(renderedLen);
