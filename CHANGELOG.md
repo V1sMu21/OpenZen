@@ -1,5 +1,39 @@
 
-## Unreleased
+## v0.2.2 (2026-09-19)
+
+### ⚙️ Miscellaneous Tasks
+
+- **scripts:** Stable local signing identity for TCC-safe installs
+
+### 🎨 Styling
+
+- Cargo fmt
+
+### 🐛 Bug Fixes
+
+- **llm:** Wrap non-object tool_call arguments for strict gateways
+- **core:** Ride out gateway outage bursts — 8 retries, 60s backoff
+- **llm:** Recover degenerate tool-argument shapes at stream parse
+- **llm:** Normalize tool args on all stream paths; drop poisoned calls
+- **ui:** Stable scrollbar gutter on messages-scroll stops layout shake
+- **sessions:** Never auto-prune sessions with message content
+- **ui:** Finalize replayed tool calls, pair saved results, scope auto-scroll
+- **ui:** Stop displayGroups from dropping adjacent intervention cards
+- **ui:** Dedupe final reply, keep visible rows, preserve live runs
+- **llm:** Repair tool protocol for strict gateways
+- **app:** Give manual compaction the summary model's real budget
+- **app:** Stop auto-archiving idle sessions
+
+### 📚 Documentation
+
+- AGENTS.md — build the macOS app with cargo tauri build only
+- Frontend-only changes need src-tauri touch to re-embed assets
+- **llm:** Blank line before normalize_tool_args summary paragraph
+
+### 🚀 Features
+
+- **app:** Drop the running-tool badge on thinking cards
+## v0.2.1 (2026-09-08)
 
 ### 🎨 Styling
 
