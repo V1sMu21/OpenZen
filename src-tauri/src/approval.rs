@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use oz_safety::{ApprovalDecision, ApprovalError, ApprovalHandler, ApprovalRequest};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
 
 use crate::AppState;
@@ -131,14 +131,22 @@ impl ApprovalHandler for TauriApprovalHandler {
 
         // Route to the owning window when a dedicated session window exists;
         // fall back to broadcast (main window / closed session window).
+        //
+        // emit_to returns Ok even when no window matches the label, so the
+        // old code considered a CLOSED session window "targeted" and the
+        // broadcast fallback never ran — the approval dialog appeared
+        // nowhere and the agent sat until the approval timeout.
         let targeted = {
-            let mapping = crate::lock_poison_guard(&self.session_windows);
-            match mapping.get(&request.session_id) {
-                Some(label) => self
+            let label = {
+                let mapping = crate::lock_poison_guard(&self.session_windows);
+                mapping.get(&request.session_id).cloned()
+            };
+            match label {
+                Some(label) if self.app_handle.get_webview_window(&label).is_some() => self
                     .app_handle
                     .emit_to(label, "sse_event", &payload)
                     .is_ok(),
-                None => false,
+                _ => false,
             }
         };
         if !targeted {

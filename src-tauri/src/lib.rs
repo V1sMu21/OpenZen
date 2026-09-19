@@ -965,6 +965,22 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // Session-window bookkeeping: a destroyed `session-{id}` window
+        // must not leave a dead label in session_windows (approvals would
+        // be routed to a nonexistent window and the fallback broadcast
+        // skipped). The agent run itself keeps going in the background,
+        // matching main-window behavior; approvals then fall back to the
+        // main window's broadcast.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let label = window.label().to_string();
+                if let Some(session_id) = label.strip_prefix("session-") {
+                    let state = window.app_handle().state::<Arc<AppState>>();
+                    lock_poison_guard(&state.session_windows).remove(session_id);
+                    tracing::info!("[session-window] cleaned up mapping for closed window {label}");
+                }
+            }
+        })
         // Auto-update: check/install updates (frontend UpdateButton) and
         // relaunch after install. Endpoints + pubkey are configured in
         // tauri.conf.json under plugins.updater; without them check()
