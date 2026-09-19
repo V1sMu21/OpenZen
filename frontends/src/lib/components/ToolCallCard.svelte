@@ -555,9 +555,9 @@
         <span class="tcc-duration" title="Execution time">{durationLabel}</span>
       {/if}
       {#if hasError}
-        <span class="tcc-status err">朱砂 ✕</span>
+        <span class="tcc-status err">{$t("status.error.short")}</span>
       {:else if toolCall.result || completed}
-        <span class="tcc-status done">已竟</span>
+        <span class="tcc-status done">{$t("status.done.short")}</span>
       {:else}
         <span class="tcc-status running"><span class="run-dot"></span><span>{$t("tool.running")}</span></span>
       {/if}

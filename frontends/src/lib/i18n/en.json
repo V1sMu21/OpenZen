@@ -352,5 +352,8 @@
   "update.available": "Version {version} available — click to install",
   "update.downloading": "Downloading update…",
   "update.installed": "Installed — restarting",
-  "soul.forgetFact": "Forget this"
+  "soul.forgetFact": "Forget this",
+  "status.done.short": "done",
+  "status.error.short": "error",
+  "message.folded": "{count} folded · {tools} tools"
 }

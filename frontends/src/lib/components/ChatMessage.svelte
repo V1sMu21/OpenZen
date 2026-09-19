@@ -386,7 +386,7 @@ import { t, locale, tSync } from "../i18n";
         {#if hasOverflow}
           <button class="timeline-header" onclick={toggleTimeline} type="button" aria-expanded={timelineExpanded} aria-label={$t("message.timeline")}>
             <span class="timeline-label">
-              {$t("message.timeline")} · 折叠 {foldedStats.count} 事 · {foldedStats.toolCount} 工具
+              {$t("message.timeline")} · {$t("message.folded", "…").replace("{count}", String(foldedStats.count)).replace("{tools}", String(foldedStats.toolCount))}
               {#if !timelineExpanded && foldedStats.totalMs > 0} · {formatDurationCompact(foldedStats.totalMs)}{/if}
             </span>
             {#if foldedStats.hasError && !timelineExpanded}

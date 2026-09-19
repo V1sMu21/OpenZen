@@ -301,7 +301,7 @@
               <span class="smc-duration" title="Execution time">{durationLabel}</span>
             {/if}
       {#if toolCall.result || completed}
-        <span class="smc-status done">已竟</span>
+        <span class="smc-status done">{$t("status.done.short")}</span>
       {:else}
         <span class="smc-status running">{$t("tool.running")}</span>
       {/if}

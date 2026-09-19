@@ -352,5 +352,8 @@
   "update.available": "发现新版本 {version}，点击安装",
   "update.downloading": "正在下载更新…",
   "update.installed": "已安装，即将重启",
-  "soul.forgetFact": "遗忘这条"
+  "soul.forgetFact": "遗忘这条",
+  "status.done.short": "已竟",
+  "status.error.short": "朱砂 ✕",
+  "message.folded": "折叠 {count} 事 · {tools} 工具"
 }

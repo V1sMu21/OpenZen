@@ -240,7 +240,7 @@
       {#if hasError}
         <span class="edit-status err">{$t("tool.failed")}</span>
       {:else}
-        <span class="edit-status done">已竟</span>
+        <span class="edit-status done">{$t("status.done.short")}</span>
       {/if}
     {:else}
       <span class="edit-status running">{$t("tool.running")}</span>
