@@ -203,8 +203,13 @@ pub fn build_review_prompt(
 }
 
 /// Tolerantly parse the review JSON response (strips markdown fences and
-/// surrounding prose). Fail-open: unparseable input → pass=true.
-pub fn parse_review_response(raw: &str) -> ReviewVerdict {
+/// surrounding prose).
+///
+/// Returns None when the response contains no reviewable JSON: a reviewer
+/// that answered with prose (or got truncated by a gateway) must not be
+/// recorded as "passed" — the caller treats None as review-unavailable
+/// (fail-open like a transport error, but distinctly logged).
+pub fn parse_review_response(raw: &str) -> Option<ReviewVerdict> {
     let raw = raw.trim();
     let body = strip_markdown_fence(raw);
     let start = body.find('{');
@@ -212,8 +217,11 @@ pub fn parse_review_response(raw: &str) -> ReviewVerdict {
     let json_text = match (start, end) {
         (Some(s), Some(e)) if e > s => &body[s..=e],
         _ => {
-            tracing::warn!("[quality] review response not JSON: {}", truncate(raw, 200));
-            return ReviewVerdict::default();
+            tracing::warn!(
+                "[quality] review response not JSON (review-unavailable, not a pass): {}",
+                truncate(raw, 200)
+            );
+            return None;
         }
     };
     match serde_json::from_str::<serde_json::Value>(json_text) {
@@ -245,19 +253,21 @@ pub fn parse_review_response(raw: &str) -> ReviewVerdict {
                 })
                 .unwrap_or_default();
             if !pass && issues.is_empty() {
-                return ReviewVerdict {
+                return Some(ReviewVerdict {
                     pass: false,
                     issues: vec![ReviewIssue {
                         severity: "high".into(),
                         item: "评审未通过，但未提供具体问题清单".into(),
                     }],
-                };
+                });
             }
-            ReviewVerdict { pass, issues }
+            Some(ReviewVerdict { pass, issues })
         }
         Err(e) => {
-            tracing::warn!("[quality] review JSON parse failed: {e}");
-            ReviewVerdict::default()
+            tracing::warn!(
+                "[quality] review JSON parse failed (review-unavailable, not a pass): {e}"
+            );
+            None
         }
     }
 }
@@ -280,7 +290,7 @@ pub async fn run_independent_review<C: LlmClient>(
     .await
     {
         Ok(Ok(resp)) => {
-            let verdict = parse_review_response(&resp.content);
+            let verdict = parse_review_response(&resp.content)?;
             tracing::info!(
                 "[quality] independent review: pass={} issues={}",
                 verdict.pass,
@@ -313,7 +323,7 @@ pub async fn review_prompt_via_client<C: LlmClient>(
     )
     .await
     {
-        Ok(Ok(resp)) => Some(parse_review_response(&resp.content)),
+        Ok(Ok(resp)) => parse_review_response(&resp.content),
         Ok(Err(e)) => {
             tracing::warn!("[quality] review call failed (fail-open): {e}");
             None
@@ -331,7 +341,7 @@ pub fn review_verdict_from_raw(raw: &str) -> Option<ReviewVerdict> {
     if raw.trim().is_empty() {
         return None;
     }
-    Some(parse_review_response(raw))
+    parse_review_response(raw)
 }
 
 /// Hint injected when the agent did file writes without creating a spec
@@ -1027,7 +1037,7 @@ mod tests {
     #[test]
     fn test_parse_review_json_plain() {
         let raw = r#"{"pass": false, "issues": [{"severity": "high", "item": "资源引用缺失"}]}"#;
-        let v = parse_review_response(raw);
+        let v = parse_review_response(raw).expect("json parses");
         assert!(!v.pass);
         assert_eq!(v.issues.len(), 1);
         assert_eq!(v.issues[0].severity, "high");
@@ -1036,21 +1046,22 @@ mod tests {
     #[test]
     fn test_parse_review_json_in_fence() {
         let raw = "评审结果：\n```json\n{\"pass\": true, \"issues\": [{\"severity\": \"low\", \"item\": \"命名可优化\"}]}\n```\n结束";
-        let v = parse_review_response(raw);
+        let v = parse_review_response(raw).expect("fenced json parses");
         assert!(v.pass);
         assert_eq!(v.issues.len(), 1);
     }
 
     #[test]
-    fn test_parse_review_fail_open_on_garbage() {
-        let v = parse_review_response("我无法评审这个任务");
-        assert!(v.pass, "unparseable review must fail open");
-        assert!(v.issues.is_empty());
+    fn test_parse_review_unavailable_not_a_pass() {
+        // A prose/non-JSON reviewer response must NOT be recorded as a
+        // pass — it is "unavailable" (None), distinctly logged.
+        assert!(parse_review_response("我无法评审这个任务").is_none());
+        assert!(parse_review_response("").is_none());
     }
 
     #[test]
     fn test_parse_review_fail_without_issues_gets_placeholder() {
-        let v = parse_review_response(r#"{"pass": false}"#);
+        let v = parse_review_response(r#"{"pass": false}"#).expect("json parses");
         assert!(!v.pass);
         assert_eq!(v.issues.len(), 1);
     }

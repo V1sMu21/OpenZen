@@ -59,7 +59,11 @@ impl Session for ClaudeSession {
         self.system = Some(system);
     }
     fn set_tools(&mut self, tools: Vec<ToolDefinition>) {
-        self.tools = Some(tools);
+        // Empty list = clear. Utility calls (review / crystallization /
+        // refinement) pass &[] precisely to drop the agent's tool set —
+        // keeping the stale Some(tools) forced strict gateways into
+        // tool_choice: required and returned empty content.
+        self.tools = if tools.is_empty() { None } else { Some(tools) };
     }
 
     async fn raw_ask(

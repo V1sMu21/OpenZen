@@ -71,9 +71,13 @@ impl LlmClient for NativeToolClient {
         // schemas to the backend, otherwise OaiSession sends the request
         // without a "tools" payload and tool-capable models (e.g. DeepSeek
         // V4 Flash) can only emit reasoning + an empty reply.
-        if !tools.is_empty() {
-            self.backend.set_tools(tools.to_vec());
-        }
+        //
+        // Propagate empty lists too: utility calls (review / crystallization
+        // / refinement) pass &[] to CLEAR the previous turn's tool set.
+        // The old `if !tools.is_empty()` guard left the agent's tools in
+        // place, so strict gateways forced tool_choice: required and the
+        // utility call returned empty content (silent pass / no-op).
+        self.backend.set_tools(tools.to_vec());
 
         // Fold ALL system messages (main prompt + any injected compression
         // summaries) into the backend system prompt. The last system message
@@ -126,9 +130,8 @@ impl LlmClient for NativeToolClient {
         event_tx: UnboundedSender<StreamEvent>,
         _speculative_tx: Option<UnboundedSender<StreamEvent>>,
     ) -> Result<MockResponse, LlmError> {
-        if !tools.is_empty() {
-            self.backend.set_tools(tools.to_vec());
-        }
+        // Same as `chat`: empty means clear (utility calls).
+        self.backend.set_tools(tools.to_vec());
 
         let system_parts: Vec<String> = messages
             .iter()
@@ -398,4 +401,82 @@ fn parse_text_tool_calls(content: &str) -> (Vec<MockToolCall>, String) {
     }
 
     (tcs, remaining)
+}
+
+#[cfg(test)]
+mod utility_tools_tests {
+    use super::*;
+    use oz_config::SessionConfig;
+    use std::sync::{Arc, Mutex};
+
+    /// Records the tool-list size the client hands to the backend.
+    struct RecordingSession {
+        seen: Arc<Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Session for RecordingSession {
+        fn config(&self) -> &SessionConfig {
+            unimplemented!("not used by this test")
+        }
+        fn history(&self) -> &Mutex<Vec<Message>> {
+            unimplemented!("not used by this test")
+        }
+        fn history_mut(&self) -> &Mutex<Vec<Message>> {
+            unimplemented!("not used by this test")
+        }
+        fn set_system(&mut self, _system: String) {}
+        fn set_tools(&mut self, tools: Vec<ToolDefinition>) {
+            self.seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(tools.len());
+        }
+        fn format_messages(&self, _messages: &[Message]) -> Vec<serde_json::Value> {
+            vec![]
+        }
+        async fn ask(&self, _prompt: &str) -> Result<Vec<ContentBlock>, LlmError> {
+            Ok(vec![])
+        }
+        async fn raw_ask(
+            &self,
+            _messages: &[Message],
+        ) -> Result<(Vec<ContentBlock>, Option<oz_core_types::TokenUsage>), LlmError> {
+            Ok((vec![], None))
+        }
+    }
+
+    fn sample_tool() -> ToolDefinition {
+        ToolDefinition {
+            type_: "function".into(),
+            function: oz_core_types::ToolFunction {
+                name: "read".into(),
+                description: "read a file".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        }
+    }
+
+    /// P0-2 contract: utility calls pass an empty tool list precisely to
+    /// drop the agent's tool set. Before the fix the client skipped the
+    /// backend call entirely on empty input, so strict gateways kept
+    /// forcing tool_choice: required and the review returned empty
+    /// content (silent pass / no-op crystallization).
+    #[tokio::test]
+    async fn empty_tool_list_reaches_backend_as_clear() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut client = NativeToolClient::new(Box::new(RecordingSession { seen: seen.clone() }));
+
+        let _ = client
+            .chat(&[Message::user("write a file")], &[sample_tool()])
+            .await;
+        let _ = client.chat(&[Message::user("review this task")], &[]).await;
+
+        let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(
+            seen,
+            vec![1, 0],
+            "empty tool list must be forwarded to the backend (clear), not skipped"
+        );
+    }
 }
