@@ -656,12 +656,16 @@ except Exception as e:
 
     fn extract_rule_based(&self, raw_text: &str) -> Vec<(String, String, String, f32)> {
         let mut results = Vec::new();
+        // CJK sentence terminators included: the splitter only knew ASCII
+        // punctuation, so a whole Chinese paragraph arrived as ONE
+        // "sentence" and never matched the verb table — Chinese
+        // conversations distilled to zero facts.
         let sentences: Vec<&str> = raw_text
-            .split(&['.', '!', '?', '\n'][..])
+            .split(&['.', '!', '?', '\n', '。', '！', '？', '；', ';', '\r'][..])
             .filter(|s| s.trim().len() > 5)
             .collect();
 
-        for sentence in sentences {
+        for sentence in &sentences {
             let words: Vec<&str> = sentence.split_whitespace().collect();
             if words.len() < 3 {
                 continue;
@@ -696,6 +700,13 @@ except Exception as e:
                 }
             }
         }
+        for sentence in &sentences {
+            results.extend(extract_cjk_facts(sentence));
+        }
+        // Overlapping patterns can emit the same triple twice; dedup on
+        // the string triple (f32 confidence has no Ord).
+        let mut seen = std::collections::HashSet::new();
+        results.retain(|(s, p, o, _)| seen.insert((s.clone(), p.clone(), o.clone())));
         results
     }
 
@@ -1419,5 +1430,112 @@ mod tests {
         let s = make_scheduler();
         assert_eq!(s.config().cycle_interval_secs, 3600);
         assert!(s.consolidation_engine().config().recursive_rounds >= 1);
+    }
+}
+
+/// Chinese predicate table for rule-based fact extraction. Longer verbs
+/// first so 想要 wins over 想; predicates are stored in English so the
+/// existing consumers (recall formatting, promotion) keep working.
+const CJK_VERBS: &[(&str, &str)] = &[
+    ("喜欢", "likes"),
+    ("讨厌", "dislikes"),
+    ("想要", "wants"),
+    ("需要", "needs"),
+    ("使用", "uses"),
+    ("在用", "uses"),
+    ("住在", "lives_in"),
+    ("工作于", "works_at"),
+    ("就职于", "works_at"),
+    ("叫做", "named"),
+    ("名叫", "named"),
+    ("名为", "named"),
+    ("是", "is"),
+];
+
+fn is_cjk_char(c: char) -> bool {
+    matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF)
+}
+
+/// Extract at most one fact from a Chinese sentence:
+///   「X的KEY是VALUE」 → (X, KEY, VALUE)      (attribute, highest confidence)
+///   「X喜欢/需要/住在…VALUE」 → (X, verb_en, VALUE)
+fn extract_cjk_facts(sentence: &str) -> Vec<(String, String, String, f32)> {
+    let s = sentence.trim().trim_start_matches(['-', '*', ' ', '\t']);
+    if s.chars().count() < 5 {
+        return Vec::new();
+    }
+    // Earliest, longest verb match wins.
+    let mut best: Option<(usize, &str, &str)> = None;
+    for (verb, en) in CJK_VERBS {
+        if let Some(pos) = s.find(verb) {
+            let better = match best {
+                None => true,
+                Some((bp, bv, _)) => pos < bp || (pos == bp && verb.len() > bv.len()),
+            };
+            if better {
+                best = Some((pos, verb, en));
+            }
+        }
+    }
+    let Some((pos, verb, en)) = best else {
+        return Vec::new();
+    };
+    let subject_part = s[..pos].trim();
+    let object = s[pos + verb.len()..]
+        .trim()
+        .trim_end_matches(['。', '！', '？', '.', '!', '?', '，', ','])
+        .trim()
+        .to_string();
+    if subject_part.is_empty()
+        || object.is_empty()
+        || object.chars().count() > 40
+        || !object.chars().any(is_cjk_char)
+    {
+        return Vec::new();
+    }
+
+    // Attribute pattern: 「我的生日是5月1日」— a trailing 的KEY in the
+    // subject names the attribute; the rest is the entity. 的 is 3 bytes.
+    if let Some(de_pos) = subject_part.rfind('的') {
+        let entity = subject_part[..de_pos].trim();
+        let attribute = subject_part[de_pos + 3..].trim();
+        if !entity.is_empty()
+            && !attribute.is_empty()
+            && attribute.chars().count() <= 12
+            && entity.chars().any(is_cjk_char)
+        {
+            return vec![(entity.to_string(), attribute.to_string(), object, 0.65)];
+        }
+    }
+
+    if subject_part.chars().count() > 24 {
+        return Vec::new();
+    }
+    vec![(subject_part.to_string(), en.to_string(), object, 0.6)]
+}
+
+#[cfg(test)]
+mod cjk_fact_tests {
+    use super::extract_cjk_facts;
+
+    #[test]
+    fn attribute_pattern() {
+        let f = extract_cjk_facts("我的生日是5月1日");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].0, "我");
+        assert_eq!(f[0].1, "生日");
+        assert_eq!(f[0].2, "5月1日");
+    }
+
+    #[test]
+    fn verb_patterns() {
+        assert_eq!(extract_cjk_facts("用户喜欢深色主题")[0].1, "likes");
+        assert_eq!(extract_cjk_facts("我住在杭州")[0].1, "lives_in");
+        assert_eq!(extract_cjk_facts("项目使用 Rust 框架")[0].1, "uses");
+    }
+
+    #[test]
+    fn english_sentence_ignored() {
+        assert!(extract_cjk_facts("the user likes dark theme").is_empty());
     }
 }

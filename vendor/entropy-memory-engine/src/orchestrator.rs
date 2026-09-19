@@ -221,13 +221,26 @@ impl MemoryOrchestrator {
         // 5. observer: 记录本轮事件
         report.observer_events = self.observer.event_count();
 
-        // 5b. scheduler: 低优先任务（叙事重建等）排队执行
+        // 5b. scheduler: low-priority maintenance. Consolidation is
+        // gated to ~12h (the L2 scan is O(n x HNSW) and this cycle runs
+        // every idle tick — running it every few minutes contradicted
+        // the 12h/24h cadence the runner and daily maintenance assume,
+        // and grew slower as the store grew).
         if let Some(scheduler) = &self.scheduler {
-            let store = Arc::clone(&self.store);
-            scheduler.submit(TaskPriority::Low, move || {
-                let _ = store.consolidate();
-            });
-            report.scheduled = 1;
+            const TWELVE_H_NANOS: i64 = 12 * 3600 * 1_000_000_000;
+            let due = self
+                .store
+                .stats()
+                .last_consolidation
+                .map(|t| crate::core::now_nanos() - t > TWELVE_H_NANOS)
+                .unwrap_or(true);
+            if due {
+                let store = Arc::clone(&self.store);
+                scheduler.submit(TaskPriority::Low, move || {
+                    let _ = store.consolidate();
+                });
+                report.scheduled = 1;
+            }
         }
 
         // 6. decay the time-graph weights so stale associations fade
