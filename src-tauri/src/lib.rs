@@ -617,7 +617,12 @@ pub struct AppState {
     pub full_access: Arc<AtomicBool>,
     /// Long-lived ERME runtime (semantic store + L0 soul layer).
     /// Created once at startup; None when construction failed.
-    pub erme_store: Option<Arc<ErmeRuntime>>,
+    /// ERME runtime, initialized on a BACKGROUND thread: the L3 snapshot
+    /// load + WAL replay + budget backfill is proportional to memory size
+    /// and used to block the first window. Readers see None until the slot
+    /// is filled (they already degrade to file memory / status=disabled);
+    /// `erme()` is the accessor.
+    pub erme_store: Arc<std::sync::OnceLock<Option<Arc<ErmeRuntime>>>>,
     /// Platform adapter registry, stored once started so the exit path can
     /// stop adapters (supervisors killed mid-await would otherwise leave WS
     /// connections and child processes behind).
@@ -698,16 +703,35 @@ impl AppState {
             .and_then(|c| c.erme_idle_interval_secs)
             .unwrap_or(300);
         let last_user_activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let erme_store = if memory_backend == "erme" {
-            init_erme_store(
-                &data_root,
-                erme_idle_secs,
-                std::sync::Arc::clone(&last_user_activity),
-            )
+        let erme_store: Arc<std::sync::OnceLock<Option<Arc<ErmeRuntime>>>> =
+            Arc::new(std::sync::OnceLock::new());
+        if memory_backend == "erme" {
+            // Background init keeps the first window responsive: the L3
+            // snapshot + WAL replay + budget backfill scale with memory
+            // size. The first message may briefly fall back to file
+            // memory while the slot fills.
+            let slot = std::sync::Arc::clone(&erme_store);
+            let root = data_root.clone();
+            let activity = std::sync::Arc::clone(&last_user_activity);
+            std::thread::Builder::new()
+                .name("erme-init".into())
+                .spawn(move || {
+                    let started = std::time::Instant::now();
+                    let built = init_erme_store(&root, erme_idle_secs, activity);
+                    if built.is_some() {
+                        tracing::info!(
+                            "ERME init finished in {:.2}s (background)",
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
+                    let _ = slot.set(built);
+                })
+                .map_err(|e| tracing::error!("failed to spawn ERME init thread: {e}"))
+                .ok();
         } else {
             tracing::info!("memory_backend = \"file\": ERME store not built (set memory_backend = \"erme\" to enable)");
-            None
-        };
+            let _ = erme_store.set(None);
+        }
 
         AppState {
             // Cap live sessions at 500; evicted ones are archived to
@@ -759,6 +783,14 @@ impl AppState {
             intervention_queues: Mutex::new(HashMap::new()),
             session_windows: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl AppState {
+    /// ERME runtime if the background init has completed (and the backend
+    /// is configured to "erme").
+    pub fn erme(&self) -> Option<&Arc<ErmeRuntime>> {
+        self.erme_store.get().and_then(|slot| slot.as_ref())
     }
 }
 

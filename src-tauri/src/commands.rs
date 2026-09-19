@@ -192,7 +192,7 @@ pub fn get_dashboard_stats() -> serde_json::Value {
 /// agent loops; `enabled: false` when the file backend is active.
 #[tauri::command]
 pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
-    let Some(runtime) = &state.erme_store else {
+    let Some(runtime) = state.erme() else {
         return serde_json::json!({
             "enabled": false,
             "harness": { "entry_count": 0 },
@@ -252,7 +252,7 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
 /// persisted to {data_dir}/memory_erme/soul.json so it survives restarts.
 #[tauri::command]
 pub fn set_soul_identity(name: String, state: State<'_, Arc<AppState>>) -> serde_json::Value {
-    let Some(runtime) = &state.erme_store else {
+    let Some(runtime) = state.erme() else {
         return serde_json::json!({ "error": "memory backend not enabled" });
     };
     let trimmed = name.trim();

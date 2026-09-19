@@ -562,7 +562,7 @@ pub async fn run_agent_for_session(
     let memory_context = if cfg.memory_backend == "erme" {
         // ERME semantic recall: inject top-k memories relevant to the user
         // message instead of the legacy full-text scan.
-        match &state.erme_store {
+        match state.erme() {
             Some(runtime) => {
                 let store = &runtime.store;
                 let query = {
@@ -684,16 +684,6 @@ pub async fn run_agent_for_session(
     let mut handler = ToolRegistryHandler::new(registry);
 
     let mut system_prompt = load_system_prompt(&ctx);
-    // L0 soul-layer injection (M7): prepend the persistent soul-model prefix
-    // so every turn carries identity/narrative/portrait state.
-    if cfg.memory_backend == "erme" {
-        if let Some(runtime) = &state.erme_store {
-            let prefix = runtime.injector.build_system_prefix();
-            if !prefix.is_empty() {
-                system_prompt = format!("{prefix}{system_prompt}");
-            }
-        }
-    }
     // Claude/OpenAI protocol requires paired
     // assistant-tool_use ↔ user-tool_result blocks; projecting to
     // standalone Message::assistant(text) + Message::tool(id,text)
@@ -721,21 +711,6 @@ pub async fn run_agent_for_session(
         anyhow::bail!("No user message to process");
     }
 
-    // Harness ledger injection: surface model-written, evidence-backed
-    // lessons every turn (a write-only ledger would silently rot), ranked
-    // by relevance to the current user message instead of recency.
-    if let Some(harness_dir) = &ctx.harness_dir {
-        let harness_ctx = oz_core::harness::render_context_relevant_cached(
-            std::path::Path::new(harness_dir),
-            oz_core::harness::HarnessKind::Memory,
-            8,
-            &user_message,
-        );
-        if !harness_ctx.is_empty() {
-            system_prompt.push_str("\n\n## Persistent Harness Lessons\n\n");
-            system_prompt.push_str(&harness_ctx);
-        }
-    }
     // Crystallized user facts/insights (skill-mcp L2 memory): without this
     // the facts the model writes were invisible to later sessions —
     // build_memory_prompt was only reachable through a rarely-taken
@@ -760,6 +735,35 @@ pub async fn run_agent_for_session(
                 system_prompt.push_str("\n\n## User Memory (facts/insights)\n\n");
                 system_prompt.push_str(&prompt);
             }
+        }
+    }
+    // L0 soul-layer injection (M7) — appended AFTER the stable segments
+    // (base prompt + facts) and BEFORE the per-query segments (harness,
+    // memory recall). Order matters for prefix caching: the soul prefix
+    // carries volatile mood/energy/focus, so putting it first (the old
+    // behavior) invalidated the cache from byte 0 on every reflection
+    // tick. Now the stable prefix stays cacheable across turns.
+    if cfg.memory_backend == "erme" {
+        if let Some(runtime) = state.erme() {
+            let prefix = runtime.injector.build_system_prefix();
+            if !prefix.is_empty() {
+                system_prompt.push_str(&prefix);
+            }
+        }
+    }
+    // Harness ledger injection: surface model-written, evidence-backed
+    // lessons every turn (a write-only ledger would silently rot), ranked
+    // by relevance to the current user message instead of recency.
+    if let Some(harness_dir) = &ctx.harness_dir {
+        let harness_ctx = oz_core::harness::render_context_relevant_cached(
+            std::path::Path::new(harness_dir),
+            oz_core::harness::HarnessKind::Memory,
+            8,
+            &user_message,
+        );
+        if !harness_ctx.is_empty() {
+            system_prompt.push_str("\n\n## Persistent Harness Lessons\n\n");
+            system_prompt.push_str(&harness_ctx);
         }
     }
     if !memory_context.is_empty() {
@@ -822,7 +826,7 @@ pub async fn run_agent_for_session(
     // selected by memory_backend: ERME semantic store vs legacy skill/MCP.
     let distiller: std::sync::Arc<dyn oz_core::memory_job::MemoryDistiller> =
         if cfg.memory_backend == "erme" {
-            match &state.erme_store {
+            match state.erme() {
                 Some(runtime) => std::sync::Arc::new(ErmeMemoryDistiller::new(
                     std::sync::Arc::clone(&runtime.store),
                     ctx.harness_dir.as_ref().map(std::path::PathBuf::from),
