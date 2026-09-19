@@ -284,6 +284,63 @@ pub fn set_soul_identity(name: String, state: State<'_, Arc<AppState>>) -> serde
     })
 }
 
+/// P2-18: the portrait correction loop. The user must be able to SEE what
+/// the agent believes about them and DELETE a wrong fact — otherwise more
+/// memory means "confidently misunderstanding you". Returns statement +
+/// confidence for every portrait fact.
+#[tauri::command]
+pub fn get_soul_portrait(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let Some(runtime) = state.erme() else {
+        return serde_json::json!({ "enabled": false, "facts": [] });
+    };
+    let handle = runtime.injector.soul();
+    let model = handle.read().unwrap_or_else(|e| e.into_inner());
+    let facts: Vec<serde_json::Value> = model
+        .user_portrait
+        .facts
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "statement": f.statement,
+                "confidence": f.confidence,
+            })
+        })
+        .collect();
+    serde_json::json!({ "enabled": true, "facts": facts })
+}
+
+/// Remove one portrait fact by statement (exact match as listed by
+/// get_soul_portrait). Persisted immediately so the correction survives
+/// a restart even if the idle cycle never runs.
+#[tauri::command]
+pub fn remove_portrait_fact(
+    statement: String,
+    state: State<'_, Arc<AppState>>,
+) -> serde_json::Value {
+    let Some(runtime) = state.erme() else {
+        return serde_json::json!({ "error": "memory backend not enabled" });
+    };
+    let handle = runtime.injector.soul();
+    let removed = {
+        let mut model = handle.write().unwrap_or_else(|e| e.into_inner());
+        let removed = model.user_portrait.remove_fact(&statement);
+        if removed {
+            model.bump_version();
+        }
+        removed
+    };
+    if !removed {
+        return serde_json::json!({ "error": "no matching portrait fact" });
+    }
+    let soul_path = data_dir().join("memory_erme").join("soul.json");
+    let persist_error = {
+        let model = handle.read().unwrap_or_else(|e| e.into_inner());
+        model.save_atomic(&soul_path).err().map(|e| e.to_string())
+    };
+    tracing::info!("[soul] removed portrait fact by user request: {statement}");
+    serde_json::json!({ "status": "ok", "persist_error": persist_error })
+}
+
 /// ── Settings panel (docs/settings-panel-plan.md) ──────────────────────────
 ///
 /// Model management writes back `mykey.toml` preserving unknown keys: the

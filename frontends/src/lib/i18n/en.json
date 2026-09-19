@@ -351,5 +351,6 @@
   "soul.nameSaved": "Named",
   "update.available": "Version {version} available — click to install",
   "update.downloading": "Downloading update…",
-  "update.installed": "Installed — restarting"
+  "update.installed": "Installed — restarting",
+  "soul.forgetFact": "Forget this"
 }

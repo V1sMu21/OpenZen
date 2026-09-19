@@ -12,15 +12,18 @@
     birthNameDisplay,
     deleteModel,
     fetchModels,
+    fetchSoulPortrait,
     getTokenStats,
     listMcpServers,
     listSkillMcp,
+    removePortraitFact,
     setDefaultModel,
     setSoulIdentity,
     toggleMcpServer,
     toggleSkillMcp,
     upsertModel,
   } from "../api/settings";
+  import type { PortraitFact } from "../api/settings";
   import { soulDisplayName } from "../api/settings";
   import { soulStore } from "../stores/soul.svelte";
 
@@ -54,6 +57,11 @@
   let nameDraft = $state("");
   let renaming = $state(false);
   let savingName = $state(false);
+  // P2-18 correction loop: the user can see and delete what the agent
+  // believes about them.
+  let portraitFacts = $state<PortraitFact[]>([]);
+  let portraitLoaded = $state(false);
+  let removingFact = $state<string | null>(null);
 
   // ── tokens tab ──
   let stats = $state<TokenStats | null>(null);
@@ -97,6 +105,9 @@
     } else if (tab === "soul") {
       void run(async () => {
         await soulStore.load();
+        const portrait = await fetchSoulPortrait();
+        portraitFacts = portrait.facts ?? [];
+        portraitLoaded = true;
       });
     } else {
       void run(async () => {
@@ -215,6 +226,20 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       savingName = false;
+    }
+  }
+
+  async function deletePortraitFact(fact: PortraitFact) {
+    if (removingFact) return;
+    removingFact = fact.statement;
+    try {
+      await removePortraitFact(fact.statement);
+      const portrait = await fetchSoulPortrait();
+      portraitFacts = portrait.facts ?? [];
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      removingFact = null;
     }
   }
 
@@ -404,6 +429,27 @@
               <span class="stat-key">{$t("soul.harness")}</span><span class="stat-val">{soul.harness.entry_count}</span>
             {/if}
           </div>
+          {#if portraitLoaded}
+            <div class="group">
+              <div class="group-head">{$t("soul.portraitFacts")}</div>
+              {#if portraitFacts.length === 0}
+                <div class="settings-empty">{$t("settings.empty")}</div>
+              {:else}
+                {#each portraitFacts as fact (fact.statement)}
+                  <div class="portrait-row">
+                    <span class="portrait-text" title={fact.statement}>{fact.statement}</span>
+                    <button
+                      class="portrait-del"
+                      onclick={() => deletePortraitFact(fact)}
+                      disabled={removingFact === fact.statement}
+                      aria-label={$t("soul.forgetFact", "Forget this")}
+                      title={$t("soul.forgetFact", "Forget this")}
+                    >✕</button>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          {/if}
         {:else}
           <div class="settings-empty">{$t("settings.empty")}</div>
         {/if}
@@ -877,5 +923,31 @@
     font-size: 11px;
     color: var(--color-dim);
     text-align: center;
+  }
+
+  .portrait-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--color-line, rgba(127, 127, 127, 0.15));
+  }
+  .portrait-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+  }
+  .portrait-del {
+    flex: none;
+    border: none;
+    background: transparent;
+    color: var(--color-muted);
+    cursor: pointer;
+    padding: 2px 6px;
+  }
+  .portrait-del:hover:not(:disabled) {
+    color: var(--color-danger, #c0392b);
   }
 </style>

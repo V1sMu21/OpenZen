@@ -124,6 +124,26 @@ export function fetchSoulStatus(): Promise<SoulStatus> {
   return invoke<SoulStatus>("get_memory_status");
 }
 
+export interface PortraitFact {
+  statement: string;
+  confidence: number;
+}
+
+/** P2-18: the user's view of the agent's portrait facts (correction loop). */
+export async function fetchSoulPortrait(): Promise<{
+  enabled: boolean;
+  facts: PortraitFact[];
+}> {
+  return invoke("get_soul_portrait");
+}
+
+export async function removePortraitFact(statement: string): Promise<MutationResult> {
+  return unwrapError(
+    await invoke<MutationResult>("remove_portrait_fact", { statement }),
+    "remove_portrait_fact",
+  );
+}
+
 export async function setSoulIdentity(name: string): Promise<MutationResult> {
   return unwrapError(await invoke<MutationResult>("set_soul_identity", { name }), "set_soul_identity");
 }
