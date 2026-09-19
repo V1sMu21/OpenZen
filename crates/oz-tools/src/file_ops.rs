@@ -9,18 +9,16 @@ use crate::registry::ToolHandler;
 /// Maximum file size for read operations (10 MB).
 const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
 
-/// Paths that are always blocked regardless of working_dir.
-const SENSITIVE_PATHS: &[&str] = &[
-    "/etc/",
-    "/usr/",
-    "/bin/",
-    "/sbin/",
-    "/var/",
-    "/boot/",
-    "/dev/",
-    "/proc/",
-    "/sys/",
-    "/root/",
+/// Absolute system locations — blocked everywhere except resolved temp
+/// roots (macOS temp dirs live under /private/var, which is why these are
+/// checked separately from the always-sensitive names below).
+const SENSITIVE_SYSTEM_PATHS: &[&str] = &[
+    "/etc/", "/usr/", "/bin/", "/sbin/", "/var/", "/boot/", "/dev/", "/proc/", "/sys/", "/root/",
+];
+
+/// Names that are sensitive regardless of location: even inside /tmp, a
+/// path aiming at .ssh/.aws/credentials-style targets is rejected.
+const SENSITIVE_ALWAYS: &[&str] = &[
     ".ssh/",
     ".aws/",
     ".gnupg/",
@@ -31,22 +29,15 @@ const SENSITIVE_PATHS: &[&str] = &[
     "id_rsa",
 ];
 
+fn contains_any(haystack_lower: &str, needles: &[&str]) -> bool {
+    needles
+        .iter()
+        .any(|n| haystack_lower.contains(&n.to_lowercase()))
+}
+
 pub(crate) fn is_in_working_dir(path: &str, working_dir: &str) -> bool {
     let wd = Path::new(working_dir);
     let p = Path::new(path);
-
-    // Always allow /tmp
-    if p.starts_with("/tmp") || p.starts_with("/var/tmp") || p.starts_with("/var/folders") {
-        return true;
-    }
-
-    // Check for sensitive paths
-    let lower = path.to_lowercase();
-    for sensitive in SENSITIVE_PATHS {
-        if lower.contains(&sensitive.to_lowercase()) {
-            return false;
-        }
-    }
 
     // Resolve relative paths against the working dir BEFORE
     // canonicalizing — otherwise new files (which don't exist yet
@@ -59,11 +50,52 @@ pub(crate) fn is_in_working_dir(path: &str, working_dir: &str) -> bool {
         wd.join(p)
     };
 
+    // Canonicalize FIRST. The old code returned "allowed" for any path
+    // whose *components* started with /tmp before resolving anything:
+    // `/tmp/../etc/passwd`, `/tmp/x/../../Users/<u>/.ssh/id_rsa` and
+    // symlinks living under /tmp all passed the fence. Canonicalization
+    // resolves `..` and symlinks, so every later check sees the real
+    // target. New files fall back to canonicalizing the nearest existing
+    // ancestor and re-attaching the file name.
     let real_p = std::fs::canonicalize(&resolved).ok().or_else(|| {
         resolved
             .parent()
             .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .map(|parent| match resolved.file_name() {
+                Some(name) => parent.join(name),
+                None => parent,
+            })
     });
+
+    // Sensitive-name check runs on the canonical path so traversal cannot
+    // smuggle sensitive targets past the substring match. The
+    // always-sensitive list applies even inside temp (a /tmp symlink to
+    // ~/.ssh resolves out of the temp roots anyway and is caught here).
+    let check = real_p.as_deref().unwrap_or(&resolved);
+    let lower = check.to_string_lossy().to_lowercase();
+    if contains_any(&lower, SENSITIVE_ALWAYS) {
+        return false;
+    }
+
+    // Temp dirs are allowed — but only on the canonical path, and only
+    // after `..`/symlink resolution.
+    if let Some(rp) = real_p.as_deref() {
+        if rp.starts_with("/tmp")
+            || rp.starts_with("/private/tmp")
+            || rp.starts_with("/var/tmp")
+            || rp.starts_with("/private/var/tmp")
+            || rp.starts_with("/var/folders")
+            || rp.starts_with("/private/var/folders")
+        {
+            return true;
+        }
+    }
+
+    // System locations: blocked outside temp roots.
+    if contains_any(&lower, SENSITIVE_SYSTEM_PATHS) {
+        return false;
+    }
+
     let real_wd = std::fs::canonicalize(wd).ok();
 
     match (real_p, real_wd) {
@@ -421,13 +453,21 @@ impl ToolHandler for GlobTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let pattern = args["pattern"].as_str().unwrap_or("");
         if pattern.is_empty() {
             return Ok(ToolOutput::bad_json("glob: missing pattern"));
         }
         let base = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        // Path fence: this tool is on the no-approval safe list, so the
+        // base directory must respect the same working-dir boundary as
+        // read/write (previously `glob "/Users/*/.aws/*"` was allowed).
+        if !is_in_working_dir(base, &ctx.working_dir) {
+            return Ok(ToolOutput::bad_json(format!(
+                "glob: path '{base}' is outside the working directory"
+            )));
+        }
         let glob_pattern = format!("{}/{}", base.trim_end_matches('/'), pattern);
 
         let mut results = Vec::new();
@@ -468,13 +508,18 @@ impl ToolHandler for GrepTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let pattern = args["pattern"].as_str().unwrap_or("");
         if pattern.is_empty() {
             return Ok(ToolOutput::bad_json("grep: missing pattern"));
         }
         let base = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        if !is_in_working_dir(base, &ctx.working_dir) {
+            return Ok(ToolOutput::bad_json(format!(
+                "grep: path '{base}' is outside the working directory"
+            )));
+        }
         let include = args.get("include").and_then(|v| v.as_str());
 
         let re = regex::Regex::new(pattern)
@@ -568,9 +613,14 @@ impl ToolHandler for LsTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        if !is_in_working_dir(path, &ctx.working_dir) {
+            return Ok(ToolOutput::bad_json(format!(
+                "ls: path '{path}' is outside the working directory"
+            )));
+        }
         let mut entries: Vec<serde_json::Value> = Vec::new();
         if let Ok(mut rd) = tokio::fs::read_dir(path).await {
             while let Ok(Some(entry)) = rd.next_entry().await {
@@ -811,4 +861,77 @@ fn register_file_ops(reg: &mut crate::registry::ToolRegistry) {
     reg.register(crate::file_ops::GlobTool);
     reg.register(crate::file_ops::GrepTool);
     reg.register(crate::file_ops::LsTool);
+}
+
+#[cfg(test)]
+mod fence_tests {
+    use super::is_in_working_dir;
+
+    fn wd() -> String {
+        std::env::temp_dir()
+            .join(format!("oz-fence-wd-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    #[test]
+    fn tmp_traversal_cannot_escape() {
+        let wd = wd();
+        let _ = std::fs::create_dir_all(&wd);
+        // Component-prefix trick: starts_with("/tmp") used to pass before
+        // any canonicalization; now `..` is resolved first.
+        assert!(!is_in_working_dir("/tmp/../etc/passwd", &wd));
+        assert!(!is_in_working_dir("/tmp/../usr/bin/ssh", &wd));
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn sensitive_paths_rejected_even_under_tmp() {
+        let wd = wd();
+        let _ = std::fs::create_dir_all(&wd);
+        assert!(!is_in_working_dir("/tmp/.ssh/id_rsa", &wd));
+        assert!(!is_in_working_dir("/tmp/mykey.toml", &wd));
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_out_of_tmp_resolves_and_rejects() {
+        let wd = wd();
+        let _ = std::fs::create_dir_all(&wd);
+        let link = std::env::temp_dir().join(format!("oz-fence-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        // Point a /tmp symlink at /etc — canonicalization resolves it out
+        // of the temp roots and the sensitive check catches it.
+        if std::os::unix::fs::symlink("/etc", &link).is_ok() {
+            assert!(!is_in_working_dir(
+                &link.join("passwd").to_string_lossy(),
+                &wd
+            ));
+        }
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn working_dir_and_tmp_still_allowed() {
+        let wd = wd();
+        let _ = std::fs::create_dir_all(&wd);
+        assert!(is_in_working_dir(&wd, &wd));
+        assert!(is_in_working_dir(".", &wd));
+        // A plain temp file (the common case) stays allowed.
+        let f = std::env::temp_dir().join("oz-fence-plain.txt");
+        std::fs::write(&f, "x").unwrap();
+        assert!(is_in_working_dir(&f.to_string_lossy(), &wd));
+        let _ = std::fs::remove_file(&f);
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn outside_working_dir_rejected() {
+        let wd = wd();
+        let _ = std::fs::create_dir_all(&wd);
+        assert!(!is_in_working_dir("/Users", &wd));
+        let _ = std::fs::remove_dir_all(&wd);
+    }
 }
