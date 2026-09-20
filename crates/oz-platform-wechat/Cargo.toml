@@ -19,7 +19,7 @@ uuid.workspace = true
 
 aes = "0.8"
 base64 = "0.22"
-md5 = "0.7"
+md5 = "0.8"
 regex.workspace = true
 
 oz-platform = { path = "../oz-platform" }
