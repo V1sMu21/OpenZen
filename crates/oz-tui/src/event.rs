@@ -265,6 +265,9 @@ pub fn handle_stream_event(app: &mut App, evt: StreamEvent) {
         // Heartbeat from a long-running tool: the TUI has no watchdog to
         // keep alive, so it needs no rendering yet.
         StreamEvent::ToolProgress { .. } => {}
+        // Post-answer quality gates (spec/assertions/review): the TUI's
+        // status line already shows the run as working; no extra row.
+        StreamEvent::DataQualityGate { .. } => {}
         StreamEvent::Error { message } => {
             app.is_processing = false;
             app.stop_signal = None;

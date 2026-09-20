@@ -1,4 +1,5 @@
 import type { UIMessagePart, ProtocolV1Event, ToolInvocationPart } from './parts';
+import { localT } from '../i18n';
 
 const reasoningStarts = new Map<string, number>();
 
@@ -135,6 +136,21 @@ export function applyProtocolEvent(
         break;
       }
 
+    case 'data_quality_gate': {
+        // Post-answer quality gates (spec synthesis / assertions /
+        // independent review) are the silent seconds between the final
+        // text and `done` — surface the stage so the pause is legible.
+        const id = `data_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        parts.push({
+          type: 'data',
+          id,
+          dataType: event.type,
+          content: localT(`status.qualityGate.${event.stage}`, formatDataEvent(event)),
+          transient: true,
+        });
+        break;
+      }
+
       // data_compressing_context is handled in chat.ts with i18n + auto-dismiss
       case 'data_todo_update':
       case 'data_context_usage':
@@ -186,6 +202,8 @@ function formatDataEvent(event: ProtocolV1Event): string {
       return `Memory: retrieved ${event.results} results for "${event.query}"`;
     case 'data_compressing_context':
       return `Compressing context: ${event.before_tokens} → ${event.after_tokens} tokens`;
+    case 'data_quality_gate':
+      return `Running delivery check: ${event.stage}`;
     default:
       return '';
   }

@@ -134,7 +134,12 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
         const cid = $sessions.currentId;
         if (!cid) break;
         try {
-          const result = await compressSession(cid);
+          // `/compact -model <name>` pins the summarizer; otherwise the
+          // session's selected model does the summary (same as the agent
+          // loop's auto-compression quality bar).
+          const override = arg.match(/(?:^|\s)-model\s+(\S+)/)?.[1]?.trim();
+          const model = override || $chat.selectedModel || undefined;
+          const result = await compressSession(cid, model);
           chat.addUserMessage(cmd);
           chat.startAssistantMessage();
           chat.appendLocalText(

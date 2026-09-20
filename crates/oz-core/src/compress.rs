@@ -775,6 +775,35 @@ fn lock_sender_tx(
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Instruction for the LLM summarizer, shared by the auto-compression path
+/// (agent loop) and the manual /compact command so both produce the same
+/// structured markdown record.
+pub fn summary_instruction(lang: &str) -> String {
+    if lang == "zh" {
+        "用简体中文将下面的对话总结为一份简洁的 markdown 记录。\
+         保留所有关键信息。\n\n\
+         ## 必需段落\n\
+         ### 任务 — 原始请求、目标、约束\n\
+         ### 文件与路径 — 每个创建/修改/读取的文件及完整路径\n\
+         ### 关键决策 — 架构、库、方案\n\
+         ### 进度 — 已完成 vs 未完成\n\
+         ### 最近动作 — 最后 2-3 个工具调用与结果\n\
+         ### 用户消息 — 澄清、反馈、新指令"
+            .to_string()
+    } else {
+        "Summarize the conversation below into a concise markdown record. \
+         Preserve ALL essential information.\n\n\
+         ## REQUIRED SECTIONS\n\
+         ### Task — original request, goals, constraints\n\
+         ### Files & Paths — every file created/modified/read with full path\n\
+         ### Key Decisions — architecture, libraries, approaches\n\
+         ### Progress — completed vs remaining\n\
+         ### Recent Actions — last 2-3 tool calls and results\n\
+         ### User Messages — clarifications, feedback, new instructions"
+            .to_string()
+    }
+}
+
 /// Single LLM call: summarize `content` into a concise markdown summary.
 /// Returns the LLM output on success, `fallback` on failure or empty response.
 async fn call_summary_llm(
@@ -809,27 +838,7 @@ async fn call_summary_llm(
         session_tag: None,
     };
     let backend: Box<dyn oz_llm::Session> = Box::new(oz_llm::NativeOAISession::new(config));
-    let instruction = if lang == "zh" {
-        "用简体中文将下面的对话总结为一份简洁的 markdown 记录。\
-         保留所有关键信息。\n\n\
-         ## 必需段落\n\
-         ### 任务 — 原始请求、目标、约束\n\
-         ### 文件与路径 — 每个创建/修改/读取的文件及完整路径\n\
-         ### 关键决策 — 架构、库、方案\n\
-         ### 进度 — 已完成 vs 未完成\n\
-         ### 最近动作 — 最后 2-3 个工具调用与结果\n\
-         ### 用户消息 — 澄清、反馈、新指令"
-    } else {
-        "Summarize the conversation below into a concise markdown record. \
-         Preserve ALL essential information.\n\n\
-         ## REQUIRED SECTIONS\n\
-         ### Task — original request, goals, constraints\n\
-         ### Files & Paths — every file created/modified/read with full path\n\
-         ### Key Decisions — architecture, libraries, approaches\n\
-         ### Progress — completed vs remaining\n\
-         ### Recent Actions — last 2-3 tool calls and results\n\
-         ### User Messages — clarifications, feedback, new instructions"
-    };
+    let instruction = summary_instruction(lang);
     let prompt = Message::user(format!("{instruction}\n\n---\n\n{content}"));
     let mut sc = oz_llm::NativeToolClient::new(backend);
     match tokio::time::timeout(

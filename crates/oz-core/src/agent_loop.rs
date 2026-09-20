@@ -2803,6 +2803,11 @@ where
                 {
                     auto_spec_attempted = true;
                     if compression_service.is_configured() {
+                        if let Some(ref tx) = config.event_tx {
+                            let _ = tx.send(StreamEvent::DataQualityGate {
+                                stage: "spec".to_string(),
+                            });
+                        }
                         let deliverables = crate::quality::collect_deliverables(&tool_sequence);
                         let prompt = crate::quality::build_spec_synthesis_prompt(
                             &user_input,
@@ -2840,6 +2845,11 @@ where
                 // by assertion_max_rounds, then we exit with a note.
                 if let Some(spec) = &spec_text {
                     if assertion_rounds < config.assertion_max_rounds {
+                        if let Some(ref tx) = config.event_tx {
+                            let _ = tx.send(StreamEvent::DataQualityGate {
+                                stage: "assertions".to_string(),
+                            });
+                        }
                         let failures =
                             crate::quality::run_assertion_gate(spec, &config.working_dir).await;
                         contract_assertions =
@@ -2902,6 +2912,13 @@ where
                     let spec_for_review = spec_text
                         .clone()
                         .unwrap_or_else(|| user_input.chars().take(1500).collect::<String>());
+                    // Gate B is the longest silent stretch (a full review
+                    // inference) — announce it so the UI can explain it.
+                    if let Some(ref tx) = config.event_tx {
+                        let _ = tx.send(StreamEvent::DataQualityGate {
+                            stage: "review".to_string(),
+                        });
+                    }
                     let reply_for_review = full_response.clone();
                     let mut review_prompt = crate::quality::build_review_prompt(
                         &spec_for_review,

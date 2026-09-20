@@ -2390,6 +2390,7 @@ pub fn open_session_window(
 #[tauri::command]
 pub async fn compress_session(
     id: String,
+    model: Option<String>,
     state: State<'_, Arc<AppState>>,
     app_handle: AppHandle,
 ) -> Result<serde_json::Value, String> {
@@ -2505,13 +2506,14 @@ pub async fn compress_session(
         )
     };
 
+    let lang = lock_poison_guard(&state.locale).clone();
     let llm_summary = if messages_removed >= 4 {
-        generate_compact_summary(&state, &template_summary).await
+        generate_compact_summary(&state, &template_summary, &lang, model.as_deref()).await
     } else {
         None
     };
 
-    if let Some(ref summary) = llm_summary {
+    if let Some((ref summary, _)) = llm_summary {
         let mut store = lock_poison_guard(&state.sessions);
         if let Some(entry) = store.get_mut(&id) {
             entry.messages.insert(
@@ -2559,33 +2561,66 @@ pub async fn compress_session(
         "messages_removed": messages_removed,
         "metrics": metrics.summary(),
         "summary": template_summary,
-        "llm_summary": llm_summary,
+        "llm_summary": llm_summary.as_ref().map(|(s, _)| s.clone()),
+        "llm_model": llm_summary.as_ref().map(|(_, m)| m.clone()),
         "strategy": format!("compressed {}→{} messages, saved {:.1}% tokens{}",
             before, after, saved_pct,
-            if llm_summary.is_some() { " (LLM summary)" } else { " (template)" }),
+            match &llm_summary {
+                Some((_, label)) => format!(" (LLM summary via {label})"),
+                None => " (template)".to_string(),
+            }),
     }))
 }
 
-async fn generate_compact_summary(state: &AppState, template: &str) -> Option<String> {
+/// Resolve a session entry by its section name or by its `model` field,
+/// case-insensitively on both — users type `/compact -model lfm2.5-230m`
+/// for an entry whose `model = "LFM2.5-230M"`.
+fn resolve_entry(
+    cfg: &MyKeyConfig,
+    needle: &str,
+) -> Option<(String, oz_config::mykey::SessionConfig)> {
+    let n = needle.trim().to_lowercase();
+    if n.is_empty() {
+        return None;
+    }
+    if let Some((k, v)) = cfg.sessions.iter().find(|(k, _)| k.to_lowercase() == n) {
+        return Some((k.clone(), v.clone()));
+    }
+    cfg.sessions
+        .iter()
+        .find(|(_, s)| s.model.to_lowercase() == n)
+        .map(|(k, v)| (k.clone(), v.clone()))
+}
+
+/// Summarize the folded conversation with an LLM (structured markdown, same
+/// instruction as the agent loop's auto-compression). Model resolution:
+///   1. `requested` — the session's selected model, or `/compact -model X`;
+///   2. `summary_model` from mykey.toml (the legacy behavior, kept for
+///      callers that pass no model);
+///   3. `default_session`.
+/// Returns (summary, model label) or None when nothing resolves / the call
+/// fails, in which case the caller keeps the deterministic template.
+async fn generate_compact_summary(
+    state: &AppState,
+    template: &str,
+    lang: &str,
+    requested: Option<&str>,
+) -> Option<(String, String)> {
     let config_path = state.config_path.clone();
     let cfg = oz_config::mykey::MyKeyConfig::from_file(std::path::Path::new(&config_path)).ok()?;
-    // Manual /compact must use the same summary model as the agent
-    // loop's auto-compression (summary_model), not default_session,
-    // so local deployments get a small fast model for the summary.
-    let (sess_name, sess_config): (String, oz_config::mykey::SessionConfig) =
-        if let Some(ref name) = cfg.summary_model {
-            let found = cfg.get(name).or_else(|| {
-                cfg.sessions
-                    .iter()
-                    .find(|(_, s)| s.model == *name)
-                    .map(|(_, s)| s)
-            });
-            let sc = found?;
-            (name.clone(), sc.clone())
-        } else {
-            let name = cfg.default_session.as_deref().unwrap_or("claude_sonnet");
-            (name.to_string(), cfg.get(name)?.clone())
-        };
+    let resolved = requested
+        .and_then(|r| resolve_entry(&cfg, r))
+        .or_else(|| {
+            cfg.summary_model
+                .as_deref()
+                .and_then(|m| resolve_entry(&cfg, m))
+        })
+        .or_else(|| {
+            cfg.default_session
+                .as_deref()
+                .and_then(|d| resolve_entry(&cfg, d))
+        })?;
+    let (sess_name, sess_config) = resolved;
     let sess_type = cfg.session_type(&sess_name);
 
     let backend: Box<dyn oz_llm::Session> = match sess_type {
@@ -2599,20 +2634,19 @@ async fn generate_compact_summary(state: &AppState, template: &str) -> Option<St
     };
     let mut client = oz_llm::NativeToolClient::new(backend);
     let prompt = Message::user(format!(
-        "Summarize what was discussed in these conversation fragments \
-         in ONE short sentence (max 30 words). Do NOT re-execute or \
-         continue the conversation.\n\n{template}"
+        "{}\n\nDo NOT re-execute or continue the conversation — only summarize.\n\n---\n\n{template}",
+        oz_core::compress::summary_instruction(lang)
     ));
     let msgs = [prompt];
-    // Manual /compact runs the same small local summarizer as the agent
-    // loop's auto-compression (e.g. LFM2.5-230M), which needs minutes for
-    // a large removed window — match `summary_wait_secs` (600s) instead of
-    // the old 10s that silently degraded every manual compaction to the
-    // template.
+    // Same small local summarizer as the agent loop's auto-compression needs
+    // minutes for a large removed window — match `summary_wait_secs` (600s)
+    // instead of a short timeout that silently degrades to the template.
     let result =
         tokio::time::timeout(std::time::Duration::from_secs(600), client.chat(&msgs, &[])).await;
     match result {
-        Ok(Ok(resp)) if !resp.content.is_empty() => Some(resp.content),
+        Ok(Ok(resp)) if !resp.content.is_empty() => {
+            Some((resp.content, sess_config.model.clone()))
+        }
         _ => None,
     }
 }
@@ -3149,6 +3183,47 @@ model = "m3"
             vec!["plain".to_string(), "qwen3.6-27b".to_string()],
             "dotted entries are collected; provider-less-shape config tables are not"
         );
+    }
+
+    #[test]
+    fn resolve_entry_matches_name_or_model_field_case_insensitively() {
+        let cfg = {
+            let path = std::env::temp_dir().join("oz_cmd_test_resolve_entry.toml");
+            std::fs::write(
+                &path,
+                r#"
+[LFM2_5_230M]
+apikey = "sk-test"
+apibase = "http://127.0.0.1:8000/v1"
+model = "LFM2.5-230M"
+
+[big_model]
+apikey = "sk-test"
+apibase = "http://127.0.0.1:8000/v1"
+model = "Qwen3-Coder-30B"
+"#,
+            )
+            .unwrap();
+            let cfg = MyKeyConfig::from_file(&path).unwrap();
+            let _ = std::fs::remove_file(&path);
+            cfg
+        };
+
+        // model-field match, case-insensitive (the `/compact -model lfm2.5-230m` case)
+        let (name, sc) = resolve_entry(&cfg, "lfm2.5-230m").expect("model field match");
+        assert_eq!(name, "LFM2_5_230M");
+        assert_eq!(sc.model, "LFM2.5-230M");
+        // exact section-name match wins
+        assert_eq!(resolve_entry(&cfg, "big_model").unwrap().0, "big_model");
+        // section name, case-insensitive
+        assert_eq!(resolve_entry(&cfg, "BIG_MODEL").unwrap().0, "big_model");
+        // unknown / empty resolve to None
+        assert!(resolve_entry(&cfg, "nope").is_none());
+        assert!(resolve_entry(&cfg, "   ").is_none());
+
+        // The shipped instruction is shared with the auto-compression path.
+        assert!(oz_core::compress::summary_instruction("en").contains("REQUIRED SECTIONS"));
+        assert!(oz_core::compress::summary_instruction("zh").contains("必需段落"));
     }
 
     #[test]

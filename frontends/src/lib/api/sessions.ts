@@ -161,7 +161,7 @@ export async function resumeSession(id: string, modelName?: string): Promise<voi
   if (!res.ok) throw new Error(`Failed to resume session: ${res.status}`);
 }
 
-export async function compressSession(id: string): Promise<{
+export async function compressSession(id: string, model?: string): Promise<{
   session_id: string;
   before_chars: number;
   after_chars: number;
@@ -171,10 +171,11 @@ export async function compressSession(id: string): Promise<{
   saved_tokens: number;
   saved_pct: number;
   messages_removed: number;
+  llm_model?: string | null;
   strategy: string;
 }> {
   if (isTauri()) {
-    return await tauriInvoke("compress_session", { id });
+    return await tauriInvoke("compress_session", { id, model: model ?? null });
   }
   const res = await fetchJson(`${BASE}/${id}/compress`, { method: "POST" });
   if (!res.ok) throw new Error(`Failed to compress session: ${res.status}`);

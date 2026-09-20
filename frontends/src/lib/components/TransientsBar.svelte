@@ -38,9 +38,14 @@
   $effect(() => {
     const id = current?.id;
     if (!id) return;
+    // Quality-gate notices describe work that runs for many seconds
+    // (assertion commands, a review inference) — a 4s flash would vanish
+    // mid-wait and leave the user staring at an apparently frozen bubble
+    // again.
+    const ttl = current?.dataType === "data_quality_gate" ? 15000 : 4000;
     const t = setTimeout(() => {
       if (current?.id === id) current = null;
-    }, 4000);
+    }, ttl);
     return () => clearTimeout(t);
   });
 </script>

@@ -103,6 +103,15 @@ pub enum StreamEvent {
         saved_tokens: usize,
     },
 
+    /// Emitted while a post-answer delivery-quality gate runs — acceptance
+    /// spec synthesis, assertion execution, independent review. These run
+    /// after the final text has streamed and before `done`, so without a
+    /// signal the UI looks frozen for the seconds they take.
+    DataQualityGate {
+        /// "spec" | "assertions" | "review"
+        stage: String,
+    },
+
     /// Emitted when the agent calls todowrite or todoupdate tools.
     /// Carries the full todo list snapshot so the frontend can render
     /// the todo progress card inline in the chat message.
