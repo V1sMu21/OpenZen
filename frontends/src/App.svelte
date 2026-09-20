@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { emitTo } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { sessions } from "./lib/stores/sessions";
@@ -57,6 +58,10 @@
         let visible = true;
         try { visible = await existing.isVisible(); } catch (_) {}
         if (visible) {
+          // 先让猫走掉（宠物页收到信号播放走路退场），再隐藏窗口。
+          // emitTo 发射即忘——await 它一旦挂起会阻塞后续隐藏。
+          emitTo("pet", "pet-walkout").catch(() => {});
+          await new Promise((r) => setTimeout(r, 1150));
           await existing.hide();
           showPetToast("🐱 阿青先去睡觉啦（再点印章唤醒）");
           console.log("[pet] hidden via seal toggle");
@@ -64,11 +69,12 @@
         }
         try { await existing.show(); } catch (_) {}
         try { await existing.setAlwaysOnTop(true); } catch (_) {}
-        // tao 的 show() = makeKeyAndOrderFront——宠物窗会抢走主窗 key 状态，
-        // macOS 对失活窗口的首个点击只做激活不投递内容，"再点一次关闭"
-        // 会变成要点两下。显示后立刻把焦点还给主窗。
-        try { await getCurrentWebviewWindow().setFocus(); } catch (_) {}
-        showPetToast("🐱 阿青回来啦");
+        try { await existing.setFocus(); } catch (_) {}
+        // 宠物窗必须持焦（key window）：WebKit 只给 key window 投递
+        // mouseMoved，且失去 key 后页面整体转 hidden、一切输入失效。
+        // 代价：收起需两次 seal 点击（第一次只是激活主窗）——这是 macOS
+        // 多窗口应用的标准行为；猫身上双击/右键菜单随时可关闭。
+        showPetToast("🐱 阿青回来啦（点两次印章收起）");
         console.log("[pet] shown existing window");
         return;
       }
@@ -102,7 +108,7 @@
       // 不拉焦点（同上：避免主窗失活吞掉下一次 seal 点击）。
       try { await w.show(); } catch (_) {}
       try { await w.setAlwaysOnTop(true); } catch (_) {}
-      try { await getCurrentWebviewWindow().setFocus(); } catch (_) {}
+      try { await w.setFocus(); } catch (_) {}
       showPetToast("🐱 阿青放到桌面啦");
       console.log("[pet] created /pet/pet.html");
     } catch (e) {
