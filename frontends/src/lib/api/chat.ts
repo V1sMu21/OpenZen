@@ -11,11 +11,26 @@ export interface ChatResponse {
 export interface ModelEntry {
   name: string;
   model: string;
+  /** Derived protocol family ("openai"/"claude"), from the entry name. */
   provider: string;
+  /** [providers.<id>] this entry borrows apibase/apikey from, if any. */
+  provider_id?: string | null;
   context_win: number;
+  /** Declared input modalities; always non-empty (["text"] fallback). */
+  modalities?: string[];
   is_local?: boolean;
   /** True when mykey.toml default_session points here (list_models only). */
   is_default?: boolean;
+}
+
+/** A named apibase+apikey credential shared by multiple model entries. */
+export interface ProviderEntry {
+  id: string;
+  /** Full base URL — shown in the settings UI, not a secret. */
+  apibase: string;
+  /** Masked key hint; the literal key never leaves the config. */
+  key_hint: string;
+  model_count: number;
 }
 
 export interface SkillMcpItem {
@@ -50,11 +65,25 @@ export interface TokenStats {
 
 export interface ModelUpsertArgs {
   name: string;
-  /** Blank/omitted on an edit keeps the stored value; required for new entries. */
+  /** When set, the entry borrows apibase/apikey from this provider and
+   *  inline apibase/apikey are ignored/stripped. Null/omitted = standalone. */
+  provider?: string | null;
+  /** Blank/omitted on an edit keeps the stored value; required for new
+   *  standalone entries. */
   apibase?: string;
   apikey?: string;
   model?: string;
   context_win: number;
+  /** Input modalities; defaults to ["text"] server-side. */
+  modalities?: string[];
+}
+
+export interface ProviderUpsertArgs {
+  id: string;
+  /** Required (validated server-side). */
+  apibase: string;
+  /** Blank/omitted on an edit keeps the stored key. */
+  apikey?: string;
 }
 
 let cachedAuthToken: string | null = null;

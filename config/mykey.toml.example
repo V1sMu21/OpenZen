@@ -1,21 +1,40 @@
+# OpenZen model configuration (mykey.toml)
+#
 # Top-level options:
+#   default_session = "..."          # model entry used when none is specified
+#   summary_model = "..."            # model used for compression summaries
 #   memory_backend = "erme"          # "erme" (semantic memory engine, default) or "file" (legacy full-text)
 #   erme_idle_interval_secs = 300    # seconds between ERME soul-reflection cycles (default 300)
+#
+# Structure: each top-level [table] is one model entry; every entry needs
+# apibase + apikey + model. Entries can share one credential by referencing
+# a [providers.<id>] table with `provider = "<id>"` instead of repeating
+# apibase/apikey. Both styles can coexist; the entry name (the table key)
+# is its identity everywhere (default_session, model switching) and cannot
+# be renamed — delete and recreate instead.
 
-[sessions.default]
-session_type = "claude"
-api_key = "${ANTHROPIC_API_KEY}"
-model = "claude-sonnet-4-20250514"
-base_url = "https://api.anthropic.com"
+default_session = "Agents_A1_8bit"
 
-# [sessions.openai]
-# session_type = "openai"
-# api_key = "${OPENAI_API_KEY}"
-# model = "gpt-4o"
-# base_url = "https://api.openai.com"
+# One credential shared by several model entries:
+[providers.local_omlx]
+apibase = "http://127.0.0.1:8000/v1"
+apikey = "sk-local-not-needed-for-omlx"
 
-# [sessions.local]
-# session_type = "native_claude"
-# api_key = "${ANTHROPIC_API_KEY}"
-# model = "claude-sonnet-4-20250514"
-# base_url = "http://localhost:8080"
+[Agents_A1_8bit]
+provider = "local_omlx"
+model = "Agents-A1-8bit"
+context_win = 256000
+# Optional declared input modalities (text/image/video/audio; default text):
+modalities = ["text", "image"]
+
+[MLX_Qwen3_Coder]
+provider = "local_omlx"
+model = "Qwen3-Coder-30B"
+context_win = 256000
+
+# A standalone entry with its own inline credential:
+[cloud_sonnet]
+apibase = "https://api.anthropic.com/v1"
+apikey = "${ANTHROPIC_API_KEY}"
+model = "claude-sonnet-4-5"
+context_win = 200000

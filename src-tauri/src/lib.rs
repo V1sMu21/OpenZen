@@ -687,6 +687,11 @@ impl AppState {
         // Uses the same config fallback chain as the runner so a config at a
         // fallback path never silently flips this decision.
         let config_path = resolve_config_path(data_root.join("mykey.toml"));
+        // One-time migration before anything reads the config: fold model
+        // entries that repeat an identical apibase+apikey into a shared
+        // [providers.<id>] table (backs up the file first; no-op when the
+        // config already has providers or nothing is duplicated).
+        commands::migrate_mykey_to_providers(&config_path.to_string_lossy());
         let memory_cfg = match oz_config::mykey::MyKeyConfig::from_file(&config_path) {
             Ok(cfg) => Some(cfg),
             Err(e) => {
@@ -810,12 +815,30 @@ pub struct SendMessageResponse {
 pub struct ModelEntry {
     pub name: String,
     pub model: String,
+    /// Derived protocol family ("openai"/"claude"), from the entry name.
     pub provider: String,
+    /// `[providers.<id>]` this entry borrows apibase/apikey from, if any.
+    pub provider_id: Option<String>,
     pub context_win: usize,
+    /// Declared input modalities; always non-empty (["text"] fallback).
+    pub modalities: Vec<String>,
     pub is_local: bool,
     /// True when `default_session` in mykey.toml points at this entry.
     #[serde(default)]
     pub is_default: bool,
+}
+
+/// A named endpoint credential (`[providers.<id>]`) shared by model entries
+/// that reference it via `provider = "<id>"`.
+#[derive(Debug, Serialize)]
+pub struct ProviderEntry {
+    pub id: String,
+    /// Full base URL — shown in the settings UI, not a secret.
+    pub apibase: String,
+    /// Masked key hint ("sk-…abcd"); the literal key never leaves the config.
+    pub key_hint: String,
+    /// How many session entries reference this provider.
+    pub model_count: usize,
 }
 
 pub(crate) fn is_local_deploy(apibase: &str) -> bool {
@@ -1459,6 +1482,9 @@ commands::get_working_dir_for_session,
             commands::upsert_model,
             commands::delete_model,
             commands::set_default_model,
+            commands::list_providers,
+            commands::upsert_provider,
+            commands::delete_provider,
             commands::list_skill_mcp,
             commands::toggle_skill_mcp,
             commands::list_mcp_servers,

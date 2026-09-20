@@ -127,6 +127,8 @@ mod tests {
             base_delay: None,
             spring_back: None,
             extra_headers: None,
+            provider: None,
+            modalities: None,
             session_tag: None,
         }
     }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { sessions } from "../stores/sessions";
   import { projects } from "../stores/projects";
+  import { runningSessionIds } from "../stores/running";
   import type { SessionInfo } from "../api/sessions";
   import { t, locale, localT } from "../i18n";
 
@@ -165,9 +166,13 @@
       class:focused={idx === focusedIndex}
       role="option"
       aria-selected={session.id === currentId}
+      aria-label={$runningSessionIds.has(session.id) ? $t("session.running") : undefined}
       tabindex="-1"
       onclick={() => { onSelectSession(session.id); focusedIndex = idx; }}
     >
+      {#if $runningSessionIds.has(session.id)}
+        <span class="running-dot" aria-hidden="true"></span>
+      {/if}
       <div class="session-info">
         {#if renamingId === session.id}
           <input
@@ -264,6 +269,49 @@
     outline: 2px solid var(--color-primary);
     outline-offset: -2px;
     background: var(--color-surface-soft);
+  }
+
+  /* ── 运行中指示：晕染呼吸圆 (title 前的扩散光环) ── */
+  .running-dot {
+    position: relative;
+    flex: none;
+    width: 8px;
+    height: 8px;
+    margin-left: 2px;
+    border-radius: 999px;
+    background: var(--color-info, #5dade2);
+  }
+
+  .running-dot::after {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: inherit;
+    background: color-mix(in srgb, var(--color-info, #5dade2) 40%, transparent);
+    animation: run-halo 1.6s ease-out infinite;
+  }
+
+  @keyframes run-halo {
+    0% {
+      transform: scale(0.55);
+      opacity: 0.9;
+    }
+    70% {
+      transform: scale(1.7);
+      opacity: 0;
+    }
+    100% {
+      transform: scale(1.7);
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .running-dot::after {
+      animation: none;
+      opacity: 0.35;
+      transform: none;
+    }
   }
 
   .session-info {

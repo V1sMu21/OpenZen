@@ -95,7 +95,7 @@
     if (!dragging || e.pointerId !== dragPointerId) return;
     e.preventDefault();
     const delta = startX - e.clientX;
-    sidepanel.width = Math.max(280, Math.min(800, startWidth + delta));
+    sidepanel.width = Math.max(280, Math.min(960, startWidth + delta));
   }
 
   function onDragEnd(e: PointerEvent) {

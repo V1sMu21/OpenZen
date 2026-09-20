@@ -1,5 +1,6 @@
 //! Tauri IPC command handlers for the OpenZen desktop app.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     data_dir, debug_log, debug_log_flush, lock_poison_guard, runner, AppState, ModelEntry,
-    SendMessageResponse,
+    ProviderEntry, SendMessageResponse,
 };
 
 #[tauri::command]
@@ -163,7 +164,9 @@ pub fn list_models(state: State<'_, Arc<AppState>>) -> Vec<ModelEntry> {
                         name: name.clone(),
                         model: sess.model.clone(),
                         provider: provider.to_string(),
+                        provider_id: sess.provider.clone(),
                         context_win: sess.context_win,
+                        modalities: normalize_modalities(sess.modalities.as_deref()),
                         is_local,
                         // Compare the explicit field only: the
                         // default_session_name() fallback pick walks a
@@ -409,9 +412,31 @@ fn valid_model_name(name: &str) -> bool {
             .any(|c| c.is_control() || matches!(c, '[' | ']' | '"' | '\'' | '#'))
 }
 
-/// Build a session table from upsert args. apibase/model/apikey may be
-/// absent — `upsert_model` fills blanks from the stored entry (edits keep
-/// existing values) and requires apibase/model for brand-new entries.
+/// Allowed input-modality values for `modalities` in a session entry.
+const ALLOWED_MODALITIES: [&str; 4] = ["text", "image", "video", "audio"];
+
+/// Normalize a stored modalities list: drop unknown values and duplicates,
+/// and fall back to ["text"] when nothing valid remains (matches the
+/// "absent = text-only" convention of SessionConfig::modalities).
+fn normalize_modalities(raw: Option<&[String]>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in raw.into_iter().flatten() {
+        let m = m.trim().to_lowercase();
+        if ALLOWED_MODALITIES.contains(&m.as_str()) && !out.contains(&m) {
+            out.push(m);
+        }
+    }
+    if out.is_empty() {
+        out.push("text".to_string());
+    }
+    out
+}
+
+/// Build a session table from upsert args. Every field may be absent —
+/// `upsert_model` fills blanks from the stored entry (edits keep existing
+/// values); a brand-new standalone entry needs apibase, a provider-backed
+/// one borrows apibase/apikey from `[providers.<id>]`, and every new entry
+/// needs model.
 fn session_table_from_args(args: &serde_json::Value) -> toml::Table {
     let context_win = args["context_win"]
         .as_u64()
@@ -426,6 +451,25 @@ fn session_table_from_args(args: &serde_json::Value) -> toml::Table {
         "context_win".into(),
         toml::Value::Integer(context_win as i64),
     );
+    if let Some(list) = args["modalities"].as_array() {
+        let names: Vec<String> = list
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::to_string)
+            .collect();
+        // Always write a normalized list (non-empty, deduped, whitelisted)
+        // so the round-trip through from_file yields the same set.
+        let normalized = normalize_modalities(Some(&names));
+        t.insert(
+            "modalities".into(),
+            toml::Value::Array(
+                normalized
+                    .into_iter()
+                    .map(toml::Value::String)
+                    .collect(),
+            ),
+        );
+    }
     t
 }
 
@@ -449,16 +493,46 @@ pub fn upsert_model(args: serde_json::Value, state: State<'_, Arc<AppState>>) ->
                 }
             }
         }
-        // SessionConfig deserialization requires apikey; a brand-new entry
-        // without one gets an empty string (valid for local no-auth servers).
-        entry
-            .entry("apikey".to_string())
-            .or_insert_with(|| toml::Value::String(String::new()));
-        // A brand-new entry still needs apibase/model from the caller.
-        for key in ["apibase", "model"] {
-            if !entry.contains_key(key) {
-                return Err(format!("{key} is required"));
+        // Provider reference: when set, the entry borrows apibase/apikey
+        // from `[providers.<id>]` at parse time — inline copies are stripped
+        // so credentials stay single-sourced. Unknown provider ids are
+        // rejected here rather than silently dropping the entry later.
+        if let Some(pid) = args["provider"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            // Validate against the *parsed* provider set, not raw key
+            // presence: a malformed [providers.<id>] table (missing apibase)
+            // is skipped by from_file, and referencing it would silently
+            // drop the entry at parse time. A cheap re-parse is fine on this
+            // cold path.
+            let known = MyKeyConfig::from_file(&state.config_path)
+                .map(|cfg| cfg.providers.contains_key(pid))
+                .unwrap_or(false);
+            if !known {
+                return Err(format!("provider not found: {pid}"));
             }
+            entry.insert("provider".into(), toml::Value::String(pid.to_string()));
+            entry.remove("apibase");
+            entry.remove("apikey");
+        } else {
+            entry.remove("provider");
+            // SessionConfig deserialization requires apikey; a brand-new
+            // inline entry without one gets an empty string (valid for
+            // local no-auth servers).
+            entry
+                .entry("apikey".to_string())
+                .or_insert_with(|| toml::Value::String(String::new()));
+            if !entry.contains_key("apibase") {
+                return Err("apibase is required".to_string());
+            }
+        }
+        // model is required regardless of credential style: SessionConfig has
+        // no default for it, so an entry without one is silently dropped by
+        // every consumer's parse.
+        if !entry.contains_key("model") {
+            return Err("model is required".to_string());
         }
         table.insert(name.clone(), toml::Value::Table(entry));
         Ok(())
@@ -499,6 +573,369 @@ pub fn set_default_model(name: String, state: State<'_, Arc<AppState>>) -> serde
         Ok(()) => serde_json::json!({ "status": "ok" }),
         Err(e) => serde_json::json!({ "error": e }),
     }
+}
+
+// ── Provider management ─────────────────────────────────────────────────────
+//
+// A provider (`[providers.<id>]`) holds one apibase + apikey shared by any
+// number of model entries. Keys are write-only: list payloads carry a
+// masked hint, never the literal value.
+
+/// Mask an API key for display. Short keys are hidden entirely — showing
+/// prefix+suffix on a 9-char token would reveal all but one character.
+fn mask_key(key: &str) -> String {
+    if key.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 12 {
+        return "••••".to_string();
+    }
+    let head = if chars.len() > 20 { 4 } else { 2 };
+    let prefix: String = chars[..head].iter().collect();
+    let suffix: String = chars[chars.len() - head..].iter().collect();
+    format!("{prefix}…{suffix}")
+}
+
+/// List configured providers with a masked key hint and reference counts
+/// (the literal key never leaves the config).
+#[tauri::command]
+pub fn list_providers(state: State<'_, Arc<AppState>>) -> Vec<ProviderEntry> {
+    let cfg_path = std::path::Path::new(&state.config_path);
+    let Ok(cfg) = MyKeyConfig::from_file(cfg_path) else {
+        return vec![];
+    };
+    let mut entries: Vec<ProviderEntry> = cfg
+        .providers
+        .iter()
+        .map(|(id, p)| ProviderEntry {
+            id: id.clone(),
+            apibase: p.apibase.clone(),
+            key_hint: mask_key(&p.apikey),
+            model_count: cfg
+                .sessions
+                .values()
+                .filter(|s| s.provider.as_deref() == Some(id.as_str()))
+                .count(),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.id.cmp(&b.id));
+    entries
+}
+
+/// Create or update `[providers.<id>]`. A blank apikey on edit keeps the
+/// stored value (the UI never has the literal key to send back).
+#[tauri::command]
+pub fn upsert_provider(
+    args: serde_json::Value,
+    state: State<'_, Arc<AppState>>,
+) -> serde_json::Value {
+    let id = args["id"].as_str().unwrap_or("").trim().to_string();
+    if !valid_model_name(&id) {
+        return serde_json::json!({ "error": "invalid provider id" });
+    }
+    let apibase = args["apibase"].as_str().unwrap_or("").trim().to_string();
+    let apikey = args["apikey"].as_str().unwrap_or("").trim().to_string();
+    match write_mykey_toml(&state.config_path, |table| {
+        if apibase.is_empty() {
+            return Err("apibase is required".to_string());
+        }
+        let providers = table
+            .entry("providers".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let Some(pt) = providers.as_table_mut() else {
+            return Err("[providers] is not a table".to_string());
+        };
+        let mut entry = toml::Table::new();
+        entry.insert("apibase".into(), toml::Value::String(apibase));
+        // Blank apikey on edit keeps the stored key (write-only field).
+        if !apikey.is_empty() {
+            entry.insert("apikey".into(), toml::Value::String(apikey));
+        } else if let Some(existing) = pt.get(&id).and_then(|v| v.get("apikey")) {
+            entry.insert("apikey".into(), existing.clone());
+        } else {
+            entry.insert("apikey".into(), toml::Value::String(String::new()));
+        }
+        pt.insert(id, toml::Value::Table(entry));
+        Ok(())
+    }) {
+        Ok(()) => serde_json::json!({ "status": "ok" }),
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Delete `[providers.<id>]` and cascade-delete every model entry that
+/// references it (user-approved in the UI with a confirmation count).
+/// Clears a dangling `default_session` as delete_model does.
+#[tauri::command]
+pub fn delete_provider(id: String, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let mut deleted_models = 0usize;
+    match write_mykey_toml(&state.config_path, |table| {
+        let removed = table
+            .get_mut("providers")
+            .and_then(|v| v.as_table_mut())
+            .and_then(|pt| pt.remove(&id))
+            .is_some();
+        if !removed {
+            return Err(format!("provider not found: {id}"));
+        }
+        let mut orphans: Vec<String> = Vec::new();
+        collect_provider_orphans(table, &id, "", &mut orphans);
+        for name in &orphans {
+            remove_entry_by_dotted_name(table, name);
+            deleted_models += 1;
+        }
+        // Clear a dangling default_session for both plain and dotted names.
+        if let Some(def) = table.get("default_session").and_then(|v| v.as_str()) {
+            if orphans.iter().any(|n| n == def) {
+                table.remove("default_session");
+            }
+        }
+        Ok(())
+    }) {
+        Ok(()) => serde_json::json!({ "status": "ok", "deleted_models": deleted_models }),
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Collect dotted names of session entries that reference `provider_id`,
+/// including entries under dotted-key sections (`[qwen3.6-27b]` parses as
+/// nested tables `qwen3` → `6-27b`). Only tables that look like a session
+/// entry (carry `provider` plus a model-shape field) count, so unrelated
+/// config tables that happen to hold a `provider` key (web_search,
+/// platforms.*) are never harvested.
+fn collect_provider_orphans(
+    table: &toml::Table,
+    provider_id: &str,
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
+    for (key, value) in table {
+        if prefix.is_empty() && oz_config::mykey::RESERVED_TOP_LEVEL_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        let Some(sub) = value.as_table() else { continue };
+        let full = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        if oz_config::mykey::provider_ref(sub) == Some(provider_id)
+            && oz_config::mykey::looks_like_session_entry(sub)
+        {
+            out.push(full);
+        } else {
+            collect_provider_orphans(sub, provider_id, &full, out);
+        }
+    }
+}
+
+/// Remove the entry at a dotted name, pruning parent tables that become
+/// empty (a dotted section only exists as nesting — `[a.b]` is a table `b`
+/// inside table `a`).
+fn remove_entry_by_dotted_name(table: &mut toml::Table, dotted: &str) {
+    fn walk(node: &mut toml::Table, parts: &[&str]) {
+        let Some((head, rest)) = parts.split_first() else {
+            return;
+        };
+        if rest.is_empty() {
+            node.remove(*head);
+            return;
+        }
+        let parent_empty = {
+            let Some(child) = node.get_mut(*head).and_then(|v| v.as_table_mut()) else {
+                return;
+            };
+            walk(child, rest);
+            child.is_empty()
+        };
+        if parent_empty {
+            node.remove(*head);
+        }
+    }
+    let parts: Vec<&str> = dotted.split('.').collect();
+    walk(table, &parts);
+}
+
+/// ── One-time migration: dedupe repeated credentials into providers ────────
+///
+/// Pre-provider configs repeat the same apibase+apikey in every model entry.
+/// At startup (before anything reads the config), entries sharing an exact
+/// (apibase, apikey) pair — two or more of them — are merged into one
+/// `[providers.<id>]` table; the entries keep all their other fields and
+/// gain `provider = "<id>"` instead of the repeated credentials. The on-disk
+/// file (plaintext or .enc) is copied to a `.bak-providers-<unix_ts>`
+/// sibling first. Idempotent: a file that already has a `[providers]` table
+/// or no duplicated pairs is left untouched. Entry names — the identity
+/// referenced by default_session / profiles / the frontend — never change.
+pub(crate) fn migrate_mykey_to_providers(config_path: &str) {
+    let path = std::path::Path::new(config_path);
+    let Ok(content) = oz_config::crypto::read_config(path) else {
+        return; // no config yet — nothing to migrate
+    };
+    let Ok(table) = content.parse::<toml::Table>() else {
+        tracing::warn!("provider migration: config does not parse as TOML, skipping");
+        return;
+    };
+    if !needs_provider_migration(&table) {
+        return;
+    }
+
+    // Backup whatever on-disk state exists (plaintext and/or encrypted)
+    // before the first mutation. fs::copy preserves the 0600 perms.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut backed_up = Vec::new();
+    for candidate in [
+        path.to_path_buf(),
+        path.with_extension("toml.enc"),
+    ] {
+        if candidate.exists() {
+            let bak = candidate.with_file_name(format!(
+                "{}.bak-providers-{ts}",
+                candidate.file_name().and_then(|n| n.to_str()).unwrap_or("mykey.toml")
+            ));
+            match std::fs::copy(&candidate, &bak) {
+                Ok(_) => backed_up.push(bak),
+                Err(e) => {
+                    // Never migrate without a backup — a bad write would be
+                    // unrecoverable and the file holds every API key.
+                    tracing::error!(
+                        "provider migration aborted: cannot back up {}: {e}",
+                        candidate.display()
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    match write_mykey_toml(config_path, |table| {
+        apply_provider_migration(table)
+    }) {
+        Ok(()) => {
+            let merged: Vec<String> = backed_up
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            tracing::info!(
+                "provider migration: merged duplicated credentials into [providers] (backup: {})",
+                merged.join(", ")
+            );
+        }
+        Err(e) => tracing::error!("provider migration write failed (backup kept): {e}"),
+    }
+}
+
+/// Detection pass: true when there is no `[providers]` table yet and at
+/// least one (apibase, apikey) pair is shared by 2+ top-level model entries.
+fn needs_provider_migration(table: &toml::Table) -> bool {
+    if table.contains_key("providers") {
+        return false;
+    }
+    credential_counts(table).values().any(|count| *count >= 2)
+}
+
+/// Count top-level model entries per exact (apibase, apikey) pair — both
+/// migration callers only need "how many share this pair", never the names.
+/// Only plain string credentials count; anything else stays untouched.
+fn credential_counts(table: &toml::Table) -> HashMap<(String, String), usize> {
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    for (name, value) in table {
+        if oz_config::mykey::RESERVED_TOP_LEVEL_KEYS.contains(&name.as_str()) {
+            continue;
+        }
+        let Some(t) = value.as_table() else { continue };
+        let (Some(apibase), Some(apikey)) = (
+            t.get("apibase").and_then(|v| v.as_str()),
+            t.get("apikey").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        *counts
+            .entry((apibase.to_string(), apikey.to_string()))
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
+/// The write-half of the migration, run inside `write_mykey_toml` (which
+/// re-reads the config under CONFIG_WRITE_LOCK). No-op unless the same
+/// conditions hold on the fresh table, so concurrent edits cannot corrupt.
+fn apply_provider_migration(table: &mut toml::Table) -> Result<(), String> {
+    if table.contains_key("providers") {
+        return Ok(()); // someone else migrated first — nothing to do
+    }
+    let counts = credential_counts(table);
+    let mut provider_id_by_cred: HashMap<(String, String), String> = HashMap::new();
+    let mut providers = toml::Table::new();
+    for ((apibase, apikey), count) in &counts {
+        if *count < 2 {
+            continue; // single entries stay inline
+        }
+        let id = derive_provider_id(apibase, &providers);
+        let mut entry = toml::Table::new();
+        entry.insert("apibase".into(), toml::Value::String(apibase.clone()));
+        entry.insert("apikey".into(), toml::Value::String(apikey.clone()));
+        providers.insert(id.clone(), toml::Value::Table(entry));
+        provider_id_by_cred.insert((apibase.clone(), apikey.clone()), id);
+    }
+    if provider_id_by_cred.is_empty() {
+        return Ok(());
+    }
+    for (name, value) in table.iter_mut() {
+        if oz_config::mykey::RESERVED_TOP_LEVEL_KEYS.contains(&name.as_str()) {
+            continue;
+        }
+        let Some(t) = value.as_table_mut() else { continue };
+        let (Some(apibase), Some(apikey)) = (
+            t.get("apibase").and_then(|v| v.as_str()),
+            t.get("apikey").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        let Some(id) = provider_id_by_cred.get(&(apibase.to_string(), apikey.to_string())) else {
+            continue;
+        };
+        t.remove("apibase");
+        t.remove("apikey");
+        t.insert("provider".into(), toml::Value::String(id.clone()));
+    }
+    table.insert("providers".into(), toml::Value::Table(providers));
+    Ok(())
+}
+
+/// Derive a readable provider id from the endpoint host, e.g.
+/// `http://127.0.0.1:8000/v1` → `127_0_0_1_8000`. Sanitized to TOML-safe
+/// characters, deduplicated against ids already in the table.
+fn derive_provider_id(apibase: &str, taken: &toml::Table) -> String {
+    let without_scheme = apibase
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(apibase);
+    let authority = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme)
+        // Strip userinfo if someone put credentials in the URL.
+        .rsplit('@')
+        .next()
+        .unwrap_or(without_scheme);
+    let base: String = authority
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let base = base.trim_matches('_').to_string();
+    let stem = if base.is_empty() { "provider".to_string() } else { base };
+    let mut id = stem.clone();
+    let mut n = 1;
+    while taken.contains_key(&id) {
+        n += 1;
+        id = format!("{stem}_{n}");
+    }
+    id
 }
 
 /// Skill/SOP inventory for the settings panel, sourced from the process-wide
@@ -2541,5 +2978,201 @@ mod tests {
     #[test]
     fn intervention_stored_content_is_plain_when_agent_idle() {
         assert_eq!(intervention_stored_content(false, "普通消息"), "普通消息");
+    }
+
+    fn mig_table(body: &str) -> toml::Table {
+        body.parse().unwrap()
+    }
+
+    #[test]
+    fn migration_needed_only_for_duplicated_credentials() {
+        let dup = mig_table(
+            r#"
+[a]
+apikey = "sk-1"
+apibase = "http://h:8000/v1"
+model = "m1"
+
+[b]
+apikey = "sk-1"
+apibase = "http://h:8000/v1"
+model = "m2"
+"#,
+        );
+        assert!(needs_provider_migration(&dup));
+
+        let unique = mig_table(
+            r#"
+[a]
+apikey = "sk-1"
+apibase = "http://h:8000/v1"
+model = "m1"
+"#,
+        );
+        assert!(!needs_provider_migration(&unique));
+
+        let with_providers = mig_table(
+            r#"
+[providers.p]
+apikey = "sk-1"
+apibase = "http://h:8000/v1"
+
+[a]
+provider = "p"
+model = "m1"
+"#,
+        );
+        assert!(!needs_provider_migration(&with_providers));
+    }
+
+    #[test]
+    fn migration_merges_group_and_keeps_entry_fields() {
+        let mut table = mig_table(
+            r#"
+default_session = "a"
+
+[a]
+apikey = "sk-1"
+apibase = "http://127.0.0.1:8000/v1"
+model = "m1"
+context_win = 256000
+max_tokens = 4096
+
+[b]
+apikey = "sk-1"
+apibase = "http://127.0.0.1:8000/v1"
+model = "m2"
+
+[c]
+apikey = "sk-other"
+apibase = "http://other:9000/v1"
+model = "m3"
+"#,
+        );
+        apply_provider_migration(&mut table).unwrap();
+
+        let providers = table["providers"].as_table().unwrap();
+        assert_eq!(providers.len(), 1, "only the duplicated pair merges");
+        let pid = providers.keys().next().unwrap();
+        assert_eq!(providers[pid]["apibase"].as_str(), Some("http://127.0.0.1:8000/v1"));
+
+        let a = table["a"].as_table().unwrap();
+        assert_eq!(a["provider"].as_str().unwrap(), pid, "entry gains the ref");
+        assert!(a.get("apibase").is_none() && a.get("apikey").is_none());
+        assert_eq!(a["model"].as_str(), Some("m1"));
+        assert_eq!(a["context_win"].as_integer(), Some(256000), "private fields kept");
+        assert_eq!(a["max_tokens"].as_integer(), Some(4096));
+
+        let b = table["b"].as_table().unwrap();
+        assert_eq!(b["provider"].as_str().unwrap(), pid);
+
+        // Single-entry credentials stay inline.
+        let c = table["c"].as_table().unwrap();
+        assert!(c.get("provider").is_none());
+        assert_eq!(c["apibase"].as_str(), Some("http://other:9000/v1"));
+
+        assert_eq!(table["default_session"].as_str(), Some("a"), "names unchanged");
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let mut table = mig_table(
+            r#"
+[a]
+apikey = "sk-1"
+apibase = "http://h:8000/v1"
+model = "m1"
+
+[b]
+apikey = "sk-1"
+apibase = "http://h:8000/v1"
+model = "m2"
+"#,
+        );
+        apply_provider_migration(&mut table).unwrap();
+        let once = table.clone();
+        apply_provider_migration(&mut table).unwrap();
+        assert_eq!(once, table, "second pass must not change anything");
+    }
+
+    #[test]
+    fn provider_id_derivation_sanitizes_and_dedups() {
+        let taken = toml::Table::new();
+        assert_eq!(
+            derive_provider_id("http://127.0.0.1:8000/v1", &taken),
+            "127_0_0_1_8000"
+        );
+        assert_eq!(
+            derive_provider_id("https://api.example.com/v1", &taken),
+            "api_example_com"
+        );
+        assert_eq!(derive_provider_id("::::", &taken), "provider");
+
+        let mut taken = toml::Table::new();
+        taken.insert("h".to_string(), toml::Value::Table(toml::Table::new()));
+        taken.insert("h_1".to_string(), toml::Value::Table(toml::Table::new()));
+        assert_eq!(
+            derive_provider_id("http://h:1/x", &taken),
+            "h_1_2",
+            "colliding id gets a numeric suffix"
+        );
+    }
+
+    #[test]
+    fn orphan_collection_covers_dotted_names_and_skips_config_tables() {
+        let table = mig_table(
+            r#"
+[providers.p]
+apibase = "http://h:8000/v1"
+
+[plain]
+provider = "p"
+model = "m1"
+
+["qwen3.6-27b"]
+provider = "p"
+model = "m2"
+
+[web_search]
+provider = "p"
+
+[other]
+provider = "different"
+model = "m3"
+"#,
+        );
+        let mut orphans = Vec::new();
+        collect_provider_orphans(&table, "p", "", &mut orphans);
+        orphans.sort();
+        assert_eq!(
+            orphans,
+            vec!["plain".to_string(), "qwen3.6-27b".to_string()],
+            "dotted entries are collected; provider-less-shape config tables are not"
+        );
+    }
+
+    #[test]
+    fn remove_entry_by_dotted_name_prunes_empty_parents() {
+        let mut table = mig_table(
+            r#"
+["qwen3.6-27b"]
+provider = "p"
+model = "m2"
+
+[keep]
+apibase = "http://x/v1"
+model = "m"
+"#,
+        );
+        remove_entry_by_dotted_name(&mut table, "qwen3.6-27b");
+        assert!(
+            !table.contains_key("qwen3"),
+            "empty parent table must be pruned, not left as [qwen3]"
+        );
+        assert!(table.contains_key("keep"));
+
+        // Removing a non-existent dotted name is a no-op.
+        remove_entry_by_dotted_name(&mut table, "nope.missing");
+        assert!(table.contains_key("keep"));
     }
 }

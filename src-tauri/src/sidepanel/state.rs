@@ -19,7 +19,7 @@ pub struct ArtifactInfo {
 #[derive(Debug, Clone)]
 pub struct SidePanelState {
     pub visible: bool,
-    /// Pixel width, clamped to [280, 800]
+    /// Pixel width, clamped to [280, 960]
     pub width: u32,
     /// All currently open artifacts (tabs)
     pub artifacts: Vec<ArtifactInfo>,
@@ -31,7 +31,9 @@ impl SidePanelState {
     pub fn new() -> Self {
         Self {
             visible: false,
-            width: 380,
+            // 380 was unreadable for html/pdf previews — users resized every
+            // time. 560 fits a typical article/pdf page; drag range below.
+            width: 560,
             artifacts: Vec::new(),
             active_id: None,
         }

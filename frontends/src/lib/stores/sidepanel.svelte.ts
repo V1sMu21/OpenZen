@@ -24,7 +24,8 @@ export interface SidePanelState {
 function createSidepanel() {
   const state = $state<SidePanelState>({
     visible: false,
-    width: 380,
+    // Mirrors SidePanelState::new() in src-tauri/sidepanel/state.rs.
+    width: 560,
     artifacts: [],
     activeId: null,
     activeIndex: 0,
@@ -38,7 +39,7 @@ function createSidepanel() {
     try {
       const rustState = await invoke<SidePanelState>("get_sidepanel_state");
       state.visible = rustState.visible ?? false;
-      state.width = rustState.width ?? 380;
+      state.width = rustState.width ?? 560;
       state.artifacts = rustState.artifacts ?? [];
       state.activeId = rustState.activeId ?? null;
       state.activeIndex = state.artifacts.findIndex(

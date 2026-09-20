@@ -217,7 +217,16 @@
     return computeDiff(ol, nl);
   });
 
-  let totalLines = $derived(diffLines.length);
+  /** Added/removed counts in one pass over the diff. */
+  let diffStat = $derived.by(() => {
+    let added = 0;
+    let removed = 0;
+    for (const l of diffLines) {
+      if (l.type === "added") added++;
+      else if (l.type === "removed") removed++;
+    }
+    return { added, removed };
+  });
 </script>
 
 <div class="edit-card">
@@ -232,7 +241,15 @@
     {/if}
     <span class="edit-name">{name}</span>
     <span class="edit-meta">·</span>
-    <span class="edit-paste" title="Total changed lines">[Pasted ~{totalLines} lines]</span>
+    <span
+      class="edit-diffstat"
+      title={$t("edit.diffstat")
+        .replace("{add}", String(diffStat.added))
+        .replace("{del}", String(diffStat.removed))}
+      ><span class="diffstat-add">+{diffStat.added}</span><span class="diffstat-sep">,</span><span
+        class="diffstat-del">-{diffStat.removed}</span
+      ></span
+    >
     {#if durationMs != null && showTimer}
       <span class="edit-duration">{formatDuration(durationMs)}</span>
     {/if}
@@ -321,10 +338,19 @@
   .edit-meta {
     color: var(--text-tertiary, #4d483e);
   }
-  .edit-paste {
-    color: var(--text-tertiary, #4d483e);
+  .edit-diffstat {
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
     font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .diffstat-add {
+    color: #65b891;
+  }
+  .diffstat-sep {
+    color: var(--text-tertiary, #4d483e);
+  }
+  .diffstat-del {
+    color: #dc5a5a;
   }
   .edit-duration {
     color: var(--text-tertiary, #4d483e);

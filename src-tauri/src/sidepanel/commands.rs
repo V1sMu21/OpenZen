@@ -24,7 +24,7 @@ pub fn toggle_sidepanel(app: AppHandle, state: State<'_, Arc<AppState>>) -> Resu
     Ok(sp.visible)
 }
 
-/// Set side panel pixel width (clamped to 280..800).
+/// Set side panel pixel width (clamped to 280..960).
 #[tauri::command]
 pub fn set_sidepanel_width(
     app: AppHandle,
@@ -32,7 +32,7 @@ pub fn set_sidepanel_width(
     width: u32,
 ) -> Result<(), String> {
     let mut sp = lock_poison_guard(&state.sidepanel);
-    sp.width = width.clamp(280, 800);
+    sp.width = width.clamp(280, 960);
     app.emit("sidepanel:width-changed", sp.width)
         .map_err(|e| e.to_string())?;
     Ok(())

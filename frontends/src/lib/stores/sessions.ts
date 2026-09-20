@@ -1,6 +1,7 @@
 import { writable, get } from "svelte/store";
 import type { SessionInfo } from "../api/sessions";
 import { listSessions, createSession, deleteSession, renameSession as renameSessionApi } from "../api/sessions";
+import { seedRunningSessions } from "./running";
 
 function createSessionStore() {
   const { subscribe, set, update } = writable<{
@@ -20,6 +21,11 @@ function createSessionStore() {
       update((s) => ({ ...s, loading: true }));
       try {
         const sessions = await listSessions(projectId);
+        // Reseed the sidebar running indicators from persisted statuses —
+        // but only for a full (unfiltered) load: a project-scoped list omits
+        // other sessions, and replacing the set from it would drop their
+        // live markers.
+        if (!projectId) seedRunningSessions(sessions);
         update((s) => ({ ...s, sessions, loading: false }));
       } catch {
         update((s) => ({ ...s, loading: false }));

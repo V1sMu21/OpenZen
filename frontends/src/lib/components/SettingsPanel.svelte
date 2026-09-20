@@ -5,13 +5,16 @@
   import type {
     McpServerItem,
     ModelEntry,
+    ProviderEntry,
     SkillMcpItem,
     TokenStats,
   } from "../api/chat";
   import {
     birthNameDisplay,
     deleteModel,
+    deleteProvider,
     fetchModels,
+    fetchProviders,
     fetchSoulPortrait,
     getTokenStats,
     listMcpServers,
@@ -22,6 +25,7 @@
     toggleMcpServer,
     toggleSkillMcp,
     upsertModel,
+    upsertProvider,
   } from "../api/settings";
   import type { PortraitFact } from "../api/settings";
   import { soulDisplayName } from "../api/settings";
@@ -35,15 +39,61 @@
 
   // ── models tab ──
   let models = $state<ModelEntry[]>([]);
-  /** null = list view; otherwise the inline create/edit form. */
+  let providers = $state<ProviderEntry[]>([]);
+  /** Collapsed provider cards (default: expanded). */
+  let collapsedProviders = $state<Set<string>>(new Set());
+
+  const MODALITIES = ["text", "image", "video", "audio"] as const;
+
+  /** null = list view; otherwise the inline model create/edit form. */
   let editing = $state<{
     name: string;
     isNew: boolean;
+    /** Provider id, or "" for a standalone entry with its own apibase. */
+    provider: string;
+    /** True when the stored entry references a provider — switching it to
+     *  standalone needs a fresh apibase (the stored one was stripped). */
+    wasProviderRef: boolean;
     apibase: string;
     apikey: string;
     model: string;
     context_win: number;
+    modalities: string[];
   } | null>(null);
+  /** null = list view; otherwise the provider create/edit form. */
+  let editingProvider = $state<{
+    id: string;
+    isNew: boolean;
+    apibase: string;
+    apikey: string;
+  } | null>(null);
+
+  /** Provider-grouped view: one group per provider (config order), then a
+   *  trailing group for standalone/legacy inline entries (provider_id null
+   *  or pointing at a since-deleted provider). Each group carries its
+   *  ProviderEntry (null = standalone) so actions need no lookup. */
+  let groups = $derived.by(() => {
+    const byProvider = new Map<string, ModelEntry[]>();
+    const standalone: ModelEntry[] = [];
+    const known = new Set(providers.map((p) => p.id));
+    for (const m of models) {
+      if (m.provider_id && known.has(m.provider_id)) {
+        const list = byProvider.get(m.provider_id) ?? [];
+        list.push(m);
+        byProvider.set(m.provider_id, list);
+      } else {
+        standalone.push(m);
+      }
+    }
+    const out: Array<{ provider: ProviderEntry | null; models: ModelEntry[] }> =
+      providers.map((p) => ({ provider: p, models: byProvider.get(p.id) ?? [] }));
+    // Only surface the standalone group when it has content — otherwise the
+    // outer each stays empty and the tab's "no data" state renders.
+    if (standalone.length > 0) {
+      out.push({ provider: null, models: standalone });
+    }
+    return out;
+  });
 
   // ── skills tab ──
   let skills = $state<SkillMcpItem[]>([]);
@@ -90,11 +140,15 @@
     }
   }
 
+  /** Refetch both lists after any mutation (provider model_count derives
+   *  from models, so the two must move together). */
+  async function refreshModels() {
+    [models, providers] = await Promise.all([fetchModels(), fetchProviders()]);
+  }
+
   function loadTab() {
     if (tab === "models") {
-      void run(async () => {
-        models = await fetchModels();
-      });
+      void run(refreshModels);
     } else if (tab === "skills") {
       void run(async () => {
         const [list, sv] = await Promise.all([listSkillMcp(), listMcpServers()]);
@@ -122,42 +176,76 @@
     loadTab();
   });
 
-  function startCreate() {
-    editing = { name: "", isNew: true, apibase: "", apikey: "", model: "", context_win: 28000 };
+  function startCreate(providerId: string | null) {
+    editing = {
+      name: "",
+      isNew: true,
+      provider: providerId ?? "",
+      wasProviderRef: false,
+      apibase: "",
+      apikey: "",
+      model: "",
+      context_win: 28000,
+      modalities: ["text"],
+    };
   }
 
   function startEdit(m: ModelEntry) {
     editing = {
       name: m.name,
       isNew: false,
-      // apibase/apikey are not in ModelEntry (list view only carries the
-      // summary); the form leaves them blank and the backend keeps the
-      // stored values.
+      provider: m.provider_id ?? "",
+      wasProviderRef: m.provider_id != null,
+      // apibase/apikey are not echoed back by the API (write-only); the
+      // form leaves them blank and the backend keeps the stored values.
       apibase: "",
       apikey: "",
       model: m.model,
       context_win: m.context_win,
+      modalities:
+        m.modalities && m.modalities.length > 0 ? [...m.modalities] : ["text"],
     };
+  }
+
+  function toggleModality(value: string) {
+    if (!editing) return;
+    const set = new Set(editing.modalities);
+    if (set.has(value)) {
+      set.delete(value);
+    } else {
+      set.add(value);
+    }
+    // Order canonical (MODALITIES order) and never empty — "text" is the
+    // implicit fallback, so a chips row of all-off reads as text-only.
+    const next = MODALITIES.filter((m) => set.has(m));
+    editing.modalities = next.length > 0 ? [...next] : ["text"];
   }
 
   async function saveModel() {
     if (!editing) return;
     const ed = editing;
-    // Editing an existing entry may leave apibase/model blank — the backend
-    // keeps the stored values; a brand-new entry needs both.
-    if (!ed.name.trim() || (ed.isNew && (!ed.apibase.trim() || !ed.model.trim()))) {
+    if (!ed.name.trim() || (ed.isNew && !ed.model.trim())) {
       error = $t("settings.model.required");
+      return;
+    }
+    // Standalone entries additionally need a base URL of their own: a new
+    // entry has none, and an edit switching away from a provider ref has
+    // none stored (it was stripped when the ref was written).
+    if (!ed.provider && (ed.isNew || ed.wasProviderRef) && !ed.apibase.trim()) {
+      error = $t("settings.model.requiredBase");
       return;
     }
     await run(async () => {
       await upsertModel({
         name: ed.name.trim(),
-        apibase: ed.apibase.trim() || undefined,
-        apikey: ed.apikey.trim() || undefined,
+        provider: ed.provider || null,
+        apibase: ed.provider ? undefined : ed.apibase.trim() || undefined,
+        apikey: ed.provider ? undefined : ed.apikey.trim() || undefined,
         model: ed.model.trim() || undefined,
         context_win: ed.context_win,
+        modalities: ed.modalities,
       });
-      models = await fetchModels();
+      await refreshModels();
       editing = null;
     });
   }
@@ -166,15 +254,67 @@
     if (!window.confirm(`${$t("settings.model.confirmDelete")} ${name}`)) return;
     await run(async () => {
       await deleteModel(name);
-      models = await fetchModels();
+      await refreshModels();
     });
   }
 
   async function makeDefault(name: string) {
     await run(async () => {
       await setDefaultModel(name);
-      models = await fetchModels();
+      await refreshModels();
     });
+  }
+
+  // ── provider forms ──
+  function startCreateProvider() {
+    editingProvider = { id: "", isNew: true, apibase: "", apikey: "" };
+  }
+
+  function startEditProvider(p: ProviderEntry) {
+    editingProvider = {
+      id: p.id,
+      isNew: false,
+      apibase: p.apibase,
+      // write-only: blank = keep the stored key
+      apikey: "",
+    };
+  }
+
+  async function saveProvider() {
+    if (!editingProvider) return;
+    const ed = editingProvider;
+    if (!ed.id.trim() || !ed.apibase.trim()) {
+      error = $t("settings.provider.required");
+      return;
+    }
+    await run(async () => {
+      await upsertProvider({
+        id: ed.id.trim(),
+        apibase: ed.apibase.trim(),
+        apikey: ed.apikey.trim() || undefined,
+      });
+      await refreshModels();
+      editingProvider = null;
+    });
+  }
+
+  async function removeProvider(p: ProviderEntry) {
+    const msg = p.model_count > 0
+      ? $t("settings.provider.confirmDeleteModels").replace("{n}", String(p.model_count))
+      : $t("settings.provider.confirmDelete");
+    if (!window.confirm(`${msg} (${p.id})`)) return;
+    await run(async () => {
+      await deleteProvider(p.id);
+      await refreshModels();
+    });
+  }
+
+  function toggleProviderExpanded(id: string | null) {
+    if (id === null) return; // standalone group has no expand state
+    const next = new Set(collapsedProviders);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    collapsedProviders = next;
   }
 
   async function flipSkill(kind: "skill" | "sop", name: string, active: boolean) {
@@ -282,6 +422,61 @@
   </div>
 {/snippet}
 
+{#snippet modalityTags(mods: string[])}
+  {#each mods.filter((m) => m !== "text") as mod (mod)}
+    <span class="mod-tag" title={$t(`settings.model.mod.${mod}`)}>{$t(`settings.model.mod.${mod}`)}</span>
+  {/each}
+{/snippet}
+
+{#snippet providerGroup(p: ProviderEntry, ms: ModelEntry[])}
+  <div class="group">
+    <div class="provider-head">
+      <button
+        class="provider-toggle"
+        onclick={() => toggleProviderExpanded(p.id)}
+        aria-expanded={!collapsedProviders.has(p.id)}
+      >
+        <span class="chevron" class:rotated={!collapsedProviders.has(p.id)}>▸</span>
+        <span class="provider-name" title={p.id}>{p.id}</span>
+      </button>
+      <span class="provider-apibase" title={p.apibase}>{p.apibase}</span>
+      <span class="provider-count">{ms.length}</span>
+      <div class="model-actions">
+        <button class="btn ghost" onclick={() => startCreate(p.id)}>{$t("settings.model.newShort")}</button>
+        <button class="btn ghost" onclick={() => startEditProvider(p)}>{$t("settings.edit")}</button>
+        <button class="btn ghost danger" onclick={() => removeProvider(p)}>{$t("settings.delete")}</button>
+      </div>
+    </div>
+    {#if !collapsedProviders.has(p.id)}
+      {#each ms as m (m.name)}
+        {@render modelRow(m)}
+      {:else}
+        <div class="settings-empty">{$t("settings.empty")}</div>
+      {/each}
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet modelRow(m: ModelEntry)}
+  <div class="model-row">
+    <div class="model-info">
+      <span class="model-name">
+        <span class="model-name-text" title={m.name}>{m.name}</span>
+        {#if m.is_default}<span class="tag default">{$t("settings.model.isDefault")}</span>{/if}
+        {@render modalityTags(m.modalities ?? ["text"])}
+      </span>
+      <span class="model-meta">{m.model} · {$t(m.is_local ? "status.localDeploy" : "status.cloud")} · {m.context_win}</span>
+    </div>
+    <div class="model-actions">
+      {#if !m.is_default}
+        <button class="btn ghost" onclick={() => makeDefault(m.name)}>{$t("settings.model.setDefault")}</button>
+      {/if}
+      <button class="btn ghost" onclick={() => startEdit(m)}>{$t("settings.edit")}</button>
+      <button class="btn ghost danger" onclick={() => removeModel(m.name)}>{$t("settings.delete")}</button>
+    </div>
+  </div>
+{/snippet}
+
 <svelte:window onkeydown={onKeydown} />
 
 {#if settings.open}
@@ -305,44 +500,54 @@
 
     <div class="settings-body">
       {#if tab === "models"}
-        {#if editing === null}
-          <div class="section-row">
-            <button class="btn primary" onclick={startCreate}>{$t("settings.model.new")}</button>
-          </div>
-          {#each models as m (m.name)}
-            <div class="model-row">
-              <div class="model-info">
-                <span class="model-name">
-                  <span class="model-name-text" title={m.name}>{m.name}</span>
-                  {#if m.is_default}<span class="tag default">{$t("settings.model.isDefault")}</span>{/if}
-                </span>
-                <span class="model-meta">{m.model} · {$t(m.is_local ? "status.localDeploy" : "status.cloud")} · {m.context_win}</span>
-              </div>
-              <div class="model-actions">
-                {#if !m.is_default}
-                  <button class="btn ghost" onclick={() => makeDefault(m.name)}>{$t("settings.model.setDefault")}</button>
-                {/if}
-                <button class="btn ghost" onclick={() => startEdit(m)}>{$t("settings.edit")}</button>
-                <button class="btn ghost danger" onclick={() => removeModel(m.name)}>{$t("settings.delete")}</button>
-              </div>
+        {#if editingProvider}
+          <div class="form">
+            <span class="form-title">{$t(editingProvider.isNew ? "settings.provider.new" : "settings.provider.edit")}</span>
+            <label class="field">
+              <span>{$t("settings.provider.id")}</span>
+              <input bind:value={editingProvider.id} disabled={!editingProvider.isNew} placeholder="local_omlx" />
+            </label>
+            <label class="field">
+              <span>{$t("settings.model.apibase")}</span>
+              <input bind:value={editingProvider.apibase} placeholder="http://127.0.0.1:8000/v1" />
+            </label>
+            <label class="field">
+              <span>{$t("settings.model.apikey")}</span>
+              <input bind:value={editingProvider.apikey} type="password" placeholder={editingProvider.isNew ? "" : $t("settings.model.apikeyHint")} />
+            </label>
+            <div class="form-actions">
+              <button class="btn primary" onclick={saveProvider} disabled={loading}>{$t("settings.save")}</button>
+              <button class="btn ghost" onclick={() => (editingProvider = null)}>{$t("settings.cancel")}</button>
             </div>
-          {:else}
-            <div class="settings-empty">{$t("settings.empty")}</div>
-          {/each}
-        {:else}
+            {#if !editingProvider.isNew}
+              <p class="form-hint">{$t("settings.model.editHint")}</p>
+            {/if}
+          </div>
+        {:else if editing}
           <div class="form">
             <label class="field">
               <span>{$t("settings.model.name")}</span>
               <input bind:value={editing.name} disabled={!editing.isNew} placeholder="Agents_A1_8bit" />
             </label>
             <label class="field">
-              <span>{$t("settings.model.apibase")}</span>
-              <input bind:value={editing.apibase} placeholder={editing.isNew ? "http://127.0.0.1:8000/v1" : ""} />
+              <span>{$t("settings.provider.select")}</span>
+              <select bind:value={editing.provider}>
+                {#each providers as p (p.id)}
+                  <option value={p.id}>{p.id}</option>
+                {/each}
+                <option value="">{$t("settings.provider.standalone")}</option>
+              </select>
             </label>
-            <label class="field">
-              <span>{$t("settings.model.apikey")}</span>
-              <input bind:value={editing.apikey} type="password" placeholder={editing.isNew ? "" : $t("settings.model.apikeyHint")} />
-            </label>
+            {#if !editing.provider}
+              <label class="field">
+                <span>{$t("settings.model.apibase")}</span>
+                <input bind:value={editing.apibase} placeholder={editing.isNew ? "http://127.0.0.1:8000/v1" : ""} />
+              </label>
+              <label class="field">
+                <span>{$t("settings.model.apikey")}</span>
+                <input bind:value={editing.apikey} type="password" placeholder={editing.isNew ? "" : $t("settings.model.apikeyHint")} />
+              </label>
+            {/if}
             <label class="field">
               <span>{$t("settings.model.modelId")}</span>
               <input bind:value={editing.model} />
@@ -351,6 +556,19 @@
               <span>{$t("settings.model.contextWin")}</span>
               <input type="number" bind:value={editing.context_win} min={1000} step={1000} />
             </label>
+            <div class="field">
+              <span>{$t("settings.model.modalities")}</span>
+              <div class="chip-row">
+                {#each MODALITIES as mod (mod)}
+                  <button
+                    type="button"
+                    class="chip"
+                    class:on={editing.modalities.includes(mod)}
+                    onclick={() => toggleModality(mod)}
+                  >{$t(`settings.model.mod.${mod}`)}</button>
+                {/each}
+              </div>
+            </div>
             <div class="form-actions">
               <button class="btn primary" onclick={saveModel} disabled={loading}>{$t("settings.save")}</button>
               <button class="btn ghost" onclick={() => (editing = null)}>{$t("settings.cancel")}</button>
@@ -359,6 +577,25 @@
               <p class="form-hint">{$t("settings.model.editHint")}</p>
             {/if}
           </div>
+        {:else}
+          <div class="section-row">
+            <button class="btn ghost" onclick={startCreateProvider}>{$t("settings.provider.new")}</button>
+            <button class="btn primary" onclick={() => startCreate(null)}>{$t("settings.model.new")}</button>
+          </div>
+          {#each groups as g (g.provider?.id ?? "__standalone__")}
+            {#if g.provider}
+              {@render providerGroup(g.provider, g.models)}
+            {:else}
+              <div class="group">
+                <div class="group-head">{$t("settings.provider.standaloneGroup")}</div>
+                {#each g.models as m (m.name)}
+                  {@render modelRow(m)}
+                {/each}
+              </div>
+            {/if}
+          {:else}
+            <div class="settings-empty">{$t("settings.empty")}</div>
+          {/each}
         {/if}
       {:else if tab === "skills"}
         <div class="group">
@@ -722,6 +959,128 @@
     letter-spacing: 0.12em;
     color: var(--color-dim);
     padding: 2px 8px 6px;
+  }
+
+  .provider-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 6px 6px;
+    min-width: 0;
+  }
+
+  .provider-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border: none;
+    background: none;
+    padding: 2px 0;
+    font-family: inherit;
+    cursor: pointer;
+    min-width: 0;
+  }
+
+  .chevron {
+    flex: none;
+    font-size: 9px;
+    color: var(--color-dim);
+    transition: transform 0.15s;
+    display: inline-block;
+  }
+
+  .chevron.rotated {
+    transform: rotate(90deg);
+  }
+
+  .provider-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--color-ink);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .provider-apibase {
+    flex: 1;
+    min-width: 0;
+    font-size: 10.5px;
+    color: var(--color-dim);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+  }
+
+  .provider-count {
+    flex: none;
+    font-size: 10px;
+    color: var(--color-muted);
+    border: 1px solid var(--color-hairline-strong);
+    border-radius: 999px;
+    padding: 0 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .chip {
+    border: 1px solid var(--color-hairline-strong);
+    background: none;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-family: inherit;
+    font-size: 11px;
+    color: var(--color-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .chip:hover {
+    color: var(--color-ink);
+  }
+
+  .chip.on {
+    background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .mod-tag {
+    flex: none;
+    font-size: 9px;
+    padding: 0 5px;
+    border-radius: 999px;
+    border: 1px solid var(--color-hairline-strong);
+    color: var(--color-muted);
+  }
+
+  .form-title {
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    color: var(--color-ink);
+  }
+
+  .field select {
+    font-family: inherit;
+    font-size: 12.5px;
+    padding: 6px 8px;
+    border: 1px solid var(--color-hairline-strong);
+    border-radius: 5px;
+    background: var(--color-surface-soft);
+    color: var(--color-ink);
+  }
+
+  .field select:focus {
+    outline: none;
+    border-color: var(--color-primary);
   }
 
   .skill-info {

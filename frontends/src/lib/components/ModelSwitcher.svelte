@@ -7,6 +7,18 @@
   let loading = $state(true);
   let switching = $state<string | null>(null);
 
+  /** Provider-grouped view, first-appearance order; "" = standalone. */
+  let groups = $derived.by(() => {
+    const map = new Map<string, ModelEntry[]>();
+    for (const m of models) {
+      const key = m.provider_id ?? "";
+      const list = map.get(key) ?? [];
+      list.push(m);
+      map.set(key, list);
+    }
+    return [...map.entries()].map(([id, list]) => ({ id, list }));
+  });
+
   $effect(() => {
     loadModels();
   });
@@ -78,35 +90,45 @@
         </div>
       {:else}
         <div class="switcher-list">
-          {#each models as m (m.name)}
-            <button
-              type="button"
-              class="switcher-item"
-              class:active={isActive(m)}
-              class:switching={switching === m.name}
-              disabled={isActive(m) || switching !== null}
-              onclick={() => switchTo(m)}
-            >
-              <div class="switcher-item-left">
-                <span class="switcher-item-name">{m.name}</span>
-                <span class="switcher-item-model">{m.model}</span>
-              </div>
-              <div class="switcher-item-right">
-                <span class="switcher-item-provider" class:local={m.provider === "openai"} class:online={m.provider === "claude"}>
-                  {m.provider === "openai" ? "Local" : "Online"}
-                </span>
-                <span class="switcher-item-ctx" title="Context window size">
-                  {m.context_win >= 1000000
-                    ? `${(m.context_win / 1000000).toFixed(1)}M`
-                    : m.context_win >= 1000
-                      ? `${(m.context_win / 1000).toFixed(0)}K`
-                      : m.context_win.toLocaleString()} ctx
-                </span>
-                {#if isActive(m)}
-                  <span class="switcher-item-check">✓</span>
-                {/if}
-              </div>
-            </button>
+          {#each groups as g (g.id)}
+            {#if g.id !== "" || groups.length > 1}
+              <div class="switcher-group-head">{g.id !== "" ? g.id : $t("settings.provider.standaloneGroup")}</div>
+            {/if}
+            {#each g.list as m (m.name)}
+              <button
+                type="button"
+                class="switcher-item"
+                class:active={isActive(m)}
+                class:switching={switching === m.name}
+                disabled={isActive(m) || switching !== null}
+                onclick={() => switchTo(m)}
+              >
+                <div class="switcher-item-left">
+                  <span class="switcher-item-name">
+                    {m.name}
+                    {#each (m.modalities ?? []).filter((mod) => mod !== "text") as mod (mod)}
+                      <span class="switcher-item-mod">{$t(`settings.model.mod.${mod}`)}</span>
+                    {/each}
+                  </span>
+                  <span class="switcher-item-model">{m.model}</span>
+                </div>
+                <div class="switcher-item-right">
+                  <span class="switcher-item-provider" class:local={m.provider === "openai"} class:online={m.provider === "claude"}>
+                    {m.provider === "openai" ? "Local" : "Online"}
+                  </span>
+                  <span class="switcher-item-ctx" title="Context window size">
+                    {m.context_win >= 1000000
+                      ? `${(m.context_win / 1000000).toFixed(1)}M`
+                      : m.context_win >= 1000
+                        ? `${(m.context_win / 1000).toFixed(0)}K`
+                        : m.context_win.toLocaleString()} ctx
+                  </span>
+                  {#if isActive(m)}
+                    <span class="switcher-item-check">✓</span>
+                  {/if}
+                </div>
+              </button>
+            {/each}
           {/each}
         </div>
       {/if}
@@ -245,6 +267,24 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .switcher-group-head {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--color-dim, #8a8a90);
+    padding: 8px 12px 2px;
+  }
+
+  .switcher-item-mod {
+    font-size: 9px;
+    font-weight: 400;
+    padding: 0 5px;
+    margin-left: 4px;
+    border-radius: 999px;
+    border: 1px solid var(--color-hairline, #2a2a2e);
+    color: var(--color-dim, #8a8a90);
+    vertical-align: 1px;
   }
 
   .switcher-item {

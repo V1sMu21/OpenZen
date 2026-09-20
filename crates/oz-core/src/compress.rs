@@ -803,6 +803,8 @@ async fn call_summary_llm(
         base_delay: None,
         spring_back: None,
         extra_headers: None,
+        provider: None,
+        modalities: None,
         // One-shot summarization call: no conversation affinity needed.
         session_tag: None,
     };

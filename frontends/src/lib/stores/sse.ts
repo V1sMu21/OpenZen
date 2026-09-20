@@ -2,6 +2,7 @@ import { chat } from "./chat";
 import { get, writable } from "svelte/store";
 import { sessions } from "./sessions";
 import { approval } from "./approval";
+import { markSessionFinished, markSessionRunning } from "./running";
 import type { SSEEvent } from "./types";
 import type { ProtocolV1Event } from "./parts";
 import { listen } from "@tauri-apps/api/event";
@@ -69,7 +70,24 @@ function getReconnectDelay(): number {
   return delay * (0.8 + Math.random() * 0.4);
 }
 
+/** Track live agent runs for the sidebar indicator. Must see ALL sessions'
+ *  events (background included), so call it before the current-session
+ *  filter in both dispatch paths. Run start is signaled by model_info
+ *  (broadcast before the loop) and run activity; done/error end the run. */
+const RUN_START_EVENTS = new Set(["model_info", "token", "thinking", "tool_call", "tool_result", "protocol_v1"]);
+const RUN_END_EVENTS = new Set(["done", "error"]);
+
+function trackRunState(sessionId: string | undefined, eventType: string | undefined) {
+  if (!sessionId || !eventType) return;
+  if (RUN_START_EVENTS.has(eventType)) {
+    markSessionRunning(sessionId);
+  } else if (RUN_END_EVENTS.has(eventType)) {
+    markSessionFinished(sessionId);
+  }
+}
+
 function handleTauriEvent(raw: { session_id?: string; event_type?: string; data?: unknown }) {
+  trackRunState(raw.session_id, raw.event_type);
   // Filter by current session
   const currentId = get(sessions).currentId;
   if (raw.session_id && currentId && raw.session_id !== currentId) {
@@ -122,6 +140,8 @@ function handleSSEEvent(event: MessageEvent) {
       event_type?: string;
       data?: string;
     };
+
+    trackRunState(raw.session_id, raw.event_type);
 
     // Filter events by current session to avoid cross-session interference
     const currentId = get(sessions).currentId;

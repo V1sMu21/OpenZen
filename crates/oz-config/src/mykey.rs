@@ -59,6 +59,17 @@ pub struct SessionConfig {
     /// rebuild. TOML: `["name".extra_headers]` table.
     #[serde(default)]
     pub extra_headers: Option<HashMap<String, String>>,
+    /// Provider id this entry borrows `apibase`/`apikey` from
+    /// (`[providers.<id>]` in mykey.toml). Resolution happens in
+    /// `from_file` — by the time callers see a SessionConfig the fields
+    /// are already flattened, so the LLM layer stays provider-unaware.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Declared input modalities ("text"/"image"/"video"/"audio").
+    /// Declarative metadata for the settings UI and model switcher;
+    /// absent/None is treated as ["text"] by convention.
+    #[serde(default)]
+    pub modalities: Option<Vec<String>>,
     /// Stable conversation tag for provider session-routing headers
     /// (opencode.ai `x-opencode-session`). Wired from the OpenZen session
     /// id at session-construction sites, never parsed from TOML.
@@ -76,14 +87,39 @@ fn default_context_win() -> usize {
 /// Top-level mykey.toml keys that hold configuration, not session entries.
 /// `from_file` skips them when collecting sessions; writers of the file
 /// (settings panel) must reject model names that would collide with them.
-pub const RESERVED_TOP_LEVEL_KEYS: [&str; 6] = [
+pub const RESERVED_TOP_LEVEL_KEYS: [&str; 7] = [
     "default_session",
     "summary_model",
     "memory_backend",
     "erme_idle_interval_secs",
     "tui",
     "router",
+    "providers",
 ];
+
+/// Heuristic: does this table look like a model/session entry? Settings-side
+/// code uses it to tell real entries from unrelated config sections that
+/// happen to carry a `provider` key (web_search, platforms.*).
+pub fn looks_like_session_entry(t: &toml::Table) -> bool {
+    t.contains_key("model") || t.contains_key("apibase") || t.contains_key("context_win")
+}
+
+/// The `provider = "<id>"` reference of an entry table, if present.
+pub fn provider_ref(t: &toml::Table) -> Option<&str> {
+    t.get("provider").and_then(|v| v.as_str())
+}
+
+/// A named endpoint credential shared by multiple model entries:
+/// `[providers.<id>]` holds `apibase` + optional `apikey`; sessions
+/// reference it with `provider = "<id>"` instead of repeating both.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderConfig {
+    /// Base URL shared by every session entry referencing this provider.
+    pub apibase: String,
+    /// Local servers often need no key; absent/empty is valid.
+    #[serde(default)]
+    pub apikey: String,
+}
 
 /// API mode for OpenAI-compatible endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -110,6 +146,9 @@ pub struct MyKeyConfig {
     pub tui: TuiConfig,
     #[serde(default)]
     pub router: RouterConfig,
+    /// Named endpoint credentials, keyed by provider id.
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
     pub sessions: HashMap<String, SessionConfig>,
 }
 
@@ -196,6 +235,73 @@ impl MyKeyConfig {
             .filter(|i| *i > 0)
             .map(|i| i as u64);
         let mut sessions = HashMap::new();
+        let mut providers = HashMap::new();
+
+        // Parse `[providers.<id>]` credential tables first — session
+        // entries referencing them need the values injected before
+        // SessionConfig deserialization (apibase/apikey are required
+        // fields there).
+        if let Some(pt) = raw.get("providers").and_then(|v| v.as_table()) {
+            for (id, value) in pt {
+                match value.clone().try_into::<ProviderConfig>() {
+                    Ok(p) => {
+                        providers.insert(id.clone(), p);
+                    }
+                    Err(_) => {
+                        // Lenient, same policy as invalid session tables:
+                        // skip, don't fail the whole config. Warn loudly —
+                        // every entry referencing it will be dropped.
+                        tracing::warn!(
+                            "mykey.toml: [providers.{id}] is invalid (apibase required) — \
+                             entries referencing it will be skipped"
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Inject provider credentials into a raw session table before
+        // deserialization. Entry-level apibase/apikey win (only missing
+        // keys are filled); an unknown provider id fills nothing, so the
+        // entry fails to parse and is skipped like any invalid table.
+        fn inject_provider_fields(
+            value: &mut toml::Value,
+            providers: &HashMap<String, ProviderConfig>,
+        ) {
+            let Some(table) = value.as_table_mut() else {
+                return;
+            };
+            let Some(pid) = provider_ref(table).map(str::to_string) else {
+                return;
+            };
+            let Some(p) = providers.get(&pid) else {
+                // A typo'd/unknown provider id leaves the entry without
+                // credentials, so SessionConfig parsing fails and the entry
+                // silently disappears from every consumer — surface it. Only
+                // for entry-shaped tables: unrelated config sections that
+                // happen to carry a `provider` key are not session entries.
+                if looks_like_session_entry(table) {
+                    tracing::warn!(
+                        "mykey.toml: entry references unknown provider '{pid}' — \
+                         entry will be skipped until the provider exists"
+                    );
+                }
+                return;
+            };
+            if !table.contains_key("apibase") {
+                table.insert(
+                    "apibase".to_string(),
+                    toml::Value::String(p.apibase.clone()),
+                );
+            }
+            if !table.contains_key("apikey") {
+                table.insert(
+                    "apikey".to_string(),
+                    toml::Value::String(p.apikey.clone()),
+                );
+            }
+        }
 
         // Walk raw table to collect session entries. Dotted section names
         // like [qwen3.6-27b] are parsed as nested tables by the TOML spec.
@@ -205,6 +311,7 @@ impl MyKeyConfig {
         fn collect_sessions(
             table: &toml::Table,
             prefix: &str,
+            providers: &HashMap<String, ProviderConfig>,
             sessions: &mut HashMap<String, SessionConfig>,
         ) -> Result<(), anyhow::Error> {
             for (key, value) in table {
@@ -216,14 +323,15 @@ impl MyKeyConfig {
                     } else {
                         format!("{prefix}.{key}")
                     };
-                    let val_clone = value.clone();
+                    let mut val_clone = value.clone();
+                    inject_provider_fields(&mut val_clone, providers);
                     match val_clone.try_into::<SessionConfig>() {
                         Ok(sess) => {
                             sessions.insert(full_key, sess);
                         }
                         Err(_) => {
                             // Not a SessionConfig — might be nested dotted keys
-                            collect_sessions(sub, &full_key, sessions)?;
+                            collect_sessions(sub, &full_key, providers, sessions)?;
                         }
                     }
                 }
@@ -241,14 +349,15 @@ impl MyKeyConfig {
             }
             let sub = value.as_table().unwrap();
             // Try direct parse first
-            let val_clone = value.clone();
+            let mut val_clone = value.clone();
+            inject_provider_fields(&mut val_clone, &providers);
             match val_clone.try_into::<SessionConfig>() {
                 Ok(sess) => {
                     sessions.insert(key.clone(), sess);
                 }
                 Err(_) => {
                     // Might be nested dotted-key structure
-                    collect_sessions(sub, key, &mut sessions)?;
+                    collect_sessions(sub, key, &providers, &mut sessions)?;
                 }
             }
         }
@@ -260,6 +369,7 @@ impl MyKeyConfig {
             erme_idle_interval_secs,
             tui: TuiConfig::default(),
             router: RouterConfig::default(),
+            providers,
             sessions,
         })
     }
@@ -682,6 +792,7 @@ model = "mixin-llm"
             erme_idle_interval_secs: None,
             tui: TuiConfig::default(),
             router: RouterConfig::default(),
+            providers: HashMap::new(),
         };
         assert_eq!(cfg.session_type("claude"), SessionType::Claude);
         assert_eq!(cfg.session_type("gpt-4"), SessionType::Oai);
@@ -710,6 +821,7 @@ model = "mixin-llm"
             erme_idle_interval_secs: None,
             tui: TuiConfig::default(),
             router: RouterConfig::default(),
+            providers: HashMap::new(),
         };
 
         let keys: Vec<_> = cfg.iter_sessions().map(|(k, _)| k.as_str()).collect();
@@ -905,5 +1017,196 @@ model = "gpt-4"
             "negative must not wrap to a huge u64"
         );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn providers_parsed_and_session_inherits_credentials() {
+        let path = write_config(
+            "oz_config_test_provider_inherit",
+            r#"
+[providers.local_omlx]
+apibase = "http://127.0.0.1:8000/v1"
+apikey = "sk-local"
+
+[gpt4]
+provider = "local_omlx"
+model = "gpt-4"
+context_win = 128000
+"#,
+        );
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.providers["local_omlx"].apibase, "http://127.0.0.1:8000/v1");
+        let sess = cfg.get("gpt4").expect("provider-referencing entry must parse");
+        assert_eq!(sess.apibase, "http://127.0.0.1:8000/v1");
+        assert_eq!(sess.apikey, "sk-local");
+        assert_eq!(sess.provider.as_deref(), Some("local_omlx"));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn provider_keyless_provider_defaults_to_empty_apikey() {
+        let path = write_config(
+            "oz_config_test_provider_keyless",
+            r#"
+[providers.lmstudio]
+apibase = "http://127.0.0.1:1234/v1"
+
+[gpt4]
+provider = "lmstudio"
+model = "qwen3"
+"#,
+        );
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        let sess = cfg.get("gpt4").unwrap();
+        assert_eq!(sess.apikey, "");
+        assert_eq!(sess.apibase, "http://127.0.0.1:1234/v1");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn entry_level_apibase_overrides_provider() {
+        let path = write_config(
+            "oz_config_test_provider_override",
+            r#"
+[providers.p1]
+apibase = "http://provider:8000/v1"
+apikey = "sk-provider"
+
+[gpt4]
+provider = "p1"
+apibase = "http://override:8000/v1"
+model = "gpt-4"
+"#,
+        );
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        let sess = cfg.get("gpt4").unwrap();
+        assert_eq!(sess.apibase, "http://override:8000/v1");
+        assert_eq!(sess.apikey, "sk-provider");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn legacy_inline_entries_still_parse_alongside_providers() {
+        let path = write_config(
+            "oz_config_test_provider_legacy",
+            r#"
+default_session = "legacy"
+
+[providers.p1]
+apibase = "http://p1:8000/v1"
+apikey = "sk-p1"
+
+[legacy]
+apikey = "sk-inline"
+apibase = "http://legacy:8000/v1"
+model = "old-model"
+
+[gpt4]
+provider = "p1"
+model = "gpt-4"
+"#,
+        );
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        let legacy = cfg.get("legacy").unwrap();
+        assert_eq!(legacy.apibase, "http://legacy:8000/v1");
+        assert_eq!(legacy.provider, None);
+        assert!(cfg.get("gpt4").is_some());
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn unknown_provider_id_entry_is_skipped_leniently() {
+        let path = write_config(
+            "oz_config_test_provider_unknown",
+            r#"
+default_session = "ok"
+
+[providers.p1]
+apibase = "http://p1:8000/v1"
+
+[ok]
+apikey = "sk-ok"
+apibase = "http://ok:8000/v1"
+model = "m1"
+
+[broken]
+provider = "no_such_provider"
+model = "m2"
+"#,
+        );
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert!(cfg.get("ok").is_some());
+        assert!(cfg.get("broken").is_none(), "unresolvable entry must be skipped, not fail the file");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn providers_table_is_not_parsed_as_session() {
+        let path = write_config(
+            "oz_config_test_provider_reserved",
+            r#"
+[providers.p1]
+apibase = "http://p1:8000/v1"
+apikey = "sk-p1"
+"#,
+        );
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert!(
+            !cfg.sessions.contains_key("providers"),
+            "providers table must not leak into sessions"
+        );
+        assert!(cfg.sessions.is_empty());
+        assert_eq!(cfg.providers.len(), 1);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn modalities_parsed_and_default_to_none() {
+        let path = write_config(
+            "oz_config_test_modalities",
+            r#"
+[gpt4]
+apikey = "sk-test"
+apibase = "https://api.example.com/v1"
+model = "gpt-4o"
+modalities = ["text", "image"]
+
+[vlm]
+apikey = "sk-test"
+apibase = "https://api.example.com/v1"
+model = "vlm-2"
+modalities = ["text", "image", "video", "audio"]
+"#,
+        );
+        let cfg = MyKeyConfig::from_file(&path).unwrap();
+        assert_eq!(
+            cfg.get("gpt4").unwrap().modalities,
+            Some(vec!["text".to_string(), "image".to_string()])
+        );
+        assert_eq!(
+            cfg.get("vlm").unwrap().modalities,
+            Some(vec![
+                "text".to_string(),
+                "image".to_string(),
+                "video".to_string(),
+                "audio".to_string()
+            ])
+        );
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn session_config_modalities_default_none() {
+        let cfg: SessionConfig = toml::from_str(
+            r#"
+            apikey = "sk-test"
+            apibase = "https://api.example.com/v1"
+            model = "gpt-4"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.modalities, None);
+        assert_eq!(cfg.provider, None);
     }
 }

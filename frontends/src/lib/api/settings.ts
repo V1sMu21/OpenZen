@@ -10,6 +10,8 @@ import type {
   McpServerItem,
   ModelEntry,
   ModelUpsertArgs,
+  ProviderEntry,
+  ProviderUpsertArgs,
   SkillMcpItem,
   TokenStats,
 } from "./chat";
@@ -94,6 +96,21 @@ export async function deleteModel(name: string): Promise<MutationResult> {
 
 export async function setDefaultModel(name: string): Promise<MutationResult> {
   return unwrapError(await invoke<MutationResult>("set_default_model", { name }), "set_default_model");
+}
+
+export function fetchProviders(): Promise<ProviderEntry[]> {
+  return invoke<ProviderEntry[]>("list_providers");
+}
+
+export async function upsertProvider(args: ProviderUpsertArgs): Promise<MutationResult> {
+  return unwrapError(await invoke<MutationResult>("upsert_provider", { args }), "upsert_provider");
+}
+
+/** Cascades: model entries referencing the provider are deleted too. */
+export async function deleteProvider(
+  id: string,
+): Promise<MutationResult & { deleted_models?: number }> {
+  return unwrapError(await invoke("delete_provider", { id }), "delete_provider");
 }
 
 export function listSkillMcp(): Promise<{ busy?: boolean; skills: SkillMcpItem[]; sops: SkillMcpItem[] }> {
