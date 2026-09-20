@@ -30,7 +30,7 @@
     "postcss": "^8.5.0",
     "svelte-check": "^4.7.6",
     "tailwindcss": "^4.0.0",
-    "typescript": "^5.7.0",
+    "typescript": "^7.0.2",
     "vite": "^6.0.0"
   }
 }
