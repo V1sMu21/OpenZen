@@ -636,21 +636,6 @@ dependencies = [
 
 [[package]]
 name = "calamine"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a3a315226fdc5b1c3e33521073e1712a05944bc0664d665ff1f6ff0396334da"
-dependencies = [
- "byteorder",
- "codepage",
- "encoding_rs",
- "log",
- "quick-xml 0.31.0",
- "serde",
- "zip 0.6.6",
-]
-
-[[package]]
-name = "calamine"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "138646b9af2c5d7f1804ea4bf93afc597737d2bd4f7341d67c48b03316976eb1"
@@ -3956,7 +3941,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "calamine 0.24.0",
+ "calamine",
  "chrono",
  "entropy_memory_engine",
  "libc",
@@ -4391,7 +4376,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
- "calamine 0.26.1",
+ "calamine",
  "chrono",
  "core-foundation 0.9.4",
  "enigo",
