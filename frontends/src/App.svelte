@@ -880,11 +880,12 @@
 
   async function handleSelectSession(id: string) {
     const prevId = $sessions.currentId;
-    // P2-26: artifacts belong to the conversation that opened them — a
-    // side panel left over from another session showed A's files while
-    // the user was in B (the docs promised this clear; no caller existed).
+    // Artifacts belong to the conversation that opened them (P2-26), but the
+    // panel itself is window layout: rebinding parks the outgoing session's
+    // tabs and restores the incoming one's instead of clearing and closing,
+    // so coming back to a session finds the panel still open on its file.
     if (prevId !== id) {
-      sidepanel.clearAll();
+      sidepanel.setSession(id);
     }
     // Persist unconditionally — including when `prevId === id`. ⌘[ / ⌘] and
     // the "new chat" path advance `sessions.currentId` BEFORE this handler
@@ -1013,7 +1014,10 @@
         }
         if (e.key === "Escape") {
           e.preventDefault();
-          sidepanel.visible = false;
+          // close() (not `visible = false`): the backend owns `visible`, and a
+          // local-only write left it thinking the panel was still up, so the
+          // next ⌘⇧E toggled the wrong way.
+          sidepanel.close();
           requestAnimationFrame(() => {
             const input = document.querySelector<HTMLTextAreaElement>(".input-area textarea");
             input?.focus();

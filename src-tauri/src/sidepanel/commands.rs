@@ -7,7 +7,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::lock_poison_guard;
 use crate::AppState;
 
-use super::state::ArtifactInfo;
+use super::state::{ArtifactInfo, SidePanelState};
 use super::terminal;
 
 /// Toggle side panel visibility. Returns new state.
@@ -61,6 +61,37 @@ fn detect_artifact_type(path: &std::path::Path) -> String {
     .to_string()
 }
 
+/// Point the `ozfile` root at whatever the panel is showing right now: the
+/// active artifact's directory when that artifact is html, nothing otherwise.
+/// The scheme serves exactly one directory at a time (scheme.rs), so a tab
+/// that becomes active again later — switched back to, or restored on a
+/// session switch — would otherwise lose its sibling css/js/img.
+///
+/// Call with the `sidepanel` lock held (order: sidepanel → html_roots).
+fn sync_html_root(state: &Arc<AppState>, sp: &SidePanelState) {
+    let active_dir = sp
+        .active_id
+        .as_ref()
+        .and_then(|id| sp.artifacts.iter().find(|a| &a.id == id))
+        .filter(|a| a.artifact_type == "html")
+        .and_then(|a| {
+            std::path::Path::new(&a.path)
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        });
+    let mut html_roots = lock_poison_guard(&state.html_roots);
+    match active_dir {
+        Some(dir) => {
+            if html_roots.first() != Some(&dir) {
+                tracing::info!("[sidepanel::commands] ozfile root: {}", dir.display());
+                html_roots.clear();
+                html_roots.push(dir);
+            }
+        }
+        None => html_roots.clear(),
+    }
+}
+
 /// Register a resolved path in the artifact whitelist (and the ozfile html
 /// root when needed), push the artifact tab and emit the open event.
 /// Shared by the agent-facing `open_artifact` and the user-dialog path.
@@ -74,9 +105,7 @@ fn register_and_show(
     if artifact_type != "terminal" {
         // Register the file (and, for html artifacts, its parent dir for
         // relative resources) in the artifact whitelist so the read_file_*
-        // commands can serve it. The parent dir replaces the previous html
-        // root: the latest artifact's directory is the only one being
-        // displayed by the ozfile:// scheme.
+        // commands can serve it.
         let p = std::path::PathBuf::from(&resolved_path);
         let mut roots = lock_poison_guard(&state.artifact_roots);
         if !roots.contains(&p) {
@@ -84,23 +113,16 @@ fn register_and_show(
         }
         if artifact_type == "html" {
             if let Some(parent) = p.parent() {
-                let canonical_parent = parent.to_path_buf();
                 if let Err(e) = app
                     .state::<tauri::scope::Scopes>()
                     .allow_directory(parent, true)
                 {
                     tracing::warn!("[sidepanel] allow_directory failed: {e}");
                 }
+                let canonical_parent = parent.to_path_buf();
                 if !roots.contains(&canonical_parent) {
-                    roots.push(canonical_parent.clone());
+                    roots.push(canonical_parent);
                 }
-                let mut html_roots = lock_poison_guard(&state.html_roots);
-                html_roots.clear();
-                html_roots.push(canonical_parent.clone());
-                tracing::info!(
-                    "[sidepanel::commands] ozfile root: {}",
-                    canonical_parent.display()
-                );
             }
         }
     }
@@ -116,6 +138,7 @@ fn register_and_show(
     sp.artifacts.push(artifact.clone());
     sp.active_id = Some(artifact.id.clone());
     sp.visible = true;
+    sync_html_root(state, &sp);
 
     let payload = serde_json::to_value(&artifact).map_err(|e| e.to_string())?;
     tracing::info!(
@@ -176,55 +199,68 @@ pub fn open_artifact(
 /// compromised) can claim "the user picked /etc/passwd". Dialog picks bypass
 /// the working-dir restriction (explicit user consent) but are still
 /// canonicalised and registered in the whitelist.
+///
+/// The picker is awaited on the blocking pool, never inline: a sync command
+/// runs on the main thread (wry's `WKScriptMessageHandler` delegate is
+/// `MainThreadOnly`), and `blocking_pick_file` parks the thread it is called
+/// on. rfd presents the panel from that same main thread, so calling it
+/// inline froze the app with the sheet stuck on screen — its completion
+/// handler could never run. As an async command the main thread stays free.
 #[tauri::command]
-pub fn open_artifact_dialog(
+pub async fn open_artifact_dialog(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let picked = app
-        .dialog()
-        .file()
-        .add_filter(
-            "Documents",
-            &[
-                "md", "html", "htm", "pdf", "doc", "docx", "txt", "rtf", "ppt", "pptx", "xls",
-                "tex",
-            ],
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        let picked = app
+            .dialog()
+            .file()
+            .add_filter(
+                "Documents",
+                &[
+                    "md", "html", "htm", "pdf", "doc", "docx", "txt", "rtf", "ppt", "pptx",
+                    "xls", "tex",
+                ],
+            )
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"],
+            )
+            .add_filter("Spreadsheets", &["xlsx", "xls", "csv", "tsv"])
+            .add_filter(
+                "Code",
+                &[
+                    "py", "rs", "ts", "js", "go", "sh", "css", "scss", "sql", "txt", "svelte",
+                ],
+            )
+            .add_filter("Data", &["json", "yaml", "toml"])
+            .add_filter("All files", &["*"])
+            .blocking_pick_file();
+        let Some(picked) = picked else {
+            return Err("cancelled".to_string());
+        };
+        let path = picked
+            .into_path()
+            .map_err(|e| format!("Invalid picked path: {e}"))?;
+        let canonical =
+            std::fs::canonicalize(&path).map_err(|e| format!("Cannot open file: {e}"))?;
+        let artifact_type = detect_artifact_type(&canonical);
+        let label = canonical
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unnamed".into());
+        register_and_show(
+            &app,
+            &state,
+            artifact_type,
+            canonical.to_string_lossy().to_string(),
+            label,
         )
-        .add_filter(
-            "Images",
-            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"],
-        )
-        .add_filter("Spreadsheets", &["xlsx", "xls", "csv", "tsv"])
-        .add_filter(
-            "Code",
-            &[
-                "py", "rs", "ts", "js", "go", "sh", "css", "scss", "sql", "txt", "svelte",
-            ],
-        )
-        .add_filter("Data", &["json", "yaml", "toml"])
-        .add_filter("All files", &["*"])
-        .blocking_pick_file();
-    let Some(picked) = picked else {
-        return Err("cancelled".into());
-    };
-    let path = picked
-        .into_path()
-        .map_err(|e| format!("Invalid picked path: {e}"))?;
-    let canonical = std::fs::canonicalize(&path).map_err(|e| format!("Cannot open file: {e}"))?;
-    let artifact_type = detect_artifact_type(&canonical);
-    let label = canonical
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unnamed".into());
-    register_and_show(
-        &app,
-        &state,
-        artifact_type,
-        canonical.to_string_lossy().to_string(),
-        label,
-    )
+    })
+    .await
+    .map_err(|e| format!("dialog task failed: {e}"))?
 }
 
 /// Close the side panel.
@@ -266,13 +302,48 @@ pub fn close_artifact_tab(
     if let Some(idx) = sp.artifacts.iter().position(|a| a.id == artifact_id) {
         sp.remove_tab(idx);
     }
-    let payload = serde_json::json!({
+    sync_html_root(&state, &sp);
+    app.emit("sidepanel:artifacts-changed", tabs_payload(&sp))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The artifact list + active tab, in the shape the `sidepanel:artifacts-changed`
+/// listener expects.
+fn tabs_payload(sp: &SidePanelState) -> serde_json::Value {
+    serde_json::json!({
         "artifacts": sp.artifacts.iter().map(|a| serde_json::json!({
             "id": a.id, "type": a.artifact_type, "path": a.path, "label": a.label,
         })).collect::<Vec<_>>(),
         "active_id": sp.active_id,
-    });
-    app.emit("sidepanel:artifacts-changed", payload)
+    })
+}
+
+/// Bind the side panel's tabs to a conversation — called on every session
+/// switch and once at startup. Tabs are per-session (A's artifacts must not
+/// linger over B, P2-26), but the panel itself is window layout: it stays
+/// open across the switch, and returning to a session restores its tabs.
+#[tauri::command]
+pub fn set_sidepanel_session(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<(), String> {
+    // Lock order (sidepanel → sidepanel_sessions) is shared with
+    // clear_sidepanel_artifacts; keep it consistent to stay deadlock-free.
+    let mut sp = lock_poison_guard(&state.sidepanel);
+    {
+        let mut parked = lock_poison_guard(&state.sidepanel_sessions);
+        sp.bind_session(&session_id, &mut parked);
+    }
+    tracing::info!(
+        "[sidepanel::commands] set_sidepanel_session: session={} tabs={} visible={}",
+        session_id,
+        sp.artifacts.len(),
+        sp.visible
+    );
+    sync_html_root(&state, &sp);
+    app.emit("sidepanel:artifacts-changed", tabs_payload(&sp))
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -287,13 +358,15 @@ pub fn switch_artifact_tab(
     let mut sp = lock_poison_guard(&state.sidepanel);
     if sp.artifacts.iter().any(|a| a.id == artifact_id) {
         sp.active_id = Some(artifact_id.clone());
+        sync_html_root(&state, &sp);
         app.emit("sidepanel:tab-switched", &artifact_id)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-/// Clear all artifacts (e.g., on session switch).
+/// Clear all artifacts (hard reset; the session-switch path is
+/// `set_sidepanel_session`, which parks instead of dropping them).
 #[tauri::command]
 pub fn clear_sidepanel_artifacts(
     app: AppHandle,
@@ -302,6 +375,12 @@ pub fn clear_sidepanel_artifacts(
     let mut sp = lock_poison_guard(&state.sidepanel);
     sp.clear();
     sp.visible = false;
+    sync_html_root(&state, &sp);
+    // Drop the parked copy too, or switching away and back would resurrect
+    // the tabs the user just cleared.
+    if let Some(session_id) = sp.session_id.clone() {
+        lock_poison_guard(&state.sidepanel_sessions).remove(&session_id);
+    }
     app.emit("sidepanel:cleared", ())
         .map_err(|e| e.to_string())?;
     Ok(())

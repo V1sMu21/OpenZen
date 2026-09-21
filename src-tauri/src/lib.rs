@@ -575,7 +575,7 @@ pub(crate) fn load_system_prompt(ctx: &ToolContext) -> String {
     }
 }
 
-use crate::sidepanel::state::SidePanelState;
+use crate::sidepanel::state::{ParkedTabs, SidePanelState};
 use crate::sidepanel::terminal::TerminalRegistry;
 
 type AskUserSlot = Arc<Mutex<HashMap<String, String>>>;
@@ -589,6 +589,10 @@ pub struct AppState {
     pub detached_agents: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     pub ask_user_rxs: Arc<Mutex<HashMap<String, AskUserSlot>>>,
     pub sidepanel: Mutex<SidePanelState>,
+    /// Tabs of the sessions the user is not currently in, keyed by session id
+    /// (parked by `set_sidepanel_session`). Keeps A's artifacts off B's panel
+    /// without losing them: switching back restores the set.
+    pub sidepanel_sessions: Mutex<HashMap<String, ParkedTabs>>,
     pub html_roots: std::sync::Mutex<Vec<std::path::PathBuf>>,
     /// Files (and, for html artifacts, their parent directories) that were
     /// explicitly opened in the side panel. The read_file_* / parse_excel /
@@ -752,6 +756,7 @@ impl AppState {
             detached_agents: Arc::new(Mutex::new(HashMap::new())),
             ask_user_rxs: Arc::new(Mutex::new(HashMap::new())),
             sidepanel: Mutex::new(SidePanelState::new()),
+            sidepanel_sessions: Mutex::new(HashMap::new()),
             html_roots: std::sync::Mutex::new(Vec::new()),
             artifact_roots: std::sync::Mutex::new(Vec::new()),
             terminal_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -1529,6 +1534,7 @@ commands::get_working_dir_for_session,
             crate::sidepanel::commands::close_artifact_tab,
             crate::sidepanel::commands::switch_artifact_tab,
             crate::sidepanel::commands::clear_sidepanel_artifacts,
+            crate::sidepanel::commands::set_sidepanel_session,
             crate::sidepanel::commands::spawn_terminal,
             crate::sidepanel::commands::write_to_terminal,
             crate::sidepanel::commands::resize_terminal,

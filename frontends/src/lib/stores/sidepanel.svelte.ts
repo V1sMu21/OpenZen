@@ -136,6 +136,13 @@ function createSidepanel() {
     await invoke("close_sidepanel");
   }
 
+  /// Point the panel at a conversation. Tabs are per-session, so the backend
+  /// parks the outgoing session's set and restores the incoming one — the
+  /// panel itself (visible/width) is window layout and stays put.
+  async function setSession(sessionId: string) {
+    await invoke("set_sidepanel_session", { sessionId });
+  }
+
   async function setWidth(width: number) {
     await invoke("set_sidepanel_width", { width });
   }
@@ -201,6 +208,7 @@ function createSidepanel() {
     toggle,
     open,
     close,
+    setSession,
     setWidth,
     prevTab,
     nextTab,
