@@ -39,44 +39,59 @@ impl Skill {
     /// Returns a relevance score 0.0–1.0.
     pub fn match_score(&self, query: &str) -> f32 {
         let query_lower = query.to_lowercase();
-        let terms: Vec<&str> = query_lower.split_whitespace().collect();
-        if terms.is_empty() {
+        if query_lower.split_whitespace().next().is_none() {
             return 0.0;
         }
 
-        let mut score: f32 = 0.0;
-
-        // Name match: strongest signal
         let name_lower = self.name.to_lowercase();
-        for term in &terms {
-            if name_lower.contains(term) {
-                score += 0.5;
-            }
-        }
-
-        // Description match: moderate signal
         let desc_lower = self.description.to_lowercase();
-        for term in &terms {
-            if desc_lower.contains(term) {
-                score += 0.3;
-            }
-        }
-
-        // Tag match: moderate signal
         let tags_lower: Vec<String> = self.tags.iter().map(|t| t.to_lowercase()).collect();
-        for term in &terms {
-            for tag in &tags_lower {
-                if tag.contains(term) || *term == tag.as_str() {
-                    score += 0.25;
+        let content_lower = self.content.to_lowercase();
+
+        // Graded tokenisation (see `matcher::tokenize_levels`): coarsest level
+        // that produces any signal wins. A Chinese query contains no spaces, so
+        // level 0 (CJK bigrams) is what lets it match at all; level 2 keeps
+        // Latin-only behaviour byte-for-byte identical to the old split.
+        let mut score: f32 = 0.0;
+        for terms in crate::matcher::tokenize_levels(query) {
+            if terms.is_empty() {
+                continue;
+            }
+            let mut level: f32 = 0.0;
+
+            // Name match: strongest signal
+            for term in &terms {
+                if name_lower.contains(term.as_str()) {
+                    level += 0.5;
                 }
             }
-        }
 
-        // Content match: weak signal (keyword in body)
-        let content_lower = self.content.to_lowercase();
-        for term in &terms {
-            if content_lower.contains(term) {
-                score += 0.1;
+            // Description match: moderate signal
+            for term in &terms {
+                if desc_lower.contains(term.as_str()) {
+                    level += 0.3;
+                }
+            }
+
+            // Tag match: moderate signal
+            for term in &terms {
+                for tag in &tags_lower {
+                    if tag.contains(term.as_str()) || term.as_str() == tag.as_str() {
+                        level += 0.25;
+                    }
+                }
+            }
+
+            // Content match: weak signal (keyword in body)
+            for term in &terms {
+                if content_lower.contains(term.as_str()) {
+                    level += 0.1;
+                }
+            }
+
+            if level > 0.0 {
+                score = level;
+                break;
             }
         }
 
@@ -784,6 +799,76 @@ description: Senior UI/UX Engineer
 
         let score = skill.match_score("csv file");
         assert!(score > 0.0, "should match on 'csv' tag");
+    }
+
+    #[test]
+    fn test_skill_match_score_chinese_query_is_not_zero() {
+        // Regression: a Chinese query has no spaces, so `split_whitespace`
+        // produced a single unsplittable token and every Chinese query scored
+        // a flat 0.0 — no skill was ever retrieved for a Chinese task.
+        let skill = Skill {
+            name: "download-large-model".into(),
+            description: "从 HuggingFace 下载大模型，支持并发与断点续传".into(),
+            tags: vec!["download".into(), "模型".into()],
+            required_tools: vec![],
+            content: String::new(),
+            source_path: PathBuf::new(),
+            metadata: SkillMcpMetadata::new("download-large-model", "", vec![]),
+            quality: 0.8,
+        };
+        let score = skill.match_score("帮我下载一个大模型，要断点续传");
+        assert!(score > 0.0, "Chinese query must score above zero; got {score}");
+    }
+
+    #[test]
+    fn test_skill_match_score_chinese_ranks_relevant_above_unrelated() {
+        let relevant = Skill {
+            name: "download-large-model".into(),
+            description: "从 HuggingFace 下载大模型，支持并发断点续传".into(),
+            tags: vec!["模型".into()],
+            required_tools: vec![],
+            content: String::new(),
+            source_path: PathBuf::new(),
+            metadata: SkillMcpMetadata::new("download-large-model", "", vec![]),
+            quality: 0.8,
+        };
+        let unrelated = Skill {
+            name: "minimalist-ui".into(),
+            description: "极简编辑风格的界面设计".into(),
+            tags: vec!["设计".into()],
+            required_tools: vec![],
+            content: String::new(),
+            source_path: PathBuf::new(),
+            metadata: SkillMcpMetadata::new("minimalist-ui", "", vec![]),
+            quality: 0.8,
+        };
+        let q = "帮我下载一个大模型，要断点续传";
+        assert!(
+            relevant.match_score(q) > unrelated.match_score(q),
+            "relevant={} unrelated={}",
+            relevant.match_score(q),
+            unrelated.match_score(q)
+        );
+    }
+
+    #[test]
+    fn test_skill_match_score_latin_unchanged_by_graded_tokenizer() {
+        // Latin-only queries must behave exactly as the legacy split.
+        let skill = Skill {
+            name: "web_search".into(),
+            description: "Search the web".into(),
+            tags: vec![],
+            required_tools: vec![],
+            content: String::new(),
+            source_path: PathBuf::new(),
+            metadata: SkillMcpMetadata::new("web_search", "", vec![]),
+            quality: 0.8,
+        };
+        // name hit (search) * 0.5 + desc hit (search) * 0.3 = 0.8, no cap
+        assert!((skill.match_score("search") - 0.8).abs() < 1e-6,
+                "got {}", skill.match_score("search"));
+        // "internet" is in neither the name nor the description
+        assert_eq!(skill.match_score("internet"), 0.0);
     }
 
     #[test]

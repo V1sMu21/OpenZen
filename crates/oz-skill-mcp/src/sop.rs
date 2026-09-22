@@ -114,12 +114,10 @@ impl Sop {
     /// Score this SOP against a query.
     pub fn match_score(&self, query: &str) -> f32 {
         let query_lower = query.to_lowercase();
-        let terms: Vec<&str> = query_lower.split_whitespace().collect();
-        if terms.is_empty() {
+        if query_lower.split_whitespace().next().is_none() {
             return 0.0;
         }
 
-        let mut score: f32 = 0.0;
         let haystack = format!(
             "{} {} {}",
             self.name.to_lowercase(),
@@ -128,9 +126,22 @@ impl Sop {
         );
         let haystack_words: Vec<&str> = haystack.split_whitespace().collect();
 
-        for term in &terms {
-            if haystack.contains(term) {
-                score += 0.3;
+        // Graded tokenisation (see `matcher::tokenize_levels`): first level that
+        // scores wins. Same rationale as `Skill::match_score`.
+        let mut score: f32 = 0.0;
+        for terms in crate::matcher::tokenize_levels(query) {
+            if terms.is_empty() {
+                continue;
+            }
+            let mut level: f32 = 0.0;
+            for term in &terms {
+                if haystack.contains(term.as_str()) {
+                    level += 0.3;
+                }
+            }
+            if level > 0.0 {
+                score = level;
+                break;
             }
         }
 
@@ -141,14 +152,24 @@ impl Sop {
         }
 
         if score < 0.15 {
-            for term in &terms {
-                if term.len() < 4 {
+            for terms in crate::matcher::tokenize_levels(query) {
+                if terms.is_empty() {
                     continue;
                 }
-                for hw in &haystack_words {
-                    if hw.len() >= 2 && term.contains(hw) {
-                        score += 0.15;
+                let mut level: f32 = 0.0;
+                for term in &terms {
+                    if term.len() < 4 {
+                        continue;
                     }
+                    for hw in &haystack_words {
+                        if hw.len() >= 2 && term.contains(hw) {
+                            level += 0.15;
+                        }
+                    }
+                }
+                if level > 0.0 {
+                    score += level;
+                    break;
                 }
             }
         }
@@ -458,6 +479,28 @@ Use web_search to find current information.
         assert_eq!(sop.name, "web_search");
         assert_eq!(sop.description, "Search the web");
         assert_eq!(sop.tags, vec!["web", "search"]);
+    }
+
+    #[test]
+    fn test_sop_match_score_chinese_query_is_not_zero() {
+        // Same regression as skills: SOPs were equally unreachable in Chinese.
+        let path = PathBuf::from("erme-memory-engine.md");
+        let sop = Sop::from_markdown(
+            &path,
+            "# erme-memory-engine — ERME 记忆引擎\nTags: memory\n\n空闲时自我迭代。\n",
+        );
+        let score = sop.match_score("让记忆引擎在空闲时自我迭代");
+        assert!(score > 0.0, "Chinese SOP query must score above zero; got {score}");
+    }
+
+    #[test]
+    fn test_sop_match_score_latin_unchanged_by_graded_tokenizer() {
+        let path = PathBuf::from("web_search.md");
+        let sop = Sop::from_markdown(&path, "# web_search — Search the web\nTags: web\n\nBody.\n");
+        // haystack hits "web" and "search" at 0.3 each, plus the reverse tag
+        // match on "web" (query contains the tag) at +0.2
+        assert!((sop.match_score("web search") - 0.8).abs() < 1e-6,
+                "got {}", sop.match_score("web search"));
     }
 
     #[test]
