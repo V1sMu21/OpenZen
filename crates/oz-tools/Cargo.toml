@@ -32,5 +32,9 @@ core-foundation = "0.9"
 enigo = "0.2"
 accessibility = "0.1"
 
+[target.'cfg(unix)'.dependencies]
+# SIGKILL a timed-out command's whole process group (kill(-pid, SIGKILL)).
+libc = "0.2"
+
 [dev-dependencies]
 tempfile.workspace = true

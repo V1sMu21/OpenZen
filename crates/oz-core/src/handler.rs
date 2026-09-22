@@ -300,6 +300,12 @@ pub struct LoopConfig {
     /// streams repeatedly; a higher budget keeps long tasks alive through
     /// transient wedges. Default: 3.
     pub llm_error_retries: u32,
+    /// Wall-clock budget in seconds for one LLM retry series (all consecutive
+    /// attempts on the same turn). The attempt count alone does not bound the
+    /// wait: one attempt can cost a 60s header timeout wrapped in inner
+    /// retries, so 8 attempts can silently burn 20-40 minutes. 0 = give up on
+    /// the first failure. Default: 300.
+    pub llm_retry_budget_secs: u64,
     /// Directory for session rollout recording. When set, all stream events
     /// are appended to {rollout_dir}/rollout-*.jsonl for replay/debug.
     pub rollout_dir: Option<String>,
@@ -370,6 +376,7 @@ impl Default for LoopConfig {
             // don't override it) survive gateway outage bursts too; with the
             // 60s outage backoff this spans multi-minute provider episodes.
             llm_error_retries: 8,
+            llm_retry_budget_secs: 300,
             rollout_dir: None,
             memory_scheduler: None,
             hooks: None,
@@ -427,6 +434,7 @@ impl Clone for LoopConfig {
             log_fn: self.log_fn.clone(),
             stream_timeout_secs: self.stream_timeout_secs,
             llm_error_retries: self.llm_error_retries,
+            llm_retry_budget_secs: self.llm_retry_budget_secs,
             rollout_dir: self.rollout_dir.clone(),
             memory_scheduler: self.memory_scheduler.clone(),
             hooks: self.hooks.clone(),

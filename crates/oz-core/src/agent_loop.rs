@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use oz_core_types::{
     ContentBlock, Message, MockResponse, Role, StepOutcome, StreamEvent, ToolContext,
@@ -84,6 +84,24 @@ async fn save_stop_checkpoint_async(
     crate::checkpoint::save_checkpoint_persist_async(&cp_dir, &config.session_id, cp).await;
 }
 
+/// Exponential backoff delay in seconds for `consecutive` (the 1-based
+/// consecutive-error count), 60s-capped.
+fn outage_retry_delay(consecutive: u32) -> f64 {
+    oz_llm::retry::outage_backoff_delay(consecutive.saturating_sub(1) as usize)
+}
+
+/// True when an LLM retry series that started `elapsed_secs` ago has outlived
+/// its budget (`LoopConfig::llm_retry_budget_secs`).
+///
+/// The attempt count alone does not bound the wait: each attempt can cost a
+/// 60s header timeout wrapped in up to 5 inner retries, so 8 attempts can
+/// silently burn 20-40 minutes with nothing on screen. Past the budget the loop
+/// stops retrying and reports why — fast failures (connection refused,
+/// immediate 5xx) still get many attempts within it.
+fn llm_retry_budget_exhausted(elapsed_secs: u64, budget_secs: u64) -> bool {
+    elapsed_secs >= budget_secs
+}
+
 /// Sleep for the exponential backoff delay of a failed LLM attempt,
 /// aborting early when the stop signal fires (stop must stay responsive).
 /// `consecutive` is the 1-based consecutive-error count. Uses the 60s-capped
@@ -91,7 +109,7 @@ async fn save_stop_checkpoint_async(
 /// windows outlast the per-request budget, and the turn-level retry is the
 /// only layer that rides them out.
 async fn backoff_or_stop(stop_signal: &AtomicBool, consecutive: u32) {
-    let delay = oz_llm::retry::outage_backoff_delay(consecutive.saturating_sub(1) as usize);
+    let delay = outage_retry_delay(consecutive);
     let mut waited = 0.0_f64;
     while waited < delay {
         if stop_signal.load(Ordering::Relaxed) {
@@ -1033,6 +1051,13 @@ where
                 // from a failed attempt are dropped on retry so a tool the
                 // final response never references is never executed.
                 let mut pending_spec: Vec<(String, String, serde_json::Value)> = Vec::new();
+                // When this turn's LLM phase started, for the wall-clock retry
+                // budget below. It must cover the FIRST attempt too: starting
+                // the clock at the first *failure* would let an already-expired
+                // budget launch another multi-minute attempt (found by the
+                // real-transport hands-on test: a 90s budget still waited
+                // 362s).
+                let retry_window_start = Instant::now();
                 let result: Result<MockResponse, oz_core_types::LlmError> = loop {
                     let (spec_tx, mut spec_rx) = tokio::sync::mpsc::unbounded_channel();
                     let stream_fut =
@@ -1163,6 +1188,47 @@ where
                             // Drop tool calls queued by the failed attempt —
                             // the retry's response is the source of truth.
                             pending_spec.clear();
+                            let retry_delay = outage_retry_delay(consecutive_llm_errors);
+                            // Tell the UI before sleeping: this is the only
+                            // sign of life during a gateway outage, and
+                            // without it the bubble sat frozen for 20-40
+                            // minutes with no explanation.
+                            let _ = tx.send(StreamEvent::LlmRetry {
+                                attempt: consecutive_llm_errors,
+                                max_attempts: max_llm_error_retries,
+                                reason: e.to_string(),
+                                retry_in_secs: retry_delay.ceil() as u64,
+                            });
+                            let window_secs = retry_window_start.elapsed().as_secs();
+                            if llm_retry_budget_exhausted(
+                                window_secs,
+                                config.llm_retry_budget_secs,
+                            ) {
+                                let exit_reason = if is_timeout {
+                                    "llm_timeout"
+                                } else {
+                                    "llm_error"
+                                };
+                                agent_log(&format!(
+                                    "LLM unreachable for {window_secs}s over {consecutive_llm_errors} attempts (budget {}s), giving up: {e}",
+                                    config.llm_retry_budget_secs
+                                ));
+                                transition_state(
+                                    handler,
+                                    AgentState::Done(exit_reason.into()),
+                                    "LLM retry budget exhausted",
+                                );
+                                return LoopOutcome {
+                                    turn,
+                                    exit_reason: exit_reason.into(),
+                                    data: Some(serde_json::json!({
+                                        "error": format!(
+                                            "LLM unreachable for {window_secs}s over {consecutive_llm_errors} attempts (retry budget {}s) — last error: {e}",
+                                            config.llm_retry_budget_secs
+                                        ),
+                                    })),
+                                };
+                            }
                             backoff_or_stop(stop_signal, consecutive_llm_errors).await;
                         }
                     }
@@ -1221,6 +1287,7 @@ where
                 // Same retry/backoff semantics as the streaming path: a
                 // single transient failure used to terminate the whole
                 // run here.
+                let retry_window_start = Instant::now();
                 let chat_resp = loop {
                     match client.chat(&messages, tools).await {
                         Ok(resp) => {
@@ -1247,6 +1314,28 @@ where
                             tracing::warn!(
                                 "LLM chat error (attempt {consecutive_llm_errors}/{max_llm_error_retries}), retrying turn {turn}: {e}"
                             );
+                            // Same wall-clock budget as the streaming path: the
+                            // attempt count alone does not bound the silence.
+                            if llm_retry_budget_exhausted(
+                                retry_window_start.elapsed().as_secs(),
+                                config.llm_retry_budget_secs,
+                            ) {
+                                transition_state(
+                                    handler,
+                                    AgentState::Done("llm_error".into()),
+                                    "LLM retry budget exhausted",
+                                );
+                                return LoopOutcome {
+                                    turn,
+                                    exit_reason: "llm_error".into(),
+                                    data: Some(serde_json::json!({
+                                        "error": format!(
+                                            "LLM unreachable for over {}s over {consecutive_llm_errors} attempts — last error: {e}",
+                                            config.llm_retry_budget_secs
+                                        ),
+                                    })),
+                                };
+                            }
                             backoff_or_stop(stop_signal, consecutive_llm_errors).await;
                         }
                     }
@@ -4143,6 +4232,293 @@ mod tests {
 
         assert_eq!(outcome.exit_reason, "llm_error");
         assert_eq!(outcome.turn, 1);
+    }
+
+    /// A gateway outage must not look like a frozen run: every retry emits a
+    /// `LlmRetry` event (the UI's only sign of life), and an exhausted
+    /// wall-clock budget ends the series with a reason instead of retrying
+    /// into the void. Budget 0 makes the exhaustion path reachable without
+    /// sleeping through the real backoff.
+    #[tokio::test]
+    async fn agent_loop_llm_retry_budget_reports_instead_of_hanging() {
+        struct ErrorLlm;
+        #[async_trait]
+        impl oz_core_types::LlmClient for ErrorLlm {
+            async fn chat(
+                &mut self,
+                _: &[Message],
+                _: &[ToolDefinition],
+            ) -> Result<MockResponse, oz_core_types::LlmError> {
+                Err(oz_core_types::LlmError::StreamError(
+                    "Stream error: no response headers within 60s".into(),
+                ))
+            }
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut client = ErrorLlm;
+        let mut handler = MockHandler::new();
+        let signal = AtomicBool::new(false);
+        let config = LoopConfig {
+            max_turns: 10,
+            verbose: false,
+            llm_error_retries: 8,
+            llm_retry_budget_secs: 0,
+            event_tx: Some(tx),
+            ..Default::default()
+        };
+
+        let outcome = run_agent_loop(
+            &mut client,
+            "system".into(),
+            "user".into(),
+            vec![],
+            &mut handler,
+            &[],
+            &default_ctx(),
+            &config,
+            &signal,
+        )
+        .await;
+
+        assert_eq!(outcome.exit_reason, "llm_error");
+        let err = outcome
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            err.contains("retry budget 0s") && err.contains("no response headers"),
+            "budget exit must say why: {err}"
+        );
+
+        let mut retries = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let StreamEvent::LlmRetry {
+                attempt,
+                max_attempts,
+                retry_in_secs,
+                reason,
+            } = ev
+            {
+                retries.push((attempt, max_attempts, retry_in_secs, reason));
+            }
+        }
+        assert_eq!(retries.len(), 1, "one notice per retry: {retries:?}");
+        assert_eq!(retries[0].0, 1);
+        assert_eq!(retries[0].1, 8);
+        assert_eq!(retries[0].2, 2, "ceil(1.5s) backoff, in whole seconds");
+        assert!(retries[0].3.contains("no response headers"));
+    }
+
+    /// Every attempt of a long series is announced, not just the first: the
+    /// notice has to keep arriving for the whole outage.
+    #[tokio::test]
+    async fn agent_loop_llm_retry_announces_every_attempt() {
+        struct ErrorLlm;
+        #[async_trait]
+        impl oz_core_types::LlmClient for ErrorLlm {
+            async fn chat(
+                &mut self,
+                _: &[Message],
+                _: &[ToolDefinition],
+            ) -> Result<MockResponse, oz_core_types::LlmError> {
+                Err(oz_core_types::LlmError::HttpError {
+                    status: 503,
+                    body: "upstream unavailable".into(),
+                })
+            }
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut client = ErrorLlm;
+        let mut handler = MockHandler::new();
+        let signal = AtomicBool::new(false);
+        let config = LoopConfig {
+            max_turns: 10,
+            verbose: false,
+            llm_error_retries: 2,
+            llm_retry_budget_secs: 3600,
+            event_tx: Some(tx),
+            ..Default::default()
+        };
+
+        let outcome = run_agent_loop(
+            &mut client,
+            "system".into(),
+            "user".into(),
+            vec![],
+            &mut handler,
+            &[],
+            &default_ctx(),
+            &config,
+            &signal,
+        )
+        .await;
+
+        assert_eq!(outcome.exit_reason, "llm_error");
+        let mut attempts = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let StreamEvent::LlmRetry { attempt, .. } = ev {
+                attempts.push(attempt);
+            }
+        }
+        assert_eq!(attempts, vec![1, 2]);
+    }
+
+    #[test]
+    fn llm_retry_budget_expires_exactly_at_the_budget() {
+        assert!(!llm_retry_budget_exhausted(0, 600));
+        assert!(!llm_retry_budget_exhausted(599, 600));
+        assert!(llm_retry_budget_exhausted(600, 600));
+        assert!(llm_retry_budget_exhausted(601, 600));
+        // 0 disables retrying entirely (used by the test above).
+        assert!(llm_retry_budget_exhausted(0, 0));
+    }
+
+    /// HANDS-ON / real transport: a server that accepts the TCP connection and
+    /// never sends response headers — the failure that froze the user's bubble
+    /// for 10+ minutes (opencode.ai zen answered 503, then stopped sending
+    /// headers). Uses the real `OaiSession` + `NativeToolClient` against a real
+    /// loopback socket, so the real 180s-local / 60s-cloud header timeout, the
+    /// real `no response headers within Ns` error, the real retry layer and the
+    /// real event bus all participate.
+    ///
+    /// Ignored by default: one real attempt costs the header timeout (~3 min
+    /// with the loopback "local" classification). Run with:
+    /// `cargo test -p oz-core --lib hands_on_real_transport -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "real HTTP transport, one header timeout (~3 min)"]
+    async fn hands_on_real_transport_retry_is_visible_and_bounded() {
+        // Accept every connection and hold it open without answering.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for s in listener.incoming().flatten() {
+                held.push(s);
+            }
+        });
+
+        let sess = oz_config::SessionConfig {
+            apikey: "test-key".into(),
+            apibase: format!("http://127.0.0.1:{port}/v1"),
+            model: "deepseek-flash".into(),
+            context_win: 128000,
+            max_tokens: None,
+            temperature: None,
+            api_mode: Default::default(),
+            reasoning_effort: None,
+            // Inner retries are configured but cannot apply to a header
+            // timeout (StreamError is not retryable) — this run therefore
+            // exercises the agent-level retry + budget path in isolation.
+            max_retries: Some(1),
+            proxy: None,
+            verify: None,
+            timeout: None,
+            llm_nos: None,
+            base_delay: None,
+            spring_back: None,
+            extra_headers: None,
+            provider: None,
+            modalities: None,
+            session_tag: None,
+        };
+        let backend: Box<dyn oz_llm::Session> = Box::new(oz_llm::OaiSession::new(sess.clone()));
+        let mut client = oz_llm::NativeToolClient::new(backend);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let started = std::time::Instant::now();
+        let collector = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while let Some(ev) = rx.recv().await {
+                println!("+{:6.1}s  {ev:?}", started.elapsed().as_secs_f64());
+                seen.push(ev);
+            }
+            seen
+        });
+
+        let mut handler = MockHandler::new();
+        let signal = AtomicBool::new(false);
+        let config = LoopConfig {
+            max_turns: 2,
+            verbose: false,
+            event_tx: Some(tx),
+            llm_error_retries: 8,
+            llm_retry_budget_secs: 90,
+            ..Default::default()
+        };
+
+        let outcome = run_agent_loop(
+            &mut client,
+            "system".into(),
+            "user".into(),
+            vec![],
+            &mut handler,
+            &[],
+            &default_ctx(),
+            &config,
+            &signal,
+        )
+        .await;
+        let elapsed = started.elapsed();
+        drop(config); // close the event channel so the collector ends
+        let seen = collector.await.unwrap();
+
+        println!("--- outcome: {:?} in {elapsed:?}", outcome);
+        let retries: Vec<(f64, u32, u32, String)> = seen
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::LlmRetry {
+                    attempt,
+                    max_attempts,
+                    reason,
+                    ..
+                } => Some((
+                    // The collector printed each event as it arrived; the
+                    // order here is arrival order.
+                    0.0,
+                    *attempt,
+                    *max_attempts,
+                    reason.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !retries.is_empty(),
+            "the UI must be told why it is waiting; events: {seen:?}"
+        );
+        // A header timeout is `StreamError`, which is deliberately NOT retried
+        // by the inner send-phase layer (see `LlmError::is_retryable`), so the
+        // first notice comes from the agent loop after exactly one timeout —
+        // not after a 5-try, 5-minute inner series.
+        assert!(
+            retries.iter().any(|(_, _, max, _)| *max == 8),
+            "agent-level retry not reported: {retries:?}"
+        );
+        assert!(
+            retries
+                .iter()
+                .all(|(_, _, _, r)| r.contains("no response headers within")),
+            "real transport error expected: {retries:?}"
+        );
+        assert_eq!(outcome.exit_reason, "llm_error");
+        let budgeted = outcome
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("retry budget 90s");
+        assert!(budgeted, "exit must name the budget: {:?}", outcome.data);
+        // 90s budget + 2 real header-timeout attempts (~180s each); the point
+        // is that it stops there instead of walking all 8 attempts.
+        assert!(
+            elapsed < std::time::Duration::from_secs(480),
+            "a 90s budget must not walk the full 8-attempt series: {elapsed:?}"
+        );
     }
 
     #[tokio::test]

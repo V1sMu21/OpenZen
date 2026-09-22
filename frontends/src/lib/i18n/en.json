@@ -284,6 +284,7 @@
   "status.qualityGate.spec": "Synthesizing acceptance criteria…",
   "status.qualityGate.assertions": "Running acceptance assertions…",
   "status.qualityGate.review": "Running independent review…",
+  "status.llmRetry": "Model not responding (attempt {attempt}/{max} failed) — retrying in {secs}s",
   "status.cloud": "Cloud",
   "status.localDeploy": "Local",
   "status.msgs": "msgs",

@@ -426,27 +426,53 @@ function createChatStore() {
       });
 
     // Post-process: convert intervention user messages into cards inside
-    // the preceding assistant message for restart-consistency.
-    for (let i = messages.length - 1; i >= 1; i--) {
+    // the agent turn they belong to for restart-consistency.
+    //
+    // The interjection is persisted the moment the user injects it, while
+    // the turn's assistant message is only persisted at after_run — so in
+    // the store an intervention ALWAYS precedes the assistant reply of the
+    // run that received it. Folding it into the PRECEDING assistant placed
+    // the card in the previous, already-completed bubble (user report
+    // 2026-09-22: the card appeared in the old bubble while the live run
+    // still saw the text). Fold FORWARD into the next assistant message;
+    // only fall back to the preceding one when no later assistant exists
+    // (intervention is the last stored message — the run died before
+    // after_run persisted its reply).
+    //
+    // Iterated forwards so several interventions in one turn keep their
+    // chronological order inside the bubble.
+    for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
-      if (msg.role === "user" && msg.content?.startsWith("[USER INTERVENTION")) {
+      if (msg.role !== "user" || !msg.content?.startsWith("[USER INTERVENTION")) continue;
+      let target = -1;
+      for (let j = i + 1; j < messages.length; j++) {
+        if (messages[j].role === "assistant") {
+          target = j;
+          break;
+        }
+      }
+      if (target < 0) {
         for (let j = i - 1; j >= 0; j--) {
           if (messages[j].role === "assistant") {
-            const parts = messages[j].parts ?? [];
-            const cleanContent = msg.content!.replace(/^\[USER INTERVENTION.*?\n/, "");
-            parts.push({
-              type: "data",
-              id: `intervention_${messages[j].id}_${i}`,
-              dataType: "user_intervention",
-              content: cleanContent,
-              transient: false,
-            } as UIMessagePart);
-            messages[j] = { ...messages[j], parts };
+            target = j;
             break;
           }
         }
-        messages.splice(i, 1);
       }
+      if (target >= 0) {
+        const parts = messages[target].parts ?? [];
+        const cleanContent = msg.content.replace(/^\[USER INTERVENTION.*?\n/, "");
+        parts.push({
+          type: "data",
+          id: `intervention_${messages[target].id}_${i}`,
+          dataType: "user_intervention",
+          content: cleanContent,
+          transient: false,
+        } as UIMessagePart);
+        messages[target] = { ...messages[target], parts };
+      }
+      messages.splice(i, 1);
+      i--;
     }
     return messages;
   }
@@ -983,6 +1009,30 @@ function createChatStore() {
         );
         return withStreamingParts(s, parts);
       });
+    },
+
+    /**
+     * A scheduled reminder fired and the backend woke this session with a
+     * fresh run (`reminder_fired` carrying `woke: true`). Show the reminder
+     * turn and open the live bubble, otherwise the report only appeared
+     * after a manual reload — the run streamed with `isProcessing === false`,
+     * so `ensureLiveAssistantMessage` refused to create a bubble and every
+     * part was dropped on the floor.
+     */
+    beginReminderTurn(content: string) {
+      const last = readState().messages[readState().messages.length - 1];
+      // The backend already persisted this turn; bail out of the optimistic
+      // append if a reload/replay already put it in the store.
+      if (!(last && last.role === 'user' && last.content === content)) {
+        addMessage({
+          id: generateId(),
+          role: 'user',
+          content,
+          timestamp: new Date().toISOString(),
+          children: [],
+        });
+      }
+      startAssistantMessageInternal();
     },
 
     startAssistantMessage() {
@@ -1542,7 +1592,11 @@ function createChatStore() {
         case "reminder_fired": {
           // A scheduled/heartbeat reminder fired — decrement its remaining
           // repeats so the right-rail card reflects live status.
-          const d = event.data as { message?: string; remaining_repeats?: number };
+          const d = event.data as {
+            message?: string;
+            remaining_repeats?: number;
+            woke?: boolean;
+          };
           if (d && typeof d.message === "string") {
             update((s) => {
               const reminders: ReminderTask[] = s.reminders.map((r) => {
@@ -1554,6 +1608,13 @@ function createChatStore() {
               });
               return { ...s, reminders };
             });
+          }
+          // The backend turned this fire into a real agent run (scheduled
+          // task): render the reminder turn + the live bubble it triggers.
+          // `woke` is false when a run was already live (the reminder went in
+          // as an intervention card instead) or the wake was skipped.
+          if (d?.woke && typeof d.message === "string") {
+            this.beginReminderTurn(`[Reminder] ${d.message}`);
           }
           break;
         }

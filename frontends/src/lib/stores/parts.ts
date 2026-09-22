@@ -70,6 +70,7 @@ export type ProtocolV1Event =
   | { type: 'data_memory_retrieval'; results: number; query: string }
   | { type: 'data_compressing_context'; before_tokens: number; after_tokens: number }
   | { type: 'data_quality_gate'; stage: string }
+  | { type: 'llm_retry'; attempt: number; max_attempts: number; reason: string; retry_in_secs: number }
   | { type: 'data_todo_update'; items: Array<{id:string;content:string;status:string;priority:string;order:number}>; current: number; total: number }
   | { type: 'data_context_usage'; current_tokens: number; output_tokens: number; context_window: number; turn: number; message_count: number; total_input_tokens?: number; total_output_tokens?: number }
   | { type: 'ask_user_pending'; payload?: { data?: { question?: string; candidates?: string[] }; [k: string]: unknown } }

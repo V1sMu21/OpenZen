@@ -1643,147 +1643,105 @@ async fn stop_session(
     Ok(Json(serde_json::json!({ "status": "stopped" })))
 }
 
+/// Resolve a session entry by its section name or by its `model` field,
+/// case-insensitively — the same lookup the desktop command uses for
+/// `/compact -model <name>`.
+fn resolve_session_pair(
+    cfg: &MyKeyConfig,
+    needle: &str,
+) -> Option<(String, oz_config::mykey::SessionConfig)> {
+    let n = needle.trim().to_lowercase();
+    if n.is_empty() {
+        return None;
+    }
+    if let Some((k, v)) = cfg.sessions.iter().find(|(k, _)| k.to_lowercase() == n) {
+        return Some((k.clone(), v.clone()));
+    }
+    cfg.sessions
+        .iter()
+        .find(|(_, s)| s.model.to_lowercase() == n)
+        .map(|(k, v)| (k.clone(), v.clone()))
+}
+
 /// POST /api/sessions/:id/compress
-/// Manually compress the context for a session: deserialize messages,
-/// run compress_messages, serialize back, save, return stats.
+/// Manually compress the context for a session: compact the persisted log,
+/// save, return stats.
 async fn handle_compress(
     State(state): State<SharedState>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (
-        before_chars,
-        after_chars,
-        saved_chars,
-        saved_pct,
-        messages_removed,
-        before_count,
-        after_count,
-        metrics_str,
-        summary,
-        _llm_summary,
-    ): (
-        usize,
-        usize,
-        usize,
-        f64,
-        usize,
-        usize,
-        usize,
-        String,
-        String,
-        Option<String>,
-    ) = {
+    // `/compact -model X` pins the summarizer; without it the configured
+    // summary/default model is used. Over HTTP the override used to be
+    // dropped on the floor entirely.
+    let requested_model = body
+        .as_ref()
+        .and_then(|Json(v)| v.get("model"))
+        .and_then(|m| m.as_str())
+        .map(str::to_string)
+        .filter(|m| !m.trim().is_empty());
+
+    let compaction = {
         let mut sessions = state.sessions.write().await;
         let session = sessions
             .get_mut(&id)
             .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Session {id} not found")))?;
 
-        let mut messages: Vec<Message> = session
-            .messages
-            .iter()
-            .filter_map(|v| {
-                let role = v.get("role")?.as_str()?;
-                let content = v
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                match role {
-                    "user" => Some(Message::user(&content)),
-                    "assistant" => Some(Message::assistant(&content)),
-                    "system" => Some(Message::system(&content)),
-                    _ => None,
-                }
-            })
-            .collect();
-
-        let before_chars = oz_core::measure_usage(&messages).total_chars;
-        let before_count = messages.len();
-
         let config = oz_core::CompressionConfig::default();
-        // Manual /compact is a force action — bypass the trigger
-        // threshold with context_win=1 (same trick as emergency_compress).
-        let _saved = oz_core::compress_messages(&mut messages, 1, &config, None);
-
-        let after_chars = oz_core::measure_usage(&messages).total_chars;
-        let after_count = messages.len();
-        let saved_chars = before_chars.saturating_sub(after_chars);
-        let saved_pct = if before_chars > 0 {
-            ((saved_chars as f64 / before_chars as f64) * 100.0 * 10.0).round() / 10.0
-        } else {
-            0.0
-        };
-        let messages_removed = before_count.saturating_sub(after_count);
-
-        let original_msgs = session.messages.clone();
-        session.messages =
-            oz_core::compress::match_messages_to_originals(&messages, &session.messages);
-
-        let metrics = oz_core::compress::CompressionMetrics::compute(
-            before_chars,
-            after_chars,
-            before_count,
-            after_count,
-        );
-        let removed_json = {
-            let surviving_ids: std::collections::HashSet<String> = session
-                .messages
-                .iter()
-                .filter_map(|v| {
-                    Some(format!(
-                        "{}_{}",
-                        v.get("role")?.as_str()?,
-                        v.get("content")?.as_str()?
-                    ))
-                })
-                .collect();
-            original_msgs
-                .into_iter()
-                .filter(|v| {
-                    let id = format!(
-                        "{}_{}",
-                        v.get("role").and_then(|r| r.as_str()).unwrap_or(""),
-                        v.get("content").and_then(|c| c.as_str()).unwrap_or("")
-                    );
-                    !surviving_ids.contains(&id)
-                })
-                .collect::<Vec<_>>()
-        };
-        let summary = oz_core::compress::build_compression_summary(&removed_json, "");
-
+        // Manual /compact is a force action — bypass the trigger threshold with
+        // context_win=1 (same trick as emergency_compress) and compact the log
+        // through the view the agent loop rebuilds for the LLM (text + tool
+        // traffic). The old content-only view ignored `tool_results` /
+        // `tool_use_blocks`, where a real session keeps most of its context,
+        // so this reported 356 tokens / 0% saved on a 100K+ token
+        // conversation (user report 2026-09-22).
+        let compaction = oz_core::compact_store_messages(&session.messages, 1, &config);
+        session.messages = compaction.messages.clone();
         sessions.save();
-
-        (
-            before_chars,
-            after_chars,
-            saved_chars,
-            saved_pct,
-            messages_removed,
-            before_count,
-            after_count,
-            metrics.summary(),
-            summary,
-            None::<String>,
-        )
+        compaction
     };
 
-    // Generate LLM summary for /compact when enough messages were removed
-    let llm_summary = if messages_removed >= 4 {
+    let before_count = compaction.before_messages;
+    let after_count = compaction.after_messages;
+    let before_chars = compaction.before_chars;
+    let after_chars = compaction.after_chars;
+    let saved_chars = compaction.saved_chars();
+    let saved_pct = compaction.saved_pct();
+    let messages_removed = compaction.removed.len();
+    let metrics_str = oz_core::compress::CompressionMetrics::compute(
+        before_chars,
+        after_chars,
+        before_count,
+        after_count,
+    )
+    .summary();
+    let summary = oz_core::compress::build_compression_summary(&compaction.removed, "");
+    let before_tokens = before_chars / 4;
+    let after_tokens = after_chars / 4;
+    let saved_tokens = before_tokens.saturating_sub(after_tokens);
+
+    // Generate the LLM summary whenever the pass actually freed something —
+    // including when only tool traffic was folded. The old
+    // `messages_removed >= 4` gate skipped the summary (and the requested
+    // model) on exactly the sessions that needed it.
+    let llm_summary = if saved_chars > 0 {
         let cfg = MyKeyConfig::from_file(&state.config_path).ok();
-        // Use the same summary model as the agent loop's auto-compression.
+        // Requested model (`/compact -model X`) first, then the configured
+        // summary model, then the default session.
         let sess_pair: Option<(String, oz_config::mykey::SessionConfig)> =
             cfg.as_ref().and_then(|c| {
-                if let Some(ref name) = c.summary_model {
-                    c.get(name).cloned().map(|s| (name.clone(), s)).or_else(|| {
-                        c.sessions
-                            .iter()
-                            .find(|(_, s)| s.model == *name)
-                            .map(|(n, s)| (n.clone(), s.clone()))
+                requested_model
+                    .as_deref()
+                    .and_then(|needle| resolve_session_pair(c, needle))
+                    .or_else(|| {
+                        c.summary_model
+                            .as_deref()
+                            .and_then(|name| resolve_session_pair(c, name))
                     })
-                } else {
-                    let name = c.default_session.as_deref().unwrap_or("claude_sonnet");
-                    c.get(name).cloned().map(|s| (name.to_string(), s))
-                }
+                    .or_else(|| {
+                        let name = c.default_session.as_deref().unwrap_or("claude_sonnet");
+                        c.get(name).cloned().map(|s| (name.to_string(), s))
+                    })
             });
         let sess_name = sess_pair
             .as_ref()
@@ -1858,14 +1816,27 @@ async fn handle_compress(
         "before_chars": before_chars,
         "after_chars": after_chars,
         "saved_chars": saved_chars,
+        "before_tokens": before_tokens,
+        "after_tokens": after_tokens,
+        "saved_tokens": saved_tokens,
         "saved_pct": saved_pct,
         "messages_removed": messages_removed,
+        "changed": saved_chars > 0,
         "metrics": metrics_str,
         "summary": summary,
         "llm_summary": llm_summary,
-        "strategy": format!("compressed {}→{} messages, saved {:.1}% chars{}",
-            before_count, after_count, saved_pct,
-            if llm_summary.is_some() { " (LLM summary)" } else { " (template)" }),
+        "strategy": if saved_chars == 0 && llm_summary.is_none() {
+            // Nothing was foldable: say so instead of reporting a successful
+            // compression that released 0 tokens.
+            format!(
+                "nothing to compress: {} messages / {} tokens already inside the keep window",
+                before_count, before_tokens
+            )
+        } else {
+            format!("compressed {}→{} messages, saved {:.1}% tokens{}",
+                before_count, after_count, saved_pct,
+                if llm_summary.is_some() { " (LLM summary)" } else { " (template)" })
+        },
     })))
 }
 
@@ -2489,6 +2460,106 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Build a session whose context lives mostly in `tool_results` — the
+    /// shape that made `/compact` report "356 tokens, 0% saved" while the UI
+    /// showed a six-figure context.
+    async fn seed_tool_heavy_session(state: &SharedState, id: &str) {
+        let mut sessions = state.sessions.write().await;
+        sessions.create_with_id(id, "tool heavy");
+        let entry = sessions.get_mut(id).unwrap();
+        for turn in 0..6 {
+            entry.messages.push(serde_json::json!({
+                "role": "user",
+                "content": format!("task {turn}"),
+            }));
+            entry.messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": "working",
+                "tool_use_blocks": [{"id": format!("c{turn}"), "name": "read", "input": {}}],
+            }));
+            entry.messages.push(serde_json::json!({
+                "role": "user",
+                "content": "",
+                "tool_results": [{"tool_use_id": format!("c{turn}"), "content": "x".repeat(40_000)}],
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compress_endpoint_folds_tool_traffic() {
+        let state = test_app_state();
+        seed_tool_heavy_session(&state, "cmp-1").await;
+        let app = Router::new()
+            .route("/api/sessions/:id/compress", post(handle_compress))
+            .with_state(state.clone());
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/sessions/cmp-1/compress")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"model":"lfm2.5-230m"}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // The tool traffic was measured and really folded away — not the
+        // content-only no-op that reported 0 saved.
+        assert!(
+            json["saved_tokens"].as_u64().unwrap() > 40_000,
+            "expected real savings, got {json}"
+        );
+        assert!(json["changed"].as_bool().unwrap());
+        assert!(!json["strategy"].as_str().unwrap().contains("nothing to compress"));
+
+        // …and the persisted log is what the next run will rebuild from.
+        let sessions = state.sessions.read().await;
+        let stored: usize = sessions
+            .get("cmp-1")
+            .unwrap()
+            .messages
+            .iter()
+            .map(oz_core::compress::store_message_payload_chars)
+            .sum();
+        assert_eq!(stored as u64, json["after_chars"].as_u64().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_compress_endpoint_is_honest_when_nothing_to_fold() {
+        let state = test_app_state();
+        {
+            let mut sessions = state.sessions.write().await;
+            sessions.create_with_id("cmp-small", "small");
+            let entry = sessions.get_mut("cmp-small").unwrap();
+            entry.messages.push(serde_json::json!({"role": "user", "content": "hi"}));
+            entry
+                .messages
+                .push(serde_json::json!({"role": "assistant", "content": "hello"}));
+        }
+        let app = Router::new()
+            .route("/api/sessions/:id/compress", post(handle_compress))
+            .with_state(state.clone());
+
+        // No body at all (an older client) must still work.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/sessions/cmp-small/compress")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(!json["changed"].as_bool().unwrap());
+        assert_eq!(json["saved_tokens"].as_u64().unwrap(), 0);
+        assert!(json["strategy"].as_str().unwrap().starts_with("nothing to compress"));
     }
 
     #[tokio::test]

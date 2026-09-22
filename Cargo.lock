@@ -4396,6 +4396,7 @@ dependencies = [
  "core-foundation 0.9.4",
  "enigo",
  "glob",
+ "libc",
  "linkme",
  "oz-browser",
  "oz-config",

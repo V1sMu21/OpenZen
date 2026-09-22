@@ -41,8 +41,14 @@
     // Quality-gate notices describe work that runs for many seconds
     // (assertion commands, a review inference) — a 4s flash would vanish
     // mid-wait and leave the user staring at an apparently frozen bubble
-    // again.
-    const ttl = current?.dataType === "data_quality_gate" ? 15000 : 4000;
+    // again. An LLM-retry notice is the only sign of life during a gateway
+    // outage, whose backoff steps reach 60s, so it must outlive them.
+    const ttl =
+      current?.dataType === "data_quality_gate"
+        ? 15000
+        : current?.dataType === "llm_retry"
+          ? 60000
+          : 4000;
     const t = setTimeout(() => {
       if (current?.id === id) current = null;
     }, ttl);

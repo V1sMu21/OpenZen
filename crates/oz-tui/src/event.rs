@@ -265,6 +265,21 @@ pub fn handle_stream_event(app: &mut App, evt: StreamEvent) {
         // Heartbeat from a long-running tool: the TUI has no watchdog to
         // keep alive, so it needs no rendering yet.
         StreamEvent::ToolProgress { .. } => {}
+        // LLM retry: surface it, otherwise a gateway outage looks like a
+        // frozen run for as long as the retry series lasts.
+        StreamEvent::LlmRetry {
+            attempt,
+            max_attempts,
+            reason,
+            retry_in_secs,
+        } => {
+            app.status = format!(
+                "Model not responding (attempt {attempt}/{max_attempts}) — retrying in {retry_in_secs}s"
+            );
+            app.add_system(&format!(
+                "LLM retry {attempt}/{max_attempts}: {reason} (next attempt in {retry_in_secs}s)"
+            ));
+        }
         // Post-answer quality gates (spec/assertions/review): the TUI's
         // status line already shows the run as working; no extra row.
         StreamEvent::DataQualityGate { .. } => {}

@@ -177,7 +177,12 @@ export async function compressSession(id: string, model?: string): Promise<{
   if (isTauri()) {
     return await tauriInvoke("compress_session", { id, model: model ?? null });
   }
-  const res = await fetchJson(`${BASE}/${id}/compress`, { method: "POST" });
+  const res = await fetchJson(`${BASE}/${id}/compress`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // Without the body the HTTP path silently ignored `/compact -model X`.
+    body: JSON.stringify({ model: model ?? null }),
+  });
   if (!res.ok) throw new Error(`Failed to compress session: ${res.status}`);
   return res.json();
 }

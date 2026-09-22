@@ -156,3 +156,36 @@ impl SseBus {
         self.tx.subscribe()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The retry notice must survive the SSE hop with the field names the
+    /// frontend reads (`frontends/src/lib/stores/parts.ts` → `llm_retry`):
+    /// the UI shows it as the only sign of life during a provider outage, so
+    /// a silent rename here would restore the frozen bubble.
+    #[test]
+    fn protocol_v1_carries_llm_retry_fields_to_the_frontend() {
+        let ev = oz_core_types::StreamEvent::LlmRetry {
+            attempt: 3,
+            max_attempts: 8,
+            reason: "Stream error: no response headers within 60s".into(),
+            retry_in_secs: 6,
+        };
+        let sse = SseEvent::protocol_v1_json("sess-1", &serde_json::to_value(&ev).unwrap());
+        assert_eq!(sse.event_type, "protocol_v1");
+        assert_eq!(sse.session_id, "sess-1");
+
+        let wire = serde_json::to_value(&sse).unwrap();
+        let payload: Value = serde_json::from_str(wire["data"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["type"], "llm_retry");
+        assert_eq!(payload["attempt"], 3);
+        assert_eq!(payload["max_attempts"], 8);
+        assert_eq!(payload["retry_in_secs"], 6);
+        assert!(payload["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no response headers"));
+    }
+}

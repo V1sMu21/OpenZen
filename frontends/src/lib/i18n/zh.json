@@ -289,6 +289,7 @@
   "status.qualityGate.spec": "正在生成验收标准…",
   "status.qualityGate.assertions": "正在运行验收断言…",
   "status.qualityGate.review": "正在进行独立评审…",
+  "status.llmRetry": "模型暂无响应（第 {attempt}/{max} 次尝试失败）· {secs}s 后重试",
   "status.fullAccess": "完全访问",
   "status.running": "运行中",
   "status.waiting": "待确认",

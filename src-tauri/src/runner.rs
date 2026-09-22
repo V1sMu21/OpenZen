@@ -808,6 +808,17 @@ pub async fn run_agent_for_session(
     } else {
         8
     };
+    // Cap the *wall clock* of one retry series, not just the attempt count.
+    // Each attempt can cost a 60s header timeout, so 8 attempts silently burned
+    // 20-40 minutes of a frozen bubble; 5 minutes of a dead gateway is enough
+    // to call it (the run's checkpoint survives, so /resume continues it).
+    // Local engines may legitimately stall on a model swap, so they keep the
+    // old generous room.
+    loop_config.llm_retry_budget_secs = if crate::is_local_deploy(&sess_config.apibase) {
+        1800
+    } else {
+        300
+    };
     loop_config.skill_mcp_dir = state.skill_mcp_dir.clone();
     // P1-j: per-session tool concurrency cap. The process-wide semaphore
     // (16) bounds the total; without a per-run cap one session's parallel
@@ -1176,10 +1187,12 @@ pub async fn run_agent_for_session(
         map.remove(session_id);
     }
 
-    // Task finished (completed / stopped / errored) → its scheduled and
-    // heartbeat reminders die with it: drop session-scoped pending entries
-    // and tell the UI to clear the right-rail cards.
-    crate::commands::clear_session_reminders(state, app, session_id);
+    // Task finished. A user-initiated stop kills the whole schedule; a normal
+    // finish only drops this session's overdue entries, because a not-yet-due
+    // reminder IS the periodic task the agent set up ("report every 5
+    // minutes") — see clear_session_reminders.
+    let aborted = outcome.exit_reason == "stopped_by_user";
+    crate::commands::clear_session_reminders(state, app, session_id, aborted);
 
     // Mark idle and persist assistant message
     let full_response = outcome

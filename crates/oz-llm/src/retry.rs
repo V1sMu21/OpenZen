@@ -13,6 +13,26 @@ where
     F: FnMut() -> AsyncFn<T>,
     T: Send + 'static,
 {
+    retry_with_backoff_notify(operation, config, |_, _, _, _| {}).await
+}
+
+/// Same as [`retry_with_backoff`], but reports every retry decision to
+/// `notify(attempt, max_attempts, delay_secs, error)` before sleeping.
+///
+/// This is the layer that sees a wedged provider first: one send can cost a
+/// 60s header timeout, and the agent loop's turn-level retry only speaks after
+/// a whole attempt (up to 5 inner tries) has burned — minutes of silent
+/// bubble. Reporting from here puts the wait on screen within one timeout.
+pub async fn retry_with_backoff_notify<T, F, N>(
+    operation: F,
+    config: &SessionConfig,
+    notify: N,
+) -> Result<T, LlmError>
+where
+    F: FnMut() -> AsyncFn<T>,
+    T: Send + 'static,
+    N: Fn(usize, usize, f64, &LlmError),
+{
     let max_retries = config.max_retries.unwrap_or(4) as usize;
     let mut op = operation;
 
@@ -24,6 +44,7 @@ where
             Ok(val) => return Ok(val),
             Err(e) if e.is_retryable() && attempt < max_retries => {
                 let delay = compute_delay(attempt, config.timeout);
+                notify(attempt + 1, max_retries + 1, delay, &e);
                 tracing::warn!(
                     "[LLM Retry] {e}, retry in {delay:.1}s ({}/{})",
                     attempt + 1,
@@ -184,6 +205,101 @@ mod tests {
             let delay = compute_delay(attempt, None);
             assert_eq!(delay, 1.5 * (2u64.pow(attempt as u32) as f64));
         }
+    }
+
+    fn retry_test_config(max_retries: u32) -> SessionConfig {
+        SessionConfig {
+            apikey: "sk-test".into(),
+            apibase: "http://127.0.0.1:1/v1".into(),
+            model: "test".into(),
+            context_win: 8000,
+            max_tokens: None,
+            temperature: None,
+            api_mode: Default::default(),
+            reasoning_effort: None,
+            max_retries: Some(max_retries),
+            proxy: None,
+            verify: None,
+            timeout: None,
+            llm_nos: None,
+            base_delay: None,
+            spring_back: None,
+            extra_headers: None,
+            provider: None,
+            modalities: None,
+            session_tag: None,
+        }
+    }
+
+    /// The inner send-phase retry must announce itself: it is the first layer
+    /// to see a struggling provider (connection failures, 5xx bursts), and
+    /// without this the UI stayed silent until a whole agent-level attempt
+    /// burned. `StreamError` (header timeout) is deliberately NOT retried here
+    /// — it bubbles to the agent loop, which owns turn-level retry.
+    #[tokio::test]
+    async fn notify_reports_every_inner_retry_before_it_sleeps() {
+        use std::sync::{Arc, Mutex};
+        /// (attempt, max_attempts, delay_secs, error)
+        type Notices = Arc<Mutex<Vec<(usize, usize, f64, String)>>>;
+        let seen: Notices = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let mut calls = 0usize;
+
+        let out: Result<(), LlmError> = retry_with_backoff_notify(
+            || {
+                calls += 1;
+                Box::pin(async move {
+                    Err(LlmError::HttpError {
+                        status: 503,
+                        body: "upstream unavailable".into(),
+                    })
+                })
+            },
+            &retry_test_config(2),
+            move |attempt, max_attempts, delay, err| {
+                sink.lock()
+                    .unwrap()
+                    .push((attempt, max_attempts, delay, err.to_string()));
+            },
+        )
+        .await;
+
+        assert!(out.is_err(), "all attempts fail");
+        assert_eq!(calls, 3, "1 initial + 2 retries");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one notice per retry, not per attempt");
+        assert_eq!(seen[0].0, 1);
+        assert_eq!(seen[0].1, 3);
+        assert_eq!(seen[0].2, 1.5);
+        assert!(seen[0].3.contains("503"));
+        assert_eq!(seen[1].0, 2);
+        assert_eq!(seen[1].2, 3.0);
+    }
+
+    /// A non-retryable failure is surfaced immediately and reported as such.
+    #[tokio::test]
+    async fn notify_is_silent_when_the_error_is_not_retryable() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let notices = AtomicUsize::new(0);
+
+        let out: Result<(), LlmError> = retry_with_backoff_notify(
+            || {
+                Box::pin(async move {
+                    Err(LlmError::HttpError {
+                        status: 401,
+                        body: "bad key".into(),
+                    })
+                })
+            },
+            &retry_test_config(2),
+            |_, _, _, _| {
+                notices.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .await;
+
+        assert!(matches!(out, Err(LlmError::HttpError { status: 401, .. })));
+        assert_eq!(notices.load(Ordering::Relaxed), 0);
     }
 
     #[test]

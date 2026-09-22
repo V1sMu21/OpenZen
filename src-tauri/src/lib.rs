@@ -1006,6 +1006,64 @@ fn save_persistent_reminders(state: &AppState) {
     }
 }
 
+/// Fire one due reminder: broadcast it, re-arm a repeat, and — the part that
+/// was missing — wake the agent so a scheduled task actually executes.
+/// Shared by the immediate-receive path and the 2s tick so both behave the
+/// same (they used to carry two copies of the emit code, both of which only
+/// emitted SSE events: `schedule_reminder` promises the backend "triggers the
+/// agent run when the delay expires", but a fired reminder never started one,
+/// so "report the download progress every 5 minutes" never ran — user report
+/// 2026-09-22).
+fn fire_reminder(
+    state: &Arc<AppState>,
+    app: &tauri::AppHandle,
+    reminder: &oz_core_types::Reminder,
+    now_ms: u64,
+) {
+    let session_id = reminder.session_id.clone();
+    let message = reminder.message.clone();
+    // Deliver BEFORE the run starts so the `reminder_fired` event reaches the
+    // webview first — the live bubble must exist before the run's stream
+    // events arrive (startAssistantMessageInternal resets streamingParts).
+    let delivery = crate::commands::deliver_fired_reminder(state, app, &session_id, &message);
+    let woke = matches!(delivery, crate::commands::ReminderDelivery::WakeRun);
+    let _ = app.emit(
+        "sse_event",
+        serde_json::to_value(SseEvent::system(
+            &session_id,
+            &format!("[Reminder] {}", message),
+        ))
+        .unwrap_or_default(),
+    );
+    // Structured event so the right-rail reminder card can decrement repeats
+    // and the chat store can enter the live state for a reminder-driven run.
+    let _ = app.emit(
+        "sse_event",
+        serde_json::json!({
+            "session_id": session_id,
+            "event_type": "reminder_fired",
+            "data": serde_json::to_string(&serde_json::json!({
+                "message": message.clone(),
+                "remaining_repeats": reminder.repeat_count,
+                "woke": woke,
+            })).unwrap_or_default(),
+        }),
+    );
+    if reminder.repeat_count > 0 {
+        lock_poison_guard(&state.pending_reminders).push(oz_core_types::Reminder {
+            session_id: session_id.clone(),
+            message,
+            fire_at_ms: now_ms + (reminder.repeat_interval_secs * 1000),
+            repeat_count: reminder.repeat_count - 1,
+            repeat_interval_secs: reminder.repeat_interval_secs,
+            persist: reminder.persist,
+        });
+    }
+    if woke {
+        crate::commands::start_reminder_run(state, app, &session_id);
+    }
+}
+
 /// Restore durable reminders on startup. Past-due entries are kept with
 /// their original fire time so the 2s tick fires them immediately (the
 /// user sees "while you were away" instead of silence).
@@ -1352,36 +1410,9 @@ pub fn run() {
                                     .map(|d| d.as_millis() as u64)
                                     .unwrap_or(0);
                                 if reminder.fire_at_ms <= now + 100 {
-                                    let session_id = reminder.session_id.clone();
-                                    let message = reminder.message.clone();
                                     let app = lock_poison_guard(&state_for_reminders.app_handle).clone();
                                     if let Some(app) = app {
-                                        let _ = app.emit("sse_event", serde_json::to_value(SseEvent::system(
-                                            &session_id, &format!("[Reminder] {}", message),
-                                        )).unwrap_or_default());
-                                        // Structured event so the right-rail
-                                        // reminder card can decrement repeats.
-                                        let _ = app.emit("sse_event", serde_json::json!({
-                                            "session_id": session_id,
-                                            "event_type": "reminder_fired",
-                                            "data": serde_json::to_string(&serde_json::json!({
-                                                "message": message.clone(),
-                                                "remaining_repeats": reminder.repeat_count,
-                                            })).unwrap_or_default(),
-                                        }));
-                                        let next_reminder = if reminder.repeat_count > 0 {
-                                            Some(oz_core_types::Reminder {
-                                                session_id: session_id.clone(),
-                                                message: message.clone(),
-                                                fire_at_ms: now + (reminder.repeat_interval_secs * 1000),
-                                                repeat_count: reminder.repeat_count - 1,
-                                                repeat_interval_secs: reminder.repeat_interval_secs,
-                                                persist: reminder.persist,
-                                            })
-                                        } else { None };
-                                        if let Some(r) = next_reminder {
-                                            lock_poison_guard(&state_for_reminders.pending_reminders).push(r);
-                                        }
+                                        fire_reminder(&state_for_reminders, &app, &reminder, now);
                                     } else {
                                         // app_handle not yet available (platform mode / early startup):
                                         // keep the reminder for the next tick instead of dropping it.
@@ -1400,58 +1431,33 @@ pub fn run() {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_millis() as u64)
                                 .unwrap_or(0);
-                            // Drop the lock before persisting (save re-locks).
-                            let fired_any = {
+                            // Collect the due entries under the lock, then fire
+                            // them outside it: firing takes the sessions /
+                            // running-agent locks (deliver + start run).
+                            let mut due: Vec<oz_core_types::Reminder> = Vec::new();
+                            {
                                 let mut pending = lock_poison_guard(&state_for_reminders.pending_reminders);
-                            let mut i = 0;
-                            let mut fired = false;
-                            while i < pending.len() {
-                                let reminder = &pending[i];
-                                if reminder.fire_at_ms <= now + 100 {
-                                    let reminder = pending.remove(i);
-                                    fired = true;
-                                    let session_id = reminder.session_id.clone();
-                                    let message = reminder.message.clone();
-                                    let app = lock_poison_guard(&state_for_reminders.app_handle).clone();
-                                    if let Some(app) = app {
-                                        let _ = app.emit("sse_event", serde_json::to_value(SseEvent::system(
-                                            &session_id, &format!("[Reminder] {}", message),
-                                        )).unwrap_or_default());
-                                        // Structured event so the right-rail
-                                        // reminder card can decrement repeats.
-                                        let _ = app.emit("sse_event", serde_json::json!({
-                                            "session_id": session_id,
-                                            "event_type": "reminder_fired",
-                                            "data": serde_json::to_string(&serde_json::json!({
-                                                "message": message.clone(),
-                                                "remaining_repeats": reminder.repeat_count,
-                                            })).unwrap_or_default(),
-                                        }));
-                                        let next_reminder = if reminder.repeat_count > 0 {
-                                            Some(oz_core_types::Reminder {
-                                                session_id: session_id.clone(),
-                                                message: message.clone(),
-                                                fire_at_ms: now + (reminder.repeat_interval_secs * 1000),
-                                                repeat_count: reminder.repeat_count - 1,
-                                                repeat_interval_secs: reminder.repeat_interval_secs,
-                                                persist: reminder.persist,
-                                            })
-                                        } else { None };
-                                        if let Some(r) = next_reminder {
-                                            pending.push(r);
-                                        }
+                                let mut i = 0;
+                                while i < pending.len() {
+                                    if pending[i].fire_at_ms <= now + 100 {
+                                        due.push(pending.remove(i));
                                     } else {
-                                        // app_handle not yet available (platform mode / early startup):
-                                        // keep the reminder for the next tick instead of dropping it.
-                                        pending.insert(i, reminder);
                                         i += 1;
                                     }
-                                } else {
-                                    i += 1;
                                 }
                             }
-                                fired
-                            };
+                            let mut fired_any = false;
+                            for reminder in due {
+                                let app = lock_poison_guard(&state_for_reminders.app_handle).clone();
+                                let Some(app) = app else {
+                                    // app_handle not yet available (platform mode / early startup):
+                                    // keep the reminder for the next tick instead of dropping it.
+                                    lock_poison_guard(&state_for_reminders.pending_reminders).push(reminder);
+                                    continue;
+                                };
+                                fired_any = true;
+                                fire_reminder(&state_for_reminders, &app, &reminder, now);
+                            }
                             if fired_any {
                                 save_persistent_reminders(&state_for_reminders);
                             }

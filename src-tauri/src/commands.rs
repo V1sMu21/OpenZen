@@ -1535,7 +1535,10 @@ fn pop_regenerate_seed(messages: &mut Vec<serde_json::Value>) -> Option<String> 
     while let Some(m) = messages.pop() {
         if m.get("role").and_then(|v| v.as_str()) == Some("user") {
             let content = m.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            if !content.is_empty() {
+            // `/compact` turns a carrier whose tool payload was folded away
+            // into this marker (oz_core::compress::message_to_store_message) —
+            // it is machine output, never a user prompt.
+            if !content.is_empty() && content != "[compressed tool output]" {
                 return Some(content.to_string());
             }
         }
@@ -1876,19 +1879,53 @@ pub fn inject_message(
     Ok(serde_json::json!({"status": "ok"}))
 }
 
-/// Drop a session's pending scheduled/heartbeat reminders and tell the UI.
+/// Does a pending reminder survive the end of a run in `session_id`?
+///
+/// Durable reminders (persist=true) survive by design: "remind me in 30
+/// minutes" must outlive the task that asked.
+///
+/// A not-yet-due entry is a pending *intent*, not a leftover of the finished
+/// run. Dropping it killed every periodic task before its first fire — the
+/// agent schedules the heartbeat (fire_at = now + interval), the run it was
+/// scheduled from ends seconds later, and the heartbeat died with it, so
+/// "report the download progress every 5 minutes" never reported once (user
+/// report 2026-09-22). Overdue entries are still dropped: those are the
+/// finished task's leftovers the 2026-09-03 fix was about (a dead task's
+/// heartbeat must not keep firing).
+///
+/// `aborted` (user pressed Stop, or the run failed) kills the whole schedule:
+/// the task is over, so its heartbeats must not keep waking the agent.
+pub(crate) fn reminder_survives_run_end(
+    r: &oz_core_types::Reminder,
+    session_id: &str,
+    now_ms: u64,
+    aborted: bool,
+) -> bool {
+    r.session_id != session_id || r.persist || (!aborted && r.fire_at_ms > now_ms)
+}
+
+/// Drop a session's overdue scheduled/heartbeat reminders and tell the UI.
 /// Reminders are scoped to the task that created them: when the run ends
 /// (completed, stopped, or errored) its `schedule_reminder` entries must
 /// not keep firing in the background — otherwise a finished task's
 /// heartbeat keeps emitting `[Reminder]` events forever and the right-rail
-/// cards stay "运行中" (user report 2026-09-03).
-pub(crate) fn clear_session_reminders(state: &Arc<AppState>, app: &AppHandle, session_id: &str) {
+/// cards stay "运行中" (user report 2026-09-03). Entries whose fire time is
+/// still in the future survive: they are the periodic task itself (see
+/// `reminder_survives_run_end`).
+pub(crate) fn clear_session_reminders(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    session_id: &str,
+    aborted: bool,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let removed = {
         let mut pending = lock_poison_guard(&state.pending_reminders);
         let before = pending.len();
-        // Durable reminders (persist=true) survive the run by design:
-        // "remind me in 30 minutes" must outlive the task that asked.
-        pending.retain(|r| r.session_id != session_id || r.persist);
+        pending.retain(|r| reminder_survives_run_end(r, session_id, now, aborted));
         before - pending.len()
     };
     if removed > 0 {
@@ -1896,15 +1933,205 @@ pub(crate) fn clear_session_reminders(state: &Arc<AppState>, app: &AppHandle, se
             "clear_session_reminders: dropped {} pending reminder(s) for session={}",
             removed, session_id
         ));
+        // Only tell the UI to clear the right-rail cards when the backend
+        // actually dropped them — a surviving pending reminder is still
+        // scheduled and must keep its card.
+        let _ = app.emit(
+            "sse_event",
+            serde_json::json!({
+                "session_id": session_id,
+                "event_type": "reminders_cleared",
+                "data": "{}",
+            }),
+        );
+    }
+}
+
+/// Outcome of delivering a fired reminder (`deliver_fired_reminder`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReminderDelivery {
+    /// Nothing to do: the session is gone or the concurrency cap is reached.
+    Skipped,
+    /// A live run took the reminder as an intervention — no new run.
+    Intervened,
+    /// The reminder was persisted as a user turn; the caller must call
+    /// `start_reminder_run` so the agent actually executes the task.
+    WakeRun,
+}
+
+/// Half one of a fired reminder: hand the message to the session.
+///
+/// `schedule_reminder` promises the backend "manages the timer and triggers
+/// the agent run when the delay expires" (crates/oz-tools/src/schedule_reminder.rs)
+/// — but the fire path only emitted SSE events, so a periodic task
+/// ("report the model download progress every 5 minutes") was accepted by the
+/// tool and then never executed (user report 2026-09-22). This is the missing
+/// half of that contract:
+///
+///   * a live run for the session receives the reminder as an intervention
+///     (the loop picks it up before its next LLM turn), persisted with the
+///     same `[USER INTERVENTION …]` shape as a manual interjection, so the
+///     transcript shows the card inside the running bubble;
+///   * otherwise the reminder is persisted as a plain user turn and the
+///     caller starts a fresh run for it (`start_reminder_run`), which each
+///     repeat re-arms.
+///
+/// Persisting happens here (not in `start_reminder_run`) so the caller can
+/// emit the `reminder_fired` SSE event *before* the run's own stream events —
+/// the webview needs to enter the live state first, or the run's first parts
+/// are wiped when it switches bubbles.
+pub(crate) fn deliver_fired_reminder(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    session_id: &str,
+    message: &str,
+) -> ReminderDelivery {
+    let content = format!("[Reminder] {message}");
+
+    // 1. A live run owns the session → queue it as an intervention.
+    {
+        let queues = lock_poison_guard(&state.intervention_queues);
+        if let Some(queue) = queues.get(session_id) {
+            lock_poison_guard(queue).push_back(oz_core::checkpoint::InterventionEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                timestamp: chrono::Utc::now().timestamp() as f64,
+                kind: oz_core::checkpoint::InterventionKind::InjectInfo,
+                content: content.clone(),
+            });
+        } else {
+            // Released before the store/mutex chain below (same ordering as
+            // inject_message).
+            drop(queues);
+            return start_reminder_wake(state, app, session_id, &content);
+        }
+    }
+    // Persist the queued intervention so the transcript matches what the
+    // running agent sees (mirrors inject_message).
+    let stored = intervention_stored_content(true, &content);
+    {
+        let mut store = lock_poison_guard(&state.sessions);
+        if let Some(entry) = store.get_mut(session_id) {
+            entry.messages.push(serde_json::json!({
+                "role": "user",
+                "content": stored,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }));
+            store.save();
+        }
+    }
+    debug_log(&format!(
+        "deliver_fired_reminder: queued as intervention session={session_id}"
+    ));
+    ReminderDelivery::Intervened
+}
+
+/// Wake half: persist the reminder as the run's trigger turn and report
+/// whether the caller must start a run for it.
+fn start_reminder_wake(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    session_id: &str,
+    content: &str,
+) -> ReminderDelivery {
+    // Same single-flight/cap gate as send_message: a run that appeared while
+    // the caller was still emitting its SSE events still wins.
+    {
+        let agents = lock_poison_guard(&state.running_agents);
+        if agents.contains_key(session_id) {
+            return ReminderDelivery::Intervened;
+        }
+        if agents.len() >= 3 {
+            debug_log(&format!(
+                "deliver_fired_reminder: concurrency cap reached, dropping session={session_id}"
+            ));
+            return ReminderDelivery::Skipped;
+        }
+    }
+
+    // Persist the reminder as the run's trigger turn. It is a real user turn
+    // (no intervention prefix): there is no live bubble to fold it into, and
+    // the frontend renders the same bubble optimistically.
+    {
+        let mut store = lock_poison_guard(&state.sessions);
+        let Some(entry) = store.get_mut(session_id) else {
+            debug_log(&format!(
+                "deliver_fired_reminder: session {session_id} not found, dropping reminder"
+            ));
+            return ReminderDelivery::Skipped;
+        };
+        entry.status = SessionStatus::Running;
+        entry.messages.push(serde_json::json!({
+            "role": "user",
+            "content": content,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        }));
+        store.save();
     }
     let _ = app.emit(
         "sse_event",
         serde_json::json!({
-            "session_id": session_id,
-            "event_type": "reminders_cleared",
-            "data": "{}",
+            "type": "protocol_v1",
+            "data": { "type": "user_message_stored", "session_id": session_id }
         }),
     );
+    debug_log(&format!(
+        "deliver_fired_reminder: stored reminder turn session={session_id}"
+    ));
+    ReminderDelivery::WakeRun
+}
+
+/// Half two of a fired reminder: run the agent for a session whose trigger
+/// turn `deliver_fired_reminder` just persisted. Mirrors the `send_message`
+/// spawn (RAII guard + inner panic isolation) so a reminder-driven run cannot
+/// wedge the session in "Running" or leak its JoinHandle.
+pub(crate) fn start_reminder_run(state: &Arc<AppState>, app: &AppHandle, session_id: &str) {
+    abort_detached_agent(session_id, state);
+    {
+        let agents = lock_poison_guard(&state.running_agents);
+        if agents.contains_key(session_id) {
+            return;
+        }
+        if agents.len() >= 3 {
+            return;
+        }
+    }
+
+    let state_clone: Arc<AppState> = state.clone();
+    let app_clone = app.clone();
+    let session_id_clone = session_id.to_string();
+    let handle = tokio::spawn(async move {
+        let _cleanup = AgentSessionGuard {
+            state: state_clone.clone(),
+            session_id: session_id_clone.clone(),
+        };
+        let inner_session = session_id_clone.clone();
+        let inner_state = state_clone.clone();
+        let inner_app = app_clone.clone();
+        let inner = tokio::spawn(async move {
+            runner::run_agent_for_session(&inner_app, &inner_state, &inner_session, None, false)
+                .await
+        });
+        match inner.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug_log(&format!("reminder run_agent error: {e}"));
+                emit_agent_run_error(&state_clone, &app_clone, &session_id_clone, &e.to_string());
+            }
+            Err(join_err) => {
+                let msg = if join_err.is_panic() {
+                    "agent task panicked (see openzen.log for the backtrace)".to_string()
+                } else {
+                    format!("agent task cancelled: {join_err}")
+                };
+                debug_log(&msg);
+                emit_agent_run_error(&state_clone, &app_clone, &session_id_clone, &msg);
+            }
+        }
+    });
+    lock_poison_guard(&state.running_agents).insert(session_id.to_string(), handle);
+    debug_log(&format!(
+        "start_reminder_run: spawned agent run session={session_id}"
+    ));
 }
 
 /// Unified run-failure path: reset Running → Idle in the store and emit an
@@ -1927,8 +2154,8 @@ fn emit_agent_run_error(state: &Arc<AppState>, app: &AppHandle, session_id: &str
         "sse_event",
         serde_json::to_value(SseEvent::error(session_id, msg)).unwrap_or_default(),
     );
-    // The task is dead — its scheduled reminders die with it.
-    clear_session_reminders(state, app, session_id);
+    // The task is dead — its whole schedule dies with it.
+    clear_session_reminders(state, app, session_id, true);
 }
 
 /// Gracefully stop a running agent: signal → wait → detach if unresponsive.
@@ -2394,45 +2621,12 @@ pub async fn compress_session(
     state: State<'_, Arc<AppState>>,
     app_handle: AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let (
-        before,
-        after,
-        saved_chars,
-        saved_pct,
-        messages_removed,
-        before_chars,
-        after_chars,
-        metrics,
-        template_summary,
-        _llm,
-    ) = {
+    let (compaction, removed_json) = {
         let mut store = lock_poison_guard(&state.sessions);
         let entry = match store.get_mut(&id) {
             Some(e) => e,
             None => return Err(format!("Session {id} not found")),
         };
-
-        let mut messages: Vec<oz_core_types::Message> = entry
-            .messages
-            .iter()
-            .filter_map(|v| {
-                let role = v.get("role")?.as_str()?;
-                let content = v
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                match role {
-                    "user" => Some(oz_core_types::Message::user(&content)),
-                    "assistant" => Some(oz_core_types::Message::assistant(&content)),
-                    "system" => Some(oz_core_types::Message::system(&content)),
-                    _ => None,
-                }
-            })
-            .collect();
-
-        let before_chars = oz_core::measure_usage(&messages).total_chars;
-        let before = messages.len();
 
         let comp_config = oz_core::CompressionConfig::default();
         // Manual /compact is a user-invoked "force" action: it must fold
@@ -2442,72 +2636,46 @@ pub async fn compress_session(
         // down to the min_messages floor instead of no-oping on small
         // sessions. The auto-compress path in the agent loop still uses
         // the real context window from config.
-        let _saved = oz_core::compress_messages(&mut messages, 1, &comp_config, None);
-
-        let after_chars = oz_core::measure_usage(&messages).total_chars;
-        let after = messages.len();
-        let saved_chars = before_chars.saturating_sub(after_chars);
-        let saved_pct = if before_chars > 0 {
-            ((saved_chars as f64 / before_chars as f64) * 100.0 * 10.0).round() / 10.0
-        } else {
-            0.0
-        };
-
-        let original_msgs = entry.messages.clone();
-        entry.messages = oz_core::compress::match_messages_to_originals(&messages, &entry.messages);
-
-        let metrics = oz_core::compress::CompressionMetrics::compute(
-            before_chars,
-            after_chars,
-            before,
-            after,
-        );
-        let removed_json: Vec<serde_json::Value> = {
-            let surviving_ids: std::collections::HashSet<String> = entry
-                .messages
-                .iter()
-                .filter_map(|v| {
-                    Some(format!(
-                        "{}_{}",
-                        v.get("role")?.as_str()?,
-                        v.get("content")?.as_str()?
-                    ))
-                })
-                .collect();
-            original_msgs
-                .iter()
-                .filter(|v| {
-                    let id = format!(
-                        "{}_{}",
-                        v.get("role").and_then(|r| r.as_str()).unwrap_or(""),
-                        v.get("content").and_then(|c| c.as_str()).unwrap_or("")
-                    );
-                    !surviving_ids.contains(&id)
-                })
-                .cloned()
-                .collect()
-        };
-        let template_summary = oz_core::compress::build_compression_summary(&removed_json, "");
-
+        //
+        // The pass runs on the same view the agent loop rebuilds for the
+        // LLM (text + tool_use/tool_result traffic). The previous
+        // content-only view ignored `tool_results`/`tool_use_blocks`, where
+        // a real session keeps the bulk of its context (measured: 24K chars
+        // of text against 665K chars of tool output in one 30-message
+        // session) — so /compact measured ~1.4K chars on a 100K+ token
+        // conversation, freed nothing, and still reported success (user
+        // report 2026-09-22).
+        let compaction = oz_core::compact_store_messages(&entry.messages, 1, &comp_config);
+        let removed_json = compaction.removed.clone();
+        entry.messages = compaction.messages.clone();
         store.save();
-
-        let messages_removed = before.saturating_sub(after);
-        (
-            before,
-            after,
-            saved_chars,
-            saved_pct,
-            messages_removed,
-            before_chars,
-            after_chars,
-            metrics,
-            template_summary,
-            None::<String>,
-        )
+        (compaction, removed_json)
     };
 
+    let before = compaction.before_messages;
+    let after = compaction.after_messages;
+    let before_chars = compaction.before_chars;
+    let after_chars = compaction.after_chars;
+    let saved_chars = compaction.saved_chars();
+    let saved_pct = compaction.saved_pct();
+    let messages_removed = compaction.removed.len();
+    let metrics = oz_core::compress::CompressionMetrics::compute(
+        before_chars,
+        after_chars,
+        before,
+        after,
+    );
+    let template_summary = oz_core::compress::build_compression_summary(&removed_json, "");
+
     let lang = lock_poison_guard(&state.locale).clone();
-    let llm_summary = if messages_removed >= 4 {
+    // The LLM summary is what makes /compact a compression instead of a
+    // truncation — and the only place the requested model is used. The old
+    // `messages_removed >= 4` gate skipped it (and the `-model` the user
+    // passed) whenever fewer than four whole messages were dropped, even
+    // though the pass had just folded hundreds of KB of tool traffic and
+    // reported "(template)" with 0 tokens freed. Run it whenever the pass
+    // actually freed something.
+    let llm_summary = if saved_chars > 0 {
         generate_compact_summary(&state, &template_summary, &lang, model.as_deref()).await
     } else {
         None
@@ -2532,6 +2700,25 @@ pub async fn compress_session(
     let before_tokens = before_chars / 4;
     let after_tokens = after_chars / 4;
     let saved_tokens = before_tokens.saturating_sub(after_tokens);
+    let strategy = if saved_chars == 0 && llm_summary.is_none() {
+        // Nothing was foldable: say so instead of reporting a successful
+        // compression that released 0 tokens.
+        format!(
+            "nothing to compress: {} messages / {} tokens already inside the keep window",
+            before, before_tokens
+        )
+    } else {
+        format!(
+            "compressed {}→{} messages, saved {:.1}% tokens{}",
+            before,
+            after,
+            saved_pct,
+            match &llm_summary {
+                Some((_, label)) => format!(" (LLM summary via {label})"),
+                None => " (template)".to_string(),
+            }
+        )
+    };
     // System notification when the user isn't looking at the main window —
     // compression takes a while and users usually switch away to wait.
     {
@@ -2559,16 +2746,12 @@ pub async fn compress_session(
         "saved_tokens": saved_tokens,
         "saved_pct": saved_pct,
         "messages_removed": messages_removed,
+        "changed": saved_chars > 0,
         "metrics": metrics.summary(),
         "summary": template_summary,
         "llm_summary": llm_summary.as_ref().map(|(s, _)| s.clone()),
         "llm_model": llm_summary.as_ref().map(|(_, m)| m.clone()),
-        "strategy": format!("compressed {}→{} messages, saved {:.1}% tokens{}",
-            before, after, saved_pct,
-            match &llm_summary {
-                Some((_, label)) => format!(" (LLM summary via {label})"),
-                None => " (template)".to_string(),
-            }),
+        "strategy": strategy,
     }))
 }
 
@@ -3012,6 +3195,37 @@ mod tests {
     #[test]
     fn intervention_stored_content_is_plain_when_agent_idle() {
         assert_eq!(intervention_stored_content(false, "普通消息"), "普通消息");
+    }
+
+    fn reminder(session: &str, fire_at_ms: u64, persist: bool) -> oz_core_types::Reminder {
+        oz_core_types::Reminder {
+            session_id: session.to_string(),
+            message: "report".into(),
+            fire_at_ms,
+            repeat_count: 0,
+            repeat_interval_secs: 300,
+            persist,
+        }
+    }
+
+    /// The core of the "定时任务一直没有成功运行" fix: a heartbeat scheduled
+    /// for the future must outlive the run that created it, while a finished
+    /// (or stopped) task's overdue leftovers must not.
+    #[test]
+    fn reminder_survives_run_end_rules() {
+        let now = 1_000_000u64;
+        let sid = "s1";
+        // Future + run-scoped + normal finish → survives (this is the
+        // periodic task; dropping it was the bug).
+        assert!(reminder_survives_run_end(&reminder(sid, now + 300_000, false), sid, now, false));
+        // Overdue leftover of a finished run → dropped (2026-09-03 rule).
+        assert!(!reminder_survives_run_end(&reminder(sid, now - 1, false), sid, now, false));
+        // User pressed Stop / run failed → the whole schedule dies.
+        assert!(!reminder_survives_run_end(&reminder(sid, now + 300_000, false), sid, now, true));
+        // Durable reminders always survive.
+        assert!(reminder_survives_run_end(&reminder(sid, now - 1, true), sid, now, true));
+        // Another session's reminders are never touched here.
+        assert!(reminder_survives_run_end(&reminder("other", now - 1, false), sid, now, true));
     }
 
     fn mig_table(body: &str) -> toml::Table {

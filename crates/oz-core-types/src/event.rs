@@ -132,6 +132,25 @@ pub enum StreamEvent {
         tool_name: String,
         elapsed_secs: u64,
     },
+
+    /// Emitted right before the agent loop backs off and retries a failed LLM
+    /// request (connection error, header timeout, 5xx from the gateway).
+    ///
+    /// Without it a dead gateway froze the bubble with no explanation at all:
+    /// one attempt costs a 60s header timeout wrapped in an inner 5-try
+    /// backoff, and the loop makes up to `llm_error_retries` (8) of them —
+    /// 20-40 minutes of pure silence. This also resets the frontend
+    /// watchdog, since it is a real "still working" signal.
+    LlmRetry {
+        /// 1-based error count of the attempt that just failed.
+        attempt: u32,
+        /// Total attempts the loop makes before giving up.
+        max_attempts: u32,
+        /// The failure, for the status line.
+        reason: String,
+        /// Seconds until the next attempt starts.
+        retry_in_secs: u64,
+    },
     FinishMessage {
         stop_reason: String,
     },
@@ -269,5 +288,36 @@ mod coalesce_tests {
             StreamEvent::TextEnd { id: "t2".into() }
         ));
         assert_eq!(buf.len(), 3);
+    }
+
+    /// The retry notice is the only thing the UI shows during a gateway
+    /// outage, so its wire shape is a contract: the frontend reads
+    /// `attempt` / `max_attempts` / `reason` / `retry_in_secs` off the
+    /// `protocol_v1` payload (`frontends/src/lib/stores/parts.ts`).
+    #[test]
+    fn llm_retry_serialises_with_the_fields_the_ui_reads() {
+        let ev = StreamEvent::LlmRetry {
+            attempt: 2,
+            max_attempts: 8,
+            reason: "Stream error: no response headers within 60s".into(),
+            retry_in_secs: 3,
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["type"], "llm_retry");
+        assert_eq!(v["attempt"], 2);
+        assert_eq!(v["max_attempts"], 8);
+        assert_eq!(v["retry_in_secs"], 3);
+        assert_eq!(v["reason"], "Stream error: no response headers within 60s");
+
+        let back: StreamEvent = serde_json::from_value(v).unwrap();
+        match back {
+            StreamEvent::LlmRetry {
+                attempt: 2,
+                max_attempts: 8,
+                retry_in_secs: 3,
+                ..
+            } => {}
+            other => panic!("round-trip changed the event: {other:?}"),
+        }
     }
 }

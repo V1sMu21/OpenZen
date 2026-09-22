@@ -7,7 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::is_local_apibase;
 use crate::message_format::{msgs_claude2oai, stamp_oai_cache_markers};
-use crate::retry::retry_with_backoff;
+use crate::retry::{retry_with_backoff, retry_with_backoff_notify};
 use crate::session::Session;
 use crate::stream::parse_openai_sse;
 
@@ -274,7 +274,13 @@ impl Session for OaiSession {
             // Retry only the send/status phase — a mid-stream failure is NOT
             // re-sent here: the agent loop owns turn-level retry, and
             // re-sending would duplicate TextDelta events already rendered.
-            let resp = retry_with_backoff(
+            //
+            // Every inner retry is reported to the UI: a wedged gateway makes
+            // one send cost the whole header timeout, and waiting for the
+            // agent-loop retry to speak would leave the bubble silent for
+            // minutes.
+            let notify_tx = event_tx.clone();
+            let resp = retry_with_backoff_notify(
                 move || {
                     let oai_msgs = oai_msgs_base.clone();
                     let tools = tools.clone();
@@ -326,6 +332,14 @@ impl Session for OaiSession {
                     })
                 },
                 &cfg_responses,
+                |attempt, max_attempts, delay, err| {
+                    let _ = notify_tx.send(StreamEvent::LlmRetry {
+                        attempt: attempt as u32,
+                        max_attempts: max_attempts as u32,
+                        reason: err.to_string(),
+                        retry_in_secs: delay.ceil() as u64,
+                    });
+                },
             )
             .await?;
             parse_openai_sse(
@@ -349,7 +363,11 @@ impl Session for OaiSession {
 
             // Retry only the send/status phase — mid-stream failures are
             // surfaced to the agent loop, not re-sent (see responses branch).
-            let resp = retry_with_backoff(
+            // Retry only the send/status phase — mid-stream failures are
+            // surfaced to the agent loop, not re-sent (see responses branch).
+            // Inner retries are reported to the UI (see responses branch).
+            let notify_tx = event_tx.clone();
+            let resp = retry_with_backoff_notify(
                 move || {
                     let mut oai_msgs = oai_msgs_base.clone();
                     let tools = tools.clone();
@@ -454,6 +472,14 @@ impl Session for OaiSession {
                     })
                 },
                 &cfg_chat,
+                |attempt, max_attempts, delay, err| {
+                    let _ = notify_tx.send(StreamEvent::LlmRetry {
+                        attempt: attempt as u32,
+                        max_attempts: max_attempts as u32,
+                        reason: err.to_string(),
+                        retry_in_secs: delay.ceil() as u64,
+                    });
+                },
             )
             .await?;
             parse_openai_sse(

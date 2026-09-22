@@ -943,6 +943,336 @@ fn content_prefix_matches(original: &str, compressed: &str) -> bool {
     }
 }
 
+// ── Persisted session-log compaction (manual /compact) ──
+
+/// Agent-facing weight of one persisted session message: the text the model
+/// re-reads plus its tool traffic (`tool_use_blocks` + `tool_results`).
+///
+/// The session store keeps tool output in separate JSON fields, so the
+/// content-only view `/compact` used to build measured a small fraction of
+/// the real context — a real 30-message session carried 24K chars of text
+/// against 665K chars of tool output, which is why a compaction on a
+/// "100K+ token" conversation reported 356 tokens and 0% saved (user report
+/// 2026-09-22). `streamEvents`/`parts`/`thinking` are display-only (the agent
+/// loop never sends them) and are deliberately excluded.
+pub fn store_message_payload_chars(m: &Value) -> usize {
+    let mut chars = m
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(str::len)
+        .unwrap_or(0);
+    for key in ["tool_use_blocks", "tool_results"] {
+        let Some(arr) = m.get(key).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for block in arr {
+            chars += block
+                .get("content")
+                .and_then(|c| c.as_str())
+                .map(str::len)
+                .unwrap_or(0);
+            chars += block
+                .get("name")
+                .and_then(|c| c.as_str())
+                .map(str::len)
+                .unwrap_or(0);
+            if let Some(input) = block.get("input") {
+                chars += serde_json::to_string(input).unwrap_or_default().len();
+            }
+        }
+    }
+    chars
+}
+
+/// Project one persisted session message into the `Message` shape the agent
+/// loop rebuilds for each run (`runner::build_history_messages`): the text
+/// plus tool_use / tool_result blocks. Only an unknown role maps to `None`,
+/// and such an entry is carried through untouched by the compaction.
+pub fn store_message_to_message(m: &Value) -> Option<Message> {
+    let role = m.get("role")?.as_str()?;
+    let content = m.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    match role {
+        "system" => Some(Message::system(content)),
+        "user" => {
+            let mut blocks: Vec<ContentBlock> = Vec::new();
+            // Text first (unlike the runner's projection, which emits the tool
+            // results first): Phase 2 spends the message budget in block order,
+            // so this keeps the user's instructions and folds away the machine
+            // output. The persisted shape stores both in separate JSON fields,
+            // so the order never reaches the provider.
+            if !content.is_empty() {
+                blocks.push(ContentBlock::text(content));
+            }
+            if let Some(results) = m.get("tool_results").and_then(|v| v.as_array()) {
+                for tr in results {
+                    let id = tr
+                        .get("tool_use_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if id.is_empty() {
+                        continue;
+                    }
+                    blocks.push(ContentBlock::tool_result(
+                        id,
+                        tr.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+                    ));
+                }
+            }
+            if blocks.is_empty() {
+                blocks.push(ContentBlock::text(""));
+            }
+            Some(Message::user_with_blocks(blocks))
+        }
+        "assistant" => {
+            let mut blocks: Vec<ContentBlock> = Vec::new();
+            if !content.is_empty() {
+                blocks.push(ContentBlock::text(content));
+            }
+            if let Some(uses) = m.get("tool_use_blocks").and_then(|v| v.as_array()) {
+                for tu in uses {
+                    let id = tu.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    if id.is_empty() {
+                        continue;
+                    }
+                    blocks.push(ContentBlock::tool_use(
+                        id,
+                        tu.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        tu.get("input").cloned().unwrap_or(Value::Null),
+                    ));
+                }
+            }
+            if blocks.is_empty() {
+                blocks.push(ContentBlock::text(""));
+            }
+            Some(Message::assistant_with_blocks(blocks))
+        }
+        _ => None,
+    }
+}
+
+/// Inverse of [`store_message_to_message`]: write a (possibly trimmed)
+/// `Message` back into the persisted log shape, keeping the UI-only fields of
+/// `orig` (timestamp, streamEvents, tokens, …).
+pub fn message_to_store_message(msg: &Message, orig: &Value) -> Value {
+    let mut out = orig.clone();
+    let Some(obj) = out.as_object_mut() else {
+        return out;
+    };
+    let text = msg.content_text();
+    let mut tool_uses: Vec<Value> = Vec::new();
+    let mut tool_results: Vec<Value> = Vec::new();
+    for block in &msg.content {
+        match block {
+            ContentBlock::ToolUse { id, name, input } => tool_uses.push(serde_json::json!({
+                "id": id,
+                "name": name,
+                "input": input,
+            })),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => tool_results.push(serde_json::json!({
+                "tool_use_id": tool_use_id,
+                "content": content_container_text(content),
+            })),
+            _ => {}
+        }
+    }
+    // A turn whose tool payload was folded away must not become an empty
+    // message: the next run rebuilds its history from exactly these fields.
+    let had_tools = orig.get("tool_use_blocks").is_some() || orig.get("tool_results").is_some();
+    let keep_blocks = !tool_uses.is_empty() || !tool_results.is_empty();
+    let content = if text.is_empty() && had_tools && !keep_blocks {
+        if msg.role == Role::Assistant {
+            "[compressed tool call]".to_string()
+        } else {
+            "[compressed tool output]".to_string()
+        }
+    } else {
+        text
+    };
+    obj.insert("content".to_string(), Value::String(content));
+    set_or_remove(obj, "tool_use_blocks", tool_uses);
+    set_or_remove(obj, "tool_results", tool_results);
+    out
+}
+
+fn set_or_remove(obj: &mut serde_json::Map<String, Value>, key: &str, values: Vec<Value>) {
+    if values.is_empty() {
+        obj.remove(key);
+    } else {
+        obj.insert(key.to_string(), Value::Array(values));
+    }
+}
+
+fn content_container_text(content: &oz_core_types::ContentContainer) -> String {
+    match content {
+        oz_core_types::ContentContainer::Text(t) => t.clone(),
+        oz_core_types::ContentContainer::Blocks(bs) => bs
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+/// Drop tool_use blocks whose result is gone, and tool_result blocks whose
+/// call is gone. `compress_messages` only repairs the second direction
+/// (`repair_orphaned_tool_results`); Phase 2 trims each message on its own
+/// budget, so a small assistant tool call easily outlives its huge result —
+/// and the chat APIs reject a history whose assistant tool call has no result.
+fn repair_tool_pairing(messages: &mut [Message]) {
+    for i in 0..messages.len() {
+        if messages[i].role != Role::Assistant {
+            continue;
+        }
+        let use_ids: Vec<String> = messages[i]
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        if use_ids.is_empty() {
+            continue;
+        }
+        // The result carrier is the immediately following message (the agent
+        // loop merges the tool results into a single user turn; system
+        // summaries are skipped). Looking further ahead would pair this call
+        // with a LATER turn's results and delete the wrong payload.
+        let carrier = (i + 1..messages.len()).find(|&j| messages[j].role != Role::System);
+        let result_ids: Vec<String> = carrier
+            .map(|j| {
+                messages[j]
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        messages[i].content.retain(|b| match b {
+            ContentBlock::ToolUse { id, .. } => result_ids.iter().any(|r| r == id),
+            _ => true,
+        });
+        if let Some(j) = carrier {
+            messages[j].content.retain(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    use_ids.iter().any(|u| u == tool_use_id)
+                }
+                _ => true,
+            });
+        }
+    }
+}
+
+/// What a [`compact_store_messages`] pass did to a persisted session log.
+pub struct StoreCompaction {
+    /// The rewritten log (survivors, tool traffic folded).
+    pub messages: Vec<Value>,
+    /// The entries that no longer take part in the next run.
+    pub removed: Vec<Value>,
+    pub before_messages: usize,
+    pub after_messages: usize,
+    pub before_chars: usize,
+    pub after_chars: usize,
+}
+
+impl StoreCompaction {
+    pub fn saved_chars(&self) -> usize {
+        self.before_chars.saturating_sub(self.after_chars)
+    }
+
+    pub fn saved_pct(&self) -> f64 {
+        if self.before_chars == 0 {
+            0.0
+        } else {
+            ((self.saved_chars() as f64 / self.before_chars as f64) * 1000.0).round() / 10.0
+        }
+    }
+
+    /// Tokens the agent will not have to re-read next run (chars/4 heuristic —
+    /// the manual path has no provider usage report to calibrate from).
+    pub fn saved_tokens(&self) -> usize {
+        self.saved_chars() / 4
+    }
+}
+
+/// Compact a persisted session log the way the agent loop compacts its
+/// in-memory context, and hand back the rewritten log.
+///
+/// `context_win` follows [`compress_messages`]: a user-invoked `/compact`
+/// passes 1 to bypass the trigger threshold and fold down to the
+/// `min_messages` floor.
+pub fn compact_store_messages(
+    messages: &[Value],
+    context_win: usize,
+    config: &CompressionConfig,
+) -> StoreCompaction {
+    let before_chars: usize = messages.iter().map(store_message_payload_chars).sum();
+    let before_messages = messages.len();
+
+    let mut view: Vec<Message> = Vec::with_capacity(messages.len());
+    let mut view_src: Vec<usize> = Vec::with_capacity(messages.len());
+    for (i, m) in messages.iter().enumerate() {
+        if let Some(msg) = store_message_to_message(m) {
+            view.push(msg);
+            view_src.push(i);
+        }
+    }
+    let sys_offset = view
+        .iter()
+        .take_while(|m| m.role == Role::System)
+        .count();
+    compress_messages(&mut view, context_win, config, None);
+    repair_tool_pairing(&mut view);
+
+    // `compress_messages` only removes from the front region (the oldest turn
+    // after the leading system messages), so the survivors are exactly the
+    // system prefix plus a suffix of the tail. Map every surviving source
+    // entry to its index in the compressed view: `view[0..sys_offset]` are the
+    // untouched system prompts, `view[sys_offset..]` are `view_src[tail_start..]`
+    // in order.
+    let kept_tail = view.len().saturating_sub(sys_offset);
+    let tail_start = view_src.len().saturating_sub(kept_tail);
+
+    let mut view_after: Vec<Option<usize>> = vec![None; messages.len()];
+    for j in 0..sys_offset.min(view.len()) {
+        view_after[view_src[j]] = Some(j);
+    }
+    for k in 0..kept_tail {
+        view_after[view_src[tail_start + k]] = Some(sys_offset + k);
+    }
+    let mut out: Vec<Value> = Vec::with_capacity(messages.len());
+    let mut removed: Vec<Value> = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
+        match view_after[i] {
+            Some(j) => out.push(message_to_store_message(&view[j], m)),
+            // Unknown role (never mapped into the view) — nothing to compress,
+            // never drop it. Anything else with no mapping was removed.
+            None if store_message_to_message(m).is_none() => out.push(m.clone()),
+            None => removed.push(m.clone()),
+        }
+    }
+    let after_chars: usize = out.iter().map(store_message_payload_chars).sum();
+    let after_messages = out.len();
+    StoreCompaction {
+        messages: out,
+        removed,
+        before_messages,
+        after_messages,
+        before_chars,
+        after_chars,
+    }
+}
+
 // ── Compression Summary Generation ──
 
 /// Extract all `[Compression summary]` system messages from the message list,
@@ -1467,6 +1797,161 @@ mod tests {
         let stats = measure_usage(&[]);
         assert_eq!(stats.total_chars, 0);
         assert_eq!(stats.message_count, 0);
+    }
+
+    /// A persisted message log shaped like the real store: the heavy tool
+    /// traffic lives in `tool_results` / `tool_use_blocks`, and the display
+    /// log (`streamEvents`) is even bigger but must not be counted.
+    fn store_fixture() -> Vec<Value> {
+        let big = "x".repeat(40_000);
+        let mut out = vec![
+            serde_json::json!({"role": "system", "content": "sys prompt"}),
+        ];
+        for turn in 0..6 {
+            out.push(serde_json::json!({
+                "role": "user",
+                "content": format!("task {turn}"),
+                "timestamp": "2026-09-22T00:00:00Z",
+            }));
+            out.push(serde_json::json!({
+                "role": "assistant",
+                "content": format!("working {turn}"),
+                "tool_use_blocks": [{"id": format!("call_{turn}"), "name": "read", "input": {"p": turn}}],
+                "streamEvents": [{"type": "text_delta", "text": "y".repeat(60_000)}],
+                "timestamp": "2026-09-22T00:00:01Z",
+            }));
+            out.push(serde_json::json!({
+                "role": "user",
+                "content": "",
+                "tool_results": [{"tool_use_id": format!("call_{turn}"), "content": big}],
+                "timestamp": "2026-09-22T00:00:02Z",
+            }));
+        }
+        out
+    }
+
+    #[test]
+    fn test_store_payload_chars_counts_tool_traffic_not_display_log() {
+        let msgs = store_fixture();
+        let total: usize = msgs.iter().map(store_message_payload_chars).sum();
+        // 6 tool results of 40K chars dominate…
+        assert!(total > 240_000, "tool traffic must be counted: {total}");
+        // …while the 360K chars of display-only streamEvents are excluded.
+        assert!(total < 300_000, "streamEvents must not be counted: {total}");
+    }
+
+    #[test]
+    fn test_compact_store_messages_folds_tool_traffic() {
+        let msgs = store_fixture();
+        let before_msgs = msgs.len();
+        let config = CompressionConfig::default();
+        let result = compact_store_messages(&msgs, 1, &config);
+        // Real savings: the tool payload was actually folded away, not a no-op
+        // that still reported success (the 356→356 / 0% bug).
+        assert!(
+            result.saved_chars() > 200_000,
+            "expected a real reduction, before={} after={}",
+            result.before_chars,
+            result.after_chars
+        );
+        assert!(result.saved_pct() > 50.0);
+        assert!(result.after_messages <= before_msgs);
+        // The removed window is what the caller feeds the LLM summarizer.
+        assert!(!result.removed.is_empty() || result.saved_chars() > 0);
+        // Nothing ran off the end: the newest turn must survive intact.
+        let last = result.messages.last().unwrap();
+        assert_eq!(last["role"], "user");
+        assert!(last["tool_results"].is_array());
+    }
+
+    #[test]
+    fn test_compact_store_messages_keeps_tool_calls_paired() {
+        let msgs = store_fixture();
+        let result = compact_store_messages(&msgs, 1, &CompressionConfig::default());
+        let mut pending_calls: Vec<String> = Vec::new();
+        for m in &result.messages {
+            let role = m["role"].as_str().unwrap_or("");
+            if role == "assistant" {
+                if let Some(uses) = m.get("tool_use_blocks").and_then(|v| v.as_array()) {
+                    for b in uses {
+                        pending_calls.push(b["id"].as_str().unwrap_or("").to_string());
+                    }
+                }
+            } else if role == "user" {
+                if let Some(results) = m.get("tool_results").and_then(|v| v.as_array()) {
+                    for b in results {
+                        let id = b["tool_use_id"].as_str().unwrap_or("");
+                        assert!(
+                            pending_calls.iter().any(|c| c == id),
+                            "tool_result {id} has no surviving tool_use — the provider rejects that history"
+                        );
+                    }
+                }
+            }
+        }
+        // Every surviving tool call must also have kept its result.
+        let result_ids: Vec<String> = result
+            .messages
+            .iter()
+            .filter_map(|m| m.get("tool_results").and_then(|v| v.as_array()))
+            .flatten()
+            .filter_map(|b| b.get("tool_use_id").and_then(|v| v.as_str()))
+            .map(str::to_string)
+            .collect();
+        for id in &pending_calls {
+            assert!(
+                result_ids.iter().any(|r| r == id),
+                "tool_use {id} survived without its result"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compact_store_messages_small_log_is_measured_honestly() {
+        // A session that really is tiny must report tiny numbers instead of
+        // silently claiming a successful compaction.
+        let msgs = vec![
+            serde_json::json!({"role": "user", "content": "hi"}),
+            serde_json::json!({"role": "assistant", "content": "hello"}),
+        ];
+        let result = compact_store_messages(&msgs, 1, &CompressionConfig::default());
+        assert_eq!(result.before_messages, 2);
+        assert_eq!(result.after_messages, 2);
+        assert_eq!(result.saved_chars(), 0);
+        assert!(result.removed.is_empty());
+    }
+
+    #[test]
+    fn test_message_to_store_message_round_trip_keeps_ui_fields() {
+        let orig = serde_json::json!({
+            "role": "assistant",
+            "content": "done",
+            "tool_use_blocks": [{"id": "c1", "name": "read", "input": {"p": "a"}}],
+            "streamEvents": [{"type": "text_delta", "text": "done"}],
+            "tokensIn": 7,
+            "timestamp": "2026-09-22T00:00:00Z",
+        });
+        let msg = store_message_to_message(&orig).unwrap();
+        let back = message_to_store_message(&msg, &orig);
+        assert_eq!(back["content"], "done");
+        assert_eq!(back["tool_use_blocks"][0]["id"], "c1");
+        assert_eq!(back["tokensIn"], 7);
+        assert!(back["streamEvents"].is_array(), "display log must survive");
+    }
+
+    #[test]
+    fn test_message_to_store_message_does_not_leave_empty_turns() {
+        // A carrier whose tool results were folded away must keep a marker —
+        // an empty user turn breaks the next run's history rebuild.
+        let orig = serde_json::json!({
+            "role": "user",
+            "content": "",
+            "tool_results": [{"tool_use_id": "c1", "content": "big"}],
+        });
+        let stripped = Message::user("");
+        let back = message_to_store_message(&stripped, &orig);
+        assert_eq!(back["content"], "[compressed tool output]");
+        assert!(back.get("tool_results").is_none());
     }
 
     #[test]

@@ -151,6 +151,25 @@ export function applyProtocolEvent(
         break;
       }
 
+    case 'llm_retry': {
+        // A wedged gateway (60s header timeout × inner backoff × 8 attempts)
+        // used to leave the bubble spinning for 20-40 minutes with no
+        // explanation at all. Say what is happening and when the next
+        // attempt starts.
+        const id = `data_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        parts.push({
+          type: 'data',
+          id,
+          dataType: event.type,
+          content: localT('status.llmRetry', formatDataEvent(event))
+            .replace('{attempt}', String(event.attempt))
+            .replace('{max}', String(event.max_attempts))
+            .replace('{secs}', String(event.retry_in_secs)),
+          transient: true,
+        });
+        break;
+      }
+
       // data_compressing_context is handled in chat.ts with i18n + auto-dismiss
       case 'data_todo_update':
       case 'data_context_usage':
@@ -204,6 +223,11 @@ function formatDataEvent(event: ProtocolV1Event): string {
       return `Compressing context: ${event.before_tokens} → ${event.after_tokens} tokens`;
     case 'data_quality_gate':
       return `Running delivery check: ${event.stage}`;
+    case 'llm_retry': {
+      const reason =
+        event.reason.length > 160 ? `${event.reason.slice(0, 160)}…` : event.reason;
+      return `Model not responding — attempt ${event.attempt}/${event.max_attempts} failed, retrying in ${event.retry_in_secs}s (${reason})`;
+    }
     default:
       return '';
   }
