@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 
 mod daemon;
 mod platform_setup;
+mod search_keys;
 mod upgrade;
 
 use oz_agent::Agent;
@@ -130,6 +131,39 @@ enum Commands {
     Platform {
         #[command(subcommand)]
         action: PlatformAction,
+    },
+    /// Store web-search API keys without leaking them into history or logs
+    Key {
+        #[command(subcommand)]
+        action: KeyAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum KeyAction {
+    /// Prompt for an engine key (hidden input) and store it in mykey.toml
+    Set {
+        /// Engine: bocha, tavily, firecrawl
+        engine: String,
+        /// Read the key from stdin instead of prompting (e.g. from a password manager)
+        #[arg(long, default_value_t = false)]
+        stdin: bool,
+        /// Store without a live API check
+        #[arg(long, default_value_t = false)]
+        no_verify: bool,
+        /// Config file to edit (default: the mykey.toml web_search actually reads)
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Show which engines have a key (masked) and where it comes from
+    List,
+    /// Remove an engine key from mykey.toml
+    Remove {
+        /// Engine: bocha, tavily, firecrawl
+        engine: String,
+        /// Config file to edit (default: the mykey.toml web_search actually reads)
+        #[arg(long)]
+        file: Option<PathBuf>,
     },
 }
 
@@ -444,6 +478,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Platform { action } => {
             platform_setup::handle_platform_command(action, &cli.config).await
         }
+        Commands::Key { action } => search_keys::handle_key_command(action, &cli.dir).await,
         Commands::Agent { name, list } => {
             let agents_dir = oz_agent::agents_dir();
             if *list {
