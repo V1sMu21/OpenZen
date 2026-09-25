@@ -4,27 +4,10 @@
   import { sidepanel, type Artifact } from "../stores/sidepanel.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { t } from "../i18n";
-
-  // ── Detect artifact type from extension ──
-  function detectType(path: string): string {
-    const ext = path.split(".").pop()?.toLowerCase() ?? "";
-    const map: Record<string, string> = {
-      html: "html", htm: "html",
-      pdf: "pdf",
-      xlsx: "spreadsheet", xls: "spreadsheet", csv: "spreadsheet", tsv: "spreadsheet",
-      py: "code", rs: "code", ts: "code", js: "code", go: "code",
-      svelte: "code", json: "code", yaml: "code", yml: "code", toml: "code",
-      sql: "code", sh: "code", css: "code", scss: "code", txt: "code",
-      md: "markdown", rtf: "markdown",
-      tex: "latex", lt: "latex", sty: "code", cls: "code", bib: "code",
-      png: "image", jpg: "image", jpeg: "image", gif: "image", svg: "image", webp: "image",
-      doc: "office", docx: "office", ppt: "office", pptx: "office",
-    };
-    return map[ext] ?? "code";
-  }
+  import { detectArtifactType } from "../utils/artifactType";
 
   function rendererFor(artifact: Artifact): string {
-    return artifact.type || detectType(artifact.path);
+    return artifact.type || detectArtifactType(artifact.path);
   }
 
   // ── Close single tab ──
@@ -181,8 +164,12 @@
         <!-- {#key} remounts the view whenever the active artifact changes.
              Every Artifact view loads only in onMount, so without the key
              switching between same-type tabs kept showing the previous
-             file (and terminal tabs shared one PTY). -->
-        {#key sidepanel.activeArtifact.id}
+             file (and terminal tabs shared one PTY).
+             `openSeq` is part of the key because a file already on the tab
+             bar is focused rather than re-added (one tab per path), leaving
+             its id unchanged — without the token a re-opened file would keep
+             rendering whatever its viewer read the first time. -->
+        {#key sidepanel.activeArtifact.id + ":" + sidepanel.openSeq}
           {@const renderer = rendererFor(sidepanel.activeArtifact)}
           <ArtifactRenderer {renderer} artifact={sidepanel.activeArtifact} />
         {/key}

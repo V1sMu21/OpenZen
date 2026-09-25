@@ -92,6 +92,59 @@ fn sync_html_root(state: &Arc<AppState>, sp: &SidePanelState) {
     }
 }
 
+/// Show `path` as the active artifact: focus the tab already displaying it, or
+/// append a new one.
+///
+/// A path already on the tab bar is FOCUSED, not duplicated. The agent normally
+/// opens its own deliverable (`open_side_panel`) before the user clicks 打开 on
+/// the turn's changed-files card, and two tabs showing one file help nobody —
+/// the second click would also stack a third. Reusing the id keeps the frontend
+/// listener, the per-session parking and its `{#key}` in sync, since all key
+/// on it (`openSeq` in frontends/src/lib/stores/sidepanel.svelte.ts forces the
+/// viewer to re-read the file, which a same-id focus would otherwise skip).
+///
+/// Split out of `register_and_show` so this rule is testable without an
+/// AppHandle.
+fn focus_or_push(
+    artifacts: &mut Vec<ArtifactInfo>,
+    artifact_type: String,
+    path: String,
+    label: String,
+) -> ArtifactInfo {
+    // A terminal tab is a SESSION, not a file, and its path is the constant
+    // "." — path identity would silently collapse every shell the user opens
+    // into one. Each 终端 click must mint a fresh tab so the viewer remounts
+    // and spawns a new PTY (ArtifactTerminal spawns in onMount only).
+    let existing_idx = if artifact_type == "terminal" {
+        None
+    } else {
+        artifacts.iter().position(|a| a.path == path)
+    };
+    match existing_idx {
+        Some(idx) => {
+            // Focus only: the tab keeps the viewer and title it was opened
+            // with. Rewriting them would let a caller holding a coarser guess
+            // — the extension map, or a bare file-name label — downgrade what
+            // another caller deliberately declared (the agent can call a
+            // `.json` a `spreadsheet`). The agent announces a deliverable
+            // before the user can click 打开 on it, so the declared viewer is
+            // already the one sitting on the tab; the caller's label/type only
+            // decide what a NEW tab looks like.
+            artifacts[idx].clone()
+        }
+        None => {
+            let fresh = ArtifactInfo {
+                id: uuid::Uuid::new_v4().to_string(),
+                artifact_type,
+                path,
+                label,
+            };
+            artifacts.push(fresh.clone());
+            fresh
+        }
+    }
+}
+
 /// Register a resolved path in the artifact whitelist (and the ozfile html
 /// root when needed), push the artifact tab and emit the open event.
 /// Shared by the agent-facing `open_artifact` and the user-dialog path.
@@ -127,15 +180,9 @@ fn register_and_show(
         }
     }
 
-    let artifact = ArtifactInfo {
-        id: uuid::Uuid::new_v4().to_string(),
-        artifact_type,
-        path: resolved_path,
-        label,
-    };
-
     let mut sp = lock_poison_guard(&state.sidepanel);
-    sp.artifacts.push(artifact.clone());
+
+    let artifact = focus_or_push(&mut sp.artifacts, artifact_type, resolved_path, label);
     sp.active_id = Some(artifact.id.clone());
     sp.visible = true;
     sync_html_root(state, &sp);
@@ -788,4 +835,83 @@ pub fn open_external_file(path: String, state: State<'_, Arc<AppState>>) -> Resu
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab(id: &str, artifact_type: &str, path: &str, label: &str) -> ArtifactInfo {
+        ArtifactInfo {
+            id: id.into(),
+            artifact_type: artifact_type.into(),
+            path: path.into(),
+            label: label.into(),
+        }
+    }
+
+    /// The reported bug: the agent opens its deliverable, the user clicks 打开
+    /// on the card for that same file, and a second tab appears.
+    #[test]
+    fn focus_or_push_never_duplicates_an_open_path() {
+        let mut tabs = vec![tab("a", "html", "/w/report.html", "报告")];
+        let got = focus_or_push(
+            &mut tabs,
+            "html".into(),
+            "/w/report.html".into(),
+            "报告 修订版".into(),
+        );
+        assert_eq!(tabs.len(), 1, "one file must stay one tab");
+        assert_eq!(got.id, "a", "the existing id is reused so the panel focuses it");
+        assert_eq!(got.label, "报告", "the tab keeps the title it was opened with");
+    }
+
+    /// The viewer must survive a re-open: a caller whose type is only an
+    /// extension guess (code) must not downgrade the agent's declared one.
+    #[test]
+    fn focus_or_push_keeps_an_open_tabs_viewer_and_title() {
+        let mut tabs = vec![
+            tab("a", "html", "/w/x.html", "X"),
+            tab("b", "spreadsheet", "/w/data.json", "数据表"),
+        ];
+        let got = focus_or_push(&mut tabs, "code".into(), "/w/data.json".into(), "data.json".into());
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[1].id, "b", "position is preserved — no reordering");
+        assert_eq!(got.artifact_type, "spreadsheet", "the declared viewer stays");
+        assert_eq!(got.label, "数据表", "the tab is not renamed by a coarser caller");
+        assert_eq!(tabs[0].artifact_type, "html", "other tabs are untouched");
+    }
+
+    /// A terminal tab is a session, not a file: its path is always ".", so
+    /// deduping on it would make the 终端 button a no-op after the first click
+    /// (the viewer remounts — and spawns the PTY — on id change only).
+    #[test]
+    fn focus_or_push_always_mints_a_fresh_terminal_tab() {
+        let mut tabs: Vec<ArtifactInfo> = Vec::new();
+        let first = focus_or_push(&mut tabs, "terminal".into(), ".".into(), "Terminal".into());
+        let second = focus_or_push(&mut tabs, "terminal".into(), ".".into(), "Terminal".into());
+        assert_eq!(tabs.len(), 2, "every shell needs its own tab");
+        assert_ne!(first.id, second.id, "a fresh id makes the PTY view remount");
+    }
+
+    #[test]
+    fn focus_or_push_appends_a_new_path_with_a_fresh_id() {
+        let mut tabs = vec![tab("a", "html", "/w/x.html", "X")];
+        let got = focus_or_push(&mut tabs, "markdown".into(), "/w/y.md".into(), "Y".into());
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[1].id, got.id);
+        assert_eq!(got.path, "/w/y.md");
+        assert_eq!(got.artifact_type, "markdown", "a new tab uses the caller's type");
+        assert_eq!(got.label, "Y");
+        assert!(!got.id.is_empty() && got.id != "a", "a new tab needs its own id");
+    }
+
+    #[test]
+    fn focus_or_push_keeps_distinct_paths_apart() {
+        let mut tabs: Vec<ArtifactInfo> = Vec::new();
+        focus_or_push(&mut tabs, "code".into(), "/w/a.py".into(), "a".into());
+        focus_or_push(&mut tabs, "code".into(), "/w/b.py".into(), "b".into());
+        assert_eq!(tabs.len(), 2);
+        assert_ne!(tabs[0].id, tabs[1].id);
+    }
 }

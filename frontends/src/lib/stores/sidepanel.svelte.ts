@@ -34,6 +34,17 @@ function createSidepanel() {
   // Track unlisten functions for cleanup
   const unlisteners: (() => void)[] = [];
 
+  /** Bumped every time the backend announces an artifact.
+   *
+   *  A file that is already on the tab bar is FOCUSED instead of re-added
+   *  (one tab per path — see `focus_or_push` in
+   *  src-tauri/src/sidepanel/commands.rs), so its id does not change. Every
+   *  artifact viewer reads its file in `onMount` only, so without this token
+   *  re-opening a file the agent has rewritten would keep showing the copy
+   *  the viewer read the first time. SidePanel.svelte includes it in its
+   *  `{#key}` to force that remount. */
+  let openSeq = $state(0);
+
   // ── Initialize from Rust on mount ──
   async function init() {
     try {
@@ -61,6 +72,7 @@ function createSidepanel() {
 
       const u2 = await listen<Artifact>("sidepanel:artifact-opened", (event) => {
         const a = event.payload;
+        openSeq += 1;
         const existing = state.artifacts.findIndex((x) => x.id === a.id);
         if (existing >= 0) {
           state.artifacts[existing] = a;
@@ -203,6 +215,7 @@ function createSidepanel() {
     get activeIndex() { return state.activeIndex; },
     get activeArtifact() { return activeArtifact; },
     get artifactCount() { return artifactCount; },
+    get openSeq() { return openSeq; },
     init,
     setupListeners,
     toggle,

@@ -37,6 +37,13 @@
   --color-error: #c05a3e;       /* 朱砂 */
   --color-info: #93c3d6;
 
+  /* Diff stat (+N / −M). Not --color-success/--color-error: those are
+     semantic-only hues (and stay dark-theme-valued in light mode), so diff
+     counts get their own pair that each theme can tune for contrast.
+     Dark values are the ones EditCard has always rendered. */
+  --color-diff-add: #65b891;
+  --color-diff-del: #dc5a5a;
+
   /* Code */
   --color-code-bg: #0f0d0a;
   --color-code-text: #e0d9cc;
@@ -144,6 +151,9 @@ html.theme-light {
   --color-hairline-strong: rgba(79, 142, 168, 0.28);
   --color-code-bg: #e8e3d8;
   --color-code-text: #2a2724;
+  /* Darkened for WCAG AA on the light canvas (≥5.4:1 / ≥4.7:1). */
+  --color-diff-add: #276b4e;
+  --color-diff-del: #b0453f;
   --bg-secondary: #e8e4dc;
   --bg-tertiary: #ded9cf;
   --bg-user-bubble: #e0d8c9;

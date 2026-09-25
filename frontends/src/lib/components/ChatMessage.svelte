@@ -11,6 +11,8 @@
   import ThinkingBlock from "./ThinkingBlock.svelte";
   import EditCard from "./EditCard.svelte";
 import SkillMcpCard from "./SkillMcpCard.svelte";
+import ChangedFilesCard from "./ChangedFilesCard.svelte";
+import { collectTurnFiles, isFileEditTool, parseEditArgs, type TurnFile } from "../utils/fileChanges";
 import { t, locale, tSync } from "../i18n";
   let lang = $state("zh");
   $effect(() => { lang = $locale; });
@@ -25,6 +27,10 @@ import { t, locale, tSync } from "../i18n";
   // Stable empty array for non-live messages: historical bubbles never
   // receive a new array reference when streaming parts change.
   const NO_STREAMING_PARTS: UIMessagePart[] = [];
+  // Same idea for the changed-files card: a turn that is still running
+  // renders no card, and returning one shared empty array keeps that from
+  // invalidating anything downstream on every streaming delta.
+  const NO_CHANGED_FILES: TurnFile[] = [];
 
   let {
     message,
@@ -87,6 +93,21 @@ import { t, locale, tSync } from "../i18n";
    *  SINGLE source of truth for "is the backend still working on
    *  THIS turn?".  Delegates entirely to `isLive`. */
   let isBackendStillWorking = $derived(isLive);
+
+  /** What this turn produced, aggregated across every edit/patch/write —
+   *  plus the deliverables the agent announced with `open_side_panel`, which
+   *  are the only evidence a file exists at all when the agent built it with
+   *  a `code_run` script.  Including the ones the timeline fold hides.
+   *  Gated on the turn being over: a running turn shows no card (it would
+   *  still be growing), and nothing pays for the diff while tokens are
+   *  streaming.
+   *
+   *  `collectTurnFiles` caches on the parts array, so this recomputes only
+   *  when the rendered part list actually changes. */
+  let changedFiles = $derived.by<TurnFile[]>(() => {
+    if (isBackendStillWorking) return NO_CHANGED_FILES;
+    return collectTurnFiles(parts, workingDir);
+  });
 
   /** Live elapsed-time ticker. We use a module-level ticker (see
    *  `utils/ticker.ts`) that increments a shared $state proxy every
@@ -152,28 +173,6 @@ import { t, locale, tSync } from "../i18n";
     return tSync(lang, "message.duration.format")
       .replace("{m}", String(m))
       .replace("{s}", String(s));
-  }
-
-  function parseEditArgs(args: string | undefined, toolName: string): { filePath: string; oldString: string; newString: string } {
-    const fallback = { filePath: "", oldString: "", newString: "" };
-    if (!args) return fallback;
-    try {
-      const parsed = JSON.parse(args);
-      if (toolName === "write") {
-        return {
-          filePath: typeof parsed.file_path === "string" ? parsed.file_path : "",
-          oldString: "",
-          newString: typeof parsed.content === "string" ? parsed.content : "",
-        };
-      }
-      return {
-        filePath: typeof parsed.file_path === "string" ? parsed.file_path : "",
-        oldString: typeof parsed.old_string === "string" ? parsed.old_string : "",
-        newString: typeof parsed.new_string === "string" ? parsed.new_string : "",
-      };
-    } catch {
-      return fallback;
-    }
   }
 
   function roleLabel(role: string): string {
@@ -407,12 +406,12 @@ import { t, locale, tSync } from "../i18n";
                 showTimer={showTimer}
                 showPausedWarning={!isLive}
               />
-            {:else if p.type === "tool-invocation" && (p.name === "edit" || p.name === "patch" || p.name === "write")}
+            {:else if p.type === "tool-invocation" && isFileEditTool(p.name)}
               {@const editArgs = parseEditArgs(p.args, p.name)}
               <EditCard
-                filePath={editArgs.filePath}
-                oldString={editArgs.oldString}
-                newString={editArgs.newString}
+                filePath={editArgs?.filePath ?? ""}
+                oldString={editArgs?.oldString ?? ""}
+                newString={editArgs?.newString ?? ""}
                 durationMs={p.durationMs}
                 result={p.result}
                 completed={isToolPartDone(p)}
@@ -469,6 +468,13 @@ import { t, locale, tSync } from "../i18n";
           <div class="exit-reason-banner">
             {$t("message.agentStopped")}: {$t(`exit.${message.exitReason}`, message.exitReason)}
           </div>
+        {/if}
+
+        {#if changedFiles.length > 0}
+          <!-- Bottom of the bubble: what this turn produced — deliverables
+               first, then everything it changed on disk — with a 打开 button
+               that previews each file in the side panel. -->
+          <ChangedFilesCard rows={changedFiles} {workingDir} />
         {/if}
 
         {#if !isBackendStillWorking}

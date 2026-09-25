@@ -2,6 +2,7 @@
   import type { ToolCallInfo } from "../stores/types";
   import { t, locale, tSync } from "../i18n";
   import { isTauri, tauriInvoke } from "../api/tauri";
+  import { displayPath } from "../utils/paths";
   let lang = $state("zh");
   $effect(() => { lang = $locale; });
 
@@ -219,17 +220,6 @@
     return s.length > max ? s.slice(0, max - 3) + "..." : s;
   }
 
-  /** path 显示优化: 等于工作目录 → 只显示目录名; 是工作目录子路径
-   *  → 显示相对路径; 其余原样. */
-  function displayPath(p: string): string {
-    if (!workingDir) return p;
-    const base = workingDir.replace(/\/+$/, "");
-    if (!base) return p;
-    if (p === base) return p.split("/").pop() || p;
-    if (p.startsWith(base + "/")) return p.slice(base.length + 1);
-    return p;
-  }
-
   /** 参数 key 的 i18n 标签: 有 tool.param.<key> 翻译则用之, 否则保留原 key */
   function paramLabel(key: string): string {
     const tkey = `tool.param.${key}`;
@@ -244,13 +234,13 @@
     if (!parsed) {
       // Partial-args fallback while the JSON is still streaming.
       const p = extractStringField(args, "file_path") ?? extractStringField(args, "path");
-      if (p && p.trim()) return { key: paramLabel("path"), value: truncate(displayPath(p), 60) };
-      if (workingDir) return { key: paramLabel("path"), value: truncate(displayPath(workingDir), 60) };
+      if (p && p.trim()) return { key: paramLabel("path"), value: truncate(displayPath(p, workingDir), 60) };
+      if (workingDir) return { key: paramLabel("path"), value: truncate(displayPath(workingDir, workingDir), 60) };
       return null;
     }
     const p = parsed["file_path"] ?? parsed["path"];
-    if (typeof p === "string" && p.trim()) return { key: paramLabel("path"), value: truncate(displayPath(p), 60) };
-    if (workingDir) return { key: paramLabel("path"), value: truncate(displayPath(workingDir), 60) };
+    if (typeof p === "string" && p.trim()) return { key: paramLabel("path"), value: truncate(displayPath(p, workingDir), 60) };
+    if (workingDir) return { key: paramLabel("path"), value: truncate(displayPath(workingDir, workingDir), 60) };
     return null;
   }
 
@@ -284,7 +274,7 @@
       const label = paramLabel(isPath ? "path" : k);
       const value =
         typeof v === "string"
-          ? (isPath ? displayPath(v) : truncate(v, 100))
+          ? (isPath ? displayPath(v, workingDir) : truncate(v, 100))
           : truncate(JSON.stringify(v), 100);
       rows.push({ key: label, value });
     }

@@ -1,5 +1,8 @@
 <script lang="ts">
   import { t, locale, tSync } from "../i18n";
+  import { computeDiff, diffStat as computeStat } from "../utils/diff";
+  import { isFailedToolResult } from "../utils/fileChanges";
+  import { basename, dirname, displayPath } from "../utils/paths";
   let lang = $state("zh");
   $effect(() => { lang = $locale; });
   interface Props {
@@ -29,27 +32,6 @@
     collapsed = !collapsed;
   }
 
-  function basename(path: string): string {
-    const parts = path.split("/");
-    return parts[parts.length - 1] || path;
-  }
-
-  function dirname(path: string): string {
-    const idx = path.lastIndexOf("/");
-    return idx >= 0 ? path.slice(0, idx) : "";
-  }
-
-  /** path 显示优化: 等于工作目录 → 只显示目录名; 是工作目录子路径
-   *  → 显示相对路径; 其余原样. (与 ToolCallCard 的 displayPath 一致) */
-  function displayPath(p: string): string {
-    if (!workingDir) return p;
-    const base = workingDir.replace(/\/+$/, "");
-    if (!base) return p;
-    if (p === base) return p.split("/").pop() || p;
-    if (p.startsWith(base + "/")) return p.slice(base.length + 1);
-    return p;
-  }
-
   function formatDuration(ms: number | undefined): string {
     if (ms == null) return "";
     if (!Number.isFinite(ms) || ms < 0) return "";
@@ -66,147 +48,17 @@
   }
 
   function isError(): boolean {
-    const r: any = result;
-    if (r == null) return false;
-    let text = "";
-    try {
-      if (typeof r === "string") {
-        text = r;
-        const parsed = JSON.parse(r);
-        if (parsed && typeof parsed === "object") {
-          return parsed.status === "error" || parsed.error != null;
-        }
-      } else if (typeof r === "object") {
-        if (r.status === "error" || r.error != null) return true;
-        text = JSON.stringify(r);
-      } else {
-        text = String(r);
-      }
-    } catch {
-      text = typeof r === "string" ? r : String(r);
-    }
-    const lower = (text || "").toLowerCase();
-    return lower.includes("error") || lower.includes("failed");
+    // Shared with the changed-files card: one verdict for "did this call
+    // actually change the file", so the two can never disagree.
+    return isFailedToolResult(result);
   }
 
   function truncateLine(line: string, max = 200): string {
     return line.length > max ? line.slice(0, max - 1) + "…" : line;
   }
 
-  // Compute a simple unified diff between oldLines and newLines
-  function computeDiff(oldLines: string[], newLines: string[]): Array<{
-    oldNum: number | null;
-    newNum: number | null;
-    text: string;
-    type: "removed" | "added" | "context";
-  }> {
-    const m = oldLines.length;
-    const n = newLines.length;
-    if (m === 0 && n === 0) return [];
-
-    // LCS table (only keep last row for memory efficiency)
-    // For long files we cap the diff to avoid O(m*n) blow-up
-    const maxDiff = 2000;
-
-    // Use a simplified patience-like diff: compare line-by-line
-    // For small diffs (common case) do full LCS
-    const useFullLcs = m * n <= maxDiff * 2;
-
-    if (useFullLcs && m <= 500 && n <= 500) {
-      return lcsDiff(oldLines, newLines);
-    }
-
-    // Fallback: show old removed, new added with line numbers
-    return simpleDiff(oldLines, newLines);
-  }
-
-  function lcsDiff(oldLines: string[], newLines: string[]): Array<{
-    oldNum: number | null;
-    newNum: number | null;
-    text: string;
-    type: "removed" | "added" | "context";
-  }> {
-    const m = oldLines.length;
-    const n = newLines.length;
-
-    // Build LCS table
-    const dp: number[][] = Array.from({ length: m + 1 }, () =>
-      Array(n + 1).fill(0)
-    );
-    for (let i = 1; i <= m; i++) {
-      for (let j = 1; j <= n; j++) {
-        if (oldLines[i - 1] === newLines[j - 1]) {
-          dp[i][j] = dp[i - 1][j - 1] + 1;
-        } else {
-          dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-        }
-      }
-    }
-
-    // Backtrack to produce diff
-    const result: Array<{
-      oldNum: number | null;
-      newNum: number | null;
-      text: string;
-      type: "removed" | "added" | "context";
-    }> = [];
-
-    let i = m;
-    let j = n;
-    while (i > 0 || j > 0) {
-      if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
-        result.unshift({
-          oldNum: i,
-          newNum: j,
-          text: oldLines[i - 1],
-          type: "context",
-        });
-        i--;
-        j--;
-      } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-        result.unshift({
-          oldNum: null,
-          newNum: j,
-          text: newLines[j - 1],
-          type: "added",
-        });
-        j--;
-      } else {
-        result.unshift({
-          oldNum: i,
-          newNum: null,
-          text: oldLines[i - 1],
-          type: "removed",
-        });
-        i--;
-      }
-    }
-    return result;
-  }
-
-  function simpleDiff(oldLines: string[], newLines: string[]): Array<{
-    oldNum: number | null;
-    newNum: number | null;
-    text: string;
-    type: "removed" | "added" | "context";
-  }> {
-    const result: Array<{
-      oldNum: number | null;
-      newNum: number | null;
-      text: string;
-      type: "removed" | "added" | "context";
-    }> = [];
-    for (let i = 0; i < oldLines.length; i++) {
-      result.push({ oldNum: i + 1, newNum: null, text: oldLines[i], type: "removed" });
-    }
-    for (let i = 0; i < newLines.length; i++) {
-      result.push({ oldNum: null, newNum: i + 1, text: newLines[i], type: "added" });
-    }
-    return result;
-  }
-
   // 卡片头部显示相对路径 + 文件名 (悬停 title 可看完整绝对路径)
-  let relPath = $derived(displayPath(filePath));
+  let relPath = $derived(displayPath(filePath, workingDir));
   let dir = $derived(dirname(relPath));
   let name = $derived(basename(filePath));
   let hasError = $derived(isError());
@@ -217,16 +69,7 @@
     return computeDiff(ol, nl);
   });
 
-  /** Added/removed counts in one pass over the diff. */
-  let diffStat = $derived.by(() => {
-    let added = 0;
-    let removed = 0;
-    for (const l of diffLines) {
-      if (l.type === "added") added++;
-      else if (l.type === "removed") removed++;
-    }
-    return { added, removed };
-  });
+  let diffStat = $derived.by(() => computeStat(diffLines));
 </script>
 
 <div class="edit-card">
@@ -344,13 +187,13 @@
     font-variant-numeric: tabular-nums;
   }
   .diffstat-add {
-    color: #65b891;
+    color: var(--color-diff-add);
   }
   .diffstat-sep {
     color: var(--text-tertiary, #4d483e);
   }
   .diffstat-del {
-    color: #dc5a5a;
+    color: var(--color-diff-del);
   }
   .edit-duration {
     color: var(--text-tertiary, #4d483e);
