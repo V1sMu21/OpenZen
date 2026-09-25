@@ -141,6 +141,10 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
   let firstDoneText: TextPart | undefined;
   let firstDoneReasoning: ReasoningPart | undefined;
   const unpairedTools: ToolInvocationPart[] = [];
+  // Ids for the `user_intervention` cards lifted out of the saved stream: they
+  // are the Svelte `{#each}` keys of the bubble, so they must stay unique even
+  // when the user interjects several times with the same text.
+  let streamInterventionSeq = 0;
 
   function noteTextPart(part: TextPart) {
     if (!firstDoneText && part.state === 'done') firstDoneText = part;
@@ -317,6 +321,25 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
           if (typeof item.duration_ms === 'number' && item.duration_ms > 0) {
             part.durationMs = item.duration_ms;
           }
+        }
+        break;
+      }
+      // ── A user interjection injected while this turn was running ──
+      // Emitted at its position IN the stream, so a restored session shows
+      // the card at the point the user actually cut in. Folding the stored
+      // intervention message onto the tail of the bubble (see
+      // parseSessionMessages) instead put it after the reply text and right
+      // before the deliverables card (user report 2026-09-25).
+      case 'user_intervention': {
+        const content = String(item.content ?? '');
+        if (content.trim()) {
+          parts.push({
+            type: 'data',
+            id: `intervention_stream_${streamInterventionSeq++}`,
+            dataType: 'user_intervention',
+            content,
+            transient: false,
+          });
         }
         break;
       }

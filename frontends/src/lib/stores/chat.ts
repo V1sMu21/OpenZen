@@ -441,40 +441,120 @@ function createChatStore() {
     //
     // Iterated forwards so several interventions in one turn keep their
     // chronological order inside the bubble.
+    //
+    // A turn whose saved stream recorded the injection itself
+    // (`user_intervention` events, lifted into cards by parts.ts) already
+    // renders it at the point the user cut in. Folding a second copy onto the
+    // bubble's tail is what pushed the card after the reply text and next to
+    // the deliverables card (user report 2026-09-25), so a stored
+    // intervention is folded ONLY when the stream of its turn did not record
+    // it (the run died before after_run persisted the reply, or the event was
+    // never written).
+    const isInterventionMessage = (m: Message) =>
+      m.role === "user" && !!m.content?.startsWith("[USER INTERVENTION");
+    const interventionCounts = (parts: UIMessagePart[]) => {
+      const counts = new Map<string, number>();
+      for (const p of parts) {
+        if (p.type !== "data" || p.dataType !== "user_intervention") continue;
+        const text = p.content.trim();
+        counts.set(text, (counts.get(text) ?? 0) + 1);
+      }
+      return counts;
+    };
+
+    // The backend stores an injection that arrived as an ordinary message in
+    // BOTH places (the message AND a stream event). That text is already on
+    // screen as the user's own bubble, so drop the duplicate stream card.
+    const visibleUserTexts = new Map<string, number>();
+    for (const m of messages) {
+      if (m.role !== "user" || isInterventionMessage(m)) continue;
+      const text = m.content.trim();
+      if (text) visibleUserTexts.set(text, (visibleUserTexts.get(text) ?? 0) + 1);
+    }
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.role !== "assistant" || !m.parts?.length) continue;
+      if (interventionCounts(m.parts).size === 0) continue;
+      const kept = m.parts.filter((p) => {
+        if (p.type !== "data" || p.dataType !== "user_intervention") return true;
+        const text = p.content.trim();
+        const left = visibleUserTexts.get(text) ?? 0;
+        if (left > 0) {
+          visibleUserTexts.set(text, left - 1);
+          return false;
+        }
+        return true;
+      });
+      if (kept.length !== m.parts.length) messages[i] = { ...m, parts: kept };
+    }
+
+    // Collect the stored interventions together with the turn that received
+    // them, keyed by the message object so that replacing a target later does
+    // not lose the remaining folds of the same turn.
+    const interventionMsgs = new Set<Message>();
+    const foldsByTarget = new Map<Message, Array<{ id: string; content: string }>>();
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
-      if (msg.role !== "user" || !msg.content?.startsWith("[USER INTERVENTION")) continue;
-      let target = -1;
+      if (!isInterventionMessage(msg)) continue;
+      let target: Message | undefined;
       for (let j = i + 1; j < messages.length; j++) {
         if (messages[j].role === "assistant") {
-          target = j;
+          target = messages[j];
           break;
         }
       }
-      if (target < 0) {
+      if (!target) {
         for (let j = i - 1; j >= 0; j--) {
           if (messages[j].role === "assistant") {
-            target = j;
+            target = messages[j];
             break;
           }
         }
       }
-      if (target >= 0) {
-        const parts = messages[target].parts ?? [];
-        const cleanContent = msg.content.replace(/^\[USER INTERVENTION.*?\n/, "");
+      interventionMsgs.add(msg);
+      if (!target) continue;
+      const list = foldsByTarget.get(target) ?? [];
+      list.push({
+        id: msg.id,
+        content: msg.content.replace(/^\[USER INTERVENTION.*?\n/, ""),
+      });
+      foldsByTarget.set(target, list);
+    }
+
+    for (const [target, items] of foldsByTarget) {
+      // Copy: for an assistant message this array is the one
+      // `convertStreamEventsToParts` cached, and pushing into it in place
+      // accumulates another card on every re-parse.
+      const parts = [...(target.parts ?? [])];
+      const rendered = interventionCounts(parts);
+      for (const it of items) {
+        const text = it.content.trim();
+        const left = rendered.get(text) ?? 0;
+        if (left > 0) {
+          // The stream already rendered this one, in position.
+          rendered.set(text, left - 1);
+          continue;
+        }
         parts.push({
           type: "data",
-          id: `intervention_${messages[target].id}_${i}`,
+          // Keyed by the intervention's OWN message id, never by a loop
+          // index: consecutive interventions were processed at the same index
+          // of the spliced array and produced identical part ids. A duplicate
+          // key in ChatMessage's keyed each throws `each_key_duplicate` in
+          // Svelte 5 (production included), which aborts the message-list
+          // render — the chat area then keeps painting the PREVIOUS session's
+          // conversation while the sidebar, header and store have already
+          // switched (report 2026-09-25: an ungrouped session would not open).
+          id: `intervention_${it.id}`,
           dataType: "user_intervention",
-          content: cleanContent,
+          content: it.content,
           transient: false,
         } as UIMessagePart);
-        messages[target] = { ...messages[target], parts };
       }
-      messages.splice(i, 1);
-      i--;
+      const at = messages.indexOf(target);
+      if (at >= 0) messages[at] = { ...target, parts };
     }
-    return messages;
+    return messages.filter((m) => !interventionMsgs.has(m));
   }
 
   function findPendingAskUserIn(messages: Message[]): PendingAskUser | null {
