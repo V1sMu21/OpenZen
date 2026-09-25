@@ -2076,7 +2076,12 @@ where
                             };
                             enriched
                         }
-                        Err(e) => format!("{{\"error\":\"{}\"}}", e),
+                        // Serialise via serde: a hand-rolled format! envelope
+                        // emits INVALID JSON as soon as the error message
+                        // contains a quote or a newline, and every consumer
+                        // that JSON.parse()s the result then mistakes the
+                        // failure for a success.
+                        Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
                     };
                     let tc_id = tool_meta
                         .iter()
