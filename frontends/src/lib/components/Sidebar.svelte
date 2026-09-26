@@ -7,6 +7,7 @@
   import { t, locale, switchLocale } from "../i18n";
   import { settings } from "../stores/settings.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import ImportSessionsDialog from "./ImportSessionsDialog.svelte";
 
   let {
     sidebarOpen = $bindable(true),
@@ -20,6 +21,7 @@
   let filterRef: { focus: () => void } | undefined = $state();
 
   let triggerAddDialog = $state(false);
+  let importOpen = $state(false);
 
   function handleAddProject() {
     triggerAddDialog = true;
@@ -58,6 +60,18 @@
       <button class="quick-new-btn" onclick={() => handleAddProject()} title={$t("sidebar.addProject")}>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
           <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <!-- 导入会话 / Import sessions — same sizing + hover as the + button -->
+      <button
+        class="quick-new-btn import-btn"
+        onclick={() => (importOpen = true)}
+        title={$t("import.tooltip")}
+        aria-label={$t("import.button")}
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M8 2v7m0 0L5.4 6.4M8 9l2.6-2.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
         </svg>
       </button>
     </div>
@@ -106,6 +120,8 @@
 </aside>
 
 <SettingsPanel />
+
+<ImportSessionsDialog open={importOpen} onClose={() => (importOpen = false)} />
 
 <style>
   .sidebar {
@@ -181,6 +197,12 @@
   .quick-new-btn:hover {
     background: var(--color-surface-elevated);
     color: var(--color-ink);
+  }
+
+  /* 导入会话入口 — 复用 .quick-new-btn 的尺寸与悬停处理, 仅补键盘焦点态 */
+  .quick-new-btn.import-btn:focus-visible {
+    outline: 1px solid var(--color-primary);
+    outline-offset: 1px;
   }
 
   .sidebar-divider {

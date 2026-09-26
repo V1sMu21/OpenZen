@@ -33,6 +33,167 @@ pub fn clear_session_messages(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Foreign session import (ZCode / DeepSeek Harness)
+// ---------------------------------------------------------------------------
+
+/// Where the import ledger lives: `<data root>/openzen/imported_sessions.json`.
+fn import_ledger_path() -> std::path::PathBuf {
+    oz_import::ImportLedger::default_path(&data_dir())
+}
+
+/// `{ sources: [{id,label,available,detail,session_count,error}] }`.
+///
+/// Never fails: a source that cannot be read is reported with
+/// `available: false` plus its error so the dialog can still show the other.
+#[tauri::command]
+pub async fn scan_import_sources() -> Result<serde_json::Value, String> {
+    let sources = tokio::task::spawn_blocking(|| {
+        let paths = oz_import::SourcePaths::default();
+        oz_import::scan_sources(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "sources": sources }))
+}
+
+/// `{ source, error, sessions: [{source_id,title,directory,created_at,
+/// message_count,already_imported}] }`.
+///
+/// A discovery failure is returned in `error` (not as an IPC rejection) so the
+/// dialog can render it inline without losing the source tabs.
+#[tauri::command]
+pub async fn import_list_sessions(source: String) -> Result<serde_json::Value, String> {
+    let requested = source.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let paths = oz_import::SourcePaths::default();
+        let src = oz_import::parse_source(&source)?;
+        oz_import::list_sessions(src, &paths).map(|sessions| (src, sessions))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match result {
+        Ok((src, mut sessions)) => {
+            // Mark rows already pulled in by an earlier import.
+            let ledger = oz_import::ImportLedger::load(import_ledger_path());
+            for s in sessions.iter_mut() {
+                s.already_imported = ledger.is_imported(src, &s.source_id);
+            }
+            Ok(serde_json::json!({
+                "source": src.id(),
+                "error": serde_json::Value::Null,
+                "sessions": sessions,
+            }))
+        }
+        Err(err) => Ok(serde_json::json!({
+            "source": requested,
+            "error": err.to_string(),
+            "sessions": [],
+        })),
+    }
+}
+
+/// Import the requested source sessions as new OpenZen sessions.
+///
+/// Returns `{ imported: [{source_id,session_id,message_count}],
+/// errors: [{source_id,error}] }`. Each session is parsed off-thread first, so
+/// a single unreadable log does not abort the whole batch; the session store is
+/// only locked once the whole batch is converted.
+#[tauri::command]
+pub async fn import_sessions(
+    source: String,
+    ids: Vec<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let state = state.inner().clone();
+
+    if ids.is_empty() {
+        return Ok(serde_json::json!({ "imported": [], "errors": [] }));
+    }
+
+    let parsed = tokio::task::spawn_blocking(move || {
+        let paths = oz_import::SourcePaths::default();
+        let src = oz_import::parse_source(&source)?;
+        let mut ok = Vec::new();
+        let mut errs = Vec::new();
+        for id in ids {
+            match oz_import::read_session(src, &id, &paths) {
+                // A session with no conversational messages would create an
+                // empty OpenZen session; report it instead of importing it.
+                Ok(session) if session.messages.is_empty() => {
+                    errs.push(serde_json::json!({
+                        "source_id": id,
+                        "error": "session contains no messages",
+                    }));
+                }
+                Ok(session) => ok.push(session),
+                Err(e) => errs.push(serde_json::json!({
+                    "source_id": id,
+                    "error": e.to_string(),
+                })),
+            }
+        }
+        Ok::<_, oz_import::ImportError>((src, ok, errs))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let (src, sessions, errors) = match parsed {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(serde_json::json!({
+                "imported": [],
+                "errors": [{ "source_id": "", "error": e.to_string() }],
+            }))
+        }
+    };
+
+    let mut imported = Vec::new();
+    let mut ledger = oz_import::ImportLedger::load(import_ledger_path());
+    {
+        let mut store = lock_poison_guard(&state.sessions);
+        for session in sessions {
+            let working_dir = session
+                .directory
+                .clone()
+                .unwrap_or_else(|| state.working_dir.clone());
+            let info = store.create_with_project(
+                &session.title,
+                None,
+                None,
+                Some(&working_dir),
+            );
+            let message_count = session.messages.len();
+            if let Some(entry) = store.get_mut(&info.id) {
+                entry.messages = session.messages;
+                entry.info.message_count = message_count;
+                // Preserve the original timeline so imported history sorts
+                // where it actually happened.
+                if let Some(created) = session.created_at {
+                    entry.created_at = created;
+                    entry.info.created_at = created.to_rfc3339();
+                }
+            }
+            ledger.record(src, &session.source_id, &info.id, &session.title, message_count);
+            imported.push(serde_json::json!({
+                "source_id": session.source_id,
+                "session_id": info.id,
+                "message_count": message_count,
+            }));
+        }
+        // create_with_project persists each new entry, but the message bodies
+        // are attached afterwards; bump the fingerprint so the full snapshot
+        // lands on disk.
+        store.save();
+    }
+    if let Err(e) = ledger.save() {
+        debug_log(&format!("[openzen] import ledger save failed: {e}"));
+    }
+
+    Ok(serde_json::json!({ "imported": imported, "errors": errors }))
+}
+
 #[tauri::command]
 pub fn ping(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     let sessions = lock_poison_guard(&state.sessions);

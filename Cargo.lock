@@ -3964,6 +3964,7 @@ dependencies = [
  "oz-config",
  "oz-core",
  "oz-core-types",
+ "oz-import",
  "oz-llm",
  "oz-mcp",
  "oz-memory",
@@ -4119,6 +4120,21 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "oz-import"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "zstd 0.13.3",
 ]
 
 [[package]]

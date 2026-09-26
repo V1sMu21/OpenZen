@@ -15,6 +15,7 @@ members = [
     "crates/oz-server",
     "crates/oz-reflect",
     "crates/oz-plugin",
+    "crates/oz-import",
     "crates/oz-tui",
     "crates/oz-tests",
     "crates/oz-agent",

@@ -17,6 +17,8 @@ use tokio::task::JoinHandle;
 mod approval;
 pub mod projects;
 mod sidepanel;
+#[cfg(test)]
+mod import_write_path_tests;
 
 const SESSION_STATE_FILE: &str = "openzen/sessions.json";
 
@@ -1480,6 +1482,9 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::clear_session_messages,
+            commands::scan_import_sources,
+            commands::import_list_sessions,
+            commands::import_sessions,
             commands::ping,
             commands::log_frontend,
             commands::computer_screenshot_data,

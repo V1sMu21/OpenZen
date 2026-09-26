@@ -32,6 +32,7 @@ oz-llm = { path = "../crates/oz-llm" }
 oz-tools = { path = "../crates/oz-tools" }
 oz-memory = { path = "../crates/oz-memory" }
 oz-server = { path = "../crates/oz-server" }
+oz-import = { path = "../crates/oz-import" }
 oz-safety = { path = "../crates/oz-safety" }
 oz-scheduler = { path = "../crates/oz-scheduler" }
 oz-skill-mcp = { path = "../crates/oz-skill-mcp" }
