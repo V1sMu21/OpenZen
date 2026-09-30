@@ -59,7 +59,16 @@ impl ToolRegistry {
         ctx: &ToolContext,
     ) -> Result<ToolOutput, oz_core_types::ToolError> {
         match self.handlers.get(name) {
-            Some(tool) => tool.execute(args, ctx).await,
+            Some(tool) => {
+                // Last line of defence for weakly schema-adhering models: a
+                // call whose payload is correct but whose *keys* are aliases
+                // (`cmd`/`command` instead of `code`, `path`/`file` instead of
+                // `file_path`, the tool name itself as the key) used to be
+                // rejected with "missing `code` argument". Re-key before the
+                // tool reads its arguments. See `oz_core_types::tool_args`.
+                let args = canonicalize_dispatch_args(name, args, tool.as_ref());
+                tool.execute(args, ctx).await
+            }
             None => Ok(ToolOutput::unknown_tool(name)),
         }
     }
@@ -159,6 +168,37 @@ impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Re-key a tool call's arguments onto the tool's canonical parameter names.
+///
+/// Curated builtin tools use the alias table in `oz_core_types::tool_args`;
+/// every other tool (MCP / dynamic) falls back to a schema-driven repair that
+/// maps the tool-name key or a lone unrecognized string key onto the schema's
+/// first required property. Unchanged arguments are returned untouched, so the
+/// happy path pays only a few string comparisons.
+fn canonicalize_dispatch_args(
+    name: &str,
+    args: serde_json::Value,
+    tool: &dyn ToolHandler,
+) -> serde_json::Value {
+    if !args.is_object() {
+        return args;
+    }
+    let repaired = oz_core_types::canonicalize_tool_args(name, args.clone());
+    let repaired = if oz_core_types::has_alias_table(name) {
+        repaired
+    } else {
+        oz_core_types::repair_args_against_schema(name, repaired, &tool.parameters())
+    };
+    if repaired != args {
+        tracing::warn!(
+            "[tools] re-keyed non-canonical arguments for {name}: keys {:?} -> keys {:?}",
+            oz_core_types::arg_keys(&args),
+            oz_core_types::arg_keys(&repaired),
+        );
+    }
+    repaired
 }
 
 #[cfg(test)]
@@ -456,5 +496,220 @@ mod tests {
             assert!(!def.function.description.is_empty());
             assert!(def.function.parameters.is_object());
         }
+    }
+
+    // ── non-canonical argument keys (weak schema adherence) ──
+
+    /// Records the arguments the tool actually received.
+    struct CaptureTool(std::sync::Arc<std::sync::Mutex<serde_json::Value>>);
+
+    #[async_trait]
+    impl ToolHandler for CaptureTool {
+        fn name(&self) -> String {
+            "capture".to_string()
+        }
+        fn description(&self) -> String {
+            "capture".to_string()
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            })
+        }
+        async fn execute(
+            &self,
+            args: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolOutput, ToolError> {
+            *self.0.lock().unwrap() = args;
+            Ok(ToolOutput::success(serde_json::json!({"ok": true})))
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_rekeys_alias_keys_for_builtin_tools() {
+        let mut reg = ToolRegistry::new();
+        reg.register(crate::code_run::CodeRunTool);
+        let out = reg
+            .dispatch(
+                "code_run",
+                serde_json::json!({"cmd": "echo canonicalized-ok", "mode": "bash", "timeout": 20}),
+                &ctx(),
+            )
+            .await
+            .expect("dispatch");
+        assert_eq!(out.data["exit_code"], 0, "output: {:?}", out.data);
+        assert!(
+            out.data["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("canonicalized-ok"),
+            "stdout: {:?}",
+            out.data["stdout"]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_rekeys_tool_name_as_argument_key() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+        let mut reg = ToolRegistry::new();
+        reg.register_with_name("code_run", CaptureTool(seen.clone()));
+        reg.dispatch("code_run", serde_json::json!({"code_run": "echo hi"}), &ctx())
+            .await
+            .expect("dispatch");
+        assert_eq!(seen.lock().unwrap()["code"], "echo hi");
+    }
+
+    #[tokio::test]
+    async fn dispatch_repairs_mcp_style_args_from_schema() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+        let mut reg = ToolRegistry::new();
+        reg.register_with_name("mcp__docs__search", CaptureTool(seen.clone()));
+        reg.dispatch("mcp__docs__search", serde_json::json!({"q": "hi"}), &ctx())
+            .await
+            .expect("dispatch");
+        assert_eq!(seen.lock().unwrap()["query"], "hi");
+    }
+
+    // ── fixture-driven regression: real "missing `code` argument" sessions ──
+
+    /// Deep-collect every string in `v` containing a `<tool_use:…>` transcript tag.
+    fn collect_transcript_strings(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => {
+                if s.contains("<tool_use:") {
+                    out.push(s.clone());
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|v| collect_transcript_strings(v, out)),
+            serde_json::Value::Object(m) => {
+                m.values().for_each(|v| collect_transcript_strings(v, out))
+            }
+            _ => {}
+        }
+    }
+
+    /// Extract `(tool_name, input)` pairs from a session transcript.
+    fn tool_uses_from_transcript(text: &str) -> Vec<(String, serde_json::Value)> {
+        let mut found = Vec::new();
+        let unescaped = text.replace("\\n", "\n");
+        for line in unescaped.split('\n') {
+            let Some(idx) = line.find("<tool_use:") else {
+                continue;
+            };
+            let rest = &line[idx + "<tool_use:".len()..];
+            let Some(close) = rest.find('>') else { continue };
+            let name = rest[..close].trim().to_string();
+            let raw = rest[close + 1..].trim();
+            if raw.is_empty() {
+                continue;
+            }
+            // Depending on how many times the transcript was JSON-encoded, the
+            // payload arrives either as plain JSON or with escaped quotes.
+            let parsed = serde_json::from_str::<serde_json::Value>(raw).ok().or_else(|| {
+                let decoded: String = serde_json::from_str(&format!("\"{raw}\"")).ok()?;
+                serde_json::from_str::<serde_json::Value>(&decoded).ok()
+            });
+            if let Some(input) = parsed {
+                found.push((name, input));
+            }
+        }
+        found
+    }
+
+    /// The real longtask transcripts contain the exact call shapes that were
+    /// failing in production (`{"cmd": …, "mode": "bash"}`, `{"command": …}`,
+    /// `{"content": …}`, the tool name as the key). Every call we touch must
+    /// end up with a required argument it did not have before — canonicalization
+    /// moves values, it never leaves a broken call broken in the same way.
+    #[test]
+    fn real_session_transcripts_gain_canonical_keys() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/longtask");
+        if !dir.exists() {
+            return; // CI-safe: fixture lives only in this checkout
+        }
+        let reg = ToolRegistry::build_default();
+        let mut strings = Vec::new();
+        let mut files = 0usize;
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let ckpt = entry.path().join("openzen/checkpoints");
+            let Ok(rd) = std::fs::read_dir(&ckpt) else {
+                continue;
+            };
+            for f in rd.flatten() {
+                let Ok(text) = std::fs::read_to_string(f.path()) else {
+                    continue;
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                files += 1;
+                collect_transcript_strings(&v, &mut strings);
+            }
+        }
+        assert!(files > 0, "no checkpoint files under {}", dir.display());
+
+        let mut calls = 0usize;
+        let mut foreign_keyed = 0usize;
+        let mut unrepaired = Vec::new();
+        for s in &strings {
+            for (name, input) in tool_uses_from_transcript(s) {
+                let Some(tool) = reg.get(&name) else { continue };
+                if !input.is_object() {
+                    continue;
+                }
+                calls += 1;
+                let schema = serde_json::json!(tool.parameters());
+                let props: Vec<&str> = schema
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .map(|p| p.keys().map(|k| k.as_str()).collect())
+                    .unwrap_or_default();
+                // A key the tool's own schema does not define is the signature
+                // of the failure this fix targets.
+                let uses_foreign_key = input
+                    .as_object()
+                    .map(|m| m.keys().any(|k| !props.contains(&k.as_str())))
+                    .unwrap_or(false);
+                let primary = schema
+                    .get("required")
+                    .and_then(|r| r.as_array())
+                    .and_then(|r| r.first())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !uses_foreign_key || primary.is_empty() {
+                    continue;
+                }
+                foreign_keyed += 1;
+                let fixed = canonicalize_dispatch_args(&name, input.clone(), tool);
+                if fixed.get(primary).is_none() {
+                    unrepaired.push((name.clone(), oz_core_types::arg_keys(&input)));
+                }
+            }
+        }
+        assert!(calls >= 20, "fixture should exercise tools, got {calls} calls");
+        assert!(
+            foreign_keyed >= 5,
+            "expected the fixture to contain non-canonical calls, got {foreign_keyed}"
+        );
+        assert!(
+            unrepaired.is_empty(),
+            "re-keying left calls without their primary argument: {}",
+            serde_json::to_string(&unrepaired).unwrap_or_default()
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_leaves_canonical_args_alone() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+        let mut reg = ToolRegistry::new();
+        reg.register_with_name("mcp__docs__search", CaptureTool(seen.clone()));
+        let args = serde_json::json!({"query": "keep", "limit": 3});
+        reg.dispatch("mcp__docs__search", args.clone(), &ctx())
+            .await
+            .expect("dispatch");
+        assert_eq!(*seen.lock().unwrap(), args);
     }
 }

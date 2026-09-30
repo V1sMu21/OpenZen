@@ -596,7 +596,8 @@ pub async fn parse_openai_sse(
                         if t.available_emitted {
                             continue;
                         }
-                        let parsed_args: serde_json::Value = normalize_tool_args(
+                        let parsed_args: serde_json::Value = normalize_tool_args_for(
+                            &t.name,
                             serde_json::from_str(&t.args)
                                 .unwrap_or_else(|_| serde_json::Value::String(t.args.clone())),
                         );
@@ -917,7 +918,8 @@ pub async fn parse_openai_sse(
                                                     // UI/history see carry the real
                                                     // payload, not a content-wrapped
                                                     // imitation.
-                                                    let normalized = normalize_tool_args(
+                                                    let normalized = normalize_tool_args_for(
+                                                        tc_name,
                                                         serde_json::from_str::<serde_json::Value>(
                                                             tc_args,
                                                         )
@@ -1012,7 +1014,8 @@ pub async fn parse_openai_sse(
             }
             let raw_args = t.args.clone();
             let tc_id = t.id.clone();
-            let parsed_args: serde_json::Value = normalize_tool_args(
+            let parsed_args: serde_json::Value = normalize_tool_args_for(
+                &t.name,
                 serde_json::from_str(&raw_args)
                     .unwrap_or_else(|_| serde_json::Value::String(raw_args.clone())),
             );
@@ -1090,6 +1093,27 @@ pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
     current
 }
 
+/// [`normalize_tool_args`] plus canonical argument-key recovery for a specific
+/// tool: models with weak schema adherence emit the right payload under the
+/// wrong key (`cmd`/`command` for `code`, `path`/`file` for `file_path`, or the
+/// tool name itself as the key), which the tool then rejects as a missing
+/// argument. `oz_core_types::canonicalize_tool_args` re-keys those onto the
+/// canonical names, so the event, the persisted history and the executed call
+/// all agree — and a model that imitates its own history imitates the correct
+/// shape. Execution is guarded a second time in `ToolRegistry::dispatch`.
+pub fn normalize_tool_args_for(tool: &str, v: serde_json::Value) -> serde_json::Value {
+    let normalized = normalize_tool_args(v);
+    let canonical = oz_core_types::canonicalize_tool_args(tool, normalized.clone());
+    if canonical != normalized {
+        tracing::warn!(
+            "[oz-llm] re-keyed tool args for {tool}: keys {:?} -> keys {:?}",
+            oz_core_types::arg_keys(&normalized),
+            oz_core_types::arg_keys(&canonical),
+        );
+    }
+    canonical
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1165,5 +1189,38 @@ mod tests {
     fn normalize_leaves_non_json_content_wrapper_alone() {
         let v = serde_json::json!({"content": "{\"code\": broken"});
         assert_eq!(normalize_tool_args(v.clone()), v);
+    }
+
+    #[test]
+    fn normalize_for_tool_unwraps_then_rekeys() {
+        // The wrapper and the alias can appear together: collapse the wrapper
+        // first, then map the alias onto the canonical `code`.
+        let v = serde_json::json!({"content": "{\"cmd\":\"ls -la\"}"});
+        let got = normalize_tool_args_for("code_run", v);
+        assert_eq!(got["code"], "ls -la");
+    }
+
+    #[test]
+    fn normalize_for_tool_rekeys_alias_only_payload() {
+        let got = normalize_tool_args_for(
+            "code_run",
+            serde_json::json!({"cmd": "ls", "mode": "bash", "timeout": 5}),
+        );
+        assert_eq!(got["code"], "ls");
+        assert_eq!(got["type"], "bash");
+    }
+
+    #[test]
+    fn normalize_for_tool_keeps_write_body_untouched() {
+        // A file body is not arguments — it must survive verbatim.
+        let v = serde_json::json!({"file_path": "/tmp/a.txt", "content": "{\"not\":\"args\"}"});
+        let got = normalize_tool_args_for("write", v.clone());
+        assert_eq!(got, v);
+    }
+
+    #[test]
+    fn normalize_for_tool_passes_canonical_args_through() {
+        let v = serde_json::json!({"code": "echo hi", "timeout": 30});
+        assert_eq!(normalize_tool_args_for("code_run", v.clone()), v);
     }
 }

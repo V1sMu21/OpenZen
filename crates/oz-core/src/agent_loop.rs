@@ -1118,7 +1118,7 @@ where
                                             // stream terminator applies, so
                                             // speculatively executed read-only
                                             // tools see the real payload too.
-                                            let parsed = oz_llm::stream::normalize_tool_args(parsed_raw);
+                                            let parsed = oz_llm::stream::normalize_tool_args_for(&name, parsed_raw);
                                             // Gate speculative execution with the
                                             // exact same guard Phase 2 applies —
                                             // tools needing approval or blocked are

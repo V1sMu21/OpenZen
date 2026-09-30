@@ -118,7 +118,7 @@ impl ToolHandler for FileReadTool {
         "read".to_string()
     }
     fn description(&self) -> String {
-        "Read a file (txt, pdf, docx, pptx, xlsx) with optional line range. Do NOT re-read files you just wrote/edited — failures report themselves and the harness tracks file state. Use start/count for long files.".to_string()
+        "Read a file (txt, pdf, docx, pptx, xlsx) with optional line range. Parameter names are fixed: `file_path` (NOT `path`/`file`/`filename`), optional `start` and `count`. Do NOT re-read files you just wrote/edited — failures report themselves and the harness tracks file state. Use start/count for long files.".to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
@@ -139,7 +139,11 @@ impl ToolHandler for FileReadTool {
     ) -> Result<ToolOutput, ToolError> {
         let path = args["file_path"].as_str().unwrap_or("");
         if path.is_empty() {
-            return Ok(ToolOutput::bad_json("read: missing file_path"));
+            return Ok(ToolOutput::bad_json(oz_core_types::missing_arg_error(
+                "read",
+                &["file_path"],
+                &args,
+            )));
         }
         if let Ok(meta) = tokio::fs::metadata(path).await {
             if meta.len() > MAX_READ_SIZE {
@@ -229,7 +233,7 @@ impl ToolHandler for FileWriteTool {
         "write".to_string()
     }
     fn description(&self) -> String {
-        "Write content to a file (creates parent dirs). No confirmation re-read after writing — failures report themselves.".to_string()
+        "Write content to a file (creates parent dirs). Parameter names are fixed: `file_path` (NOT `path`/`file`/`filename`) and `content` (NOT `text`/`data`/`body`). No confirmation re-read after writing — failures report themselves.".to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
@@ -250,7 +254,20 @@ impl ToolHandler for FileWriteTool {
         let path = args["file_path"].as_str().unwrap_or("");
         let content = args["content"].as_str().unwrap_or("");
         if path.is_empty() {
-            return Ok(ToolOutput::bad_json("write: missing file_path"));
+            return Ok(ToolOutput::bad_json(oz_core_types::missing_arg_error(
+                "write",
+                &["file_path"],
+                &args,
+            )));
+        }
+        // A *missing* `content` key used to silently write an empty file; an
+        // explicitly empty string stays legal (`touch`-style create).
+        if args.get("content").and_then(|v| v.as_str()).is_none() {
+            return Ok(ToolOutput::bad_json(oz_core_types::missing_arg_error(
+                "write",
+                &["content"],
+                &args,
+            )));
         }
         if !is_in_working_dir(path, &ctx.working_dir) {
             let hint = if !Path::new(path).is_absolute() {
@@ -308,9 +325,18 @@ impl ToolHandler for FilePatchTool {
         let old = args["old_string"].as_str().unwrap_or("");
         let new = args["new_string"].as_str().unwrap_or("");
         if path.is_empty() || old.is_empty() {
-            return Ok(ToolOutput::bad_json(
-                "patch: missing file_path or old_string",
-            ));
+            let mut missing: Vec<&str> = Vec::new();
+            if path.is_empty() {
+                missing.push("file_path");
+            }
+            if old.is_empty() {
+                missing.push("old_string");
+            }
+            return Ok(ToolOutput::bad_json(oz_core_types::missing_arg_error(
+                "patch",
+                &missing,
+                &args,
+            )));
         }
         if !is_in_working_dir(path, &ctx.working_dir) {
             let hint = if !Path::new(path).is_absolute() {
@@ -384,9 +410,18 @@ impl ToolHandler for FileEditTool {
         let old = args["old_string"].as_str().unwrap_or("");
         let new = args["new_string"].as_str().unwrap_or("");
         if path.is_empty() || old.is_empty() {
-            return Ok(ToolOutput::bad_json(
-                "edit: missing file_path or old_string",
-            ));
+            let mut missing: Vec<&str> = Vec::new();
+            if path.is_empty() {
+                missing.push("file_path");
+            }
+            if old.is_empty() {
+                missing.push("old_string");
+            }
+            return Ok(ToolOutput::bad_json(oz_core_types::missing_arg_error(
+                "edit",
+                &missing,
+                &args,
+            )));
         }
         if !is_in_working_dir(path, &ctx.working_dir) {
             let hint = if !Path::new(path).is_absolute() {
@@ -457,7 +492,11 @@ impl ToolHandler for GlobTool {
     ) -> Result<ToolOutput, ToolError> {
         let pattern = args["pattern"].as_str().unwrap_or("");
         if pattern.is_empty() {
-            return Ok(ToolOutput::bad_json("glob: missing pattern"));
+            return Ok(ToolOutput::bad_json(oz_core_types::missing_arg_error(
+                "glob",
+                &["pattern"],
+                &args,
+            )));
         }
         let base = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         // Path fence: this tool is on the no-approval safe list, so the
@@ -512,7 +551,11 @@ impl ToolHandler for GrepTool {
     ) -> Result<ToolOutput, ToolError> {
         let pattern = args["pattern"].as_str().unwrap_or("");
         if pattern.is_empty() {
-            return Ok(ToolOutput::bad_json("grep: missing pattern"));
+            return Ok(ToolOutput::bad_json(oz_core_types::missing_arg_error(
+                "grep",
+                &["pattern"],
+                &args,
+            )));
         }
         let base = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         if !is_in_working_dir(base, &ctx.working_dir) {

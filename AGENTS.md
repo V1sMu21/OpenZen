@@ -238,3 +238,63 @@ Rules:
 - Frontend-only changes do NOT trigger a Rust rebuild (assets embed at
   compile time): `touch src-tauri/src/main.rs src-tauri/src/lib.rs` before
   `cargo tauri build`, or the .app ships with the stale frontend.
+
+## Tool-argument aliases — canonicalization layer (2026-09-27)
+
+**Symptom** (recurring, twice mis-diagnosed as "already fixed"):
+`{"error":"code_run: missing `code` argument","status":"error"}` and
+`{"error":"write: missing file_path","status":"error"}` on calls whose
+payload was clearly present. Real frequency in `~/.openzen/openzen/sessions.json`:
+`missing `code` argument` ×422, `missing file_path` ×72.
+
+**Cause**: weak-schema models (the local MLX models especially) send the right
+value under the wrong *key*:
+- `cmd` / `command` / `script` / `content` instead of `code`
+- `mode: "bash"` where the schema means `type`
+- `path` / `file` / `filename` / `filePath` instead of `file_path`
+- the tool name itself as the key: `{"code_run": "…", "type": "bash"}`
+
+The tool read only its canonical keys and rejected the call. Note this is a
+*different* shape from the earlier `normalize_tool_args` fix (which collapses
+doubly-JSON-encoded and single-key `{"content": "<json>"}` wrappers) — that one
+still works and is still needed.
+
+**Fix (two layers, one source of truth)**:
+1. `crates/oz-core-types/src/tool_args.rs`
+   - `canonicalize_tool_args(tool, args)` — curated alias table for code_run /
+     read / write / edit / patch / glob / grep / ls, plus the tool-name-as-key
+     and lone-unknown-string-key fallbacks. Moves values, never invents them;
+     never overwrites a canonical key; idempotent.
+   - `repair_args_against_schema(tool, args, schema)` — schema-driven repair for
+     MCP / dynamically registered tools (first `required` property).
+   - `missing_arg_error(tool, missing, args)` — errors now name the expected
+     key **and** the keys the model actually sent, so the next turn can
+     self-correct instead of blind-retrying.
+2. Wiring
+   - `crates/oz-tools/src/registry.rs` → `ToolRegistry::dispatch` re-keys before
+     `execute`. This is the single execution choke point for every runtime path
+     (`ToolRegistryHandler` → `registry.dispatch`; the legacy `shared_registry()`
+     is test-only). It logs `[tools] re-keyed non-canonical arguments …`.
+   - `crates/oz-llm/src/stream.rs` → `normalize_tool_args_for(tool, args)` used at
+     all three parse sites (mid-stream flush, speculative `ToolCallReady`,
+     stream terminator) and in `oz-core/src/agent_loop.rs`, so the emitted event,
+     the persisted `ContentBlock::ToolUse` and the executed call all carry the
+     canonical keys — a model imitating its own history then imitates the
+     correct shape.
+
+Also changed: `write` no longer silently writes an **empty file** when the
+`content` key is absent (an explicit `""` is still a legal touch-style create),
+and tool descriptions now state the fixed parameter names.
+
+**Regression guard**: `crates/oz-tools/src/registry.rs` →
+`real_session_transcripts_gain_canonical_keys` replays every real
+`<tool_use:…>` from `tests/longtask/*/openzen/checkpoints/*.json` and asserts
+that any call using a key outside the tool's schema still ends up with its
+primary argument (self-skips when the fixture is absent). Per-shape unit tests
+live in `crates/oz-core-types/src/tool_args.rs` (`real_shape_*`,
+`canonicalization_is_idempotent`).
+
+Do **not** "fix" this by rewriting persisted history at request time — history
+is only canonicalized as it is parsed/stored, so an old failing call keeps its
+old error text next to it (rewriting it would show a canonical call paired with
+a "missing argument" error, which teaches the wrong lesson).
