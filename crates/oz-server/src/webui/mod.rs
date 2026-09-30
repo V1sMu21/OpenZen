@@ -1275,17 +1275,23 @@ async fn run_agent_for_session(
             let stream_events_json: Vec<serde_json::Value> = {
                 let events = collected_events.lock().unwrap();
                 let arrivals = event_arrival_ms.lock().unwrap();
+                // Arrival samples are RELATIVE offsets from the collector's
+                // base, so the fallback for a missing trailing sample must be
+                // relative too — an absolute epoch-ms here produced
+                // ~20-day durations on the final persisted event.
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
+                let rel_now =
+                    now_ms.saturating_sub(start_ms.lock().unwrap().unwrap_or(now_ms));
                 events
                     .iter()
                     .enumerate()
                     .filter_map(|(i, e)| {
                         let mut v = serde_json::to_value(e).ok()?;
                         let arr_i = arrivals.get(i).copied().unwrap_or(0);
-                        let next_arr = arrivals.get(i + 1).copied().unwrap_or(now_ms);
+                        let next_arr = arrivals.get(i + 1).copied().unwrap_or(rel_now);
                         let dur = next_arr.saturating_sub(arr_i);
                         if let Some(obj) = v.as_object_mut() {
                             obj.insert(

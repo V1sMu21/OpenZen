@@ -63,11 +63,15 @@ fn relax_tool_choice(
 
 /// Total request timeout for streaming responses. reqwest's `.timeout()`
 /// covers the whole body read, so a slow local stream that runs past it
-/// gets cut off mid-response. Local quantized models need an hour; cloud
-/// APIs keep the tight 10-minute cap.
-fn http_timeout(apibase: &str) -> std::time::Duration {
-    let secs = if is_local_apibase(apibase) { 3600 } else { 600 };
-    std::time::Duration::from_secs(secs)
+/// gets cut off mid-response. Cloud APIs also need the hour: agentic turns
+/// over long contexts legitimately stream for many minutes, and the old
+/// 600s cap cut healthy streams at exactly 10 minutes (surfaced to the user
+/// as "模型出错" — the turn then died without a retry because the elapsed
+/// streaming time already exhausted the agent loop's 300s retry budget).
+/// Wedged streams are still caught by the 60s per-chunk idle timeout and
+/// the agent loop's hang timeout, so this bound is only a safety net.
+fn http_timeout(_apibase: &str) -> std::time::Duration {
+    std::time::Duration::from_secs(3600)
 }
 
 impl OaiSession {

@@ -98,6 +98,12 @@ fn outage_retry_delay(consecutive: u32) -> f64 {
 /// silently burn 20-40 minutes with nothing on screen. Past the budget the loop
 /// stops retrying and reports why — fast failures (connection refused,
 /// immediate 5xx) still get many attempts within it.
+///
+/// Callers must not consult this on the FIRST consecutive failure: the window
+/// starts before the first attempt, so it includes that attempt's healthy
+/// streaming time. A stream that runs 10 productive minutes and then gets cut
+/// would otherwise read as a 600s outage and kill the turn without a single
+/// retry (the "LLM unreachable for 600s over 1 attempts" incident).
 fn llm_retry_budget_exhausted(elapsed_secs: u64, budget_secs: u64) -> bool {
     elapsed_secs >= budget_secs
 }
@@ -1052,11 +1058,10 @@ where
                 // final response never references is never executed.
                 let mut pending_spec: Vec<(String, String, serde_json::Value)> = Vec::new();
                 // When this turn's LLM phase started, for the wall-clock retry
-                // budget below. It must cover the FIRST attempt too: starting
-                // the clock at the first *failure* would let an already-expired
-                // budget launch another multi-minute attempt (found by the
-                // real-transport hands-on test: a 90s budget still waited
-                // 362s).
+                // budget below. It covers the FIRST attempt too, which means a
+                // long productive stream counts toward the budget — so the
+                // budget check is only consulted from the SECOND consecutive
+                // failure on (first failure always retries; see the Err arm).
                 let retry_window_start = Instant::now();
                 let result: Result<MockResponse, oz_core_types::LlmError> = loop {
                     let (spec_tx, mut spec_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1200,10 +1205,18 @@ where
                                 retry_in_secs: retry_delay.ceil() as u64,
                             });
                             let window_secs = retry_window_start.elapsed().as_secs();
-                            if llm_retry_budget_exhausted(
-                                window_secs,
-                                config.llm_retry_budget_secs,
-                            ) {
+                            // The window covers the first attempt's healthy
+                            // streaming time, so a mid-stream cut after a long
+                            // productive attempt would read as an exhausted
+                            // budget. Never give up on the first failure — the
+                            // turn always gets at least one retry; the budget
+                            // only stops *repeated* failures (real outages).
+                            if consecutive_llm_errors > 1
+                                && llm_retry_budget_exhausted(
+                                    window_secs,
+                                    config.llm_retry_budget_secs,
+                                )
+                            {
                                 let exit_reason = if is_timeout {
                                     "llm_timeout"
                                 } else {
@@ -1316,10 +1329,14 @@ where
                             );
                             // Same wall-clock budget as the streaming path: the
                             // attempt count alone does not bound the silence.
-                            if llm_retry_budget_exhausted(
-                                retry_window_start.elapsed().as_secs(),
-                                config.llm_retry_budget_secs,
-                            ) {
+                            // First failure always retries — the window includes
+                            // that attempt's own (possibly long) runtime.
+                            if consecutive_llm_errors > 1
+                                && llm_retry_budget_exhausted(
+                                    retry_window_start.elapsed().as_secs(),
+                                    config.llm_retry_budget_secs,
+                                )
+                            {
                                 transition_state(
                                     handler,
                                     AgentState::Done("llm_error".into()),
@@ -4244,6 +4261,13 @@ mod tests {
     /// wall-clock budget ends the series with a reason instead of retrying
     /// into the void. Budget 0 makes the exhaustion path reachable without
     /// sleeping through the real backoff.
+    ///
+    /// Regression guard for the "模型出错 after ~10 minutes" incident: the
+    /// budget window includes the first attempt's streaming time, so an
+    /// already-exhausted budget (here: 0s) used to kill the turn on the FIRST
+    /// failure — "LLM unreachable for 600s over 1 attempts". The first
+    /// failure must always get one retry; exhaustion may only fire from the
+    /// second consecutive failure on (attempts 1 and 2 below).
     #[tokio::test]
     async fn agent_loop_llm_retry_budget_reports_instead_of_hanging() {
         struct ErrorLlm;
@@ -4310,8 +4334,9 @@ mod tests {
                 retries.push((attempt, max_attempts, retry_in_secs, reason));
             }
         }
-        assert_eq!(retries.len(), 1, "one notice per retry: {retries:?}");
+        assert_eq!(retries.len(), 2, "first failure always retries: {retries:?}");
         assert_eq!(retries[0].0, 1);
+        assert_eq!(retries[1].0, 2);
         assert_eq!(retries[0].1, 8);
         assert_eq!(retries[0].2, 2, "ceil(1.5s) backoff, in whole seconds");
         assert!(retries[0].3.contains("no response headers"));
@@ -4378,7 +4403,9 @@ mod tests {
         assert!(!llm_retry_budget_exhausted(599, 600));
         assert!(llm_retry_budget_exhausted(600, 600));
         assert!(llm_retry_budget_exhausted(601, 600));
-        // 0 disables retrying entirely (used by the test above).
+        // 0 exhausts immediately — but only from the second consecutive
+        // failure on (the first failure always retries; used by the test
+        // above).
         assert!(llm_retry_budget_exhausted(0, 0));
     }
 
