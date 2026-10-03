@@ -29,6 +29,7 @@ fn emit(tx: &Option<UnboundedSender<StreamEvent>>, event: StreamEvent) {
 /// Step / Anthropic-style local backends.
 const INTERNAL_TAGS: &[&str] = &[
     "antThinking",
+    "think",
     "thinking",
     "reasoning",
     "summary",
@@ -1038,13 +1039,148 @@ pub async fn parse_openai_sse(
     Ok((content_blocks, usage))
 }
 
+// ── Leaked parameter-call repair ─────────────────────────────────────
+//
+// Dialects a tool-call-extracting gateway may leak as the accumulated
+// `arguments` string (see `repair_parameter_style_args` below).
+const XML_OPEN: &str = "<parameter name=\"";
+const XML_OPEN_ESCAPED: &str = "<parameter name=\\\"";
+const HALF_OPEN: &str = "{\"";
+const PARAM_CLOSER: &str = "</parameter>";
+/// Heuristic cap so garbage input cannot drive an unbounded key scan.
+const MAX_PARAM_KEY_LEN: usize = 80;
+
+/// Earliest leaked-parameter opener in `rest`, of any dialect. Returns
+/// `(start, key, value_start)` with offsets relative to `rest`, or `None`.
+fn next_parameter_opener(rest: &str) -> Option<(usize, String, usize)> {
+    let mut best: Option<(usize, String, usize)> = None;
+    for (needle, escaped) in [(HALF_OPEN, false), (XML_OPEN, false), (XML_OPEN_ESCAPED, true)] {
+        let mut from = 0usize;
+        while let Some(p) = rest[from..].find(needle) {
+            let abs = from + p;
+            let after_open = abs + needle.len();
+            let quote = if escaped { "\\\"" } else { "\"" };
+            let Some(key_rel) = rest[after_open..].find(quote) else {
+                break;
+            };
+            let key = rest[after_open..after_open + key_rel].trim().to_string();
+            if key.is_empty() || key.len() > MAX_PARAM_KEY_LEN || key.contains('\n') {
+                from = abs + 1;
+                continue;
+            }
+            let key_close = after_open + key_rel + quote.len();
+            // Half form: the key must be terminated directly by `>` — a
+            // proper JSON object has `":`, so `{"key">` is the leak
+            // signature rather than a truncated JSON object.
+            if !escaped && needle == HALF_OPEN && !rest[key_close..].starts_with('>') {
+                from = abs + 1;
+                continue;
+            }
+            // XML forms may carry attributes (`string="true"`) between the
+            // key and the tag's `>`; the value starts past that `>`.
+            let value_start = if needle == HALF_OPEN {
+                key_close + 1
+            } else {
+                match rest[key_close..].find('>') {
+                    Some(g) => key_close + g + 1,
+                    None => break,
+                }
+            };
+            if best.as_ref().is_none_or(|(b, _, _)| abs < *b) {
+                best = Some((abs, key, value_start));
+            }
+            break;
+        }
+    }
+    best
+}
+
+/// Recover tool arguments from a provider's half-converted parameter-call
+/// syntax. Some gateways translate the model's XML-style tool calls
+/// (DeepSeek DSML, Claude-Code `<parameter>` dialect) into chat_completions
+/// `tool_calls` deltas but leak malformed fragments as the accumulated
+/// `arguments` string; strict JSON parsing fails, and the raw string used to
+/// become the whole argument object — for the terminal `respond` call that
+/// made the final reply unrecoverable, which cascaded into the agent loop
+/// promoting the entire thinking transcript as the user-visible reply.
+///
+/// Recognized shapes (the closing tag is optional — the gateway may truncate
+/// the call mid-value):
+///   `{"key">value</parameter>`                 — opening tag reduced to `{`
+///   `<parameter name="key">value</parameter>`  — intact XML form
+///   `<parameter name=\"key\">value</parameter>` — JSON-escaped variant
+///
+/// Values always become strings; duplicate keys are last-wins. Returns
+/// `None` when no recognizable fragment is present so callers keep their
+/// existing fallback. Heuristic by design: it only ever sees strings that
+/// already failed strict JSON parsing.
+pub fn repair_parameter_style_args(raw: &str) -> Option<serde_json::Value> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Cheap rejection before scanning: one of the dialects must appear.
+    if !s.contains(XML_OPEN) && !s.contains(XML_OPEN_ESCAPED) && !s.contains("\">") {
+        return None;
+    }
+    let mut out = serde_json::Map::new();
+    let mut i = 0usize;
+    while let Some((_, key, value_start)) = next_parameter_opener(&s[i..]) {
+        let rest = &s[i..];
+        // The value runs to the next `</parameter>` or the next opener of any
+        // dialect, whichever comes first; otherwise to end-of-string (the
+        // gateway truncated the call there).
+        let body = &rest[value_start..];
+        let mut end = body.len();
+        for marker in [PARAM_CLOSER, XML_OPEN, XML_OPEN_ESCAPED, HALF_OPEN] {
+            if let Some(p) = body.find(marker) {
+                if p < end {
+                    end = p;
+                }
+            }
+        }
+        let mut value = body[..end].trim().to_string();
+        // A truncated tail often ends with dangling closing noise (`: "`),
+        // the quote the model would have closed its value with. Only strip
+        // on truncated values: a value closed by `</parameter>` may
+        // legitimately end with a quote or a colon.
+        if end == body.len() {
+            let had_dangling_quote = value.ends_with('"');
+            while value.ends_with('"') {
+                value.pop();
+            }
+            if had_dangling_quote {
+                let trimmed = value.trim_end();
+                if let Some(stripped) = trimmed.strip_suffix(':') {
+                    value = stripped.trim_end().to_string();
+                }
+            }
+        }
+        out.insert(key, serde_json::Value::String(value));
+        // All offsets above are `rest`-relative; advance the absolute cursor
+        // by the same amount and skip a trailing closer so it cannot become
+        // the next value.
+        let mut advance = value_start + end;
+        if rest[advance..].starts_with(PARAM_CLOSER) {
+            advance += PARAM_CLOSER.len();
+        }
+        i += advance;
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(serde_json::Value::Object(out))
+}
+
 /// Recover degenerate tool-argument shapes some models emit, so tools get a
 /// schema-shaped object and clean history stops teaching the model the bad
 /// pattern:
 /// - doubly-JSON-encoded arguments: the accumulated `arguments` string parses
 ///   to a JSON string whose text is the real argument object;
 /// - single-key `{"content": "<json text>"}` wrappers (imitated by models
-///   that saw sanitized history): the inner text is the real object.
+///   that saw sanitized history): the inner text is the real object;
+/// - half-converted parameter-call fragments leaked by tool-call-extracting
+///   gateways (`{"response">…`, see `repair_parameter_style_args`).
 ///
 /// Applied repeatedly so multi-level wrappers collapse fully. Unrecognized
 /// shapes pass through unchanged.
@@ -1054,7 +1190,8 @@ pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
         let next = match &current {
             serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
                 .ok()
-                .filter(|inner| inner.is_object()),
+                .filter(|inner| inner.is_object())
+                .or_else(|| repair_parameter_style_args(s)),
             serde_json::Value::Object(m) if m.len() == 1 => {
                 match m.get("content") {
                     // Wrapper with the payload as a JSON-encoded string…
@@ -1222,5 +1359,96 @@ mod tests {
     fn normalize_for_tool_passes_canonical_args_through() {
         let v = serde_json::json!({"code": "echo hi", "timeout": 30});
         assert_eq!(normalize_tool_args_for("code_run", v.clone()), v);
+    }
+
+    // ── repair_parameter_style_args (real gateway leaks, 2026-10-03 noon
+    //    session fd68d2e3: respond args arrived as half-converted DSML) ──
+
+    #[test]
+    fn repair_recovers_truncated_respond_reply() {
+        // Raw accumulated `arguments` string: leading stray quote, the
+        // opening tag reduced to `{`, no closing tag, dangling `: "`.
+        let raw = r#""{"response">我按你描述锁定了账号，并把它归到具体的绘画技术体系，再给出可落地的: ""#;
+        let got = repair_parameter_style_args(raw).expect("should repair");
+        assert_eq!(
+            got["response"],
+            "我按你描述锁定了账号，并把它归到具体的绘画技术体系，再给出可落地的"
+        );
+    }
+
+    #[test]
+    fn repair_recovers_truncated_multiline_reply() {
+        let raw = r#""{"response">已按验收断言修复并通过复验。
+
+**做了什么**
+-: ""#;
+        let got = repair_parameter_style_args(raw).expect("should repair");
+        assert_eq!(
+            got["response"],
+            "已按验收断言修复并通过复验。\n\n**做了什么**\n-"
+        );
+    }
+
+    #[test]
+    fn repair_recovers_mixed_half_converted_and_escaped_fragments() {
+        // A web_fetch call that arrived as a frankenstring: half-converted
+        // first parameter, intact-but-escaped DSML parameters after it, a
+        // JSON-ish tail the extractor cannot express as pairs.
+        let raw = concat!(
+            r#"{"max_chars">2500</parameter>"#,
+            "\n",
+            r#"<parameter: "SDXL Flux 人体解剖 LoRA 骨骼 肌肉 结构 素描 模型 civitai</parameter>"#,
+            "\n",
+            r#"<parameter name=\"num_results\">5</parameter>"#,
+            "\n",
+            r#"<parameter name=\"query\" string=\"true\">明婷画画 怎么画的 工具 数位板 比例 测量 透视</parameter>"#,
+        );
+        let got = repair_parameter_style_args(raw).expect("should repair");
+        assert_eq!(got["max_chars"], "2500");
+        assert_eq!(got["num_results"], "5");
+        assert_eq!(
+            got["query"],
+            "明婷画画 怎么画的 工具 数位板 比例 测量 透视"
+        );
+    }
+
+    #[test]
+    fn repair_handles_intact_xml_parameters() {
+        let raw = "<parameter name=\"url\">https://example.com/x</parameter>\n<parameter name=\"q\" string=\"true\">multi\nline</parameter>";
+        let got = repair_parameter_style_args(raw).expect("should repair");
+        assert_eq!(got["url"], "https://example.com/x");
+        assert_eq!(got["q"], "multi\nline");
+    }
+
+    #[test]
+    fn repair_preserves_quotes_in_closed_values() {
+        // The dangling-quote strip only applies to truncated tails; a value
+        // closed by `</parameter>` may legitimately end with a quote.
+        let raw = "<parameter name=\"q\">say \"hi\"</parameter>";
+        let got = repair_parameter_style_args(raw).expect("should repair");
+        assert_eq!(got["q"], "say \"hi\"");
+    }
+
+    #[test]
+    fn repair_rejects_plain_text_and_truncated_json() {
+        // No parameter opener at all.
+        assert_eq!(repair_parameter_style_args("plain text no params"), None);
+        // Truncated proper JSON — the `":` terminator must NOT be mistaken
+        // for the half-converted `">` leak signature (this shape keeps the
+        // string fallback so the tool reports a structured missing-arg
+        // error instead of executing guessed input).
+        assert_eq!(repair_parameter_style_args("{\"code\":\"cd ~/x"), None);
+        assert_eq!(repair_parameter_style_args("{\"a\": \"b\"}"), None);
+        assert_eq!(repair_parameter_style_args(""), None);
+    }
+
+    #[test]
+    fn normalize_repairs_leaked_parameter_string() {
+        // End-to-end: the openai stream terminator wraps an unparseable
+        // arguments string as Value::String; normalize must recover the
+        // object so the agent loop can read `response` again.
+        let v = serde_json::Value::String(r#""{"response">最终回复正文""#.into());
+        let got = normalize_tool_args_for("respond", v);
+        assert_eq!(got["response"], "最终回复正文");
     }
 }

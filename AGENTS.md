@@ -42,6 +42,54 @@
 
 ---
 
+## Gateway-leaked tool args — respond reply lost → whole-thinking promoted as reply (2026-10-03)
+
+**Symptom**: agent's final reply and thinking "fused into one blob". In the
+noon session (`fd68d2e3`, deepseek-flash via `opencode.ai/zen/go/v1`) the
+message had 22 reasoning blocks, **zero** `text_*` events, and
+`content == thinking` (48,935 chars of multi-turn reasoning delivered as the
+user-visible reply).
+
+**Cause chain** (three failures stacked):
+1. The gateway converts the model's DSML/XML tool calls
+   (`<parameter name="k">v</parameter>`) into chat-completions `tool_calls`
+   but sometimes leaks half-converted fragments as the accumulated
+   `arguments` string — `{"response">我按你描述...`, `{"max_chars">2500</parameter>`.
+   Strict JSON parse fails → the raw string became the whole argument object.
+2. `agent_loop` could not read `arguments.response` → no `respond_override`
+   → `full_response` stayed empty (the gateway streamed nothing on the text
+   channel for this run).
+3. The Bug-1 fallback (agent_loop, end of run) promoted thinking-as-reply —
+   and it promoted **all turns concatenated**, not just the final turn.
+
+Note `INTERNAL_TAGS` also lacked `"think"`, so a `</think>` close could never
+be matched and Qwen3-style replies could trap in the reasoning channel — the
+original Bug-1 this fallback was written for.
+
+**Fix (2026-10-03)**:
+- `crates/oz-llm/src/stream.rs` → `repair_parameter_style_args` recovers
+  key/value pairs from the leaked shapes (values may run to end-of-string
+  when the gateway truncated the call); wired into `normalize_tool_args`'s
+  String branch so every parse site ([DONE] flush, end-of-stream flush,
+  speculative, checkpoint-resumed blocks via agent_loop) benefits.
+  `respond` args then parse to `{"response": "…"}` again and the canonical
+  reply path works.
+- `agent_loop` respond handling: belt-and-braces repair for String-shaped
+  arguments that bypassed the stream repair.
+- Bug-1 fallback now promotes **only the final turn's thinking**
+  (`last_turn_thinking`), never the whole multi-turn transcript.
+- `"think"` added to `INTERNAL_TAGS` (Qwen3/DeepSeek close-tag matching).
+
+**Tests**: `crates/oz-llm/src/stream.rs` `repair_*` / `normalize_repairs_leaked_parameter_string`
+use the exact leaked bytes from the noon session as fixtures.
+
+Known limitation: when the gateway truncated the leaked `respond` args
+mid-value, the recovered reply is the truncated text — upstream loss that no
+client-side repair can undo. Watch for `[oz-llm] normalized degenerate tool
+args` / `[agent_loop] recovered respond arguments` in logs to spot recurrences.
+
+---
+
 # Tauri E2E driving — lessons from the ask_user test (2026-06-17)
 
 The `ask_user` tool flow was first verified in the real Tauri webview

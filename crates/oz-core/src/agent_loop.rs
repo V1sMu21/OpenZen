@@ -308,6 +308,11 @@ static INTERNAL_TAG_PATTERNS: std::sync::LazyLock<Vec<regex::Regex>> =
             r"(?is)<antThinking[^>]*/>",
             r"(?is)<thinking[^>]*>.*?</thinking\s*>",
             r"(?is)<thinking[^>]*/>",
+            // DeepSeek/Qwen3 dialect. The open tag must not swallow
+            // `<thinking` (`<think` prefix) — hence the `(?:>|\s…)`
+            // alternation instead of `[^>]*` (no look-around in regex).
+            r"(?is)<think(?:>|\s[^>]*>).*?</think\s*>",
+            r"(?is)<think(?:>|\s[^>]*)/>",
             r"(?is)<tool_code[^>]*>.*?</tool_code\s*>",
             r"(?is)<tool_code[^>]*/>",
             r"(?is)<respond[^>]*>",
@@ -518,6 +523,10 @@ where
     };
     let mut full_response = String::new();
     let mut full_thinking = String::new();
+    // The final turn's thinking only. `full_thinking` concatenates every
+    // turn of the run; the end-of-run reply fallback must not promote that
+    // whole transcript as one user-visible reply.
+    let mut last_turn_thinking = String::new();
     let mut total_input_tokens: u64 = 0;
     let mut total_output_tokens: u64 = 0;
     let mut last_turn_input_tokens: u64 = 0;
@@ -1366,6 +1375,8 @@ where
                 full_thinking.push('\n');
             }
             full_thinking.push_str(&response.thinking);
+            last_turn_thinking.clear();
+            last_turn_thinking.push_str(&response.thinking);
         }
         let input_chars: usize = messages
             .iter()
@@ -1541,7 +1552,18 @@ where
             let mut respond_override: Option<String> = None;
             for tc in &tool_calls {
                 if tc.name == "respond" {
-                    if let Some(resp_val) = tc.arguments.get("response").and_then(|v| v.as_str()) {
+                    // Stream-parsed blocks are already repaired; this covers
+                    // checkpoint-resumed and imported history that still
+                    // carries the raw leaked parameter shape (see
+                    // repair_parameter_style_args). The repair only fires on
+                    // String values, which never carry a `response` key, so
+                    // no happy-path guard is needed.
+                    let repaired = tc
+                        .arguments
+                        .as_str()
+                        .and_then(oz_llm::stream::repair_parameter_style_args);
+                    let args = repaired.as_ref().unwrap_or(&tc.arguments);
+                    if let Some(resp_val) = args.get("response").and_then(|v| v.as_str()) {
                         if !resp_val.is_empty() {
                             let (clean_resp, _resp_summary) = strip_summary_tags(resp_val);
                             respond_override = Some(clean_resp);
@@ -3792,14 +3814,25 @@ where
     // (via proxy) sometimes emit the visible reply inside the
     // reasoning channel — no matching text block ever opens. Promote
     // thinking-as-response so the user always sees a reply.
+    //
+    // Promote only the FINAL turn's thinking: full_thinking concatenates
+    // every turn of a multi-turn run, and promoting it wholesale turned a
+    // failed terminal `respond` call into the entire reasoning transcript
+    // (48K+ chars across 20+ turns) dumped as one fused reply where the
+    // user could no longer tell thinking from answer.
     let trimmed_response = full_response.trim();
     let trimmed_thinking = full_thinking.trim();
     let final_full_response = if trimmed_response.is_empty() && trimmed_thinking.len() >= 20 {
+        let promoted = if last_turn_thinking.trim().is_empty() {
+            full_thinking.clone()
+        } else {
+            std::mem::take(&mut last_turn_thinking)
+        };
         tracing::warn!(
-            "[agent_loop] empty response, promoting {}-char thinking as the user reply",
-            trimmed_thinking.len()
+            "[agent_loop] empty response, promoting {}-char final-turn thinking as the user reply",
+            promoted.len()
         );
-        full_thinking.clone()
+        promoted
     } else {
         full_response
     };
