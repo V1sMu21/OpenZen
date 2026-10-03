@@ -76,7 +76,13 @@ impl ToolHandler for WebExecuteJsTool {
             None => result.error.unwrap_or_default(),
         };
         let truncated = if output.len() > 8000 {
-            format!("{}... (truncated, {} bytes)", &output[..8000], output.len())
+            // Truncate on a char boundary — byte 8000 may fall inside a
+            // multi-byte UTF-8 char (e.g. CJK) in the page output.
+            format!(
+                "{}... (truncated, {} bytes)",
+                &output[..output.floor_char_boundary(8000)],
+                output.len()
+            )
         } else {
             output
         };

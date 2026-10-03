@@ -217,7 +217,9 @@ fn simplify_args_for_prompt(args: &serde_json::Value) -> String {
         }
         serde_json::Value::String(s) => {
             if s.len() > 60 {
-                format!("{}...", &s[..57])
+                // Truncate on a char boundary — byte 57 may fall inside a
+                // multi-byte UTF-8 char (e.g. CJK) in non-ASCII tool args.
+                format!("{}...", &s[..s.floor_char_boundary(57)])
             } else {
                 s.clone()
             }
@@ -261,6 +263,25 @@ mod tests {
         let args = serde_json::json!({"code": long});
         let summary = simplify_args_for_prompt(&args);
         assert!(summary.len() <= 63);
+    }
+
+    #[test]
+    fn test_simplify_args_multibyte_no_panic() {
+        // Regression: byte 57 used to fall inside the CJK char '方'
+        // (bytes 56..59), panicking the whole agent task while
+        // crystallizing a Chinese-language session.
+        let s = format!("{}方向b", "a".repeat(56));
+        assert_eq!(s.len(), 63);
+        let summary = simplify_args_for_prompt(&serde_json::json!(s));
+        assert!(summary.ends_with("..."));
+        assert!(summary.is_char_boundary(summary.len() - 3));
+    }
+
+    #[test]
+    fn test_simplify_args_pure_cjk_no_panic() {
+        let s = "修复桌面端的问题".repeat(10);
+        let summary = simplify_args_for_prompt(&serde_json::json!(s));
+        assert!(summary.ends_with("..."));
     }
 
     #[test]

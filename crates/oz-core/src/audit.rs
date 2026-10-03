@@ -67,7 +67,9 @@ impl AuditLog {
         let args_summary = serde_json::to_string(args)
             .map(|s| {
                 if s.len() > 200 {
-                    format!("{}...", &s[..200])
+                    // Truncate on a char boundary — byte 200 may fall inside a
+                    // multi-byte UTF-8 char (e.g. CJK) in serialized args.
+                    format!("{}...", &s[..s.floor_char_boundary(200)])
                 } else {
                     s
                 }
@@ -88,5 +90,26 @@ impl AuditLog {
 impl Clone for AuditLog {
     fn clone(&self) -> Self {
         AuditLog::new(self.path.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_record_tool_call_multibyte_args_no_panic() {
+        // Regression: serialized args over 200 bytes with CJK chars used to
+        // panic on `&s[..200]` when byte 200 fell inside a multi-byte char.
+        let log = AuditLog::new(std::path::PathBuf::from("/nonexistent/audit.jsonl"));
+        let args = serde_json::json!({"cmd": "修复桌面端的问题 ".repeat(20)});
+        log.record_tool_call("sess-1", "code_run", &args, "ok", "allowed");
+    }
+
+    #[test]
+    fn test_record_tool_call_ascii_args_unchanged() {
+        let log = AuditLog::new(std::path::PathBuf::from("/nonexistent/audit.jsonl"));
+        let args = serde_json::json!({"cmd": "echo hi"});
+        log.record_tool_call("sess-1", "code_run", &args, "ok", "allowed");
     }
 }
