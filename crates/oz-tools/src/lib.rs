@@ -140,6 +140,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 
@@ -321,6 +322,7 @@ mod legacy_bridge_tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 
@@ -367,6 +369,7 @@ mod integration {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 

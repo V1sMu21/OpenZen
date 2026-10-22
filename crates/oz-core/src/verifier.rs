@@ -62,13 +62,62 @@ fn detect_project_kind(working_dir: &str) -> ProjectKind {
     }
 }
 
+#[derive(Debug)]
 pub enum VerifyResult {
     Passed,
     Failed(String),
     SoftPass,
 }
 
+/// Identifies one agent run for the heavy-command throttle below.
+#[derive(Debug, Clone, Default)]
+pub struct RunScope {
+    /// Unique per run (session id + start time); empty disables the throttle.
+    pub run_id: String,
+    /// When the run started — used to tell "created by this run" from
+    /// "already there before".
+    pub started_at: Option<std::time::SystemTime>,
+}
+
+/// P2-23: one `cargo test`/`clippy` per run, keyed by (run, command).
+/// Without it every completed todo re-ran the same 90-120s command.
+static HEAVY_CMD_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Result<(), String>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn heavy_cmd_cached(run_id: &str, key: &str) -> Option<Result<(), String>> {
+    if run_id.is_empty() {
+        return None;
+    }
+    let cache = HEAVY_CMD_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.get(&format!("{run_id}|{key}")).cloned()
+}
+
+fn heavy_cmd_store(run_id: &str, key: &str, result: &Result<(), String>) {
+    if run_id.is_empty() {
+        return;
+    }
+    let mut cache = HEAVY_CMD_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    // Bound the map: a long-lived process must not accumulate one entry per
+    // run forever.
+    if cache.len() > 256 {
+        cache.clear();
+    }
+    cache.insert(format!("{run_id}|{key}"), result.clone());
+}
+
 pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult {
+    verify_todo_item_scoped(content, working_dir, &RunScope::default()).await
+}
+
+/// Run-aware variant (P2-23): knows when the run started and which run this
+/// is, so document/asset checks can require "created by THIS run" and heavy
+/// commands can be throttled per run.
+pub async fn verify_todo_item_scoped(
+    content: &str,
+    working_dir: &str,
+    scope: &RunScope,
+) -> VerifyResult {
     // 1. File existence check: parse file path from todo content
     if let Some(path) = extract_file_path(content) {
         let full = Path::new(working_dir).join(&path);
@@ -114,17 +163,26 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
     // this project is absent (e.g. cargo on a JS project) — that is NOT a
     // verification failure; fail-open with a log so the gate does not
     // send the agent into a rework loop over a missing binary.
-    let verdict = |name: &str, r: CommandResult| -> VerifyResult {
-        match r {
-            CommandResult::Success => VerifyResult::Passed,
-            CommandResult::Failed(stderr) => VerifyResult::Failed(stderr),
-            CommandResult::Timeout(secs) => {
-                VerifyResult::Failed(format!("{name} timed out after {secs}s"))
-            }
+    // P2-23: throttle the expensive probes — same command, same run, once.
+    let verdict_cached = |name: &str, key: &str, r: CommandResult| -> VerifyResult {
+        // Record the FRESH result, then answer from it. The old order asked
+        // the cache first and let a stale entry overwrite the new outcome, so
+        // (a) the command still ran every time — the throttle saved nothing —
+        // and (b) a first failure stuck for the whole run: fixing the code and
+        // re-verifying still returned Failed (review B6).
+        let result = match r {
+            CommandResult::Success => Ok(()),
+            CommandResult::Failed(e) => Err(e),
+            CommandResult::Timeout(secs) => Err(format!("{name} timed out after {secs}s")),
             CommandResult::SpawnError(e) => {
                 tracing::info!("[verifier] {name} toolchain unavailable ({e}); not a failure");
-                VerifyResult::Passed
+                return VerifyResult::Passed;
             }
+        };
+        heavy_cmd_store(&scope.run_id, key, &result);
+        match result {
+            Ok(()) => VerifyResult::Passed,
+            Err(e) => VerifyResult::Failed(e),
         }
     };
 
@@ -134,6 +192,13 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
         .iter()
         .any(|k| keyword_matches(&content_lower, k))
     {
+        if let Some(prev) = heavy_cmd_cached(&scope.run_id, "cargo-build") {
+            tracing::info!("[verifier] build: reusing this run's earlier result");
+            return match prev {
+                Ok(()) => VerifyResult::Passed,
+                Err(e) => VerifyResult::Failed(e),
+            };
+        }
         let wd = working_dir.to_string();
         let r = match kind {
             ProjectKind::Cargo => {
@@ -147,7 +212,7 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
                 return VerifyResult::Passed;
             }
         };
-        return verdict("build", r);
+        return verdict_cached("build", "cargo-build", r);
     }
 
     // 3. Test detection
@@ -156,6 +221,13 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
         .iter()
         .any(|k| keyword_matches(&content_lower, k))
     {
+        if let Some(prev) = heavy_cmd_cached(&scope.run_id, "tests") {
+            tracing::info!("[verifier] tests: reusing this run's earlier result");
+            return match prev {
+                Ok(()) => VerifyResult::Passed,
+                Err(e) => VerifyResult::Failed(e),
+            };
+        }
         let wd = working_dir.to_string();
         let r = match kind {
             ProjectKind::Cargo => {
@@ -171,7 +243,7 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
                 return VerifyResult::Passed;
             }
         };
-        return verdict("tests", r);
+        return verdict_cached("tests", "tests", r);
     }
 
     // 4. Lint/check detection
@@ -180,6 +252,13 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
         .iter()
         .any(|k| keyword_matches(&content_lower, k))
     {
+        if let Some(prev) = heavy_cmd_cached(&scope.run_id, "lint") {
+            tracing::info!("[verifier] lint: reusing this run's earlier result");
+            return match prev {
+                Ok(()) => VerifyResult::Passed,
+                Err(e) => VerifyResult::Failed(e),
+            };
+        }
         let wd = working_dir.to_string();
         let r = match kind {
             ProjectKind::Cargo => {
@@ -202,7 +281,7 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
                 return VerifyResult::Passed;
             }
         };
-        return verdict("lint", r);
+        return verdict_cached("lint", "lint", r);
     }
 
     // 5. Document/spec creation: check for .md/.txt file content
@@ -211,13 +290,51 @@ pub async fn verify_todo_item(content: &str, working_dir: &str) -> VerifyResult 
         .iter()
         .any(|k| keyword_matches(&content_lower, k))
     {
-        // Try to find a recently created .md or .txt file in working_dir
-        if let Some(_path) = find_recent_doc(working_dir) {
+        // P2-23: "any .md/.txt anywhere in the tree" passed even when the run
+        // wrote nothing (an unrelated README counted). Require a file that
+        // THIS run created AND that looks like a document: non-empty, a
+        // heading, and a minimum body length.
+        match find_doc_created_this_run(working_dir, scope.started_at) {
+            DocCheck::Ok(path) => {
+                tracing::info!("[verifier] document deliverable verified: {path}");
+                return VerifyResult::Passed;
+            }
+            DocCheck::TooThin(path, why) => {
+                return VerifyResult::Failed(format!(
+                    "Document deliverable `{path}` is not usable: {why} (expected a non-empty \
+                     document with a heading and at least 200 characters of body)"
+                ));
+            }
+            DocCheck::NotFound => {
+                return VerifyResult::Failed(
+                    "No .md/.txt file created by this run was found in the working directory \
+                     (pre-existing documents do not count)"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    // 5b. Asset deliverables (P2-23): an image or HTML page must at least be
+    // a real file of its type — a 0-byte or truncated PNG used to pass.
+    let asset_keywords = [
+        "素材", "图片", "sprite", "asset", "html", "页面", "png", "jpg",
+    ];
+    if asset_keywords
+        .iter()
+        .any(|k| keyword_matches(&content_lower, k))
+    {
+        if let Some((path, kind)) = find_asset_created_this_run(working_dir, scope.started_at) {
+            if let Err(why) = check_asset_structure(&path, kind) {
+                return VerifyResult::Failed(format!(
+                    "Asset `{path}` failed its structural check: {why}"
+                ));
+            }
+            tracing::info!("[verifier] asset deliverable verified: {path}");
             return VerifyResult::Passed;
         }
-        return VerifyResult::Failed(
-            "No .md or .txt file found in working directory for document task".to_string(),
-        );
+        // No asset found at all: fall through to the soft passes below so a
+        // task that merely mentions "html" is not failed for it.
     }
 
     // 6. Code review / analysis: soft pass (can't verify subjective quality)
@@ -247,40 +364,64 @@ async fn run_command_with_timeout(
     working_dir: &str,
     timeout_secs: u64,
 ) -> CommandResult {
-    let cmd = cmd.to_string();
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let wd = working_dir.to_string();
+    // tokio::process with its own process group, exactly like
+    // `code_run::run_child_with_timeout`: on timeout the whole TREE must die.
+    // `spawn_blocking(Command::output())` cannot be cancelled — the timeout
+    // only stopped *waiting*, so a timed-out `cargo test` kept a rustc tree
+    // alive and, worse, kept holding the target-dir lock, which made the next
+    // code_run build hang and time out too (round5 P1-9).
+    let mut command = tokio::process::Command::new(cmd);
+    command
+        .args(args)
+        .current_dir(working_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
 
-    let fut = tokio::task::spawn_blocking(move || {
-        match std::process::Command::new(&cmd)
-            .args(&args)
-            .current_dir(&wd)
-            .output()
-        {
-            Ok(out) if out.status.success() => Ok(()),
-            Ok(out) => {
-                let stderr_full = String::from_utf8_lossy(&out.stderr);
-                let tail = if stderr_full.len() > MAX_STDERR_LEN {
-                    format!(
-                        "...{}",
-                        &stderr_full[stderr_full.len().saturating_sub(MAX_STDERR_LEN)..]
-                    )
-                } else {
-                    stderr_full.to_string()
-                };
-                Err(format!("{} failed:\n{}", cmd, tail))
-            }
-            Err(e) => Err(format!("{} spawn error: {}", cmd, e)),
+    let child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => return CommandResult::SpawnError(format!("{cmd} spawn error: {e}")),
+    };
+    let pid = child.id();
+
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+        Ok(Ok(out)) if out.status.success() => CommandResult::Success,
+        Ok(Ok(out)) => {
+            let stderr_full = String::from_utf8_lossy(&out.stderr);
+            let tail = if stderr_full.len() > MAX_STDERR_LEN {
+                format!(
+                    "...{}",
+                    &stderr_full[stderr_full.len().saturating_sub(MAX_STDERR_LEN)..]
+                )
+            } else {
+                stderr_full.to_string()
+            };
+            CommandResult::Failed(format!("{cmd} failed:\n{tail}"))
         }
-    });
-
-    match tokio::time::timeout(Duration::from_secs(timeout_secs), fut).await {
-        Ok(Ok(Ok(()))) => CommandResult::Success,
-        Ok(Ok(Err(msg))) => CommandResult::Failed(msg),
-        Ok(Err(join_err)) => CommandResult::SpawnError(format!("join error: {}", join_err)),
-        Err(_elapsed) => CommandResult::Timeout(timeout_secs),
+        Ok(Err(e)) => CommandResult::SpawnError(format!("{cmd} wait error: {e}")),
+        Err(_elapsed) => {
+            kill_verifier_tree(pid);
+            CommandResult::Timeout(timeout_secs)
+        }
     }
 }
+
+/// SIGKILL the verifier child's process group (best effort).
+#[cfg(unix)]
+fn kill_verifier_tree(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        unsafe {
+            // Negative pid = process group (the child ran with process_group(0)).
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_verifier_tree(_pid: Option<u32>) {}
 
 /// File-path probe used on every todoupdate completion — compiled once.
 static FILE_PATH_RE: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| {
@@ -297,36 +438,214 @@ pub fn extract_file_path(text: &str) -> Option<String> {
         .map(|m| m.as_str().to_string())
 }
 
-fn find_recent_doc(working_dir: &str) -> Option<String> {
-    let dir = Path::new(working_dir);
-    if !dir.is_dir() {
-        return None;
-    }
-    find_docs_recursive(dir, 3)
+/// Result of the "did this run deliver a usable document?" probe.
+pub enum DocCheck {
+    Ok(String),
+    TooThin(String, String),
+    NotFound,
 }
 
-fn find_docs_recursive(dir: &Path, max_depth: u32) -> Option<String> {
-    if max_depth == 0 {
-        return None;
+/// Newest .md/.txt created at/after `started_at` that looks like a document.
+fn find_doc_created_this_run(
+    working_dir: &str,
+    started_at: Option<std::time::SystemTime>,
+) -> DocCheck {
+    let dir = Path::new(working_dir);
+    if !dir.is_dir() {
+        return DocCheck::NotFound;
     }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return None,
+    let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    collect_docs(dir, 3, started_at, &mut candidates);
+    candidates.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    for (_, path) in candidates {
+        match std::fs::read_to_string(&path) {
+            Ok(body) => {
+                let trimmed = body.trim();
+                if trimmed.is_empty() {
+                    return DocCheck::TooThin(
+                        path.to_string_lossy().to_string(),
+                        "the file is empty".to_string(),
+                    );
+                }
+                let has_heading = trimmed
+                    .lines()
+                    .any(|l| l.trim_start().starts_with('#') || l.trim_start().starts_with("<h"));
+                if !has_heading {
+                    return DocCheck::TooThin(
+                        path.to_string_lossy().to_string(),
+                        "no heading (# / <h1>) was found".to_string(),
+                    );
+                }
+                if trimmed.chars().count() < 200 {
+                    return DocCheck::TooThin(
+                        path.to_string_lossy().to_string(),
+                        format!("only {} characters of content", trimmed.chars().count()),
+                    );
+                }
+                return DocCheck::Ok(path.to_string_lossy().to_string());
+            }
+            Err(_) => continue,
+        }
+    }
+    DocCheck::NotFound
+}
+
+fn collect_docs(
+    dir: &Path,
+    max_depth: u32,
+    started_at: Option<std::time::SystemTime>,
+    out: &mut Vec<(std::time::SystemTime, std::path::PathBuf)>,
+) {
+    if max_depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_lowercase();
         if path.is_dir() {
-            if let Some(found) = find_docs_recursive(&path, max_depth - 1) {
-                return Some(found);
+            if matches!(
+                name.as_str(),
+                "node_modules" | "target" | ".git" | "dist" | "build" | ".venv" | "__pycache__"
+            ) {
+                continue;
             }
-        } else {
-            let name = entry.file_name().to_string_lossy().to_lowercase();
-            if name.ends_with(".md") || name.ends_with(".txt") {
-                return Some(path.to_string_lossy().to_string());
+            collect_docs(&path, max_depth - 1, started_at, out);
+        } else if name.ends_with(".md") || name.ends_with(".txt") {
+            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(mtime) = meta.modified() else { continue };
+            // 2s slack: the file may be written just before the run is
+            // recorded as started.
+            let fresh = match started_at {
+                Some(start) => mtime
+                    .duration_since(start)
+                    .map(|_| true)
+                    .unwrap_or_else(|e| e.duration() < Duration::from_secs(2)),
+                None => true,
+            };
+            if fresh {
+                out.push((mtime, path));
             }
         }
     }
-    None
+}
+
+/// Asset kinds we can check mechanically.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AssetKind {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Html,
+}
+
+fn find_asset_created_this_run(
+    working_dir: &str,
+    started_at: Option<std::time::SystemTime>,
+) -> Option<(String, AssetKind)> {
+    let dir = Path::new(working_dir);
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf, AssetKind)> = None;
+    collect_assets(dir, 3, started_at, &mut best);
+    best.map(|(_, p, k)| (p.to_string_lossy().to_string(), k))
+}
+
+fn collect_assets(
+    dir: &Path,
+    max_depth: u32,
+    started_at: Option<std::time::SystemTime>,
+    best: &mut Option<(std::time::SystemTime, std::path::PathBuf, AssetKind)>,
+) {
+    if max_depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if path.is_dir() {
+            if matches!(
+                name.as_str(),
+                "node_modules" | "target" | ".git" | "dist" | "build" | ".venv" | "__pycache__"
+            ) {
+                continue;
+            }
+            collect_assets(&path, max_depth - 1, started_at, best);
+            continue;
+        }
+        let kind = if name.ends_with(".png") {
+            AssetKind::Png
+        } else if name.ends_with(".jpg") || name.ends_with(".jpeg") {
+            AssetKind::Jpeg
+        } else if name.ends_with(".gif") {
+            AssetKind::Gif
+        } else if name.ends_with(".webp") {
+            AssetKind::Webp
+        } else if name.ends_with(".html") || name.ends_with(".htm") {
+            AssetKind::Html
+        } else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(mtime) = meta.modified() else { continue };
+        let fresh = match started_at {
+            Some(start) => mtime
+                .duration_since(start)
+                .map(|_| true)
+                .unwrap_or_else(|e| e.duration() < Duration::from_secs(2)),
+            None => true,
+        };
+        if !fresh {
+            continue;
+        }
+        if best.as_ref().map(|(t, _, _)| mtime > *t).unwrap_or(true) {
+            *best = Some((mtime, path, kind));
+        }
+    }
+}
+
+/// Minimal mechanical validation: real file header / closing tag.
+pub fn check_asset_structure(path: &str, kind: AssetKind) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("unreadable: {e}"))?;
+    if bytes.is_empty() {
+        return Err("the file is empty".to_string());
+    }
+    match kind {
+        AssetKind::Png => {
+            if !bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+                return Err("missing the PNG magic bytes".to_string());
+            }
+        }
+        AssetKind::Jpeg => {
+            if !bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+                return Err("missing the JPEG magic bytes".to_string());
+            }
+        }
+        AssetKind::Gif => {
+            if !(bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+                return Err("missing the GIF magic bytes".to_string());
+            }
+        }
+        AssetKind::Webp => {
+            if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+                return Err("missing the WEBP container header".to_string());
+            }
+        }
+        AssetKind::Html => {
+            let text = String::from_utf8_lossy(&bytes).to_lowercase();
+            if !text.contains("</html>") {
+                return Err("no closing </html> tag".to_string());
+            }
+            if !text.contains("<body") && !text.contains("<script") && !text.contains("<canvas") {
+                return Err("no <body>/<script>/<canvas> content".to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Bounded recursive search for a file whose basename equals `target`,
@@ -455,5 +774,101 @@ mod keyword_boundary_tests {
     fn cjk_keywords_stay_substring() {
         assert!(keyword_matches("完成编译与测试", "编译"));
         assert!(keyword_matches("补充文档说明", "文档"));
+    }
+
+    // ── P2-23 regression tests ──
+
+    /// A pre-existing document must not satisfy a document task, and a
+    /// 3-line stub must not either. Before the fix, ANY `.md`/`.txt` found
+    /// in the tree passed — including an unrelated README that was already
+    /// there.
+    #[tokio::test]
+    async fn document_deliverable_must_be_created_by_this_run_and_structured() {
+        let dir = std::env::temp_dir().join(format!("oz-ver-doc-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // Pre-existing README (mtime in the past) → not this run's work.
+        let readme = dir.join("README.md");
+        std::fs::write(&readme, "# old readme\n").unwrap();
+        let future = std::time::SystemTime::now() + Duration::from_secs(3600);
+        let scope = RunScope {
+            run_id: "doc-test".into(),
+            started_at: Some(future),
+        };
+        let r = verify_todo_item_scoped("写一份说明文档 document", &dir.to_string_lossy(), &scope)
+            .await;
+        assert!(
+            matches!(r, VerifyResult::Failed(_)),
+            "a pre-existing document must not pass"
+        );
+
+        // A stub created by this run → still failed (no heading / too short).
+        std::fs::write(dir.join("notes.md"), "hi").unwrap();
+        let scope2 = RunScope {
+            run_id: "doc-test-2".into(),
+            started_at: Some(std::time::SystemTime::now() - Duration::from_secs(5)),
+        };
+        let r2 =
+            verify_todo_item_scoped("写一份说明文档 document", &dir.to_string_lossy(), &scope2)
+                .await;
+        assert!(
+            matches!(r2, VerifyResult::Failed(_)),
+            "a 2-character stub must not pass: {r2:?}"
+        );
+
+        // A real document → passed.
+        let body = format!("# 设计说明\n\n{}\n", "内容段落。".repeat(60));
+        std::fs::write(dir.join("design.md"), body).unwrap();
+        let r3 =
+            verify_todo_item_scoped("写一份说明文档 document", &dir.to_string_lossy(), &scope2)
+                .await;
+        assert!(
+            matches!(r3, VerifyResult::Passed),
+            "a structured document must pass: {r3:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Asset deliverables get a mechanical structural check (magic bytes /
+    /// closing tag). A 0-byte PNG used to pass silently.
+    #[tokio::test]
+    async fn asset_deliverables_get_a_structural_check() {
+        let dir = std::env::temp_dir().join(format!("oz-ver-asset-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let scope = RunScope {
+            run_id: "asset-test".into(),
+            started_at: Some(std::time::SystemTime::now() - Duration::from_secs(5)),
+        };
+        // Broken PNG.
+        std::fs::write(dir.join("sprite.png"), b"not really a png").unwrap();
+        let r = verify_todo_item_scoped("生成游戏素材 sprite 图片", &dir.to_string_lossy(), &scope)
+            .await;
+        assert!(
+            matches!(r, VerifyResult::Failed(_)),
+            "a fake PNG must fail its structural check: {r:?}"
+        );
+        // Real PNG header.
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&[0u8; 64]);
+        std::fs::write(dir.join("sprite2.png"), &png).unwrap();
+        let r2 =
+            verify_todo_item_scoped("生成游戏素材 sprite 图片", &dir.to_string_lossy(), &scope)
+                .await;
+        assert!(matches!(r2, VerifyResult::Passed), "valid PNG: {r2:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn asset_structure_checks_magic_bytes() {
+        let dir = std::env::temp_dir().join(format!("oz-ver-magic-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let html = dir.join("index.html");
+        std::fs::write(&html, "<html><body>hi</body></html>").unwrap();
+        assert!(check_asset_structure(&html.to_string_lossy(), AssetKind::Html).is_ok());
+        std::fs::write(&html, "<html><body>truncated").unwrap();
+        assert!(check_asset_structure(&html.to_string_lossy(), AssetKind::Html).is_err());
+        let empty = dir.join("empty.png");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(check_asset_structure(&empty.to_string_lossy(), AssetKind::Png).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

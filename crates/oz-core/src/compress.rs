@@ -164,6 +164,11 @@ fn content_block_len(block: &ContentBlock) -> usize {
             oz_core_types::ContentContainer::Text(t) => t.len(),
             oz_core_types::ContentContainer::Blocks(bs) => bs.iter().map(content_block_len).sum(),
         },
+        // Images used to fall into `_ => 0`: the compressor could not see
+        // them at all, so a history full of screenshots never crossed the
+        // threshold while every request shipped megabytes of base64
+        // (round5 P1-1). Count a fixed token-equivalent instead.
+        ContentBlock::ImageUrl { url, .. } => oz_core_types::image_char_estimate(url),
         _ => 0,
     }
 }
@@ -325,30 +330,58 @@ pub fn compress_messages(
     // Index of the first message that must survive (start of tail). It
     // shrinks as messages are removed so it keeps pointing at the same
     // surviving messages.
-    let mut keep_start = if user_positions.len() > tail_turns {
+    let keep_start = if user_positions.len() > tail_turns {
         user_positions[user_positions.len() - tail_turns]
     } else {
         messages.len() // fewer turns than the tail → nothing to drop
     };
     let drop_start = sys_offset;
     let mut removed: usize = 0;
-    while drop_start < keep_start
-        && messages.len() > drop_start + config.min_messages
-        && measure_usage_with_ratio(messages, token_ratio).total_tokens() > target_tokens
-    {
-        messages.remove(drop_start);
-        removed += 1;
-        keep_start -= 1;
-        while drop_start < keep_start
-            && messages[drop_start].role != Role::User
-            && messages[drop_start].role != Role::System
-        {
-            messages.remove(drop_start);
-            removed += 1;
-            keep_start -= 1;
+    // Compute the drop boundary ONCE instead of re-measuring after every
+    // removal. The old loop called `measure_usage_with_ratio` inside the
+    // `while` condition — a full scan (and a re-serialization of every
+    // tool_use argument) per removed message, i.e. O(N²) on exactly the
+    // large contexts where compression is most needed (round5 P1-20).
+    if drop_start < keep_start {
+        let ratio = token_ratio.unwrap_or(0.25); // chars → tokens
+        let char_budget = (target_tokens as f64 / ratio.max(1e-6)) as usize;
+        // Suffix sums over message payload sizes, so the cost of "drop up to
+        // here" is O(1) per candidate.
+        let lens: Vec<usize> = messages
+            .iter()
+            .map(|m| m.content.iter().map(content_block_len).sum::<usize>())
+            .collect();
+        let mut total: usize = lens.iter().sum();
+        let mut cut = drop_start;
+        let floor = drop_start + config.min_messages;
+        // `remaining` mirrors what `messages.len()` would be after dropping
+        // `cut - drop_start` entries — the old loop compared the SHRINKING
+        // length, so the floor has to be evaluated the same way.
+        let mut remaining = messages.len();
+        while cut < keep_start && remaining > floor && total > char_budget {
+            total = total.saturating_sub(lens[cut]);
+            cut += 1;
+            remaining -= 1;
+            // A turn boundary: keep dropping non-user/non-system lead-ins.
+            while cut < keep_start
+                && remaining > floor
+                && messages[cut].role != Role::User
+                && messages[cut].role != Role::System
+            {
+                total = total.saturating_sub(lens[cut]);
+                cut += 1;
+                remaining -= 1;
+            }
         }
-        if removed > 0 && drop_start < messages.len() {
-            sanitize_leading_message(&mut messages[drop_start]);
+        if cut > drop_start {
+            messages.drain(drop_start..cut);
+            removed = cut - drop_start;
+            // `keep_start` is intentionally not adjusted: the drain already
+            // moved the tail down, and nothing below reads the old index.
+            let _ = keep_start;
+            if drop_start < messages.len() {
+                sanitize_leading_message(&mut messages[drop_start]);
+            }
         }
     }
 
@@ -671,7 +704,52 @@ impl CompressionService {
             static SUMMARY_SEM: std::sync::OnceLock<tokio::sync::Semaphore> =
                 std::sync::OnceLock::new();
             let sem = SUMMARY_SEM.get_or_init(|| tokio::sync::Semaphore::new(2));
-            let Ok(_permit) = sem.acquire().await else {
+            // The Sender is shared through a mutex so the closed-watcher can
+            // poll is_closed() without conflicting with the by-value send in
+            // the other select branch.
+            let tx_shared = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+            let tx_watch = std::sync::Arc::clone(&tx_shared);
+            // Wait for a permit and for the caller to still be interested,
+            // WHICHEVER COMES FIRST. The old code acquired the permit before
+            // installing the cancellation watcher, so a task queued behind
+            // two long `progressive_merge_summary` runs (hundreds of serial
+            // LLM calls for a large window) kept its multi-MB prompt alive
+            // long after the caller had given up — a task/memory leak that
+            // got worse the longer the app ran (round5 P1-17).
+            let permit = {
+                let acquire = sem.acquire();
+                tokio::pin!(acquire);
+                let mut closed_check = tokio::time::interval(std::time::Duration::from_millis(200));
+                // Hard cap on queueing: past this, fall back to the template
+                // rather than holding the prompt. The deadline must be
+                // ABSOLUTE and pinned outside the loop — a `sleep(30s)`
+                // recreated inside `select!` never fires, because every
+                // 200ms tick abandons the future and starts a fresh one
+                // (review finding C-F2: the cap was dead code, so a queued
+                // summary held its multi-MB prompt for up to 600s).
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                let queue_cap = tokio::time::sleep_until(deadline);
+                tokio::pin!(queue_cap);
+                loop {
+                    tokio::select! {
+                        p = &mut acquire => break Some(p),
+                        _ = closed_check.tick() => {
+                            let closed = lock_sender_tx(&tx_watch)
+                                .as_ref()
+                                .map(|t| t.is_closed())
+                                .unwrap_or(true);
+                            if closed {
+                                break None;
+                            }
+                        }
+                        _ = &mut queue_cap => {
+                            tracing::info!("[compress] summary slot busy >30s — using template");
+                            break None;
+                        }
+                    }
+                }
+            };
+            let Some(Ok(_permit)) = permit else {
                 return;
             };
             let summary_fut = async {
@@ -698,11 +776,6 @@ impl CompressionService {
                 }
             };
             tokio::pin!(summary_fut);
-            // The Sender is shared through a mutex so the closed-watcher
-            // below can poll is_closed() without conflicting with the
-            // by-value send in the other select branch.
-            let tx_shared = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
-            let tx_watch = std::sync::Arc::clone(&tx_shared);
             tokio::select! {
                 summary = &mut summary_fut => {
                     if let Some(tx) = lock_sender_tx(&tx_shared).take() {
@@ -1005,10 +1078,7 @@ pub fn store_message_to_message(m: &Value) -> Option<Message> {
             }
             if let Some(results) = m.get("tool_results").and_then(|v| v.as_array()) {
                 for tr in results {
-                    let id = tr
-                        .get("tool_use_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let id = tr.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
                     if id.is_empty() {
                         continue;
                     }
@@ -1227,10 +1297,7 @@ pub fn compact_store_messages(
             view_src.push(i);
         }
     }
-    let sys_offset = view
-        .iter()
-        .take_while(|m| m.role == Role::System)
-        .count();
+    let sys_offset = view.iter().take_while(|m| m.role == Role::System).count();
     compress_messages(&mut view, context_win, config, None);
     repair_tool_pairing(&mut view);
 
@@ -1804,9 +1871,7 @@ mod tests {
     /// log (`streamEvents`) is even bigger but must not be counted.
     fn store_fixture() -> Vec<Value> {
         let big = "x".repeat(40_000);
-        let mut out = vec![
-            serde_json::json!({"role": "system", "content": "sys prompt"}),
-        ];
+        let mut out = vec![serde_json::json!({"role": "system", "content": "sys prompt"})];
         for turn in 0..6 {
             out.push(serde_json::json!({
                 "role": "user",

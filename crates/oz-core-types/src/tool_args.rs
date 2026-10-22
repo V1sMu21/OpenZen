@@ -272,6 +272,13 @@ fn primary_key(groups: &[Group]) -> &'static str {
     groups[0].0
 }
 
+/// Canonical parameter names of a curated tool in priority order
+/// (write → [file_path, content], code_run → [code, …]). `None` for tools
+/// without a curated table (respond, web_search, MCP…).
+pub fn canonical_param_names(tool: &str) -> Option<Vec<&'static str>> {
+    groups_for(tool).map(|g| g.iter().map(|grp| grp.0).collect())
+}
+
 /// True when `tool` has a curated alias table (i.e. [`canonicalize_tool_args`]
 /// already did everything it can for it).
 pub fn has_alias_table(tool: &str) -> bool {
@@ -399,7 +406,11 @@ pub fn canonicalize_tool_args(tool: &str, args: Value) -> Value {
     // names on purpose — a `write` that only sent `content` must still fail
     // loudly instead of writing to an argument we guessed.
     if !out.contains_key(primary) && (primary == "path" || primary == "file_path") {
-        let other = if primary == "path" { "file_path" } else { "path" };
+        let other = if primary == "path" {
+            "file_path"
+        } else {
+            "path"
+        };
         let carried = out.get(other).cloned();
         if let Some(v) = carried {
             out.insert(primary.to_string(), v);
@@ -460,7 +471,12 @@ pub fn repair_args_against_schema(tool: &str, args: Value, schema: &Value) -> Va
         .get("properties")
         .and_then(|p| p.as_object())
         .map(|p| p.keys().map(|k| norm_key(k)).collect());
-    repair_with_primary(tool, Value::Object(map.clone()), Some(&primary), known.as_deref())
+    repair_with_primary(
+        tool,
+        Value::Object(map.clone()),
+        Some(&primary),
+        known.as_deref(),
+    )
 }
 
 /// Shared tail of the repair ladder: tool-name-as-key, then a lone unknown
@@ -629,10 +645,8 @@ mod tests {
 
     #[test]
     fn edit_old_new_aliases() {
-        let got = canonicalize_tool_args(
-            "edit",
-            json!({"file": "a.rs", "old": "foo", "new": "bar"}),
-        );
+        let got =
+            canonicalize_tool_args("edit", json!({"file": "a.rs", "old": "foo", "new": "bar"}));
         assert_eq!(got["file_path"], "a.rs");
         assert_eq!(got["old_string"], "foo");
         assert_eq!(got["new_string"], "bar");
@@ -670,8 +684,10 @@ mod tests {
 
     #[test]
     fn real_shape_command_mode_type() {
-        let got =
-            canonicalize_tool_args("code_run", json!({"command": "ls", "mode": "shell", "type": "bash"}));
+        let got = canonicalize_tool_args(
+            "code_run",
+            json!({"command": "ls", "mode": "shell", "type": "bash"}),
+        );
         assert_eq!(got["code"], "ls");
         assert_eq!(got["type"], "bash");
     }
@@ -702,7 +718,10 @@ mod tests {
         // It runs twice on the same call: once when the stream parses the tool
         // call, once again at dispatch.
         for (tool, args) in [
-            ("code_run", json!({"cmd": "ls", "mode": "bash", "timeout": 3})),
+            (
+                "code_run",
+                json!({"cmd": "ls", "mode": "bash", "timeout": 3}),
+            ),
             ("write", json!({"path": "a.txt", "text": "body"})),
             ("edit", json!({"file": "a.rs", "old": "x", "new": "y"})),
             ("read", json!({"path": "a.rs", "limit": 5})),
@@ -744,7 +763,8 @@ mod tests {
             "properties": {"query": {"type": "string"}},
             "required": ["query"]
         });
-        let got = repair_args_against_schema("mcp__x__search", json!({"mcp__x__search": "hi"}), &schema);
+        let got =
+            repair_args_against_schema("mcp__x__search", json!({"mcp__x__search": "hi"}), &schema);
         assert_eq!(got["query"], "hi");
     }
 

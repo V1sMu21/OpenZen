@@ -161,11 +161,16 @@ impl TrustStore {
         let span = entry.created_at;
         let days_span = (now - span).num_days();
 
-        if entry.approved_count >= 10 && days_span >= 1 {
-            entry.level = TrustLevel::WorkspaceTrust;
-        } else if entry.approved_count >= 3 {
-            entry.level = TrustLevel::SessionTrust;
-            inner.session_trusts.insert(key.clone());
+        // Interpreters / network clients never escalate: one approval for
+        // `python3 x.py` must not become a standing approval for
+        // `python3 -c "<anything>"` (round5 P1-8a).
+        if crate::patterns::is_auto_trustable(tool, pattern) {
+            if entry.approved_count >= 10 && days_span >= 1 {
+                entry.level = TrustLevel::WorkspaceTrust;
+            } else if entry.approved_count >= 3 {
+                entry.level = TrustLevel::SessionTrust;
+                inner.session_trusts.insert(key.clone());
+            }
         }
 
         drop(inner);
@@ -307,6 +312,14 @@ impl TrustStore {
         let entries: HashMap<_, _> = file
             .entries
             .into_iter()
+            // Drop remembered trust for interpreters/network clients: entries
+            // written before this rule existed (or planted by anything that
+            // could write the file) must not stay authoritative. Blocked
+            // entries are kept — they only ever deny.
+            .filter(|e| {
+                e.level == TrustLevel::Blocked
+                    || crate::patterns::is_auto_trustable(&e.tool, &e.pattern)
+            })
             .map(|e| ((e.tool.clone(), e.pattern.clone()), e))
             .collect();
         Some(entries)

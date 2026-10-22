@@ -53,7 +53,23 @@ pub fn media_type_for(ext: &str) -> &'static str {
     }
 }
 
+/// Largest source image we will inline as base64. Beyond this the data URL
+/// is carried by every subsequent request AND written into every checkpoint
+/// (measured: a single 62.9 MB checkpoint was ~100% inline screenshots), so
+/// an unbounded read here is what let one image cost hundreds of MB of I/O.
+/// Text tool results have had a 100 KB cap for the same reason; images had
+/// none (round5 P1-13).
+pub const MAX_INLINE_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+
 pub fn read_image_base64(path: &str) -> Result<String, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("cannot stat image: {e}"))?;
+    if meta.len() > MAX_INLINE_IMAGE_BYTES {
+        return Err(format!(
+            "image is {} MB, above the {} MB inline limit. Downscale it first              (e.g. `sips -Z 1600 in.png --out /tmp/small.png` or python PIL) and read that,              or inspect it with a command instead of loading it into context.",
+            meta.len() / (1024 * 1024),
+            MAX_INLINE_IMAGE_BYTES / (1024 * 1024),
+        ));
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read image: {e}"))?;
 
     let ext = Path::new(path)

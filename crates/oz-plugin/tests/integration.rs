@@ -38,6 +38,7 @@ fn test_handler_integration() {
                 skill_mcp_dir: None,
                 harness_dir: None,
                 session_id: String::new(),
+                tool_budget_secs: 0,
             };
             handler.execute(serde_json::json!({"x": 1}), &ctx).await
         })

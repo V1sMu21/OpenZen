@@ -56,6 +56,14 @@ pub struct SessionEntry {
     /// Todo items restored from the latest checkpoint (for UI recovery).
     #[serde(default)]
     pub todos: Vec<oz_core_types::TodoItem>,
+    /// Bumped by every `get_mut` (i.e. every in-place mutation). The persist
+    /// cache compares it so that a rewrite which changes a message's
+    /// *content* without changing the message *count* — `/compact` folding
+    /// tool output, a checkpoint rebuild, a todo status flip — is still
+    /// written to disk. Counting alone silently persisted the pre-change
+    /// snapshot, so the change came back after a restart (round5 P0-3).
+    #[serde(default)]
+    pub revision: u64,
 }
 
 /// In-memory session store with optional file persistence.
@@ -84,11 +92,12 @@ pub struct SessionStore {
 type SessionSnapshot = HashMap<String, Arc<String>>;
 type PersistPayload = (PathBuf, SessionSnapshot);
 
-/// Cheap staleness fingerprint. Every current mutation path changes one of
-/// these fields (messages are only ever pushed/truncated/removed — never
-/// edited in place), so a match means the cached serialization is valid.
+/// Cheap staleness fingerprint. `revision` is bumped by every in-place
+/// mutation (see `SessionEntry::revision`), so this is no longer fooled by
+/// "same count, different content" edits.
 #[derive(Clone, PartialEq)]
 struct EntryFingerprint {
+    revision: u64,
     messages: usize,
     todos: usize,
     status: SessionStatus,
@@ -101,6 +110,7 @@ struct EntryFingerprint {
 
 fn entry_fingerprint(e: &SessionEntry) -> EntryFingerprint {
     EntryFingerprint {
+        revision: e.revision,
         messages: e.messages.len(),
         todos: e.todos.len(),
         status: e.status.clone(),
@@ -118,12 +128,18 @@ struct PersistWriter {
     /// must skip while this is non-zero: the on-disk file is older than
     /// memory in that window and reloading would clobber newer state.
     pending: Arc<AtomicU64>,
+    /// mtime of the file as of our own last write. Shared with the worker
+    /// thread so `reload_if_stale` can tell "another process wrote" from
+    /// "this is our own write coming back".
+    last_write: Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
 }
 
 impl PersistWriter {
     fn spawn() -> Self {
         let (tx, rx) = mpsc::channel::<PersistPayload>();
         let pending = Arc::new(AtomicU64::new(0));
+        let last_write = Arc::new(std::sync::Mutex::new(None));
+        let worker_last_write = Arc::clone(&last_write);
         let worker_pending = Arc::clone(&pending);
         std::thread::Builder::new()
             .name("openzen-session-persist".into())
@@ -156,12 +172,25 @@ impl PersistWriter {
                         }
                         json.push('}');
                         SessionStore::write_atomic(&path, &json);
+                        // Record when WE last wrote, so a later staleness
+                        // check does not mistake our own write for another
+                        // process's change (and vice versa).
+                        if let Ok(meta) = std::fs::metadata(&path) {
+                            if let Ok(mtime) = meta.modified() {
+                                *worker_last_write.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(mtime);
+                            }
+                        }
                         worker_pending.fetch_sub(1, Ordering::SeqCst);
                     }
                 }
             })
             .expect("failed to spawn session persist thread");
-        PersistWriter { tx, pending }
+        PersistWriter {
+            tx,
+            pending,
+            last_write,
+        }
     }
 
     fn submit(&self, path: PathBuf, snapshot: SessionSnapshot) {
@@ -262,7 +291,11 @@ impl SessionStore {
     /// 30 minutes are reset to Stopped; the runner re-marks its own
     /// transitions, and a real long run is re-marked Running/Idle at its
     /// boundaries anyway.
-    pub fn prune_expired(&mut self, threshold: chrono::DateTime<chrono::Utc>) -> usize {
+    pub fn prune_expired(
+        &mut self,
+        threshold: chrono::DateTime<chrono::Utc>,
+        live_running: &std::collections::HashSet<String>,
+    ) -> usize {
         let now = chrono::Utc::now();
         fn last_activity(s: &SessionEntry) -> chrono::DateTime<chrono::Utc> {
             s.messages
@@ -274,8 +307,16 @@ impl SessionStore {
                 .unwrap_or(s.created_at)
         }
         let mut ghosts = 0;
-        for entry in self.sessions.values_mut() {
+        for (id, entry) in self.sessions.iter_mut() {
+            // Ghost flip: a session whose last *persisted* message is older
+            // than 30 minutes was assumed dead. That assumption is wrong for
+            // any long run — the assistant message is only written when the
+            // run ends — and flipping it made the next Stop a no-op
+            // (`stop_session` early-returned "already_stopped"), so the user
+            // lost control of a running task (round5 P0-8). Only flip when
+            // the agent is genuinely not running.
             if entry.status == SessionStatus::Running
+                && !live_running.contains(id)
                 && (now - last_activity(entry)).num_seconds() > 30 * 60
             {
                 entry.status = SessionStatus::Stopped;
@@ -349,6 +390,43 @@ impl SessionStore {
         }
     }
 
+    /// Reload only when the file on disk is newer than our own last
+    /// read/write.
+    ///
+    /// The desktop app writes the whole file from its in-memory map, and
+    /// several processes can share one data root (webui, TUI, CLI, the
+    /// platform bridge). `list_sessions` used to call `reload()`
+    /// unconditionally, which re-parsed the entire file on every sidebar
+    /// refresh; removing it entirely would have made a concurrently running
+    /// webui's new sessions invisible AND let the next full-file write erase
+    /// them (review finding A-F5). One `stat` per refresh is the cheap middle
+    /// ground.
+    pub fn reload_if_stale(&mut self) -> bool {
+        let Some(ref path) = self.path else {
+            return false;
+        };
+        if let Some(ref w) = self.writer {
+            if w.pending.load(Ordering::SeqCst) > 0 {
+                return false;
+            }
+        }
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        let Ok(mtime) = meta.modified() else {
+            return false;
+        };
+        let known = self
+            .writer
+            .as_ref()
+            .and_then(|w| *w.last_write.lock().unwrap_or_else(|e| e.into_inner()));
+        if known.is_some_and(|k| mtime <= k) {
+            return false;
+        }
+        self.reload();
+        true
+    }
+
     /// Reload sessions from disk. Useful when another process or adapter
     /// (e.g. platform bridge) has written to the same persistence file.
     /// Skipped while a background write is in flight — the on-disk file is
@@ -361,9 +439,24 @@ impl SessionStore {
             }
         }
         if let Some(ref path) = self.path {
+            if let Ok(meta) = std::fs::metadata(path) {
+                if let Ok(mtime) = meta.modified() {
+                    if let Some(ref w) = self.writer {
+                        *w.last_write.lock().unwrap_or_else(|e| e.into_inner()) = Some(mtime);
+                    }
+                }
+            }
             if let Ok(data) = std::fs::read_to_string(path) {
                 if let Ok(sessions) = serde_json::from_str::<HashMap<String, SessionEntry>>(&data) {
                     self.sessions = sessions;
+                    // The cache holds serializations of the *previous*
+                    // in-memory state. Keeping them could write that older
+                    // content back over what we just loaded (same revision,
+                    // different bytes) — drop it.
+                    self.persist_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear();
                 }
             }
         }
@@ -479,6 +572,7 @@ impl SessionStore {
                 project_id: project_id.map(|s| s.to_string()),
                 working_dir: working_dir.map(|s| s.to_string()),
                 todos: Vec::new(),
+                revision: 0,
             },
         );
     }
@@ -501,8 +595,17 @@ impl SessionStore {
         self.sessions.get(id)
     }
 
+    /// Mutable access. Hands out `&mut` and therefore records a revision
+    /// bump: any caller that mutates the entry in place (compaction folding
+    /// content, checkpoint recovery, todo updates) invalidates the persist
+    /// cache even when no message was added or removed.
     pub fn get_mut(&mut self, id: &str) -> Option<&mut SessionEntry> {
-        self.sessions.get_mut(id)
+        // `#[allow]`: clippy suggests `inspect`, which only hands out `&`.
+        #[allow(clippy::manual_inspect)]
+        self.sessions.get_mut(id).map(|e| {
+            e.revision = e.revision.wrapping_add(1);
+            e
+        })
     }
 
     pub fn delete(&mut self, id: &str) -> bool {
@@ -610,6 +713,7 @@ mod incremental_persist_tests {
             project_id: None,
             working_dir: None,
             todos: vec![],
+            revision: 0,
         };
         let e2 = SessionEntry {
             info: SessionInfo {
@@ -667,6 +771,150 @@ mod incremental_persist_tests {
             parsed["s1"]["messages"].as_array().unwrap().len(),
             2,
             "file must reflect the mutated entry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_regression_tests {
+    use super::*;
+
+    fn entry(id: &str, content: &str) -> SessionEntry {
+        SessionEntry {
+            info: SessionInfo {
+                id: id.into(),
+                name: id.into(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                status: "idle".into(),
+                message_count: 1,
+                project_id: None,
+                project_name: None,
+                working_dir: None,
+            },
+            status: SessionStatus::Idle,
+            messages: vec![serde_json::json!({"role": "user", "content": content})],
+            created_at: chrono::Utc::now(),
+            project_id: None,
+            working_dir: None,
+            todos: vec![],
+            revision: 0,
+        }
+    }
+
+    /// round5 P0-3 regression: `/compact` folds content IN PLACE — the
+    /// message count does not change, so the old count-only fingerprint
+    /// decided the cached (pre-compaction) JSON was still valid and wrote it
+    /// back. The user saw "compressed" and got the old context after a
+    /// restart. Mutating through `get_mut` must invalidate the cache.
+    #[test]
+    fn in_place_content_change_is_persisted() {
+        let dir = std::env::temp_dir().join(format!("oz-fp-inplace-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions.json");
+        let mut store = SessionStore::persisted(path.clone());
+        store.sessions.insert("s1".into(), entry("s1", "BEFORE"));
+        store.save();
+        store.wait_persisted(std::time::Duration::from_secs(2));
+
+        // Same message count, different content — exactly what compaction does.
+        {
+            let e = store.get_mut("s1").expect("session present");
+            e.messages[0]["content"] = serde_json::json!("AFTER");
+        }
+        store.save();
+        store.wait_persisted(std::time::Duration::from_secs(2));
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            parsed["s1"]["messages"][0]["content"], "AFTER",
+            "in-place content change was not persisted (stale cache written back)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pure read must not force a rewrite of the cached JSON.
+    #[test]
+    fn read_only_access_does_not_invalidate_the_cache() {
+        let dir = std::env::temp_dir().join(format!("oz-fp-read-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions.json");
+        let mut store = SessionStore::persisted(path.clone());
+        store.sessions.insert("s1".into(), entry("s1", "same"));
+        store.save();
+        store.wait_persisted(std::time::Duration::from_secs(2));
+        let before = {
+            let cache = store.persist_cache.lock().unwrap();
+            Arc::clone(&cache.get("s1").unwrap().1)
+        };
+        assert!(store.get("s1").is_some());
+        store.save();
+        store.wait_persisted(std::time::Duration::from_secs(2));
+        let after = {
+            let cache = store.persist_cache.lock().unwrap();
+            Arc::clone(&cache.get("s1").unwrap().1)
+        };
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "a read must not invalidate the persist cache"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review finding A-F5: removing the unconditional `reload()` from the
+    /// stats/list commands must not make another process's writes invisible
+    /// (and then erasable by our next full-file save). `reload_if_stale()`
+    /// picks them up with a single `stat`.
+    #[test]
+    fn reload_if_stale_picks_up_another_process_write() {
+        let dir = std::env::temp_dir().join(format!("oz-fp-stale-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions.json");
+        let mut store = SessionStore::persisted(path.clone());
+        store.sessions.insert("s1".into(), entry("s1", "mine"));
+        store.save();
+        store.wait_persisted(std::time::Duration::from_secs(2));
+        // Our own write must NOT look like a foreign change.
+        assert!(
+            !store.reload_if_stale(),
+            "our own write must not trigger a reload"
+        );
+
+        // Another process (webui/TUI/CLI) appends a session.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut foreign: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        foreign["s2"] = serde_json::to_value(entry("s2", "from another process")).unwrap();
+        std::fs::write(&path, serde_json::to_string(&foreign).unwrap()).unwrap();
+
+        assert!(store.reload_if_stale(), "a foreign write must be detected");
+        assert!(
+            store.get("s2").is_some(),
+            "the other process's session must be visible (otherwise the next save erases it)"
+        );
+        // And it must be idempotent: nothing changed since.
+        assert!(!store.reload_if_stale());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `reload()` must drop the persist cache: it holds serializations of the
+    /// previous in-memory state and could otherwise overwrite what was just
+    /// loaded from disk.
+    #[test]
+    fn reload_drops_the_persist_cache() {
+        let dir = std::env::temp_dir().join(format!("oz-fp-reload-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions.json");
+        let mut store = SessionStore::persisted(path.clone());
+        store.sessions.insert("s1".into(), entry("s1", "disk"));
+        store.save();
+        store.wait_persisted(std::time::Duration::from_secs(2));
+        assert!(!store.persist_cache.lock().unwrap().is_empty());
+        store.reload();
+        assert!(
+            store.persist_cache.lock().unwrap().is_empty(),
+            "reload must clear the persist cache"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

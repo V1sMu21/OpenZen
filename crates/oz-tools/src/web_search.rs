@@ -32,7 +32,14 @@ use std::sync::LazyLock;
 pub struct WebSearchTool;
 
 /// Every engine this tool can dispatch to, in preferred-default order.
-pub const SEARCH_ENGINES: [&str; 6] = ["bocha", "tavily", "firecrawl", "exa", "bing-rss", "bing-html"];
+pub const SEARCH_ENGINES: [&str; 6] = [
+    "bocha",
+    "tavily",
+    "firecrawl",
+    "exa",
+    "bing-rss",
+    "bing-html",
+];
 
 /// Default chain for the tool's default `engine: "keyless"` — the
 /// dsh-keyless-search backend order (Tavily first, then Firecrawl).
@@ -381,8 +388,14 @@ pub async fn probe_engine_with_key(
     key: Option<&str>,
     working_dir: &str,
 ) -> Result<usize, String> {
-    let results =
-        run_engine(engine, "openzen web search connectivity check", 3, working_dir, key).await?;
+    let results = run_engine(
+        engine,
+        "openzen web search connectivity check",
+        3,
+        working_dir,
+        key,
+    )
+    .await?;
     Ok(results.len())
 }
 
@@ -435,14 +448,8 @@ async fn post_search_json(
 }
 
 /// GET a URL as text with per-request timeout, failing loudly on any non-2xx.
-async fn get_text(
-    url: &str,
-    headers: Vec<(&str, &str)>,
-    engine: &str,
-) -> Result<String, String> {
-    let mut request = KEYLESS_CLIENT
-        .get(url)
-        .header("user-agent", USER_AGENT);
+async fn get_text(url: &str, headers: Vec<(&str, &str)>, engine: &str) -> Result<String, String> {
+    let mut request = KEYLESS_CLIENT.get(url).header("user-agent", USER_AGENT);
     for (name, value) in headers {
         request = request.header(name, value);
     }
@@ -474,9 +481,8 @@ static DATE_PREFIX_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"^\s*\d{4}[年/-]\s?\d{1,2}[月/-]\s?\d{1,2}日?\s*[·|—-]?\s*")
         .expect("valid date regex")
 });
-static BING_TRACKING_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r#"[?&]u=a1([^&"]+)"#).expect("valid bing tracking regex")
-});
+static BING_TRACKING_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r#"[?&]u=a1([^&"]+)"#).expect("valid bing tracking regex"));
 
 /// Decode the small HTML entity set search snippets actually contain.
 fn decode_entities(value: &str) -> String {
@@ -631,7 +637,11 @@ async fn search_tavily(
 
     let mut results = Vec::new();
     for row in rows {
-        let Some(url) = row.get("url").and_then(|v| v.as_str()).and_then(normalize_url) else {
+        let Some(url) = row
+            .get("url")
+            .and_then(|v| v.as_str())
+            .and_then(normalize_url)
+        else {
             continue;
         };
         results.push(source_row(
@@ -690,7 +700,11 @@ async fn search_firecrawl(
 
     let mut results = Vec::new();
     for row in rows {
-        let Some(url) = row.get("url").and_then(|v| v.as_str()).and_then(normalize_url) else {
+        let Some(url) = row
+            .get("url")
+            .and_then(|v| v.as_str())
+            .and_then(normalize_url)
+        else {
             continue;
         };
         let snippet = row
@@ -714,7 +728,10 @@ async fn search_firecrawl(
 }
 
 /// `bing-rss` — Bing's result RSS feed. Operator opt-in only.
-async fn search_bing_rss(query: &str, num_results: usize) -> Result<Vec<serde_json::Value>, String> {
+async fn search_bing_rss(
+    query: &str,
+    num_results: usize,
+) -> Result<Vec<serde_json::Value>, String> {
     let url = format!(
         "https://{BING_HOST}/search?q={}&format=rss&count={}&mkt={}",
         urlencode(query),
@@ -798,8 +815,8 @@ async fn search_bing_html(
     let split_re = regex::Regex::new(r#"(?i)<li class="b_algo""#).map_err(|e| e.to_string())?;
     let anchor_re = regex::Regex::new(r#"(?is)<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
         .map_err(|e| e.to_string())?;
-    let snippet_re =
-        regex::Regex::new(r#"(?is)<p class="b_lineclamp[^"]*"[^>]*>(.*?)</p>"#).map_err(|e| e.to_string())?;
+    let snippet_re = regex::Regex::new(r#"(?is)<p class="b_lineclamp[^"]*"[^>]*>(.*?)</p>"#)
+        .map_err(|e| e.to_string())?;
     let paragraph_re = regex::Regex::new(r"(?is)<p[^>]*>(.*?)</p>").map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
@@ -1030,7 +1047,9 @@ pub fn extract_toml_value(content: &str, section: &str, key: &str) -> Option<Str
         // (or a `#` inside the value) cannot corrupt the key.
         if let Some(quote) = raw.chars().next().filter(|c| *c == '"' || *c == '\'') {
             let rest = &raw[quote.len_utf8()..];
-            let Some(end) = rest.rfind(quote) else { continue };
+            let Some(end) = rest.rfind(quote) else {
+                continue;
+            };
             let value = &rest[..end];
             return Some(if quote == '"' {
                 value.replace("\\\"", "\"").replace("\\\\", "\\")
@@ -1112,8 +1131,13 @@ mod tests {
             vec!["tavily", "bocha"]
         );
         assert_eq!(
-            resolve_chain_from("keyless", None, Some(vec!["firecrawl".into(), "tavily".into()]), &[])
-                .unwrap(),
+            resolve_chain_from(
+                "keyless",
+                None,
+                Some(vec!["firecrawl".into(), "tavily".into()]),
+                &[]
+            )
+            .unwrap(),
             vec!["firecrawl", "tavily"]
         );
     }
@@ -1250,7 +1274,9 @@ mod tests {
         assert_eq!(keyed.len(), 1);
         assert_eq!(keyed[0].0, "authorization");
         assert_eq!(keyed[0].1, "Bearer tvly-dev-abc");
-        assert!(!keyed.iter().any(|(name, _)| *name == "x-tavily-access-mode"));
+        assert!(!keyed
+            .iter()
+            .any(|(name, _)| *name == "x-tavily-access-mode"));
     }
 
     /* ---------------------------------------------------------------- *

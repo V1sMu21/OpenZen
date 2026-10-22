@@ -237,6 +237,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 
@@ -452,6 +453,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         };
         let result = reg
             .dispatch("ctx_check", serde_json::json!({}), &tc)
@@ -556,9 +558,13 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
         let mut reg = ToolRegistry::new();
         reg.register_with_name("code_run", CaptureTool(seen.clone()));
-        reg.dispatch("code_run", serde_json::json!({"code_run": "echo hi"}), &ctx())
-            .await
-            .expect("dispatch");
+        reg.dispatch(
+            "code_run",
+            serde_json::json!({"code_run": "echo hi"}),
+            &ctx(),
+        )
+        .await
+        .expect("dispatch");
         assert_eq!(seen.lock().unwrap()["code"], "echo hi");
     }
 
@@ -576,20 +582,6 @@ mod tests {
     // ── fixture-driven regression: real "missing `code` argument" sessions ──
 
     /// Deep-collect every string in `v` containing a `<tool_use:…>` transcript tag.
-    fn collect_transcript_strings(v: &serde_json::Value, out: &mut Vec<String>) {
-        match v {
-            serde_json::Value::String(s) => {
-                if s.contains("<tool_use:") {
-                    out.push(s.clone());
-                }
-            }
-            serde_json::Value::Array(a) => a.iter().for_each(|v| collect_transcript_strings(v, out)),
-            serde_json::Value::Object(m) => {
-                m.values().for_each(|v| collect_transcript_strings(v, out))
-            }
-            _ => {}
-        }
-    }
 
     /// Extract `(tool_name, input)` pairs from a session transcript.
     fn tool_uses_from_transcript(text: &str) -> Vec<(String, serde_json::Value)> {
@@ -600,7 +592,9 @@ mod tests {
                 continue;
             };
             let rest = &line[idx + "<tool_use:".len()..];
-            let Some(close) = rest.find('>') else { continue };
+            let Some(close) = rest.find('>') else {
+                continue;
+            };
             let name = rest[..close].trim().to_string();
             let raw = rest[close + 1..].trim();
             if raw.is_empty() {
@@ -608,10 +602,12 @@ mod tests {
             }
             // Depending on how many times the transcript was JSON-encoded, the
             // payload arrives either as plain JSON or with escaped quotes.
-            let parsed = serde_json::from_str::<serde_json::Value>(raw).ok().or_else(|| {
-                let decoded: String = serde_json::from_str(&format!("\"{raw}\"")).ok()?;
-                serde_json::from_str::<serde_json::Value>(&decoded).ok()
-            });
+            let parsed = serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .or_else(|| {
+                    let decoded: String = serde_json::from_str(&format!("\"{raw}\"")).ok()?;
+                    serde_json::from_str::<serde_json::Value>(&decoded).ok()
+                });
             if let Some(input) = parsed {
                 found.push((name, input));
             }
@@ -619,37 +615,75 @@ mod tests {
         found
     }
 
-    /// The real longtask transcripts contain the exact call shapes that were
-    /// failing in production (`{"cmd": …, "mode": "bash"}`, `{"command": …}`,
-    /// `{"content": …}`, the tool name as the key). Every call we touch must
-    /// end up with a required argument it did not have before — canonicalization
-    /// moves values, it never leaves a broken call broken in the same way.
+    /// Inline fixture of the REAL failing call shapes.
+    ///
+    /// These bytes come from the long-task transcripts under
+    /// `tests/longtask/*/openzen/checkpoints/*.json` — 374 real `<tool_use:…>`
+    /// calls, of which the non-canonical ones are exactly these shapes
+    /// (extracted 2026-10-21; the transcripts themselves are gitignored, so a
+    /// fixture that read them from disk could never run in CI — the guard was
+    /// green-by-absence there). Values are shortened; **key sets and types are
+    /// verbatim**, which is what canonicalization keys off.
+    ///
+    /// Production frequencies behind the same shapes (AGENTS.md, real
+    /// `sessions.json`): `missing \`code\` argument` ×422,
+    /// `missing file_path` ×72.
+    const REAL_FAILING_CALLS: &[(&str, &str)] = &[
+        // The dominant code_run shape: `cmd` instead of `code`, `mode`
+        // instead of `type` — this is the ×422 failure.
+        (
+            "code_run",
+            r#"{"cmd": "cd ~/Documents/apps/openzen/tests/longtask/2/final && npm run build", "mode": "bash", "timeout": "60"}"#,
+        ),
+        // Same shape, python type and a bare command.
+        (
+            "code_run",
+            r#"{"cmd": "print(1)", "mode": "python", "timeout": "30"}"#,
+        ),
+        // `command` / `script` aliases.
+        ("code_run", r#"{"command": "echo hi", "type": "bash"}"#),
+        ("code_run", r#"{"script": "ls -la", "type": "bash"}"#),
+        // The tool name itself used as the key (weak-schema models).
+        ("code_run", r#"{"code_run": "git status", "type": "bash"}"#),
+        // Real read shape: `count`/`start` instead of `limit`/`offset`.
+        (
+            "read",
+            r#"{"count": "1244", "file_path": "/tmp/longtask/index.html", "start": "200"}"#,
+        ),
+        // `path` instead of `file_path` (the ×72 failure).
+        ("read", r#"{"path": "/tmp/notes.md"}"#),
+        ("write", r#"{"file": "/tmp/out.txt", "content": "hello"}"#),
+        ("write", r#"{"filename": "/tmp/out.txt", "text": "hello"}"#),
+        (
+            "write",
+            r#"{"filePath": "/tmp/out.txt", "content": "hello"}"#,
+        ),
+        (
+            "edit",
+            r#"{"file_path": "/tmp/a.rs", "old_text": "a", "new_text": "b"}"#,
+        ),
+        (
+            "patch",
+            r#"{"file": "/tmp/a.rs", "old_string": "a", "new_string": "b"}"#,
+        ),
+        ("glob", r#"{"glob": "**/*.rs", "path": "/tmp"}"#),
+        ("grep", r#"{"query": "fn main", "path": "/tmp"}"#),
+        ("ls", r#"{"dir": "/tmp"}"#),
+        // Canonical call: must pass through untouched.
+        ("code_run", r#"{"code": "echo ok", "type": "bash"}"#),
+        ("read", r#"{"file_path": "/tmp/a.md", "limit": 20}"#),
+    ];
+
+    /// Every real failing call must end up with a required argument it did not
+    /// have before — canonicalization moves values, it never leaves a broken
+    /// call broken in the same way.
     #[test]
-    fn real_session_transcripts_gain_canonical_keys() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/longtask");
-        if !dir.exists() {
-            return; // CI-safe: fixture lives only in this checkout
-        }
+    fn real_failing_call_shapes_gain_canonical_keys() {
         let reg = ToolRegistry::build_default();
-        let mut strings = Vec::new();
-        let mut files = 0usize;
-        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let ckpt = entry.path().join("openzen/checkpoints");
-            let Ok(rd) = std::fs::read_dir(&ckpt) else {
-                continue;
-            };
-            for f in rd.flatten() {
-                let Ok(text) = std::fs::read_to_string(f.path()) else {
-                    continue;
-                };
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-                    continue;
-                };
-                files += 1;
-                collect_transcript_strings(&v, &mut strings);
-            }
-        }
-        assert!(files > 0, "no checkpoint files under {}", dir.display());
+        let strings: Vec<String> = REAL_FAILING_CALLS
+            .iter()
+            .map(|(name, args)| format!("<tool_use:{name}>{args}"))
+            .collect();
 
         let mut calls = 0usize;
         let mut foreign_keyed = 0usize;
@@ -689,10 +723,14 @@ mod tests {
                 }
             }
         }
-        assert!(calls >= 20, "fixture should exercise tools, got {calls} calls");
+        assert_eq!(
+            calls,
+            REAL_FAILING_CALLS.len(),
+            "every fixture call must resolve to a registered tool"
+        );
         assert!(
-            foreign_keyed >= 5,
-            "expected the fixture to contain non-canonical calls, got {foreign_keyed}"
+            foreign_keyed >= 10,
+            "the fixture must actually contain non-canonical calls, got {foreign_keyed}"
         );
         assert!(
             unrepaired.is_empty(),

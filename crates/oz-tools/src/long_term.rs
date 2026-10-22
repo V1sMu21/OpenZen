@@ -106,6 +106,7 @@ mod tests {
             skill_mcp_dir: Some(tmp.to_string_lossy().to_string()),
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 

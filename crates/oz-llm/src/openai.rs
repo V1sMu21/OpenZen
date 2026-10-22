@@ -141,6 +141,10 @@ impl Session for OaiSession {
                         if let Some(ref tw) = tools {
                             payload["tools"] = serde_json::to_value(tw).unwrap_or_default();
                         }
+                        // Responses API nests the effort under `reasoning`.
+                        if let Some(ref effort) = cfg.reasoning_effort {
+                            payload["reasoning"] = serde_json::json!({ "effort": effort });
+                        }
                         let resp = http_client
                             .post(&url)
                             .bearer_auth(&cfg.apikey)
@@ -192,6 +196,12 @@ impl Session for OaiSession {
                             "stream": true,
                             "stream_options": { "include_usage": true },
                         });
+                        // Thinking-dial pass-through (chat_completions takes
+                        // the flat OpenAI field; omit entirely when unset so
+                        // backends that reject the param stay unaffected).
+                        if let Some(ref effort) = cfg.reasoning_effort {
+                            payload["reasoning_effort"] = serde_json::json!(effort);
+                        }
                         if let Some(temp) = cfg.temperature {
                             if (temp - 1.0).abs() > f64::EPSILON {
                                 payload["temperature"] = serde_json::json!(temp);
@@ -393,6 +403,12 @@ impl Session for OaiSession {
                             "stream": true,
                             "stream_options": { "include_usage": true },
                         });
+                        // Thinking-dial pass-through (chat_completions takes
+                        // the flat OpenAI field; omit entirely when unset so
+                        // backends that reject the param stay unaffected).
+                        if let Some(ref effort) = cfg.reasoning_effort {
+                            payload["reasoning_effort"] = serde_json::json!(effort);
+                        }
                         if let Some(temp) = cfg.temperature {
                             if (temp - 1.0).abs() > f64::EPSILON {
                                 payload["temperature"] = serde_json::json!(temp);
@@ -413,6 +429,12 @@ impl Session for OaiSession {
                         if let Some(ref tw) = tools {
                             payload["tools"] = serde_json::to_value(tw).unwrap_or_default();
                             payload["tool_choice"] = tool_choice_value(&tool_choice_relaxed);
+                        }
+                        // Thinking-dial pass-through (chat_completions takes
+                        // the flat OpenAI field; omit entirely when unset so
+                        // backends that reject the param stay unaffected).
+                        if let Some(ref effort) = cfg.reasoning_effort {
+                            payload["reasoning_effort"] = serde_json::json!(effort);
                         }
                         // Send-phase timeout (see responses branch).
                         let header_timeout = if is_local_apibase(&cfg.apibase) {

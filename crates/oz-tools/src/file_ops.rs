@@ -18,15 +18,31 @@ const SENSITIVE_SYSTEM_PATHS: &[&str] = &[
 
 /// Names that are sensitive regardless of location: even inside /tmp, a
 /// path aiming at .ssh/.aws/credentials-style targets is rejected.
+///
+/// Read-side counterpart to the runtime-state fence below: with `read` and
+/// `web_fetch` both unapproved, any credential file the agent can read can
+/// be exfiltrated in a URL (round5 P1-8d). Kept to things that are *always*
+/// credentials — a blanket "dotfiles" rule would break ordinary work.
 const SENSITIVE_ALWAYS: &[&str] = &[
     ".ssh/",
     ".aws/",
     ".gnupg/",
     ".docker/",
+    ".kube/",
+    ".config/gh/",
+    ".config/gcloud/",
+    ".password-store/",
+    ".terraform.d/",
     "mykey.toml",
     ".env",
     "credentials",
     "id_rsa",
+    "id_ed25519",
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+    ".git-credentials",
+    ".htpasswd",
 ];
 
 fn contains_any(haystack_lower: &str, needles: &[&str]) -> bool {
@@ -35,7 +51,61 @@ fn contains_any(haystack_lower: &str, needles: &[&str]) -> bool {
         .any(|n| haystack_lower.contains(&n.to_lowercase()))
 }
 
+/// Runtime state that must never be rewritten through the file tools, even
+/// though it lives inside the working directory.
+///
+/// `{working_dir}/openzen/trust.json` is the trust store the safety guard
+/// reloads on every run: an unapproved `write` to it would let the agent
+/// grant itself permission for arbitrary commands from the next message on.
+/// The rest are the other injection surfaces — `.git/hooks/*` (executed by
+/// the user's next commit), `servers.toml` (spawned as a command by the
+/// server form), and the memory/facts text files that are pasted into every
+/// system prompt. Matching is done on canonicalized paths relative to the
+/// canonical working dir, so a project legitimately named `openzen` is not
+/// affected — only the runtime sub-directory inside it.
+fn is_protected_runtime_path(real: &Path, real_wd: &Path, for_write: bool) -> bool {
+    const PROTECTED_DIRS: &[&str] = &["openzen", ".openzen", "memory", "facts", "checkpoints"];
+    const PROTECTED_FILES: &[&str] = &["servers.toml", "trust.json"];
+    // Reads are allowed into the runtime directories on purpose: the system
+    // prompt tells the agent to read `{working_dir}/.openzen/reflections.jsonl`
+    // (the Reflexion failure log), and `memory/`+`facts/` are injected into
+    // the prompt anyway. Blocking them made that instruction impossible to
+    // follow — the agent burned a tool call every turn on a path the fence
+    // rejected (review findings B-2/D-4/E-3).
+    if !for_write {
+        // `servers.toml` can carry MCP server credentials in `env = {...}`.
+        return real == real_wd.join("servers.toml");
+    }
+    for d in PROTECTED_DIRS {
+        if real.starts_with(real_wd.join(d)) {
+            return true;
+        }
+    }
+    for f in PROTECTED_FILES {
+        if real == real_wd.join(f) {
+            return true;
+        }
+    }
+    let git = real_wd.join(".git");
+    if real.starts_with(git.join("hooks")) || real == git.join("config") {
+        return true;
+    }
+    false
+}
+
+/// Read-side fence: working-dir containment, credentials, system paths.
 pub(crate) fn is_in_working_dir(path: &str, working_dir: &str) -> bool {
+    is_in_working_dir_inner(path, working_dir, false)
+}
+
+/// Write-side fence: everything the read side blocks, plus the runtime state
+/// and injection surfaces (trust store, git hooks, servers.toml, the agent's
+/// own memory files).
+pub(crate) fn is_in_working_dir_for_write(path: &str, working_dir: &str) -> bool {
+    is_in_working_dir_inner(path, working_dir, true)
+}
+
+fn is_in_working_dir_inner(path: &str, working_dir: &str, for_write: bool) -> bool {
     let wd = Path::new(working_dir);
     let p = Path::new(path);
 
@@ -77,6 +147,20 @@ pub(crate) fn is_in_working_dir(path: &str, working_dir: &str) -> bool {
         return false;
     }
 
+    // Runtime state / injection surfaces inside the working directory.
+    // Checked before the temp early-return so a working dir under a temp
+    // root cannot bypass it.
+    let real_wd = std::fs::canonicalize(wd).ok();
+    if let (Some(rp), Some(rw)) = (real_p.as_deref(), real_wd.as_deref()) {
+        if is_protected_runtime_path(rp, rw, for_write) {
+            tracing::warn!(
+                "[safety] rejected runtime-state path (injection surface): {}",
+                rp.display()
+            );
+            return false;
+        }
+    }
+
     // Temp dirs are allowed — but only on the canonical path, and only
     // after `..`/symlink resolution.
     if let Some(rp) = real_p.as_deref() {
@@ -95,8 +179,6 @@ pub(crate) fn is_in_working_dir(path: &str, working_dir: &str) -> bool {
     if contains_any(&lower, SENSITIVE_SYSTEM_PATHS) {
         return false;
     }
-
-    let real_wd = std::fs::canonicalize(wd).ok();
 
     match (real_p, real_wd) {
         (Some(rp), Some(rw)) => rp.starts_with(&rw),
@@ -269,7 +351,7 @@ impl ToolHandler for FileWriteTool {
                 &args,
             )));
         }
-        if !is_in_working_dir(path, &ctx.working_dir) {
+        if !is_in_working_dir_for_write(path, &ctx.working_dir) {
             let hint = if !Path::new(path).is_absolute() {
                 let suggested = Path::new(&ctx.working_dir).join(path);
                 format!(" Try the absolute path `{}` instead.", suggested.display())
@@ -333,12 +415,10 @@ impl ToolHandler for FilePatchTool {
                 missing.push("old_string");
             }
             return Ok(ToolOutput::bad_json(oz_core_types::missing_arg_error(
-                "patch",
-                &missing,
-                &args,
+                "patch", &missing, &args,
             )));
         }
-        if !is_in_working_dir(path, &ctx.working_dir) {
+        if !is_in_working_dir_for_write(path, &ctx.working_dir) {
             let hint = if !Path::new(path).is_absolute() {
                 let suggested = Path::new(&ctx.working_dir).join(path);
                 format!(" Try the absolute path `{}` instead.", suggested.display())
@@ -418,12 +498,10 @@ impl ToolHandler for FileEditTool {
                 missing.push("old_string");
             }
             return Ok(ToolOutput::bad_json(oz_core_types::missing_arg_error(
-                "edit",
-                &missing,
-                &args,
+                "edit", &missing, &args,
             )));
         }
-        if !is_in_working_dir(path, &ctx.working_dir) {
+        if !is_in_working_dir_for_write(path, &ctx.working_dir) {
             let hint = if !Path::new(path).is_absolute() {
                 let suggested = Path::new(&ctx.working_dir).join(path);
                 format!(" Try the absolute path `{}` instead.", suggested.display())
@@ -512,6 +590,12 @@ impl ToolHandler for GlobTool {
         let mut results = Vec::new();
         if let Ok(entries) = glob::glob(&glob_pattern) {
             for entry in entries.flatten() {
+                // Same per-entry fence as grep: the pattern itself can walk
+                // into a fenced file even when the base is inside the
+                // working dir (e.g. `glob "**/.env"`).
+                if !is_in_working_dir(&entry.to_string_lossy(), &ctx.working_dir) {
+                    continue;
+                }
                 results.push(entry.to_string_lossy().to_string());
             }
         }
@@ -591,6 +675,19 @@ impl ToolHandler for GrepTool {
                     {
                         continue;
                     }
+                }
+                // The base directory was fenced, but the ENTRIES were not:
+                // `grep {pattern:".", path:"<wd>"}` returned every line of
+                // `<wd>/.env` — the exact credential-read path that the
+                // unapproved `web_fetch` turns into exfiltration. Every file
+                // is re-checked (canonicalized, so a symlink out of the
+                // working dir is caught too).
+                if !is_in_working_dir(&entry_path.to_string_lossy(), &ctx.working_dir) {
+                    tracing::debug!(
+                        "[safety] grep skipped fenced entry: {}",
+                        entry_path.display()
+                    );
+                    continue;
                 }
                 if let Ok(content) = tokio::fs::read_to_string(&entry_path).await {
                     for (lineno, line) in content.lines().enumerate() {
@@ -785,6 +882,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 
@@ -894,6 +992,37 @@ mod tests {
             .await;
         assert!(r.is_err());
     }
+
+    /// Review finding D-1: `grep {pattern:".", path:"<wd>"}` used to return
+    /// every line of `<wd>/.env`. `read .env` was refused, but grep walked
+    /// the directory and read the file anyway — with the unapproved
+    /// `web_fetch` that is a complete credential-exfiltration path.
+    #[tokio::test]
+    async fn grep_does_not_read_fenced_files_inside_the_working_dir() {
+        let wd = std::env::temp_dir().join(format!("oz-grep-fence-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&wd);
+        std::fs::write(wd.join(".env"), "DB_PASSWORD=supersecret\n").unwrap();
+        std::fs::write(wd.join("app.rs"), "fn main() {}\n").unwrap();
+        let c = ToolContext {
+            working_dir: wd.to_string_lossy().to_string(),
+            ..ctx()
+        };
+        let r = GrepTool
+            .execute(
+                serde_json::json!({"pattern": ".", "path": wd.to_string_lossy()}),
+                &c,
+            )
+            .await
+            .unwrap();
+        let body = serde_json::to_string(&r.data).unwrap();
+        assert!(
+            !body.contains("supersecret"),
+            "grep leaked a fenced credential file: {body}"
+        );
+        // The ordinary file next to it is still searchable.
+        assert!(body.contains("app.rs"), "normal files must still be found");
+        let _ = std::fs::remove_dir_all(&wd);
+    }
 }
 
 #[linkme::distributed_slice(crate::registry::TOOL_FACTORIES)]
@@ -911,8 +1040,16 @@ mod fence_tests {
     use super::is_in_working_dir;
 
     fn wd() -> String {
+        wd_named("wd")
+    }
+
+    /// Each test gets its own directory: they run in parallel and used to
+    /// `remove_dir_all` the tree out from under each other, which made
+    /// `canonicalize` fail and the fence reject valid paths (a flaky failure
+    /// that looked like a security bug).
+    fn wd_named(tag: &str) -> String {
         std::env::temp_dir()
-            .join(format!("oz-fence-wd-{}", std::process::id()))
+            .join(format!("oz-fence-{tag}-{}", std::process::id()))
             .to_string_lossy()
             .to_string()
     }
@@ -975,6 +1112,103 @@ mod fence_tests {
         let wd = wd();
         let _ = std::fs::create_dir_all(&wd);
         assert!(!is_in_working_dir("/Users", &wd));
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    /// round5 P0-4 regression: the trust store, the git hook directory and
+    /// the memory text files are injection surfaces — rewriting them through
+    /// an unapproved `write` used to let the agent grant itself permission
+    /// for arbitrary commands (and to plant text into every future system
+    /// prompt). These must be rejected even though they sit inside the
+    /// working directory.
+    #[test]
+    fn runtime_state_paths_are_rejected() {
+        use super::is_in_working_dir_for_write;
+        let wd = wd_named("runtime");
+        let openzen = std::path::Path::new(&wd).join("openzen");
+        let hooks = std::path::Path::new(&wd).join(".git").join("hooks");
+        let memory = std::path::Path::new(&wd).join("memory");
+        for d in [&openzen, &hooks, &memory] {
+            let _ = std::fs::create_dir_all(d);
+        }
+        // Would have been ALLOWED before the fix (all inside wd).
+        // These are WRITE-fence assertions: reads into the runtime
+        // directories are deliberately allowed now (see the read/write test).
+        assert!(!is_in_working_dir_for_write(
+            &openzen.join("trust.json").to_string_lossy(),
+            &wd
+        ));
+        assert!(!is_in_working_dir_for_write(
+            &hooks.join("pre-commit").to_string_lossy(),
+            &wd
+        ));
+        assert!(!is_in_working_dir_for_write(
+            &memory.join("global_mem.txt").to_string_lossy(),
+            &wd
+        ));
+        // servers.toml is refused on BOTH sides (it can carry credentials).
+        assert!(!is_in_working_dir(
+            &std::path::Path::new(&wd)
+                .join("servers.toml")
+                .to_string_lossy(),
+            &wd
+        ));
+        assert!(!is_in_working_dir_for_write(
+            &std::path::Path::new(&wd)
+                .join("servers.toml")
+                .to_string_lossy(),
+            &wd
+        ));
+        // A normal project file next to them stays allowed.
+        let ok = std::path::Path::new(&wd).join("src").join("main.rs");
+        let _ = std::fs::create_dir_all(ok.parent().unwrap());
+        std::fs::write(&ok, "fn main() {}").unwrap();
+        assert!(is_in_working_dir(&ok.to_string_lossy(), &wd));
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    /// Review findings B-2 / D-4 / E-3: the write fence used to be applied to
+    /// READS as well, which made the system prompt's own instruction
+    /// ("read `{working_dir}/.openzen/reflections.jsonl` with the read tool")
+    /// impossible to follow — the Reflexion failure log was unreadable and
+    /// every turn burned a tool call on it.
+    #[test]
+    fn runtime_state_is_readable_but_not_writable() {
+        use super::is_in_working_dir_for_write;
+        let wd = wd_named("readwrite");
+        let reflections = std::path::Path::new(&wd).join(".openzen");
+        let _ = std::fs::create_dir_all(&reflections);
+        let log = reflections.join("reflections.jsonl");
+        std::fs::write(&log, "{\"lesson\":\"x\"}").unwrap();
+        let log_s = log.to_string_lossy().to_string();
+        // Read side: allowed (that is what the system prompt asks for).
+        assert!(
+            is_in_working_dir(&log_s, &wd),
+            "the reflexion log must be readable"
+        );
+        // Write side: still refused — the agent must not rewrite its own
+        // failure log or the trust store.
+        assert!(
+            !is_in_working_dir_for_write(&log_s, &wd),
+            "runtime state must stay write-protected"
+        );
+        let trust = std::path::Path::new(&wd).join("openzen").join("trust.json");
+        let _ = std::fs::create_dir_all(trust.parent().unwrap());
+        std::fs::write(&trust, "{}").unwrap();
+        assert!(!is_in_working_dir_for_write(&trust.to_string_lossy(), &wd));
+        // `servers.toml` can hold MCP credentials → not even readable.
+        let servers = std::path::Path::new(&wd).join("servers.toml");
+        std::fs::write(&servers, "[mcp]").unwrap();
+        assert!(!is_in_working_dir(&servers.to_string_lossy(), &wd));
+        // Review finding D-6: the old substring rule rejected any path
+        // containing "keychain" — including a project file named after it.
+        let kc = std::path::Path::new(&wd).join("src").join("keychain.rs");
+        let _ = std::fs::create_dir_all(kc.parent().unwrap());
+        std::fs::write(&kc, "//! keychain").unwrap();
+        assert!(
+            is_in_working_dir(&kc.to_string_lossy(), &wd),
+            "a source file named keychain.rs must not be treated as a credential"
+        );
         let _ = std::fs::remove_dir_all(&wd);
     }
 }

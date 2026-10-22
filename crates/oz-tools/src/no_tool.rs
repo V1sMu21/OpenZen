@@ -95,6 +95,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 

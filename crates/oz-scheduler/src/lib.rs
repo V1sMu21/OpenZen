@@ -20,6 +20,11 @@ use std::time::Duration;
 pub struct Scheduler {
     tasks: Vec<Box<dyn ScheduledTask>>,
     shutdown: Arc<AtomicBool>,
+    /// Wakes the per-task `select!` immediately on `stop()`. The previous
+    /// implementation had every task poll `shutdown` with a 100 ms sleep
+    /// inside its select branch: three registered tasks meant ~30 wakeups a
+    /// second, forever, even while the app was idle (round5 P1-14).
+    notify: Arc<tokio::sync::Notify>,
 }
 
 impl Scheduler {
@@ -27,6 +32,7 @@ impl Scheduler {
         Scheduler {
             tasks: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -40,6 +46,11 @@ impl Scheduler {
 
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        // Wake current waiters, and leave a permit for a task that has not
+        // reached its `notified()` yet (otherwise it would only notice at
+        // its next tick — up to an hour later).
+        self.notify.notify_waiters();
+        self.notify.notify_one();
     }
 
     /// Start all registered tasks. Each runs in its own `tokio::spawn` with
@@ -50,12 +61,14 @@ impl Scheduler {
     /// context, so 7x24 maintenance would never actually run.
     pub async fn run(self, ctx: TaskContext) {
         let shutdown = self.shutdown.clone();
+        let notify = self.notify.clone();
         let mut handles = Vec::new();
 
         for task in self.tasks {
             let name = task.name().to_string();
             let interval = task.interval();
             let shutdown = shutdown.clone();
+            let notify = notify.clone();
             let task_ctx = ctx.clone();
 
             tracing::info!("[scheduler] starting task `{name}` every {interval:?}");
@@ -73,12 +86,21 @@ impl Scheduler {
                                 Err(e) => tracing::warn!("[scheduler] `{name}` failed: {e}"),
                             }
                         }
-                        _ = async {
-                            while !shutdown.load(Ordering::Relaxed) {
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                            }
-                        } => {
+                        _ = notify.notified() => {
                             break;
+                        }
+                        // Fallback: `Scheduler::stop()` is not the only way the
+                        // shutdown flag is set — `graceful_shutdown` stores
+                        // into the same `AtomicBool` through
+                        // `shutdown_signal()`, and that path cannot notify.
+                        // Re-check the flag every 5s so a stop is observed
+                        // within seconds instead of at the next tick (which
+                        // is up to 6h for SkillMcpScan), without going back
+                        // to the old 100ms-per-task spin (review finding C-F5).
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                            if shutdown.load(Ordering::Relaxed) {
+                                break;
+                            }
                         }
                     }
                 }

@@ -379,6 +379,7 @@ mod tests {
             skill_mcp_dir: Some(dir_path),
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 

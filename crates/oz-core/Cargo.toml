@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# kill(2) for process-group teardown on timeout (see verifier::kill_verifier_tree)
+libc = "0.2"
 oz-core-types = { path = "../oz-core-types" }
 oz-skill-mcp = { path = "../oz-skill-mcp" }
 oz-safety = { path = "../oz-safety" }

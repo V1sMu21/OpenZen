@@ -21,6 +21,12 @@ pub struct MmapWal {
     cursor: usize,
     /// Total mapped capacity.
     capacity: usize,
+    /// Number of valid records currently in the file. Maintained on open
+    /// (from the header scan) and on append, so the compaction check no
+    /// longer has to deserialize every record just to count them — that was
+    /// the single most expensive thing a periodic checkpoint did (up to 8
+    /// full conversation snapshots parsed per append).
+    records: usize,
     path: PathBuf,
 }
 
@@ -39,13 +45,13 @@ impl MmapWal {
             .open(&path)?;
 
         let file_len = file.metadata()?.len() as usize;
-        let (map, cursor, capacity) = if file_len == 0 {
+        let (map, cursor, capacity, records) = if file_len == 0 {
             // Fresh file — initialise with header
             file.set_len(WAL_INITIAL_SIZE as u64)?;
             let mut map = unsafe { memmap2::MmapMut::map_mut(&file)? };
             map[..4].copy_from_slice(WAL_MAGIC);
             map[4..8].copy_from_slice(&WAL_VERSION.to_le_bytes());
-            (map, WAL_HEADER_SIZE, WAL_INITIAL_SIZE)
+            (map, WAL_HEADER_SIZE, WAL_INITIAL_SIZE, 0)
         } else {
             // Existing file — validate header, scan to end
             let cap = file_len.max(WAL_INITIAL_SIZE);
@@ -60,8 +66,8 @@ impl MmapWal {
                     "invalid WAL magic bytes",
                 ));
             }
-            let cursor = scan_records(&map[..], WAL_HEADER_SIZE);
-            (map, cursor, cap)
+            let (cursor, records) = scan_records_counted(&map[..], WAL_HEADER_SIZE);
+            (map, cursor, cap, records)
         };
 
         Ok(MmapWal {
@@ -69,6 +75,7 @@ impl MmapWal {
             map,
             cursor,
             capacity,
+            records,
             path,
         })
     }
@@ -97,6 +104,7 @@ impl MmapWal {
         // Write JSON data
         self.map[self.cursor + 4..self.cursor + record_len].copy_from_slice(json);
         self.cursor += record_len;
+        self.records += 1;
         Ok(())
     }
 
@@ -169,7 +177,7 @@ impl MmapWal {
 // and the WAL compacts itself past a record budget so a 7x24 session
 // can't grow it without bound (each record is a full snapshot).
 
-const MAX_WAL_RECORDS: usize = 8;
+const MAX_WAL_RECORDS: usize = 1;
 
 fn wal_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, MmapWal>> {
     static CACHE: std::sync::OnceLock<
@@ -215,7 +223,7 @@ fn append_checkpoint_wal_bytes(dir: &Path, session_id: &str, json: &[u8]) {
     }
     let needs_compact = cache
         .get(&key)
-        .map(|wal| wal.all().len() >= MAX_WAL_RECORDS)
+        .map(|wal| wal.records >= MAX_WAL_RECORDS)
         .unwrap_or(false);
     if needs_compact {
         // Keep only the newest record: drop the handle, remove the file,
@@ -264,20 +272,24 @@ pub fn read_latest_checkpoint_wal(dir: &Path, session_id: &str) -> Option<LoopCh
     wal.latest()
 }
 
-/// Scan from `start` forward to find the first byte after the last
-/// complete record (or `start` if no complete records exist).
-fn scan_records(data: &[u8], start: usize) -> usize {
+/// Scan from `start` forward to find the first byte after the last complete
+/// record (or `start` if no complete records exist) **and** how many complete
+/// records were seen. No JSON is parsed — only length prefixes are read,
+/// which is what makes it safe to call on every append.
+fn scan_records_counted(data: &[u8], start: usize) -> (usize, usize) {
     let mut pos = start;
+    let mut count = 0usize;
     loop {
         if pos + 4 > data.len() {
-            break pos;
+            break (pos, count);
         }
         let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + len > data.len() {
-            break pos - 4; // back to start of incomplete record
+            break (pos - 4, count); // back to start of incomplete record
         }
         pos += len;
+        count += 1;
     }
 }
 
@@ -589,27 +601,54 @@ pub fn load_best_loop_checkpoint(dir: &Path, session_id: &str) -> Option<LoopChe
         // snapshot.
         return read_latest_checkpoint_wal(dir, session_id);
     }
-    let mut best: Option<(u32, usize, PathBuf)> = None;
-    for path in &paths {
-        if let Ok(data) = std::fs::read_to_string(path) {
-            if let Ok(cp) = serde_json::from_str::<LoopCheckpoint>(&data) {
-                let n = cp.messages.len();
-                let turn = cp.turn;
-                let replace = match &best {
-                    Some((best_turn, best_msgs, _)) => {
-                        turn > *best_turn || (turn == *best_turn && n > *best_msgs)
+    // The turn number is part of the file name (`loop_<sid>_<turn>.json`),
+    // and a later turn is authoritative by definition (see the doc comment).
+    // Picking it from the NAME means we parse exactly one file instead of
+    // every retained snapshot — those are full conversation dumps and reach
+    // tens of MB each (measured: five files, 62.9/60.6/59.4/57.1/56.0 MB,
+    // ~2s of CPU and hundreds of MB of transient allocation per resume).
+    let newest = paths
+        .iter()
+        .filter_map(|p| {
+            let name = p.file_name()?.to_string_lossy().to_string();
+            let turn: u32 = name
+                .strip_suffix(".json")?
+                .rsplit('_')
+                .next()?
+                .parse()
+                .ok()?;
+            Some((turn, p.clone()))
+        })
+        .max_by_key(|(turn, _)| *turn);
+    let file_best = newest.and_then(|(_, path)| {
+        let data = std::fs::read_to_string(&path).ok()?;
+        serde_json::from_str::<LoopCheckpoint>(&data).ok()
+    });
+    // Fallback for names that do not carry a parseable turn (older layouts):
+    // scan them the slow way rather than losing the checkpoint.
+    let file_best = file_best.or_else(|| {
+        let mut best: Option<(u32, usize, PathBuf)> = None;
+        for path in &paths {
+            if let Ok(data) = std::fs::read_to_string(path) {
+                if let Ok(cp) = serde_json::from_str::<LoopCheckpoint>(&data) {
+                    let n = cp.messages.len();
+                    let turn = cp.turn;
+                    let replace = match &best {
+                        Some((best_turn, best_msgs, _)) => {
+                            turn > *best_turn || (turn == *best_turn && n > *best_msgs)
+                        }
+                        None => true,
+                    };
+                    if replace {
+                        best = Some((turn, n, path.clone()));
                     }
-                    None => true,
-                };
-                if replace {
-                    best = Some((turn, n, path.clone()));
                 }
             }
         }
-    }
-    let file_best = best.and_then(|(_, _, path)| {
-        let data = std::fs::read_to_string(&path).ok()?;
-        serde_json::from_str::<LoopCheckpoint>(&data).ok()
+        best.and_then(|(_, _, path)| {
+            let data = std::fs::read_to_string(&path).ok()?;
+            serde_json::from_str::<LoopCheckpoint>(&data).ok()
+        })
     });
     // The WAL is written after the JSON file in the same save call, so a
     // WAL record with a >= turn is at least as recent (crash between the
@@ -739,11 +778,99 @@ fn collect_checkpoints(dir: &Path, prefix: Option<&str>) -> Vec<PathBuf> {
 fn cleanup_session_checkpoints(dir: &Path, safe_session: &str, keep: usize) {
     let prefix = format!("loop_{}_", safe_session);
     let entries = collect_checkpoints(dir, Some(&prefix));
+    // Count budget first (newest kept), then a byte budget: five snapshots of
+    // a screenshot-heavy conversation measured 282 MB for one session, and
+    // the byte cap is what actually bounds the directory (round5 P0-2).
     if entries.len() > keep {
         for entry in entries.iter().take(entries.len() - keep) {
             let _ = std::fs::remove_file(entry);
         }
     }
+    let mut remaining = collect_checkpoints(dir, Some(&prefix));
+    remaining.reverse(); // newest first
+    let mut total: u64 = 0;
+    for (i, entry) in remaining.iter().enumerate() {
+        let size = std::fs::metadata(entry).map(|m| m.len()).unwrap_or(0);
+        total = total.saturating_add(size);
+        // Always keep the newest one; drop older ones past the budget.
+        if i > 0 && total > MAX_SESSION_CHECKPOINT_BYTES {
+            let _ = std::fs::remove_file(entry);
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+/// Per-session on-disk budget for `loop_*.json` snapshots.
+pub const MAX_SESSION_CHECKPOINT_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Delete every checkpoint artifact belonging to `session_id`
+/// (`loop_<sid>_*.json` and `wal_<sid>.mmap`). Called when a session is
+/// deleted: the files used to stay forever, which is how the checkpoint
+/// directory reached 978 MB with 175 files belonging to sessions that no
+/// longer existed (round5 P0-2 / P1-8).
+pub fn purge_session_checkpoints(dir: &Path, session_id: &str) -> usize {
+    let safe = sanitize_session_id(session_id);
+    let mut removed = 0usize;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_mine =
+                name.starts_with(&format!("loop_{safe}_")) || name == format!("wal_{safe}.mmap");
+            if is_mine && std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    // Drop the cached WAL handle too, otherwise the next append would
+    // recreate the file we just deleted.
+    let key = wal_key(dir, session_id);
+    wal_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&key);
+    removed
+}
+
+/// Remove checkpoint artifacts whose session no longer exists in
+/// `live_ids`, skipping anything touched within `min_age` (a run that is
+/// starting up may not be listed yet).
+pub fn gc_orphan_checkpoints(
+    dir: &Path,
+    live_ids: &std::collections::HashSet<String>,
+    min_age: std::time::Duration,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        // loop_<sid>_<turn>.json | wal_<sid>.mmap
+        let sid = if let Some(rest) = name.strip_prefix("loop_") {
+            rest.rsplit_once('_').map(|(sid, _)| sid.to_string())
+        } else if let Some(rest) = name.strip_prefix("wal_") {
+            rest.strip_suffix(".mmap").map(|s| s.to_string())
+        } else {
+            None
+        };
+        let Some(sid) = sid else { continue };
+        if live_ids.contains(&sid) {
+            continue;
+        }
+        let fresh = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map(|e| e < min_age).unwrap_or(false))
+            .unwrap_or(false);
+        if fresh {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!("[gc] failed to remove {}: {e}", path.display()),
+        }
+    }
+    removed
 }
 
 /// Create an InterventionEvent from user input.

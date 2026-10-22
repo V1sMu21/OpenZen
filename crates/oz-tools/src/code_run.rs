@@ -85,7 +85,7 @@ impl ToolHandler for CodeRunTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default 60, max 1800). Set a larger value for long-running commands."
+                    "description": "Timeout in seconds (default 300, max 1800). Set a larger value for long-running commands."
                 },
                 "mode": {
                     "type": "string",
@@ -118,17 +118,22 @@ impl ToolHandler for CodeRunTool {
         }
 
         let code_type = args.get("type").and_then(|v| v.as_str()).unwrap_or("bash");
-        // Inner cap. The agent loop's outer cap honors a declared `timeout`
-        // (+30s grace) up to 1830s, so the inner kill fires first with its
-        // structured timeout result. Clamp here so a runaway value can't
-        // outrun the outer cap and get killed by the loop's blunt error.
-        // 30s outer caps from `tool_timeout_secs` no longer bite: even the
-        // default (60s) is honored.
-        let timeout = args
-            .get("timeout")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(60)
-            .clamp(1, 1800);
+        // Inner timeout. The agent loop hands us its OUTER budget in
+        // `ctx.tool_budget_secs`; clamp strictly below it so THIS timeout
+        // always fires first — it returns a structured timeout result and
+        // kills the whole process group, whereas the loop's outer timeout
+        // merely drops the future and (killing only the direct child) leaves
+        // node/cargo/pytest descendants running.
+        //
+        // Default raised 60s -> 300s: dependency installs, test suites and
+        // asset generation are the common case, and the old 30s loop default
+        // that preempted this was measured killing 129 real calls across 36
+        // sessions.
+        let declared = args.get("timeout").and_then(|v| v.as_u64());
+        let mut timeout = declared.unwrap_or(300).clamp(1, 1800);
+        if ctx.tool_budget_secs > 0 {
+            timeout = timeout.min(ctx.tool_budget_secs.saturating_sub(10).max(1));
+        }
         let mode = args
             .get("mode")
             .and_then(|v| v.as_str())
@@ -367,11 +372,8 @@ async fn run_child_with_timeout(
     let mut err_task = tokio::spawn(read_pipe_into(child.stderr.take(), err_buf.clone()));
 
     // Wait for the direct child only — never for pipe EOF.
-    let waited = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout.max(1)),
-        child.wait(),
-    )
-    .await;
+    let waited =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout.max(1)), child.wait()).await;
     let timed_out = waited.is_err();
     if timed_out {
         kill_process_tree(pid);
@@ -423,7 +425,8 @@ async fn run_child_with_timeout(
         // model must know the output may be incomplete and that redirecting
         // is how you get an immediate return.
         result["detached_output"] = serde_json::json!(true);
-        const NOTE: &str = "\n[code_run] the command exited but a background descendant still holds \
+        const NOTE: &str =
+            "\n[code_run] the command exited but a background descendant still holds \
              stdout/stderr; it keeps running detached and the output above may be truncated. \
              Redirect long-lived output (e.g. `nohup cmd >/tmp/cmd.log 2>&1 &`) so the tool \
              returns immediately.";
@@ -537,6 +540,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 
@@ -659,9 +663,8 @@ mod tests {
     async fn test_timeout_keeps_partial_output_and_kills_process_tree() {
         let tool = CodeRunTool;
         let marker = "oz_code_run_tree_marker_7f3c";
-        let script = format!(
-            "echo {marker}_started; sh -c 'sleep 47 # {marker}' & sleep 300 # {marker}"
-        );
+        let script =
+            format!("echo {marker}_started; sh -c 'sleep 47 # {marker}' & sleep 300 # {marker}");
         let started = std::time::Instant::now();
         let result = tool
             .execute(
@@ -683,10 +686,7 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("timed out"));
-        assert!(
-            elapsed.as_secs() < 15,
-            "timeout path took {elapsed:?}"
-        );
+        assert!(elapsed.as_secs() < 15, "timeout path took {elapsed:?}");
 
         // The descendant must be gone too (process-group kill).
         std::thread::sleep(std::time::Duration::from_millis(600));

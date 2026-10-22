@@ -72,6 +72,7 @@ pub fn spawn_agent_loop(
         skill_mcp_dir: None,
         harness_dir: None,
         session_id: String::new(),
+        tool_budget_secs: 0,
     };
 
     let backend: Box<dyn oz_llm::Session> = match sess_type {

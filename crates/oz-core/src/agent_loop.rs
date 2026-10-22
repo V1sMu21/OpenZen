@@ -167,6 +167,44 @@ struct ToolCallMeta {
     blocked: bool,
 }
 
+/// T9.1: stable identity of one tool call (name + canonical arguments) for
+/// the repeated-failure hard gate.
+///
+/// NOT a truncated serialization: `write`'s keys sort alphabetically, so
+/// `content` comes before `file_path` and a 400-char cut dropped the path
+/// entirely — two different files then shared one key and the 4th write was
+/// rejected as a repeat (review B11). The identifying arguments are hashed in
+/// full; long payloads contribute a digest instead of being cut.
+fn failure_key(tool_name: &str, args: &serde_json::Value) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match args {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                k.hash(&mut hasher);
+                let v = &map[k];
+                // The path/name-ish arguments go in verbatim; big text bodies
+                // are represented by their length + digest.
+                let rendered = match v {
+                    serde_json::Value::String(s) if s.chars().count() > 200 => {
+                        format!("len={}#{:x}", s.len(), {
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            s.hash(&mut h);
+                            h.finish()
+                        })
+                    }
+                    other => other.to_string(),
+                };
+                rendered.hash(&mut hasher);
+            }
+        }
+        other => other.to_string().hash(&mut hasher),
+    }
+    format!("{tool_name}|{:x}", hasher.finish())
+}
+
 /// Process the outcome of a single tool dispatch, updating shared state.
 /// Every outcome (success AND error) is recorded in `tool_results` so
 /// the next LLM turn can pair it with the assistant's `tool_use`
@@ -190,6 +228,12 @@ fn process_tool_outcome(
     exit_reason: &mut Option<String>,
     _config: &LoopConfig,
     pending_ask_user: &mut Vec<PendingAskUser>,
+    // Run-level (tool_name, success, message) log. Feeds the review
+    // evidence (P0-6 ①) and the usage telemetry (T6).
+    run_outcomes: &mut Vec<(String, bool, String)>,
+    // T9.1: identical-failure counter, shared across turns.
+    failure_counts: &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u32>>>,
+    tool_args: &serde_json::Value,
 ) {
     match outcome {
         Ok(oc) => {
@@ -206,6 +250,11 @@ fn process_tool_outcome(
             }
             if oc.should_exit {
                 *exit_reason = Some("EXITED".into());
+                run_outcomes.push((
+                    tool_name.to_string(),
+                    true,
+                    crate::quality::truncate_text(&tool_result_content(&oc.data), 300),
+                ));
                 tool_results.push(ToolResultItem {
                     tool_use_id: tid.to_string(),
                     content: tool_result_content(&oc.data),
@@ -213,6 +262,35 @@ fn process_tool_outcome(
                 });
                 return;
             }
+            // A tool that reports `status: "error"` is a FAILED call even
+            // though the transport succeeded. `code_run` never emits `status`
+            // — it reports `{exit_code, stdout, stderr}` — so the old check
+            // made the repeated-failure hard gate unreachable for the most
+            // used tool in the product (4947 calls) AND made the review
+            // evidence describe failing commands as "ok" (review B1).
+            let ok = oc.data.get("status").and_then(|v| v.as_str()) != Some("error")
+                && oc
+                    .data
+                    .get("exit_code")
+                    .and_then(|v| v.as_i64())
+                    .map(|c| c == 0)
+                    .unwrap_or(true)
+                && oc.data.get("timeout").and_then(|v| v.as_bool()) != Some(true)
+                && oc.data.get("error").is_none();
+            {
+                let mut m = failure_counts.lock().unwrap_or_else(|p| p.into_inner());
+                let key = failure_key(tool_name, tool_args);
+                if ok {
+                    m.remove(&key);
+                } else {
+                    *m.entry(key).or_insert(0) += 1;
+                }
+            }
+            run_outcomes.push((
+                tool_name.to_string(),
+                ok,
+                crate::quality::truncate_text(&tool_result_content(&oc.data), 300),
+            ));
             tool_results.push(ToolResultItem {
                 tool_use_id: tid.to_string(),
                 content: tool_result_content(&oc.data),
@@ -226,6 +304,11 @@ fn process_tool_outcome(
         }
         Err(e) => {
             let err_msg = format!("[TOOL_ERROR] {}: {}", tool_name, e);
+            run_outcomes.push((tool_name.to_string(), false, err_msg.clone()));
+            {
+                let mut m = failure_counts.lock().unwrap_or_else(|p| p.into_inner());
+                *m.entry(failure_key(tool_name, tool_args)).or_insert(0) += 1;
+            }
             tool_results.push(ToolResultItem {
                 tool_use_id: tid.to_string(),
                 content: err_msg.clone(),
@@ -393,14 +476,55 @@ async fn build_system_reminder(working_dir: &str, session_id: &str) -> String {
         block.push_str(&format!("Session: {session_id}\n"));
     }
     // Prior failure reflections (Reflexion): point the agent at them so it
-    // can avoid repeating past mistakes.
+    // can avoid repeating past mistakes. Give the ABSOLUTE path — a bare
+    // `.openzen/…` gets resolved against the data root by the model, lands
+    // outside the working-dir sandbox, and the read is rejected (observed
+    // 2026-10-03: `read: path ~/.openzen/reflections.jsonl is outside
+    // working directory`).
     if crate::quality::reflection_log_exists(working_dir) {
-        block.push_str(
-            "Prior task failures: .openzen/reflections.jsonl (read with the `read` tool to avoid repeating past mistakes)\n",
-        );
+        let reflections = std::path::Path::new(working_dir)
+            .join(".openzen")
+            .join("reflections.jsonl");
+        block.push_str(&format!(
+            "Prior task failures: {} (read with the `read` tool to avoid repeating past mistakes)\n",
+            reflections.display()
+        ));
     }
     block.push_str("</system-reminder>");
     block
+}
+
+/// Cap on the accumulated `full_thinking` of one run (chars, ≈16k tokens).
+const MAX_FULL_THINKING_CHARS: usize = 64 * 1024;
+
+/// How many screenshots may stay inline in the live history. Everything
+/// older is replaced by a text placeholder (see `retain_recent_images`).
+const MAX_LIVE_IMAGES: usize = 2;
+
+/// Replace all but the last `keep` inline images with a text placeholder.
+///
+/// Walks backwards so the newest images are the ones kept. Returns the number
+/// of images that were dropped.
+fn retain_recent_images(messages: &mut [Message], keep: usize) -> usize {
+    let mut seen = 0usize;
+    let mut dropped = 0usize;
+    for msg in messages.iter_mut().rev() {
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::ImageUrl { url, .. } = block {
+                seen += 1;
+                if seen > keep {
+                    let approx_kb = url.len() / 1024;
+                    let note = format!(
+                        "[earlier screenshot omitted from context to bound its size: ~{approx_kb} KB \
+                         of base64; re-read the file if you still need to look at it]"
+                    );
+                    *block = ContentBlock::text(&note);
+                    dropped += 1;
+                }
+            }
+        }
+    }
+    dropped
 }
 
 /// Wait (bounded) for the LLM summary from `spawn_summary`. Returns the
@@ -413,13 +537,36 @@ async fn wait_for_summary(
     rx: Option<tokio::sync::oneshot::Receiver<String>>,
     fallback: String,
     wait_secs: u64,
+    stop_signal: Option<&AtomicBool>,
 ) -> String {
     let Some(mut rx) = rx else {
         return fallback;
     };
-    match tokio::time::timeout(std::time::Duration::from_secs(wait_secs), &mut rx).await {
-        Ok(Ok(s)) if !s.is_empty() => s,
-        _ => fallback,
+    // Also stop waiting when the user presses Stop: this wait is inline in
+    // the turn (up to `summary_wait_secs`, 600s by default) and used to be
+    // uninterruptible, so a compression could keep a "stopped" run alive for
+    // ten minutes (round5 P1-17).
+    let stop = async {
+        match stop_signal {
+            Some(sig) => loop {
+                if sig.load(Ordering::Relaxed) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            },
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(stop);
+    tokio::select! {
+        biased;
+        _ = &mut stop => fallback,
+        res = tokio::time::timeout(std::time::Duration::from_secs(wait_secs), &mut rx) => {
+            match res {
+                Ok(Ok(s)) if !s.is_empty() => s,
+                _ => fallback,
+            }
+        }
     }
 }
 
@@ -505,11 +652,20 @@ where
     let mut diff_selfcheck_done = false;
     let mut tdd_nudged = false;
     let mut contract_assertions: Option<(usize, usize)> = None; // (total, failed)
-    let mut contract_review: Option<(bool, usize)> = None; // (pass, high count)
-                                                           // Consecutive LLM transport failures (timeout / stream error). Local
-                                                           // servers (omlx etc.) can wedge for minutes; instead of terminating
-                                                           // the whole long task, retry the same turn. Cap retries so a
-                                                           // persistently-broken backend still exits instead of looping forever.
+                                                                // P0-6 ③ / P2-22: explicit, aggregatable quality state for THIS run.
+    let mut quality_outcome = crate::quality::RunQualityOutcome::default();
+    // Which model actually reviewed this run (set where the review runs; read
+    // by the telemetry row). A slot rather than a local because the review
+    // happens deep inside the gate block.
+    let reviewer_model_slot: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    // P0-6 ④: why the gate did not run (None = it did).
+    let mut gate_skipped: Option<String> = None;
+    // True once the delivery gate block was entered for a run with deliverables.
+    let mut gate_entered = false;
+    // Consecutive LLM transport failures (timeout / stream error). Local
+    // servers (omlx etc.) can wedge for minutes; instead of terminating
+    // the whole long task, retry the same turn. Cap retries so a
+    // persistently-broken backend still exits instead of looping forever.
     let mut consecutive_llm_errors: u32 = 0;
     let max_llm_error_retries: u32 = config.llm_error_retries;
 
@@ -559,6 +715,23 @@ where
     meter::record_session();
 
     let mut tool_sequence: Vec<(String, serde_json::Value)> = Vec::new();
+    // Run-level tool outcome log (tool_name, success, message). Accumulated
+    // across turns; feeds the review evidence (P0-6 ①) and the usage
+    // telemetry written at run end (T6).
+    let mut run_tool_outcomes: Vec<(String, bool, String)> = Vec::new();
+    // T6: knowledge matched at loop start; usage is recorded at run end.
+    let mut used_skill_names: Vec<String> = Vec::new();
+    let mut used_sop_names: Vec<String> = Vec::new();
+    // T9.1: hard gate on repeated identical failures.
+    let failure_counts: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    // T9.2: run-level soft budget (one clarification per N turns, bounded).
+    let mut soft_budget_prompts = 0u32;
+    // T9.3: unanswered ask_user questions and how many times we refunded a turn.
+    let mut unanswered_questions = 0u32;
+    let mut ask_user_timeouts = 0u32;
+    // Timestamp for spec freshness checks (P2-24).
+    let run_started_at = std::time::SystemTime::now();
 
     // ── Knowledge store: unified skill/SOP/memory injection ──
     // P1-d: prefer the AppState-level shared store (one process-wide instance,
@@ -599,6 +772,31 @@ where
             let store = store_arc.lock().await;
             store.build_index()
         };
+        // T6: remember which skills/SOPs this run matched so their usage
+        // counters are updated at run end. `record_*` had ZERO production
+        // callers, so the learning loop never learned which knowledge helped.
+        {
+            let store = store_arc.lock().await;
+            used_skill_names = store
+                .find_skills(&user_input)
+                .into_iter()
+                .map(|s| s.name.clone())
+                .take(5)
+                .collect();
+            used_sop_names = store
+                .find_sops(&user_input)
+                .into_iter()
+                .map(|s| s.name.clone())
+                .take(5)
+                .collect();
+        }
+        if !used_skill_names.is_empty() || !used_sop_names.is_empty() {
+            tracing::info!(
+                "[openzen] matched {} skill(s) / {} SOP(s) for this run",
+                used_skill_names.len(),
+                used_sop_names.len()
+            );
+        }
         if !skill_index.is_empty() {
             tracing::info!(
                 "[openzen] Injected skill/SOP index ({} chars)",
@@ -701,6 +899,13 @@ where
                 AgentState::Done("stopped_by_user".into()),
                 "stop signal received",
             );
+            crate::quality::log_gate_skipped(
+                &config.working_dir,
+                "stopped_by_user",
+                crate::quality::deliverable_probe(&tool_sequence)
+                    .all_files()
+                    .len(),
+            );
             return LoopOutcome {
                 turn,
                 exit_reason: "stopped_by_user".into(),
@@ -767,6 +972,13 @@ where
                         handler,
                         AgentState::Done("paused_by_user".into()),
                         "pause intervention",
+                    );
+                    crate::quality::log_gate_skipped(
+                        &config.working_dir,
+                        "paused_by_user",
+                        crate::quality::deliverable_probe(&tool_sequence)
+                            .all_files()
+                            .len(),
                     );
                     return LoopOutcome {
                         turn,
@@ -1004,7 +1216,13 @@ where
                 // by the late summary on a later turn, so each
                 // compression changes the injected prefix exactly once.
                 let summary_text = if removed_count > 0 {
-                    wait_for_summary(summary_rx, template, comp_config.summary_wait_secs).await
+                    wait_for_summary(
+                        summary_rx,
+                        template,
+                        comp_config.summary_wait_secs,
+                        Some(stop_signal),
+                    )
+                    .await
                 } else {
                     template
                 };
@@ -1095,6 +1313,11 @@ where
                                 tracing::info!("Stop signal received during LLM stream, saving checkpoint and aborting");
                                 save_stop_checkpoint_async(config, turn, "stopped_by_user", &messages, &history_info, &full_response, &full_thinking, &handler.working().todos).await;
                                 transition_state(handler, AgentState::Done("stopped_by_user".into()), "stop signal during LLM stream");
+                                crate::quality::log_gate_skipped(
+                                    &config.working_dir,
+                                    "stopped_by_user",
+                                    crate::quality::deliverable_probe(&tool_sequence).all_files().len(),
+                                );
                                 return LoopOutcome {
                                     turn,
                                     exit_reason: "stopped_by_user".into(),
@@ -1187,6 +1410,17 @@ where
                                     AgentState::Done(exit_reason.into()),
                                     "LLM stream error",
                                 );
+                                // Every abnormal exit writes its own quality
+                                // row, otherwise the denominator only counts
+                                // runs that happened to reach the gate — the
+                                // exact blind spot P0-6 ④ removed (review B7).
+                                crate::quality::log_gate_skipped(
+                                    &config.working_dir,
+                                    exit_reason,
+                                    crate::quality::deliverable_probe(&tool_sequence)
+                                        .all_files()
+                                        .len(),
+                                );
                                 return LoopOutcome {
                                     turn,
                                     exit_reason: exit_reason.into(),
@@ -1240,6 +1474,13 @@ where
                                     AgentState::Done(exit_reason.into()),
                                     "LLM retry budget exhausted",
                                 );
+                                crate::quality::log_gate_skipped(
+                                    &config.working_dir,
+                                    exit_reason,
+                                    crate::quality::deliverable_probe(&tool_sequence)
+                                        .all_files()
+                                        .len(),
+                                );
                                 return LoopOutcome {
                                     turn,
                                     exit_reason: exit_reason.into(),
@@ -1263,6 +1504,13 @@ where
                             handler,
                             AgentState::Done("llm_error".into()),
                             "LLM stream error",
+                        );
+                        crate::quality::log_gate_skipped(
+                            &config.working_dir,
+                            "llm_error",
+                            crate::quality::deliverable_probe(&tool_sequence)
+                                .all_files()
+                                .len(),
                         );
                         return LoopOutcome {
                             turn,
@@ -1325,6 +1573,13 @@ where
                                     AgentState::Done("llm_error".into()),
                                     "non-streaming LLM error",
                                 );
+                                crate::quality::log_gate_skipped(
+                                    &config.working_dir,
+                                    "llm_error",
+                                    crate::quality::deliverable_probe(&tool_sequence)
+                                        .all_files()
+                                        .len(),
+                                );
                                 return LoopOutcome {
                                     turn,
                                     exit_reason: "llm_error".into(),
@@ -1375,6 +1630,25 @@ where
                 full_thinking.push('\n');
             }
             full_thinking.push_str(&response.thinking);
+            // Bound the accumulated reasoning: it is persisted with the
+            // message and written into every checkpoint, and on a
+            // reasoning-heavy model it grows without limit across turns
+            // (round5 P1-6). Keep the most recent MAX_FULL_THINKING_CHARS,
+            // trimmed on a char boundary.
+            if full_thinking.len() > MAX_FULL_THINKING_CHARS {
+                let mut cut = full_thinking.len() - MAX_FULL_THINKING_CHARS;
+                while cut < full_thinking.len() && !full_thinking.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                let dropped = cut;
+                full_thinking.drain(..cut);
+                if dropped > 0 {
+                    full_thinking.insert_str(
+                        0,
+                        "[earlier reasoning from this run trimmed to bound its size]\n",
+                    );
+                }
+            }
             last_turn_thinking.clear();
             last_turn_thinking.push_str(&response.thinking);
         }
@@ -1392,7 +1666,14 @@ where
                             content.as_text().map(|t| t.len()).unwrap_or(0)
                         }
                         ContentBlock::Thinking { thinking, .. } => thinking.len(),
-                        ContentBlock::ImageUrl { url, .. } => url.len(),
+                        // An inline image costs roughly a fixed number of
+                        // tokens regardless of its base64 length; counting the
+                        // raw string inflated `input_chars` by 3 orders of
+                        // magnitude and collapsed the chars→tokens ratio the
+                        // compression thresholds rely on (round5 P1-1).
+                        ContentBlock::ImageUrl { url, .. } => {
+                            oz_core_types::image_char_estimate(url)
+                        }
                     })
                     .sum::<usize>()
             })
@@ -1558,10 +1839,9 @@ where
                     // repair_parameter_style_args). The repair only fires on
                     // String values, which never carry a `response` key, so
                     // no happy-path guard is needed.
-                    let repaired = tc
-                        .arguments
-                        .as_str()
-                        .and_then(oz_llm::stream::repair_parameter_style_args);
+                    let repaired = tc.arguments.as_str().and_then(|s| {
+                        oz_llm::stream::repair_parameter_style_args(s, Some(&tc.name))
+                    });
                     let args = repaired.as_ref().unwrap_or(&tc.arguments);
                     if let Some(resp_val) = args.get("response").and_then(|v| v.as_str()) {
                         if !resp_val.is_empty() {
@@ -1619,6 +1899,9 @@ where
                     &mut exit_reason,
                     config,
                     &mut pending_ask_user,
+                    &mut run_tool_outcomes,
+                    &failure_counts,
+                    &m.arguments,
                 );
             }
         } else {
@@ -1735,6 +2018,9 @@ where
                         let cx = ctx;
                         let cfg = config;
                         let cache = spec_cache_for_phase2.clone();
+                        // T9.1: the hard gate needs the shared counter inside
+                        // this spawned future — clone the Arc, don't move it.
+                        let failure_counts = std::sync::Arc::clone(&failure_counts);
 
                         async move {
                             // Check speculative execution cache first (Direction A)
@@ -1756,35 +2042,78 @@ where
                                 return (ii, tool_name, Err(ToolError::Custom("cancelled".into())));
                             }
 
-                            // Acquire concurrency permits (blocks if at
-                            // capacity): per-run first, then the global cap
-                            // so concurrent sessions share one budget.
-                            let _global_permit = match global_sem.acquire().await {
-                                Ok(p) => p,
-                                Err(_) => {
-                                    tracing::warn!(
-                                        "Global tool semaphore closed, skipping {}",
-                                        tool_name
-                                    );
-                                    return (
-                                        ii,
-                                        tool_name.clone(),
-                                        Err(ToolError::Custom("semaphore closed".into())),
-                                    );
-                                }
-                            };
-                            let _permit = match &sem {
-                                Some(s) => match s.acquire().await {
-                                    Ok(p) => Some(p),
-                                    Err(_) => {
-                                        tracing::warn!("Semaphore closed, skipping {}", tool_name);
+                            // Acquire concurrency permits: per-run first, then
+                            // the global cap so concurrent sessions share one
+                            // budget. Both waits are BOUNDED — a permit is held
+                            // for the whole tool run (up to 30 minutes) and
+                            // during approval waits, so 16 long tools from
+                            // other sessions could otherwise block this call
+                            // forever, with no timeout and no stop signal, and
+                            // no heartbeat (the heartbeat starts after the
+                            // permit), which made the frontend watchdog declare
+                            // "Processing timed out" while the backend was
+                            // alive (round5 P1-16).
+                            const PERMIT_WAIT: Duration = Duration::from_secs(15);
+                            let _global_permit =
+                                match tokio::time::timeout(PERMIT_WAIT, global_sem.acquire()).await {
+                                    Ok(Ok(p)) => p,
+                                    Ok(Err(_)) => {
+                                        tracing::warn!(
+                                            "Global tool semaphore closed, skipping {}",
+                                            tool_name
+                                        );
                                         return (
                                             ii,
                                             tool_name.clone(),
                                             Err(ToolError::Custom("semaphore closed".into())),
                                         );
                                     }
-                                },
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "Tool queue busy (>{}s): skipping {}",
+                                            PERMIT_WAIT.as_secs(),
+                                            tool_name
+                                        );
+                                        return (
+                                            ii,
+                                            tool_name.clone(),
+                                            Err(ToolError::Custom(
+                                                "tool queue busy: the process-wide tool slots are all \
+                                                 taken by other sessions; retry in a moment"
+                                                    .into(),
+                                            )),
+                                        );
+                                    }
+                                };
+                            let _permit = match &sem {
+                                Some(s) => {
+                                    match tokio::time::timeout(PERMIT_WAIT, s.acquire()).await {
+                                        Ok(Ok(p)) => Some(p),
+                                        Ok(Err(_)) => {
+                                            tracing::warn!(
+                                                "Semaphore closed, skipping {}",
+                                                tool_name
+                                            );
+                                            return (
+                                                ii,
+                                                tool_name.clone(),
+                                                Err(ToolError::Custom(
+                                                    "semaphore closed".into(),
+                                                )),
+                                            );
+                                        }
+                                        Err(_) => {
+                                            return (
+                                                ii,
+                                                tool_name.clone(),
+                                                Err(ToolError::Custom(format!(
+                                                    "tool queue busy: this session already has {}                                                      concurrent tool call(s) running",
+                                                    cfg.max_concurrent_tools
+                                                ))),
+                                            );
+                                        }
+                                    }
+                                }
                                 None => None,
                             };
 
@@ -1798,6 +2127,18 @@ where
                             }
 
                             // Safety guard check — progressive trust + blocklist
+                            if cfg.safety_guard.is_none() || cfg.approval_handler.is_none() {
+                                // No guard wired (TUI/CLI/embedded) or the user
+                                // turned approvals off: the call runs
+                                // unsupervised, which is precisely what an
+                                // audit trail exists to make visible.
+                                crate::audit::log_tool_call(
+                                    &cfg.session_id,
+                                    &tool_name,
+                                    &crate::audit::digest_args(&tool_name, &args),
+                                    "full_access",
+                                );
+                            }
                             if let (Some(ref guard), Some(ref approval)) =
                                 (&cfg.safety_guard, &cfg.approval_handler)
                             {
@@ -1805,6 +2146,12 @@ where
                                 match decision {
                                     oz_safety::TrustDecision::Blocked(msg) => {
                                         tracing::warn!("[safety] blocked {tool_name}: {msg}");
+                                        crate::audit::log_tool_call(
+                                            &cfg.session_id,
+                                            &tool_name,
+                                            &crate::audit::digest_args(&tool_name, &args),
+                                            "blocked",
+                                        );
                                         return (
                                             ii,
                                             tool_name.clone(),
@@ -1856,24 +2203,50 @@ where
                                                 );
                                             }
                                         };
+                                        let audit_digest =
+                                            crate::audit::digest_args(&tool_name, &args);
                                         match approval_result {
                                             Ok(oz_safety::ApprovalDecision::Allow) => {
                                                 tracing::debug!("[safety] approved {tool_name}");
+                                                crate::audit::log_tool_call(
+                                                    &cfg.session_id,
+                                                    &tool_name,
+                                                    &audit_digest,
+                                                    "approved",
+                                                );
                                             }
                                             Ok(oz_safety::ApprovalDecision::TrustSession) => {
                                                 tracing::info!(
                                                     "[safety] session-trusted {tool_name}"
                                                 );
                                                 guard.record_approval(&tool_name, &args);
+                                                crate::audit::log_tool_call(
+                                                    &cfg.session_id,
+                                                    &tool_name,
+                                                    &audit_digest,
+                                                    "approved",
+                                                );
                                             }
                                             Ok(oz_safety::ApprovalDecision::TrustWorkspace) => {
                                                 tracing::info!(
                                                     "[safety] workspace-trusted {tool_name}"
                                                 );
                                                 guard.record_approval(&tool_name, &args);
+                                                crate::audit::log_tool_call(
+                                                    &cfg.session_id,
+                                                    &tool_name,
+                                                    &audit_digest,
+                                                    "approved",
+                                                );
                                             }
                                             Ok(oz_safety::ApprovalDecision::Deny) => {
                                                 tracing::info!("[safety] denied {tool_name}");
+                                                crate::audit::log_tool_call(
+                                                    &cfg.session_id,
+                                                    &tool_name,
+                                                    &audit_digest,
+                                                    "denied",
+                                                );
                                                 return (
                                                     ii,
                                                     tool_name.clone(),
@@ -1887,6 +2260,12 @@ where
                                                     "[safety] permanently blocked {tool_name}"
                                                 );
                                                 guard.block(&tool_name, &args);
+                                                crate::audit::log_tool_call(
+                                                    &cfg.session_id,
+                                                    &tool_name,
+                                                    &audit_digest,
+                                                    "blocked",
+                                                );
                                                 return (
                                                     ii,
                                                     tool_name.clone(),
@@ -1899,6 +2278,12 @@ where
                                                 tracing::warn!(
                                                     "[safety] approval error for {tool_name}: {e}"
                                                 );
+                                                crate::audit::log_tool_call(
+                                                    &cfg.session_id,
+                                                    &tool_name,
+                                                    &audit_digest,
+                                                    "error",
+                                                );
                                                 return (
                                                     ii,
                                                     tool_name.clone(),
@@ -1910,6 +2295,15 @@ where
                                         }
                                     }
                                     oz_safety::TrustDecision::Allowed => {
+                                        // P1-10 ①: record the auto-allowed call too —
+                                        // "which commands ran without asking" is the
+                                        // first question an audit has to answer.
+                                        crate::audit::log_tool_call(
+                                            &cfg.session_id,
+                                            &tool_name,
+                                            &crate::audit::digest_args(&tool_name, &args),
+                                            "auto_allowed",
+                                        );
                                         // Silent pass — trusted or safe tool
                                     }
                                 }
@@ -1921,10 +2315,19 @@ where
                             // et al.) is granted its declared duration plus a
                             // grace window so the TOOL's inner timeout fires
                             // first with its structured timeout result
+                            // (which also kills the whole process group)
                             // instead of the loop's blunt error. The hard
                             // ceiling keeps a runaway args value from
                             // stalling the turn forever (genuinely longer
                             // work belongs in nohup background jobs).
+                            //
+                            // The default budget is deliberately larger than
+                            // code_run's own default (300s): with the old
+                            // 30s default the loop preempted every tool that
+                            // did not declare a timeout — measured 129 real
+                            // calls killed at 30s across 36 sessions, with
+                            // the process group surviving because only the
+                            // direct child died with the dropped future.
                             const TOOL_TIMEOUT_HARD_CEILING_SECS: u64 = 1830;
                             let declared_timeout = args.get("timeout").and_then(|v| {
                                 v.as_u64()
@@ -1936,6 +2339,58 @@ where
                                 .unwrap_or(cfg.tool_timeout_secs)
                                 .max(cfg.tool_timeout_secs)
                                 .min(TOOL_TIMEOUT_HARD_CEILING_SECS);
+                            // Hand the effective budget to the tool so it can
+                            // clamp its own (inner) timeout strictly below the
+                            // outer one and therefore always be the one that
+                            // fires — with a structured result and a process
+                            // group kill instead of a dropped future.
+                            let tool_cx = ToolContext {
+                                tool_budget_secs: tool_timeout,
+                                ..cx.clone()
+                            };
+
+                            // ── T9.1: hard gate on repeated identical failures ──
+                            // The old DANGER_LOOP_MSG was pure prose: the model
+                            // could (and did) re-run the same failing command
+                            // indefinitely. Three identical failures is enough
+                            // evidence that the path is wrong — the 4th call is
+                            // refused with a structured error that tells the
+                            // model what to do instead.
+                            {
+                                let key = failure_key(&tool_name, &args);
+                                let prior = {
+                                    let m = failure_counts
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    m.get(&key).copied().unwrap_or(0)
+                                };
+                                if prior >= 3 {
+                                    let msg = if cfg.lang == "zh" {
+                                        format!(
+                                            "这条命令/调用已连续失败 {prior} 次，本次直接拒绝执行。\n\
+                                             请换一条路径：修改参数或输入、改用其它工具、先读错误信息定位根因，\
+                                             或用 ask_user 向用户确认后再继续。不要原样重试。"
+                                        )
+                                    } else {
+                                        format!(
+                                            "This exact call has already failed {prior} times, so it \
+                                             is refused without executing. Change the approach: fix the \
+                                             arguments/inputs, use a different tool, read the error to \
+                                             find the root cause, or ask_user. Do not retry it unchanged."
+                                        )
+                                    };
+                                    tracing::warn!(
+                                        "[loop] hard gate refused `{tool_name}` after {prior} identical failures"
+                                    );
+                                    crate::audit::log_tool_call(
+                                        &cfg.session_id,
+                                        &tool_name,
+                                        &crate::audit::digest_args(&tool_name, &args),
+                                        "blocked_repeated_failure",
+                                    );
+                                    return (ii, tool_name, Err(ToolError::Custom(msg)));
+                                }
+                            }
 
                             // Heartbeat for long tools: a single code_run
                             // can legitimately run ~30 minutes with ZERO
@@ -1964,12 +2419,21 @@ where
                             });
 
                             let dispatch_fut =
-                                handler_ref.dispatch(&tool_name, args, resp, ii as u32, cx);
+                                handler_ref.dispatch(&tool_name, args, resp, ii as u32, &tool_cx);
                             // Race the dispatch against both the tool timeout AND a
                             // user stop-signal poll, so cancelling the session
                             // actually interrupts an in-flight tool instead of
                             // waiting for its timeout to fire.
-                            let stop_poll = cancel.clone();
+                            //
+                            // NOTE: this polls `stop_signal`, NOT the intra-turn
+                            // `cancel_flag`. The old code polled `cancel_flag`,
+                            // which is only set by speculative-cache hits and by
+                            // a tool that returns should_exit — so pressing Stop
+                            // during a tool never interrupted it (measured: zero
+                            // "interrupted by user stop" occurrences in a
+                            // year of real sessions), while the UI had already
+                            // declared the run stopped.
+                            let stop_poll = stop_signal;
                             let stop_wait = async move {
                                 loop {
                                     if stop_poll.load(Ordering::Relaxed) {
@@ -1991,7 +2455,7 @@ where
                                 ) => match timed {
                                     Ok(outcome) => outcome,
                                     Err(_elapsed) => Err(ToolError::Custom(format!(
-                                        "tool '{}' timed out after {}s (pass a smaller `timeout` argument or run it with nohup in the background)",
+                                        "tool '{}' timed out after {}s (raise its `timeout` argument — up to 1800s — or run it with nohup in the background)",
                                         tool_name, tool_timeout,
                                     ))),
                                 }
@@ -2184,6 +2648,9 @@ where
                     &mut exit_reason,
                     config,
                     &mut pending_ask_user,
+                    &mut run_tool_outcomes,
+                    &failure_counts,
+                    &meta.args,
                 );
             }
 
@@ -2301,9 +2768,20 @@ where
                         if !id.is_empty() {
                             if let Some(t) = wm.todos.iter_mut().find(|t| t.id == id) {
                                 if status == "completed" {
-                                    match crate::verifier::verify_todo_item(
+                                    match crate::verifier::verify_todo_item_scoped(
                                         &t.content,
                                         &config.working_dir,
+                                        &crate::verifier::RunScope {
+                                            run_id: format!(
+                                                "{}|{}",
+                                                config.session_id,
+                                                run_started_at
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .map(|d| d.as_secs())
+                                                    .unwrap_or(0)
+                                            ),
+                                            started_at: Some(run_started_at),
+                                        },
                                     )
                                     .await
                                     {
@@ -2591,11 +3069,61 @@ where
                         String::new()
                     }
                     Err(_elapsed) => {
+                        // P0-6 ③ / T9.3: an unanswered question is a STATE, not
+                        // an empty reply. Persist a resume point, tell the UI
+                        // the question is still open, and let the model
+                        // continue from an explicit "unanswered" note instead
+                        // of pretending the user said nothing.
                         tracing::warn!(
-                            "ask_user timed out after {}s — continuing with empty reply",
+                            "ask_user timed out after {}s — saving checkpoint and marking the \
+                             question as unanswered",
                             ASK_USER_TIMEOUT_SECS
                         );
-                        String::new()
+                        save_stop_checkpoint_async(
+                            config,
+                            turn,
+                            "waiting_for_clarification",
+                            &messages,
+                            &history_info,
+                            &full_response,
+                            &full_thinking,
+                            &handler.working().todos,
+                        )
+                        .await;
+                        if let Some(ref tx) = config.event_tx {
+                            let q_payload = serde_json::json!({
+                                "tool_use_id": pending.tool_use_id,
+                                "tool_name": pending.tool_name,
+                                "payload": pending.payload,
+                                "unanswered": true,
+                            });
+                            let _ = tx.send(StreamEvent::AskUserPending {
+                                data: serde_json::to_string(&q_payload).unwrap_or_default(),
+                            });
+                        }
+                        // Do not consume a turn for waiting: the question is
+                        // still open, and burning the budget on it would end
+                        // long tasks while the user is away. Bounded so a
+                        // permanently absent user cannot loop forever.
+                        if ask_user_timeouts < 3 {
+                            ask_user_timeouts += 1;
+                            turn = turn.saturating_sub(1);
+                        }
+                        unanswered_questions += 1;
+                        if config.lang == "zh" {
+                            format!(
+                                "[系统] 上一条提问在 {}s 内没有得到回答（问题已保留，用户回来后仍可回答）。\
+                                 请基于最合理的假设继续，并在最终交付说明里写明这一处假设。",
+                                ASK_USER_TIMEOUT_SECS
+                            )
+                        } else {
+                            format!(
+                                "[SYSTEM] The previous question was not answered within {}s (it \
+                                 stays open and can still be answered later). Continue from your \
+                                 best assumption and state that assumption in the delivery notes.",
+                                ASK_USER_TIMEOUT_SECS
+                            )
+                        }
                     }
                 }
             } else {
@@ -2841,7 +3369,12 @@ where
             // can never loop.
             if !spec_hint_sent
                 && crate::quality::has_write_operations(&tool_sequence)
-                && crate::quality::read_spec(&config.working_dir).is_none()
+                && crate::quality::read_spec_for_run(
+                    &config.working_dir,
+                    &config.session_id,
+                    run_started_at,
+                )
+                .is_none()
             {
                 spec_hint_sent = true;
                 next_prompts.push(crate::quality::spec_anchor_hint(&config.lang));
@@ -2901,6 +3434,39 @@ where
                 });
             }
 
+            // ── T9.2: run-level soft budget ──
+            // `max_turns` is u32::MAX, so nothing ever asked "should this
+            // still be running?". Every SOFT_BUDGET_TURNS turns (bounded
+            // number of times) the agent must check in with the user via
+            // ask_user: continue / split / stop.
+            const SOFT_BUDGET_TURNS: u32 = 60;
+            const SOFT_BUDGET_MAX_PROMPTS: u32 = 3;
+            if config.quality_gates
+                && turn > 0
+                && turn.is_multiple_of(SOFT_BUDGET_TURNS)
+                && soft_budget_prompts < SOFT_BUDGET_MAX_PROMPTS
+                && exit_reason.is_none()
+            {
+                soft_budget_prompts += 1;
+                tracing::warn!(
+                    "[loop] soft budget: {turn} turns reached — asking the user to confirm direction"
+                );
+                next_prompts.push(if config.lang == "zh" {
+                    format!(
+                        "[预算] 已执行 {turn} 轮。请用 ask_user 向用户确认下一步：\
+                         ① 继续当前方向；② 把剩余工作拆成更小的可验证步骤；③ 停止并交付当前成果。\
+                         在用户答复前不要继续大改动。"
+                    )
+                } else {
+                    format!(
+                        "[BUDGET] {turn} turns elapsed. Use ask_user to confirm the next step: \
+                         (1) continue as-is, (2) split the remaining work into smaller verifiable \
+                         steps, (3) stop and deliver what exists. Do not start large changes \
+                         before the user answers."
+                    )
+                });
+            }
+
             // ── Gate C (P2): unresolved-suspicion closure ──
             // Surface recent uncertainty ("飞船可能朝左" / "seems off") before
             // exit so the agent confirms or fixes it instead of carrying an
@@ -2922,9 +3488,66 @@ where
                 }
             }
 
+            // ── P0-6 ④: is this the LAST delivery attempt? ──
+            // A run can finish in three ways: `respond` (EXITED), a clean
+            // "nothing left to do" turn (CURRENT_TASK_DONE), or an abnormal
+            // end. Only the first used to reach the quality gate. Decide the
+            // clean-finish reason HERE — above the gate — so the gate sees it
+            // in the same iteration; the abnormal reasons
+            // (stopped_by_user / llm_error / llm_timeout / llm_stuck) stay out
+            // of the gate but are recorded as `gate_skipped`.
+            let guard_msg = handler.working().sensorium.detect_loop();
+            if let Some(msg) = guard_msg {
+                next_prompts.push(msg);
+            }
+            if next_prompts.is_empty() && exit_reason.is_none() {
+                let pending_todos = handler
+                    .working()
+                    .todos
+                    .iter()
+                    .filter(|t| t.status == "pending" || t.status == "in_progress")
+                    .count();
+                if pending_todos > 0 {
+                    let remaining: Vec<String> = handler
+                        .working()
+                        .todos
+                        .iter()
+                        .filter(|t| t.status != "completed")
+                        .map(|t| format!("  [{}] {}", t.id, t.content))
+                        .collect();
+                    let hint = if ctx.lang == "zh" {
+                        format!(
+                            "还有 {} 项待办未完成，请继续：\n{}\n\n完成后调用 respond 结束任务。",
+                            pending_todos,
+                            remaining.join("\n")
+                        )
+                    } else {
+                        format!(
+                            "{} pending todo(s), continue working:\n{}\n\nCall respond when all are done.",
+                            pending_todos, remaining.join("\n")
+                        )
+                    };
+                    next_prompts.push(hint);
+                } else {
+                    transition_state(
+                        handler,
+                        AgentState::Done("CURRENT_TASK_DONE".into()),
+                        "no next prompts and no exit reason",
+                    );
+                    exit_reason = Some("CURRENT_TASK_DONE".to_string());
+                }
+            }
+
             // ── Delivery-quality gates (P2-10) ──
             if exit_reason.is_some() && config.quality_gates {
-                let write_count = crate::quality::collect_deliverables(&tool_sequence).len();
+                // P0-6 ②: the single backend probe — shell-delivered work
+                // (heredoc / redirection / tee) now counts too.
+                let probe = crate::quality::deliverable_probe(&tool_sequence);
+                let write_count = probe.all_files().len();
+                gate_entered = write_count > 0;
+                quality_outcome.deliverables = write_count;
+                quality_outcome.shell_only_delivery =
+                    probe.files.is_empty() && !probe.shell_written.is_empty();
 
                 // DQ1 QA-1: writes happened but no task_spec.md exists —
                 // synthesize minimal executable assertions from the user's own
@@ -2932,7 +3555,12 @@ where
                 // like an agent-authored spec. One-shot, fail-open.
                 if !auto_spec_attempted
                     && write_count > 0
-                    && crate::quality::read_spec(&config.working_dir).is_none()
+                    && crate::quality::read_spec_for_run(
+                        &config.working_dir,
+                        &config.session_id,
+                        run_started_at,
+                    )
+                    .is_none()
                 {
                     auto_spec_attempted = true;
                     if compression_service.is_configured() {
@@ -2941,14 +3569,15 @@ where
                                 stage: "spec".to_string(),
                             });
                         }
-                        let deliverables = crate::quality::collect_deliverables(&tool_sequence);
+                        let deliverables = probe.all_files();
                         let prompt = crate::quality::build_spec_synthesis_prompt(
                             &user_input,
                             &deliverables,
                             &config.lang,
                         );
                         let rx = compression_service.spawn_summary(prompt, String::new());
-                        let raw = wait_for_summary(Some(rx), String::new(), 30).await;
+                        let raw =
+                            wait_for_summary(Some(rx), String::new(), 30, Some(stop_signal)).await;
                         let lines = crate::quality::extract_verify_lines(&raw);
                         match crate::quality::write_auto_spec(&config.working_dir, &lines) {
                             Some(path) => {
@@ -2960,17 +3589,46 @@ where
                                 crate::quality::log_quality_event(
                                     &config.working_dir,
                                     "spec_synthesized",
-                                    &format!("{} assertion(s) derived from user request", lines.len()),
+                                    &format!(
+                                        "{} assertion(s) derived from user request",
+                                        lines.len()
+                                    ),
                                 );
                             }
-                            None => tracing::warn!(
-                                "[quality] auto spec synthesis produced no usable assertions (fail-open)"
-                            ),
+                            None => {
+                                quality_outcome.assertion_status =
+                                    crate::quality::AssertionStatus::SynthesisFailed;
+                                tracing::warn!(
+                                    "[quality] auto spec synthesis produced no usable assertions \
+                                     (assertion_status=synthesis_failed)"
+                                );
+                            }
                         }
                     }
+                } else if write_count > 0
+                    && crate::quality::read_spec_for_run(
+                        &config.working_dir,
+                        &config.session_id,
+                        run_started_at,
+                    )
+                    .is_none()
+                {
+                    // Deliverables but no spec and no summary model to
+                    // synthesize one: the run cannot be verified at all, and
+                    // that must be visible instead of fail-open (P0-6 ③).
+                    quality_outcome.assertion_status =
+                        crate::quality::AssertionStatus::SynthesisFailed;
+                    tracing::warn!(
+                        "[quality] no task_spec.md and no summary model — \
+                         assertion_status=synthesis_failed"
+                    );
                 }
 
-                let spec_text = crate::quality::read_spec(&config.working_dir);
+                let spec_text = crate::quality::read_spec_for_run(
+                    &config.working_dir,
+                    &config.session_id,
+                    run_started_at,
+                );
 
                 // Gate A: [verify] assertions from task_spec.md — executable
                 // acceptance criteria the agent pre-registered at task start.
@@ -2983,8 +3641,21 @@ where
                                 stage: "assertions".to_string(),
                             });
                         }
-                        let failures =
-                            crate::quality::run_assertion_gate(spec, &config.working_dir).await;
+                        let outcome =
+                            crate::quality::run_assertion_gate_checked(spec, &config.working_dir)
+                                .await;
+                        quality_outcome.assertion_status = outcome.status();
+                        quality_outcome.assertions_total = outcome.total;
+                        quality_outcome.assertions_failed = outcome.failures.len();
+                        quality_outcome.assertions_blocked = outcome.blocked.len();
+                        if !outcome.blocked.is_empty() || !outcome.needs_approval.is_empty() {
+                            tracing::warn!(
+                                "[quality] {} assertion(s) blocked by policy, {} need approval",
+                                outcome.blocked.len(),
+                                outcome.needs_approval.len()
+                            );
+                        }
+                        let failures = outcome.failures;
                         contract_assertions =
                             Some((crate::quality::load_assertions(spec).len(), failures.len()));
                         if !failures.is_empty() {
@@ -3011,8 +3682,14 @@ where
                         // Budget exhausted: check once more for the exit note
                         // so the final reply honestly states unverified state.
                         assertions_exhausted_checked = true;
-                        let failures =
-                            crate::quality::run_assertion_gate(spec, &config.working_dir).await;
+                        let outcome =
+                            crate::quality::run_assertion_gate_checked(spec, &config.working_dir)
+                                .await;
+                        quality_outcome.assertion_status = outcome.status();
+                        quality_outcome.assertions_total = outcome.total;
+                        quality_outcome.assertions_failed = outcome.failures.len();
+                        quality_outcome.assertions_blocked = outcome.blocked.len();
+                        let failures = outcome.failures;
                         contract_assertions =
                             Some((crate::quality::load_assertions(spec).len(), failures.len()));
                         if !failures.is_empty() {
@@ -3038,7 +3715,7 @@ where
                     && review_rounds < 2
                 {
                     review_rounds += 1;
-                    let deliverables = crate::quality::collect_deliverables(&tool_sequence);
+                    let deliverables = probe.all_files();
                     // Fall back to the original task text (first 1500 chars)
                     // when no spec was written — reviewing against an empty
                     // spec defeats the purpose of the cross-check.
@@ -3053,11 +3730,37 @@ where
                         });
                     }
                     let reply_for_review = full_response.clone();
+                    // P0-6 ①: give the reviewer EVIDENCE, not just paths —
+                    // diff footprint, deliverable content, per-tool exit
+                    // status and the real assertion output. Without it the
+                    // reviewer could only agree (33 reviews / 0 failures).
+                    let evidence = crate::quality::ReviewEvidence {
+                        diff_excerpt: crate::quality::git_diff_stat_summary(&config.working_dir)
+                            .await
+                            .map(|d| d.excerpt),
+                        file_snippets: crate::quality::collect_file_snippets(
+                            &config.working_dir,
+                            &deliverables,
+                        ),
+                        tool_outcomes: crate::quality::summarize_tool_outcomes(
+                            &tool_sequence,
+                            &run_tool_outcomes,
+                        ),
+                        assertion_summary: quality_outcome.assertion_summary_lines(&config.lang),
+                    };
+                    tracing::info!(
+                        "[quality] review evidence: diff={} files={} tools={} assertions={}",
+                        evidence.diff_excerpt.is_some(),
+                        evidence.file_snippets.len(),
+                        evidence.tool_outcomes.len(),
+                        evidence.assertion_summary.len()
+                    );
                     let mut review_prompt = crate::quality::build_review_prompt(
                         &spec_for_review,
                         &deliverables,
                         &reply_for_review,
                         &config.lang,
+                        &evidence,
                     );
                     // QA-2: adversarial pass for high-risk change sets.
                     if crate::quality::is_high_risk_write(&tool_sequence) {
@@ -3070,26 +3773,104 @@ where
                     // QA-2 reviewer selection: summary model first (a different
                     // model removes self-review blind spots); main client only
                     // as a bounded fallback.
-                    let verdict_opt = if config.review_use_summary
+                    // P2-25: the reviewer should not be the same 230M model
+                    // that summarizes context. When `review_model` names a
+                    // different model than the summary model, prefer the main
+                    // client (a real second client has to be supplied by the
+                    // host — see the report); when nothing is configured,
+                    // keep the old summary-model behaviour.
+                    let review_via_summary = config.review_use_summary
                         && compression_service.is_configured()
-                    {
+                        && match (
+                            config.review_model.as_deref(),
+                            config.summary_model_name.as_deref(),
+                        ) {
+                            (Some(want), Some(have)) => want == have,
+                            (Some(_), None) => false,
+                            _ => true,
+                        };
+                    if let Some(ref want) = config.review_model {
+                        if !review_via_summary {
+                            tracing::warn!(
+                                "[quality] review_model=`{want}` is not the summary model and no \
+                                 dedicated reviewer client is wired — using the main client"
+                            );
+                        }
+                    }
+                    // Which model actually reviewed — not which one was
+                    // requested. The telemetry used to report `review_model`
+                    // (the configured name) even when the review ran on the
+                    // main client, so a run reviewed by deepseek-flash was
+                    // logged as Gym-5.3-flash (review B5).
+                    let reviewer_model = if review_via_summary {
+                        config
+                            .summary_model_name
+                            .clone()
+                            .unwrap_or_else(|| "summary-model".to_string())
+                    } else {
+                        config
+                            .main_model_name
+                            .clone()
+                            .unwrap_or_else(|| "main-client".to_string())
+                    };
+                    *reviewer_model_slot
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner()) = Some(reviewer_model);
+                    let verdict_opt = if review_via_summary {
                         let rx = compression_service.spawn_summary(review_prompt, String::new());
-                        let raw = wait_for_summary(Some(rx), String::new(), 90).await;
+                        let raw =
+                            wait_for_summary(Some(rx), String::new(), 90, Some(stop_signal)).await;
                         crate::quality::review_verdict_from_raw(&raw)
                     } else {
                         crate::quality::review_prompt_via_client(client, &review_prompt).await
                     };
-                    if let Some(v) = verdict_opt {
+                    quality_outcome.reviewed = true;
+                    match verdict_opt {
+                        None => {
+                            // P0-6 ③: "no verdict" is a STATE, not a pass.
+                            quality_outcome.review_status =
+                                crate::quality::ReviewStatus::Unavailable;
+                            tracing::warn!(
+                                "[quality] independent review UNAVAILABLE for this run \
+                                 (no reviewer verdict) — recorded as unverified, not passed"
+                            );
+                            if let Some(ref tx) = config.event_tx {
+                                let _ = tx.send(StreamEvent::DataQualityGate {
+                                    stage: "review_unavailable".to_string(),
+                                });
+                            }
+                        }
+                        Some(ref v) => {
+                            let high = v.issues.iter().filter(|i| i.severity == "high").count();
+                            // A verdict of `pass` WITH high-severity issues is
+                            // internally contradictory, and the two consumers
+                            // disagreed: the badge said "已评审/通过" while the
+                            // gate pushed a redo round and wrote "独立评审未通过
+                            // （high×N）" (review B4). Derive the status from
+                            // the same `must_fix` the gate uses.
+                            quality_outcome.review_status = if v.pass && high > 0 {
+                                crate::quality::ReviewStatus::Failed
+                            } else {
+                                v.status
+                            };
+                            quality_outcome.review_derived = v.derived_from_issues;
+                            quality_outcome.review_high_issues = high;
+                        }
+                    }
+                    if let Some(ref v) = verdict_opt {
                         let high_count = v.issues.iter().filter(|i| i.severity == "high").count();
-                        contract_review = Some((v.pass, high_count));
-                        if v.pass {
+                        // A reviewer that returned pass=true while listing
+                        // high-severity problems is still a must-fix signal
+                        // (P0-6 ③: high issues must trigger at least one redo).
+                        let must_fix = !v.pass || high_count > 0;
+                        if v.pass && high_count == 0 {
                             // QC-1: success-side evidence.
                             crate::quality::log_quality_event(
                                 &config.working_dir,
                                 "review_passed",
                                 &format!("high={high_count}"),
                             );
-                        } else if review_rounds < 2 {
+                        } else if must_fix && review_rounds < 2 {
                             crate::quality::log_reflection(
                                 &config.working_dir,
                                 "review_failed",
@@ -3107,9 +3888,12 @@ where
                             );
                         } else {
                             quality_note = Some(if config.lang == "zh" {
-                                "独立评审未通过，修复预算已耗尽".to_string()
+                                format!("独立评审未通过（high 问题 ×{high_count}），修复预算已耗尽")
                             } else {
-                                "independent review failed, fix budget exhausted".to_string()
+                                format!(
+                                    "independent review failed ({high_count} high issue(s)), \
+                                     fix budget exhausted"
+                                )
                             });
                         }
                     }
@@ -3214,8 +3998,13 @@ where
                         let summary_text = if compression_service.is_configured() {
                             let rx =
                                 compression_service.spawn_summary(full_prompt, template.clone());
-                            wait_for_summary(Some(rx), template, comp_config.summary_wait_secs)
-                                .await
+                            wait_for_summary(
+                                Some(rx),
+                                template,
+                                comp_config.summary_wait_secs,
+                                Some(stop_signal),
+                            )
+                            .await
                         } else {
                             template
                         };
@@ -3279,11 +4068,6 @@ where
                 .await;
         }
 
-        let guard_msg = handler.working().sensorium.detect_loop();
-        if let Some(msg) = guard_msg {
-            next_prompts.push(msg);
-        }
-
         if let Some(ref reason) = exit_reason {
             let _ = reason;
             // Exit the loop
@@ -3321,6 +4105,13 @@ where
                 AgentState::Done("llm_stuck".into()),
                 "consecutive empty turns",
             );
+            crate::quality::log_gate_skipped(
+                &config.working_dir,
+                "llm_stuck",
+                crate::quality::deliverable_probe(&tool_sequence)
+                    .all_files()
+                    .len(),
+            );
             return LoopOutcome {
                 turn,
                 exit_reason: "llm_stuck".into(),
@@ -3333,43 +4124,10 @@ where
             };
         }
 
-        if next_prompts.is_empty() && exit_reason.is_none() {
-            let pending_todos = handler
-                .working()
-                .todos
-                .iter()
-                .filter(|t| t.status == "pending" || t.status == "in_progress")
-                .count();
-            if pending_todos > 0 {
-                let remaining: Vec<String> = handler
-                    .working()
-                    .todos
-                    .iter()
-                    .filter(|t| t.status != "completed")
-                    .map(|t| format!("  [{}] {}", t.id, t.content))
-                    .collect();
-                let hint = if ctx.lang == "zh" {
-                    format!(
-                        "还有 {} 项待办未完成，请继续：\n{}\n\n完成后调用 respond 结束任务。",
-                        pending_todos,
-                        remaining.join("\n")
-                    )
-                } else {
-                    format!(
-                        "{} pending todo(s), continue working:\n{}\n\nCall respond when all are done.",
-                        pending_todos, remaining.join("\n")
-                    )
-                };
-                next_prompts.push(hint);
-            } else {
-                transition_state(
-                    handler,
-                    AgentState::Done("CURRENT_TASK_DONE".into()),
-                    "no next prompts and no exit reason",
-                );
-                break;
-            }
-        }
+        // NOTE (P0-6 ④): the "nothing left to do" decision was moved ABOVE the
+        // quality gate — see the `last delivery attempt` block. Leaving it
+        // here meant a clean finish broke out of the loop before the gate
+        // ever saw it (18 runs / 7.6% of the real telemetry).
 
         // Anti-runaway warning every 10 turns on CONTINUING turns only —
         // placed after the emptiness check so a clean finish is never held
@@ -3440,6 +4198,23 @@ where
         }
         if !user_blocks.is_empty() {
             messages.push(Message::user_with_blocks(user_blocks));
+        }
+
+        // Keep only the most recent screenshots in the live history.
+        //
+        // A base64 screenshot is ~2.4 MB (two copies: the tool result and the
+        // image block), it is carried by every subsequent request, and it is
+        // written into every checkpoint — which is how a single checkpoint
+        // reached 62.9 MB and the checkpoint directory 978 MB (round5 P0-2).
+        // Older images are replaced by a one-line note: the model can always
+        // re-read the file if it still needs it.
+        let dropped_images = retain_recent_images(&mut messages, MAX_LIVE_IMAGES);
+        if dropped_images > 0 {
+            // Not silent: the user must be able to tell "the model did not
+            // look at it" from "it was dropped to bound the context".
+            tracing::info!(
+                "[context] dropped {dropped_images} earlier inline image(s), kept the last {MAX_LIVE_IMAGES}"
+            );
         }
 
         // ── P0: Post-tool emergency compression check ──
@@ -3518,7 +4293,13 @@ where
                 // injected prefix exactly once).
                 let summary_text = if compression_service.is_configured() {
                     let rx = compression_service.spawn_summary(full_prompt, template.clone());
-                    wait_for_summary(Some(rx), template, comp_config.summary_wait_secs).await
+                    wait_for_summary(
+                        Some(rx),
+                        template,
+                        comp_config.summary_wait_secs,
+                        Some(stop_signal),
+                    )
+                    .await
                 } else {
                     template
                 };
@@ -3585,6 +4366,79 @@ where
         }
     });
 
+    // ── P0-6 ④ / P2-22: one quality row per RUN ──
+    // The gate deliberately does not run for user-stopped or transport-dead
+    // runs, but "not reviewed" must still be countable — otherwise the
+    // denominator silently shrinks to the runs that happened to pass through
+    // the gate (the 27.5% bypass was invisible for exactly this reason).
+    if !gate_entered {
+        gate_skipped = Some(
+            if matches!(final_reason.as_str(), "EXITED" | "CURRENT_TASK_DONE") {
+                "no_deliverables".to_string()
+            } else {
+                final_reason.clone()
+            },
+        );
+    }
+    quality_outcome.exit_reason = final_reason.clone();
+    if unanswered_questions > 0 {
+        tracing::warn!(
+            "[quality] {unanswered_questions} ask_user question(s) went unanswered this run"
+        );
+        crate::quality::log_quality_event(
+            &config.working_dir,
+            "ask_user_unanswered",
+            &format!("{unanswered_questions} question(s) unanswered"),
+        );
+    }
+    quality_outcome.gate_skipped = gate_skipped.clone();
+    // The ACTUAL reviewer (see `reviewer_model` where the review runs); the
+    // configured-but-unused name is kept separately so a misconfiguration is
+    // still visible instead of being reported as if it had been used.
+    quality_outcome.review_model = reviewer_model_slot
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .unwrap_or_else(|| "unavailable".to_string());
+    quality_outcome.review_model_expected = config.review_model.clone();
+    crate::quality::log_run_outcome(&config.working_dir, &quality_outcome);
+    // Aggregator keys (P2-22): exactly one review/assertion verdict per run,
+    // including the "it did not run" case — otherwise the denominator only
+    // contains runs that happened to pass through the gate.
+    match quality_outcome.review_status {
+        crate::quality::ReviewStatus::Unavailable => crate::quality::log_quality_event(
+            &config.working_dir,
+            "review_unavailable",
+            "reviewer produced no verdict (transport/timeout/unparsable)",
+        ),
+        crate::quality::ReviewStatus::NotRun => crate::quality::log_quality_event(
+            &config.working_dir,
+            "review_not_run",
+            &format!(
+                "gate skipped: {}",
+                gate_skipped
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string())
+            ),
+        ),
+        crate::quality::ReviewStatus::InsufficientEvidence => crate::quality::log_quality_event(
+            &config.working_dir,
+            "review_failed",
+            "reviewer reported insufficient_evidence",
+        ),
+        _ => {}
+    }
+    if quality_outcome.assertion_status == crate::quality::AssertionStatus::BlockedByPolicy {
+        crate::quality::log_quality_event(
+            &config.working_dir,
+            "assertion_blocked_by_policy",
+            &format!(
+                "{} assertion(s) refused",
+                quality_outcome.assertions_blocked
+            ),
+        );
+    }
+
     // Reflexion: record abnormal exits so later tasks can avoid the mode.
     if matches!(
         final_reason.as_str(),
@@ -3624,18 +4478,69 @@ where
             ),
         );
     }
-    if !tool_sequence.is_empty() && final_reason == "EXITED" {
-        let safe_name: String = user_input
-            .chars()
-            .take(40)
-            .map(|c| {
-                if c.is_alphanumeric() || c == '_' || c == '-' {
-                    c
-                } else {
-                    '_'
+    // ── T6: learning-loop usage telemetry ──
+    // Record the terminal outcome for every skill/SOP this run matched, so
+    // the store can decay knowledge that never helps. Terminal = the run's
+    // quality verdict and whether the user interrupted it.
+    if !used_skill_names.is_empty() || !used_sop_names.is_empty() {
+        let run_success = matches!(final_reason.as_str(), "EXITED" | "CURRENT_TASK_DONE")
+            && quality_outcome.review_status != crate::quality::ReviewStatus::Failed
+            && quality_outcome.assertion_status != crate::quality::AssertionStatus::Failed;
+        if let Some(ref store_arc) = skill_mcp_store {
+            let locked =
+                tokio::time::timeout(std::time::Duration::from_secs(2), store_arc.lock()).await;
+            match locked {
+                Ok(mut store) => {
+                    for name in &used_skill_names {
+                        let r = if run_success {
+                            store.record_skill_success(name, turn)
+                        } else {
+                            store.record_skill_failure(name)
+                        };
+                        if let Err(e) = r {
+                            tracing::warn!("[quality] record_skill usage failed for {name}: {e}");
+                        }
+                    }
+                    for name in &used_sop_names {
+                        let r = if run_success {
+                            store.record_sop_success(name, turn)
+                        } else {
+                            // `record_sop_failure` now exists (round5 P0-6 ⑥):
+                            // without it a SOP that led the agent into a wall
+                            // kept its quality score forever.
+                            store.record_sop_failure(name)
+                        };
+                        if let Err(e) = r {
+                            tracing::warn!("[quality] record_sop usage failed for {name}: {e}");
+                        }
+                    }
+                    tracing::info!(
+                        "[quality] recorded usage: {} skill(s) / {} SOP(s), success={run_success}",
+                        used_skill_names.len(),
+                        used_sop_names.len()
+                    );
                 }
-            })
-            .collect();
+                Err(_) => tracing::info!(
+                    "[quality] skill store busy — usage telemetry skipped for this run"
+                ),
+            }
+        }
+    }
+
+    // P0-6 ⑥: never crystallize the session scaffolding into a "SOP".
+    // The real store had 7 SOPs named `system-reminder__today_s_date__…`
+    // whose body was the conversation scaffold, re-injected as instructions.
+    let sop_name = crate::quality::slug_sop_name(&user_input);
+    if sop_name.is_none() && config.enable_crystallization && !tool_sequence.is_empty() {
+        tracing::info!(
+            "[quality] skipping crystallisation: input is scaffolding or too short ({} chars)",
+            user_input.chars().count()
+        );
+    }
+    if let (Some(safe_name), true) = (
+        sop_name,
+        !tool_sequence.is_empty() && final_reason == "EXITED",
+    ) {
         let sess_id = if config.session_id.is_empty() {
             None
         } else {
@@ -3735,64 +4640,111 @@ where
     }
 
     // LLM-driven crystallization & refinement (when skill_mcp_store is active)
+    //
+    // Both phases make un-timeouted LLM calls while holding the process-wide
+    // skill-store lock, and this code runs *before* `run_agent_loop` returns
+    // — so a slow model used to delay the run's completion (and, by holding
+    // the lock, block every other session's skill-index load) for as long as
+    // the provider's own HTTP timeout allowed (round5 P1-19). Bound both:
+    // the lock wait (give up rather than queue) and each phase.
     if let Some(ref store_arc) = skill_mcp_store {
-        let mut store = store_arc.lock().await;
-        if config.enable_crystallization && !tool_sequence.is_empty() && final_reason == "EXITED" {
-            match Crystallizer::crystallize(
-                client,
-                &mut store,
-                &user_input,
-                &messages,
-                &tool_sequence,
-                if config.session_id.is_empty() {
-                    None
-                } else {
-                    Some(config.session_id.clone())
-                },
-            )
-            .await
+        const SKILL_STORE_LOCK_WAIT: Duration = Duration::from_secs(2);
+        /// Budget for each LLM-driven skill phase (crystallization,
+        /// refinement). They hold the process-wide skill-store lock, so an
+        /// unbounded call stalls every other session's skill-index load.
+        const CRYSTALLIZE_BUDGET: Duration = Duration::from_secs(60);
+        // Give up rather than queue behind another session's crystallization:
+        // this runs before the loop returns, and holding the lock is what
+        // made a new session's skill-index load appear to hang.
+        let locked = tokio::time::timeout(SKILL_STORE_LOCK_WAIT, store_arc.lock()).await;
+        if let Ok(mut store) = locked {
+            // Bounded: both phases make un-timeouted LLM calls while holding
+            // the process-wide skill-store lock, and they run before the loop
+            // returns — so a slow provider used to delay this run's
+            // completion and block every other session's skill-index load
+            // (review finding C-F1: the lock wait was bounded, the phases
+            // were not).
+            if config.enable_crystallization
+                && !tool_sequence.is_empty()
+                && final_reason == "EXITED"
             {
-                Ok(results) => {
-                    for r in &results {
-                        match r {
-                            crate::crystallizer::CrystallizeResult::SkillCreated { name } => {
-                                tracing::info!("Crystallized skill: {}", name)
+                let crystallize = tokio::time::timeout(
+                    CRYSTALLIZE_BUDGET,
+                    Crystallizer::crystallize(
+                        client,
+                        &mut store,
+                        &user_input,
+                        &messages,
+                        &tool_sequence,
+                        if config.session_id.is_empty() {
+                            None
+                        } else {
+                            Some(config.session_id.clone())
+                        },
+                    ),
+                )
+                .await;
+                match crystallize {
+                    Err(_) => tracing::info!(
+                        "crystallization exceeded {}s — skipped for this run",
+                        CRYSTALLIZE_BUDGET.as_secs()
+                    ),
+                    Ok(Ok(results)) => {
+                        for r in &results {
+                            match r {
+                                crate::crystallizer::CrystallizeResult::SkillCreated { name } => {
+                                    tracing::info!("Crystallized skill: {}", name)
+                                }
+                                crate::crystallizer::CrystallizeResult::SopCreated { name } => {
+                                    tracing::info!("Crystallized SOP: {}", name)
+                                }
+                                crate::crystallizer::CrystallizeResult::FactAdded { content } => {
+                                    tracing::info!("Crystallized fact: {}", content)
+                                }
+                                crate::crystallizer::CrystallizeResult::Nothing => {}
                             }
-                            crate::crystallizer::CrystallizeResult::SopCreated { name } => {
-                                tracing::info!("Crystallized SOP: {}", name)
-                            }
-                            crate::crystallizer::CrystallizeResult::FactAdded { content } => {
-                                tracing::info!("Crystallized fact: {}", content)
-                            }
-                            crate::crystallizer::CrystallizeResult::Nothing => {}
                         }
                     }
+                    Ok(Err(e)) => tracing::warn!("Crystallization failed: {}", e),
                 }
-                Err(e) => tracing::warn!("Crystallization failed: {}", e),
             }
-        }
 
-        if config.enable_refinement && store.skill_count() > 0 {
-            match Refiner::refine_all_skills(client, &mut store).await {
-                Ok(results) => {
-                    for r in &results {
-                        if let crate::refiner::RefineResult::Refined {
-                            name,
-                            old_version,
-                            new_version,
-                        } = r
-                        {
-                            tracing::info!(
-                                "Refined skill '{}': v{} → v{}",
+            if config.enable_refinement && store.skill_count() > 0 {
+                let refine = tokio::time::timeout(
+                    CRYSTALLIZE_BUDGET,
+                    Refiner::refine_all_skills(client, &mut store),
+                )
+                .await;
+                match refine {
+                    Err(_) => tracing::info!(
+                        "skill refinement exceeded {}s — skipped for this run",
+                        CRYSTALLIZE_BUDGET.as_secs()
+                    ),
+                    Ok(Ok(results)) => {
+                        for r in &results {
+                            if let crate::refiner::RefineResult::Refined {
                                 name,
                                 old_version,
-                                new_version
-                            );
+                                new_version,
+                            } = r
+                            {
+                                tracing::info!(
+                                    "Refined skill '{}': v{} → v{}",
+                                    name,
+                                    old_version,
+                                    new_version
+                                );
+                            }
                         }
                     }
+                    Ok(Err(e)) => tracing::warn!("Skill refinement failed: {}", e),
                 }
-                Err(e) => tracing::warn!("Skill refinement failed: {}", e),
             }
+        } else {
+            tracing::info!(
+                "skill store busy — skipping crystallization/refinement for session {}",
+                config.session_id
+            );
         }
     }
 
@@ -3850,36 +4802,37 @@ where
     let final_full_response =
         if config.quality_gates && crate::quality::has_write_operations(&tool_sequence) {
             let completed_head = smart_format(final_full_response.trim(), 120);
-            let mut verified: Vec<String> = Vec::new();
+            // P0-6 ③: one honest line from the run's real quality state.
+            // The old code printed "独立评审通过" whenever the reviewer said
+            // pass, and said nothing at all when the reviewer was
+            // unavailable — the two cases must not look alike.
+            let mut verified: Vec<String> = vec![quality_outcome.verification_line(&config.lang)];
             if let Some((total, failed)) = contract_assertions {
+                if failed > 0 && quality_outcome.assertion_status.is_verified() {
+                    // Belt-and-braces: the stored counters and the status must
+                    // never disagree in the user-visible text.
+                    verified.push(if config.lang == "zh" {
+                        format!("断言 {}/{} 通过", total.saturating_sub(failed), total)
+                    } else {
+                        format!(
+                            "{}/{} assertions passed",
+                            total.saturating_sub(failed),
+                            total
+                        )
+                    });
+                }
+            }
+            if gate_skipped.is_some() {
                 verified.push(if config.lang == "zh" {
-                    format!("断言 {}/{} 通过", total.saturating_sub(failed), total)
+                    format!(
+                        "本轮未做交付评审（{}）",
+                        gate_skipped.clone().unwrap_or_default()
+                    )
                 } else {
                     format!(
-                        "{}/{} assertions passed",
-                        total.saturating_sub(failed),
-                        total
+                        "delivery review did not run this turn ({})",
+                        gate_skipped.clone().unwrap_or_default()
                     )
-                });
-            }
-            if let Some((passed, high)) = contract_review {
-                verified.push(if passed {
-                    if config.lang == "zh" {
-                        "独立评审通过".to_string()
-                    } else {
-                        "independent review passed".to_string()
-                    }
-                } else if config.lang == "zh" {
-                    format!("独立评审提出 high 问题 ×{high}")
-                } else {
-                    format!("independent review raised {high} high issue(s)")
-                });
-            }
-            if verified.is_empty() && contract_assertions.is_none() {
-                verified.push(if config.lang == "zh" {
-                    "未运行验收断言（无 spec）".to_string()
-                } else {
-                    "no acceptance assertions ran (no spec)".to_string()
                 });
             }
             let pending_left = handler
@@ -3919,6 +4872,9 @@ where
             "output_tokens_est": total_output_tokens,
             "context_tokens_est": last_turn_input_tokens,
             "tool_sequence": tool_seq_json,
+            // P0-6 ③: the frontend renders a three-state badge from this
+            // block; anything unrecognized shows as "unverified".
+            "quality": quality_outcome.to_contract_json(&config.lang),
         })),
     }
 }
@@ -4212,6 +5168,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 
@@ -4367,7 +5324,11 @@ mod tests {
                 retries.push((attempt, max_attempts, retry_in_secs, reason));
             }
         }
-        assert_eq!(retries.len(), 2, "first failure always retries: {retries:?}");
+        assert_eq!(
+            retries.len(),
+            2,
+            "first failure always retries: {retries:?}"
+        );
         assert_eq!(retries[0].0, 1);
         assert_eq!(retries[1].0, 2);
         assert_eq!(retries[0].1, 8);

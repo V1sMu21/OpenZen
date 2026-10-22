@@ -1054,7 +1054,11 @@ const MAX_PARAM_KEY_LEN: usize = 80;
 /// `(start, key, value_start)` with offsets relative to `rest`, or `None`.
 fn next_parameter_opener(rest: &str) -> Option<(usize, String, usize)> {
     let mut best: Option<(usize, String, usize)> = None;
-    for (needle, escaped) in [(HALF_OPEN, false), (XML_OPEN, false), (XML_OPEN_ESCAPED, true)] {
+    for (needle, escaped) in [
+        (HALF_OPEN, false),
+        (XML_OPEN, false),
+        (XML_OPEN_ESCAPED, true),
+    ] {
         let mut from = 0usize;
         while let Some(p) = rest[from..].find(needle) {
             let abs = from + p;
@@ -1114,7 +1118,7 @@ fn next_parameter_opener(rest: &str) -> Option<(usize, String, usize)> {
 /// `None` when no recognizable fragment is present so callers keep their
 /// existing fallback. Heuristic by design: it only ever sees strings that
 /// already failed strict JSON parsing.
-pub fn repair_parameter_style_args(raw: &str) -> Option<serde_json::Value> {
+pub fn repair_parameter_style_args(raw: &str, tool: Option<&str>) -> Option<serde_json::Value> {
     let s = raw.trim();
     if s.is_empty() {
         return None;
@@ -1123,6 +1127,40 @@ pub fn repair_parameter_style_args(raw: &str) -> Option<serde_json::Value> {
     if !s.contains(XML_OPEN) && !s.contains(XML_OPEN_ESCAPED) && !s.contains("\">") {
         return None;
     }
+    // Tier 1 — JSON reconstruction. The gateway sometimes splices junk
+    // between a half-open key and a JSON continuation that is otherwise
+    // intact (observed: `{"file_path"><parameter: "/p", "content": "…\n"}`).
+    // Rebuild the object from the opener's key plus everything from the
+    // first quote of the remainder; accept it only when it parses. This
+    // recovers the CONTENT-bearing calls that pair extraction loses.
+    if let Some((_, key, value_start)) = next_parameter_opener(s) {
+        if let Some(q) = s[value_start..].find('"') {
+            // The first quote may belong to a NAMELESS DSML value that
+            // follows the key's own `</parameter>` boundary — reconstructing
+            // with it would assign the wrong value to the opener key.
+            let gap = &s[value_start..value_start + q];
+            let boundary_in_gap = gap.contains(PARAM_CLOSER);
+            let mut candidate = String::with_capacity(s.len() - value_start - q + key.len() + 8);
+            if !boundary_in_gap {
+                candidate.push('{');
+                candidate.push('"');
+                candidate.push_str(&key);
+                candidate.push_str("\": ");
+                candidate.push_str(&s[value_start + q..]);
+                // The tail usually still carries its own closing brace; only add
+                // one when the gateway truncated the call before it.
+                if serde_json::from_str::<serde_json::Value>(&candidate).is_err() {
+                    candidate.push('}');
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&candidate) {
+                    if v.is_object() {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+    }
+    // Tier 2 — pair extraction from the leaked parameter fragments.
     let mut out = serde_json::Map::new();
     let mut i = 0usize;
     while let Some((_, key, value_start)) = next_parameter_opener(&s[i..]) {
@@ -1166,10 +1204,158 @@ pub fn repair_parameter_style_args(raw: &str) -> Option<serde_json::Value> {
         }
         i += advance;
     }
+    // Nameless DSML values (`<｜DSML｜: "…"`): the gateway dropped the
+    // parameter name entirely. The value almost always belongs to the
+    // tool's primary parameter — map it there when the tool is known and
+    // the key is still missing.
+    if !out.is_empty() {
+        if let Some(v) = extract_nameless_dsml_value(s) {
+            // The nameless value belongs to the tool's FIRST MISSING
+            // canonical parameter (write with a bare file_path → content).
+            if let Some(names) = tool.and_then(oz_core_types::canonical_param_names) {
+                if let Some(slot) = names.into_iter().find(|k| !out.contains_key(*k)) {
+                    out.insert(slot.to_string(), serde_json::Value::String(v));
+                }
+            }
+        }
+    }
     if out.is_empty() {
         return None;
     }
     Some(serde_json::Value::Object(out))
+}
+
+/// Extract the value of a NAMELESS DSML fragment (`<｜DSML｜: "…"` — the
+/// gateway lost the parameter name, but the quoted JSON-escaped value is
+/// intact). Named forms are handled by the pair scanner; this skips them.
+fn extract_nameless_dsml_value(s: &str) -> Option<String> {
+    const DSML: &str = "\u{ff5c}DSML\u{ff5c}";
+    let mut from = 0usize;
+    while let Some(p) = s[from..].find(DSML) {
+        let after = &s[from + p + DSML.len()..];
+        from += p + DSML.len();
+        if after.trim_start().starts_with("parameter") {
+            continue;
+        }
+        let rest = after.trim_start().strip_prefix(':')?.trim_start();
+        let quoted = rest.strip_prefix('"')?;
+        let bytes = quoted.as_bytes();
+        let mut i = 0usize;
+        let mut end = None;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 2,
+                b'"' => {
+                    end = Some(i);
+                    break;
+                }
+                _ => i += 1,
+            }
+        }
+        let end = end?;
+        let mut body = String::with_capacity(end + 2);
+        body.push('"');
+        body.push_str(&quoted[..end]);
+        body.push('"');
+        return serde_json::from_str::<String>(&body).ok();
+    }
+    None
+}
+
+/// Extract named parameters from DSML fragments embedded in a value or
+/// trailing text: `<｜DSML｜  parameter name="k" string="true">v</parameter>`
+/// (quotes may arrive JSON-escaped as `\"`). DeepSeek's DSML dialect uses
+/// fullwidth brackets, so the literal `<｜DSML｜` prefix is required — plain
+/// `<parameter …>` in legitimate content is never touched.
+fn extract_dsml_params(text: &str) -> Vec<(String, String)> {
+    const DSML: &str = "\u{ff5c}DSML\u{ff5c}";
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(p) = text[from..].find(DSML) {
+        let seg = &text[from + p..];
+        let Some(kpos) = seg.find("parameter name=") else {
+            from += p + DSML.len();
+            continue;
+        };
+        let after = &seg[kpos + "parameter name=".len()..];
+        // Key in plain quotes or JSON-escaped quotes, then attribute junk
+        // (` string="true"`) up to the `>` that starts the value.
+        let (key, key_end) = if let Some(r) = after.strip_prefix("\\\"") {
+            match r.find("\\\"") {
+                Some(e) => (r[..e].to_string(), e + 4),
+                None => {
+                    from += p + DSML.len();
+                    continue;
+                }
+            }
+        } else {
+            match after.strip_prefix('"').and_then(|r| r.find('"')) {
+                Some(e) => (after[1..1 + e].to_string(), e + 2),
+                None => {
+                    from += p + DSML.len();
+                    continue;
+                }
+            }
+        };
+        let Some(vrel) = after[key_end..].find('>') else {
+            from += p + DSML.len();
+            continue;
+        };
+        let value_start = kpos + "parameter name=".len() + key_end + vrel + 1;
+        let value = match seg[value_start..].find("</parameter>") {
+            Some(e) => seg[value_start..value_start + e].to_string(),
+            // No closer: the segment ends where the JSON value ended —
+            // take it verbatim (trailing newlines are content).
+            None => seg[value_start..].to_string(),
+        };
+        let consumed = value.len().max(1);
+        if !key.is_empty() {
+            out.push((key, value));
+        }
+        from += p + value_start + consumed;
+    }
+    out
+}
+
+/// Cut DSML pollution out of parsed string values and lift the swallowed
+/// parameters back into the object.
+///
+/// Observed corruption (2026-10-03 evening session): the gateway delivers
+/// VALID JSON whose string value silently continues past the model's
+/// parameter boundary —
+///   `{"file_path": "/p.sh</parameter>\n<｜DSML｜  parameter name=\"content\"
+///    string=\"true\">#!/bin/bash\n…"}``
+/// The JSON parses fine, so the repair path never runs, but `content` is
+/// buried inside `file_path` and the tool fails `missing content`. When the
+/// value contains `</parameter>` followed by DSML/parameter junk, cut it at
+/// the boundary and promote the embedded named parameters.
+fn sanitize_dsml_pollution(v: &mut serde_json::Value) {
+    const DSML: &str = "\u{ff5c}DSML\u{ff5c}";
+    let serde_json::Value::Object(map) = v else {
+        return;
+    };
+    let mut lifted: Vec<(String, String)> = Vec::new();
+    for (_, val) in map.iter_mut() {
+        let serde_json::Value::String(s) = val else {
+            continue;
+        };
+        // Fast reject before scanning for the boundary.
+        let Some(boundary) = s.find("</parameter>") else {
+            continue;
+        };
+        let rest = &s[boundary..];
+        // The value has already been JSON-parsed, so escaped unicode is
+        // decoded — checking the literal fullwidth token is enough.
+        let followed_by_junk = rest.contains(DSML) || rest.contains("<parameter");
+        if !followed_by_junk {
+            continue;
+        }
+        lifted.extend(extract_dsml_params(rest));
+        *s = s[..boundary].trim_end().to_string();
+    }
+    for (k, val) in lifted {
+        map.entry(k).or_insert(serde_json::Value::String(val));
+    }
 }
 
 /// Recover degenerate tool-argument shapes some models emit, so tools get a
@@ -1186,12 +1372,27 @@ pub fn repair_parameter_style_args(raw: &str) -> Option<serde_json::Value> {
 /// shapes pass through unchanged.
 pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
     let mut current = v;
+    // DSML pollution can ride inside otherwise-valid JSON (see
+    // sanitize_dsml_pollution) — clean parsed objects before the unwrap
+    // loop so degenerate-shape checks see the intended payload.
+    if current.is_object() {
+        sanitize_dsml_pollution(&mut current);
+    }
     for _ in 0..4 {
         let next = match &current {
             serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
+                .map(|parsed| {
+                    if parsed.is_object() {
+                        let mut inner = parsed;
+                        sanitize_dsml_pollution(&mut inner);
+                        inner
+                    } else {
+                        parsed
+                    }
+                })
                 .ok()
                 .filter(|inner| inner.is_object())
-                .or_else(|| repair_parameter_style_args(s)),
+                .or_else(|| repair_parameter_style_args(s, None)),
             serde_json::Value::Object(m) if m.len() == 1 => {
                 match m.get("content") {
                     // Wrapper with the payload as a JSON-encoded string…
@@ -1239,6 +1440,17 @@ pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
 /// all agree — and a model that imitates its own history imitates the correct
 /// shape. Execution is guarded a second time in `ToolRegistry::dispatch`.
 pub fn normalize_tool_args_for(tool: &str, v: serde_json::Value) -> serde_json::Value {
+    // Nameless-DSML repair needs the tool's primary key, which only this
+    // function knows — run it first on strings strict JSON rejects (the
+    // unwrap pipeline below only ever fires on parseable strings, so the
+    // two paths stay mutually exclusive).
+    if let serde_json::Value::String(s) = &v {
+        if serde_json::from_str::<serde_json::Value>(s).is_err() {
+            if let Some(repaired) = repair_parameter_style_args(s, Some(tool)) {
+                return oz_core_types::canonicalize_tool_args(tool, repaired);
+            }
+        }
+    }
     let normalized = normalize_tool_args(v);
     let canonical = oz_core_types::canonicalize_tool_args(tool, normalized.clone());
     if canonical != normalized {
@@ -1368,8 +1580,9 @@ mod tests {
     fn repair_recovers_truncated_respond_reply() {
         // Raw accumulated `arguments` string: leading stray quote, the
         // opening tag reduced to `{`, no closing tag, dangling `: "`.
-        let raw = r#""{"response">我按你描述锁定了账号，并把它归到具体的绘画技术体系，再给出可落地的: ""#;
-        let got = repair_parameter_style_args(raw).expect("should repair");
+        let raw =
+            r#""{"response">我按你描述锁定了账号，并把它归到具体的绘画技术体系，再给出可落地的: ""#;
+        let got = repair_parameter_style_args(raw, None).expect("should repair");
         assert_eq!(
             got["response"],
             "我按你描述锁定了账号，并把它归到具体的绘画技术体系，再给出可落地的"
@@ -1382,7 +1595,7 @@ mod tests {
 
 **做了什么**
 -: ""#;
-        let got = repair_parameter_style_args(raw).expect("should repair");
+        let got = repair_parameter_style_args(raw, None).expect("should repair");
         assert_eq!(
             got["response"],
             "已按验收断言修复并通过复验。\n\n**做了什么**\n-"
@@ -1403,19 +1616,16 @@ mod tests {
             "\n",
             r#"<parameter name=\"query\" string=\"true\">明婷画画 怎么画的 工具 数位板 比例 测量 透视</parameter>"#,
         );
-        let got = repair_parameter_style_args(raw).expect("should repair");
+        let got = repair_parameter_style_args(raw, None).expect("should repair");
         assert_eq!(got["max_chars"], "2500");
         assert_eq!(got["num_results"], "5");
-        assert_eq!(
-            got["query"],
-            "明婷画画 怎么画的 工具 数位板 比例 测量 透视"
-        );
+        assert_eq!(got["query"], "明婷画画 怎么画的 工具 数位板 比例 测量 透视");
     }
 
     #[test]
     fn repair_handles_intact_xml_parameters() {
         let raw = "<parameter name=\"url\">https://example.com/x</parameter>\n<parameter name=\"q\" string=\"true\">multi\nline</parameter>";
-        let got = repair_parameter_style_args(raw).expect("should repair");
+        let got = repair_parameter_style_args(raw, None).expect("should repair");
         assert_eq!(got["url"], "https://example.com/x");
         assert_eq!(got["q"], "multi\nline");
     }
@@ -1425,21 +1635,117 @@ mod tests {
         // The dangling-quote strip only applies to truncated tails; a value
         // closed by `</parameter>` may legitimately end with a quote.
         let raw = "<parameter name=\"q\">say \"hi\"</parameter>";
-        let got = repair_parameter_style_args(raw).expect("should repair");
+        let got = repair_parameter_style_args(raw, None).expect("should repair");
         assert_eq!(got["q"], "say \"hi\"");
+    }
+
+    #[test]
+    fn repair_reconstructs_json_after_junk_prefix() {
+        // Real 2026-10-03 leak: the model's complete JSON arguments arrived
+        // with a mangled half-open key and a `<parameter: ` splice in front
+        // of the first value. Pair extraction recovers only file_path; the
+        // reconstruction tier must recover content too.
+        let raw = concat!(
+            r##"{"file_path"><parameter: "/Users/w/work/probe_env.sh", "##,
+            r##""content": "#!/bin/bash\nC=/w/comfyUI\necho \"== ver ==\"\n"}"##
+        );
+        let got = repair_parameter_style_args(raw, None).expect("should repair");
+        assert_eq!(got["file_path"], "/Users/w/work/probe_env.sh");
+        assert_eq!(
+            got["content"],
+            "#!/bin/bash\nC=/w/comfyUI\necho \"== ver ==\"\n"
+        );
+    }
+
+    #[test]
+    fn repair_reconstruction_never_fires_on_pair_shapes() {
+        // The pre-existing fixtures must keep resolving through pair
+        // extraction exactly as before (tier 1 must not swallow them).
+        let raw =
+            r#""{"response">我按你描述锁定了账号，并把它归到具体的绘画技术体系，再给出可落地的: ""#;
+        let got = repair_parameter_style_args(raw, None).expect("should repair");
+        assert_eq!(
+            got["response"],
+            "我按你描述锁定了账号，并把它归到具体的绘画技术体系，再给出可落地的"
+        );
+        let raw2 = "<parameter name=\"url\">https://example.com/x</parameter>\n<parameter name=\"q\" string=\"true\">multi\nline</parameter>";
+        let got2 = repair_parameter_style_args(raw2, None).expect("should repair");
+        assert_eq!(got2["url"], "https://example.com/x");
+        assert_eq!(got2["q"], "multi\nline");
+        // Truncated bare-value shape still degrades to pair extraction.
+        let raw3 = r#"{"file_path">/Users/w/work/probe_env.sh</parameter>"#;
+        let got3 = repair_parameter_style_args(raw3, None).expect("should repair");
+        assert_eq!(got3["file_path"], "/Users/w/work/probe_env.sh");
     }
 
     #[test]
     fn repair_rejects_plain_text_and_truncated_json() {
         // No parameter opener at all.
-        assert_eq!(repair_parameter_style_args("plain text no params"), None);
+        assert_eq!(
+            repair_parameter_style_args("plain text no params", None),
+            None
+        );
         // Truncated proper JSON — the `":` terminator must NOT be mistaken
         // for the half-converted `">` leak signature (this shape keeps the
         // string fallback so the tool reports a structured missing-arg
         // error instead of executing guessed input).
-        assert_eq!(repair_parameter_style_args("{\"code\":\"cd ~/x"), None);
-        assert_eq!(repair_parameter_style_args("{\"a\": \"b\"}"), None);
-        assert_eq!(repair_parameter_style_args(""), None);
+        assert_eq!(
+            repair_parameter_style_args("{\"code\":\"cd ~/x", None),
+            None
+        );
+        assert_eq!(repair_parameter_style_args("{\"a\": \"b\"}", None), None);
+        assert_eq!(repair_parameter_style_args("", None), None);
+    }
+
+    #[test]
+    fn sanitize_lifts_dsml_params_swallowed_into_values() {
+        // 2026-10-03 evening: VALID JSON whose string value continues past
+        // the model's parameter boundary — the gateway embedded the next
+        // DSML parameter inside the value. Strict parse succeeds, so only
+        // the value-level sanitizer can recover the buried parameter.
+        let raw = concat!(
+            r##"{"file_path": "/Users/w/work/comfy_probe.sh</parameter>\n"##,
+            r##"<｜DSML｜  parameter name=\"content\" string=\"true\">#!/bin/bash\n# 启动\nset -uo pipefail\n"}"##
+        );
+        let got = normalize_tool_args_for("write", serde_json::Value::String(raw.into()));
+        assert_eq!(got["file_path"], "/Users/w/work/comfy_probe.sh");
+        assert_eq!(got["content"], "#!/bin/bash\n# 启动\nset -uo pipefail\n");
+
+        let raw2 = concat!(
+            r##"{"content": "探测本机 ComfyUI 能力</parameter>\n"##,
+            r##"<｜DSML｜  parameter name=\"priority\" string=\"true\">high</parameter>\n"}"##
+        );
+        let got2 = normalize_tool_args_for("todowrite", serde_json::Value::String(raw2.into()));
+        assert_eq!(got2["content"], "探测本机 ComfyUI 能力");
+        assert_eq!(got2["priority"], "high");
+    }
+
+    #[test]
+    fn sanitize_leaves_legitimate_parameter_text_alone() {
+        // A value that merely MENTIONS </parameter> without DSML junk after
+        // it must survive byte-for-byte.
+        let v = serde_json::json!({"content": "the closing tag is </parameter> here"});
+        assert_eq!(normalize_tool_args(v.clone()), v);
+        // Already-clean objects pass through.
+        let v2 = serde_json::json!({"file_path": "/tmp/a.sh", "content": "#!/bin/bash\necho hi"});
+        assert_eq!(normalize_tool_args(v2.clone()), v2);
+    }
+
+    #[test]
+    fn repair_maps_nameless_dsml_value_to_primary_param() {
+        // 2026-10-03 evening (write relay-howto.md): half-open key, bare
+        // value, then the gateway's nameless DSML value carrying the whole
+        // markdown body. The nameless value must land on `content`.
+        let raw = concat!(
+            r##"{"file_path">/Users/w/work/relay-howto.md</parameter>\n"##,
+            r##"<｜DSML｜: "# 还原\"明婷画画\"式作画过程\n\n> 2026-10-03\n"}"##
+        );
+        let got = normalize_tool_args_for("write", serde_json::Value::String(raw.into()));
+        assert_eq!(got["file_path"], "/Users/w/work/relay-howto.md");
+        assert_eq!(
+            got["content"],
+            "# 还原\"明婷画画\"式作画过程\n\n> 2026-10-03\n"
+        );
     }
 
     #[test]

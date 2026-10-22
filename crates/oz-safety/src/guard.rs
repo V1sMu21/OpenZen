@@ -38,7 +38,12 @@ impl SafetyGuard {
                 "web_search".into(),
                 "web_scan".into(),
                 "web_fetch".into(),
-                "web_js".into(),
+                // NOTE: `web_js` is deliberately NOT here. It runs arbitrary
+                // JavaScript in a live page — the same primitive as
+                // `web_execute_js`, which is approval-gated — and its
+                // "no exfiltration" guard is a substring blacklist that
+                // `window['fe'+'tch'](...)` walks straight through
+                // (round5 P1-8b).
                 "todowrite".into(),
                 "todoupdate".into(),
                 "long_term".into(),

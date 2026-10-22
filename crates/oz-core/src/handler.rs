@@ -338,6 +338,21 @@ pub struct LoopConfig {
     /// Minimum number of file-writing tool calls for a task to be
     /// considered "important" enough for the independent review.
     pub review_min_tools: u32,
+    /// P2-25: model used for the independent review and the assertion
+    /// synthesis. `None` = follow `review_use_summary` / the main client.
+    ///
+    /// Both jobs used to share the 230M local summary model, which cannot
+    /// judge a delivery — it produced "pass" for everything. When a distinct
+    /// model is configured here, reviews use it; when nothing is available
+    /// the outcome records `review_model: "unavailable"` instead of silently
+    /// degrading to the same small model.
+    pub review_model: Option<String>,
+    /// The model the MAIN client is configured with, for telemetry only.
+    ///
+    /// When a review runs on the main client the host knows which model that
+    /// is; without this the outcome could only say "main-client" (or worse,
+    /// name the configured-but-unused `review_model` — review B5).
+    pub main_model_name: Option<String>,
 }
 
 impl Default for LoopConfig {
@@ -358,7 +373,13 @@ impl Default for LoopConfig {
             enable_crystallization: false,
             enable_refinement: false,
             max_concurrent_tools: 8,
-            tool_timeout_secs: 30,
+            // Fail-fast default for tools that do NOT manage their own
+            // timeout. Must stay strictly ABOVE code_run's own default
+            // (300s) so the tool's inner timeout — which returns a structured
+            // result and kills the whole process group — is always the one
+            // that fires. The old 30s value preempted every undeclared call
+            // and leaked process groups (round5 P0-7).
+            tool_timeout_secs: 330,
             intervention_rx: None,
             ask_user_rx: None,
             working_dir: String::from("."),
@@ -387,6 +408,8 @@ impl Default for LoopConfig {
             tdd_gate_enabled: false,
             review_enabled: true,
             review_min_tools: 3,
+            review_model: None,
+            main_model_name: None,
         }
     }
 }
@@ -445,6 +468,8 @@ impl Clone for LoopConfig {
             assertion_max_rounds: self.assertion_max_rounds,
             review_enabled: self.review_enabled,
             review_min_tools: self.review_min_tools,
+            review_model: self.review_model.clone(),
+            main_model_name: self.main_model_name.clone(),
         }
     }
 }

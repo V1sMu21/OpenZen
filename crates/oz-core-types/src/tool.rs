@@ -214,6 +214,15 @@ pub struct ToolContext {
     /// per-session identity (like schedule_reminder) read this instead of a
     /// process-global, which breaks under concurrent sessions.
     pub session_id: String,
+    /// Effective OUTER timeout budget for this tool call, in seconds, as
+    /// computed by the agent loop (`declared timeout + grace`, or the loop's
+    /// default). A long-running tool must clamp its own inner timeout
+    /// strictly below this so that IT — not the loop's dropped future — is
+    /// what fires: the tool then returns a structured timeout result and
+    /// kills its whole process group. 0 means "unknown" (tests, TUI, bridge),
+    /// in which case the tool uses its own default.
+    #[serde(default)]
+    pub tool_budget_secs: u64,
 }
 
 impl ToolContext {
@@ -227,6 +236,7 @@ impl ToolContext {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         }
     }
 
@@ -272,6 +282,23 @@ pub trait LlmClient: Send {
 }
 
 // ── Tests ──
+
+/// Rough character-equivalent cost of one inline image, for the chars→tokens
+/// estimator. A screenshot is ~1-1.6k tokens on every provider; counting the
+/// base64 string instead (2.4 MB → ~600k "chars") both hid images from the
+/// compression thresholds and made the ratio projection meaningless.
+pub const IMAGE_CHAR_EQUIVALENT: usize = 4_000;
+
+/// Character-equivalent length of an inline image URL, clamped so a data URL
+/// can never dominate the token estimate.
+pub fn image_char_estimate(url: &str) -> usize {
+    if url.starts_with("data:") {
+        IMAGE_CHAR_EQUIVALENT
+    } else {
+        // A plain path/URL: cheap to carry, but not free.
+        url.len().min(IMAGE_CHAR_EQUIVALENT)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -414,6 +441,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         };
         assert_eq!(ctx.resolve_path("/etc/passwd"), "/etc/passwd");
     }
@@ -428,6 +456,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         };
         assert_eq!(ctx.resolve_path("~/config"), "~/config");
     }
@@ -442,6 +471,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         };
         assert_eq!(
             ctx.resolve_path("src/main.rs"),
@@ -459,6 +489,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         };
         assert_eq!(ctx.resolve_path("a/b/c.txt"), "/workspace/a/b/c.txt");
     }
@@ -473,6 +504,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         };
         assert_eq!(ctx.resolve_path("foo.txt"), "/home/user/project/foo.txt");
     }
@@ -487,6 +519,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         };
         assert!(!ctx.resolve_path("foo.txt").contains("//"));
     }
@@ -501,6 +534,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         };
         assert_eq!(ctx.resolve_path(""), "/home/user/project/");
     }
@@ -581,6 +615,7 @@ mod tests {
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
+            tool_budget_secs: 0,
         };
         let cloned = ctx.clone();
         assert_eq!(cloned.working_dir, ctx.working_dir);
