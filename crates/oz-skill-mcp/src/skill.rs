@@ -817,7 +817,10 @@ description: Senior UI/UX Engineer
             quality: 0.8,
         };
         let score = skill.match_score("帮我下载一个大模型，要断点续传");
-        assert!(score > 0.0, "Chinese query must score above zero; got {score}");
+        assert!(
+            score > 0.0,
+            "Chinese query must score above zero; got {score}"
+        );
     }
 
     #[test]
@@ -865,8 +868,11 @@ description: Senior UI/UX Engineer
             quality: 0.8,
         };
         // name hit (search) * 0.5 + desc hit (search) * 0.3 = 0.8, no cap
-        assert!((skill.match_score("search") - 0.8).abs() < 1e-6,
-                "got {}", skill.match_score("search"));
+        assert!(
+            (skill.match_score("search") - 0.8).abs() < 1e-6,
+            "got {}",
+            skill.match_score("search")
+        );
         // "internet" is in neither the name nor the description
         assert_eq!(skill.match_score("internet"), 0.0);
     }

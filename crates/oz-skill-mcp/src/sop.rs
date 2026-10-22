@@ -379,6 +379,19 @@ impl SopManager {
         Ok(())
     }
 
+    /// Record a failed usage of a SOP (round5 P0-6 ⑥).
+    ///
+    /// Only `record_success` existed, so a SOP that led the agent into a wall
+    /// kept its quality score forever — "the more it writes, the better it
+    /// looks" instead of "the more it is used, the better it gets".
+    pub fn record_failure(&mut self, name: &str) -> Result<(), SkillMcpError> {
+        if let Some(sop) = self.sops.iter_mut().find(|s| s.name == name) {
+            sop.metadata.record_failure();
+            self.meta_store.save("sops", name, &sop.metadata)?;
+        }
+        Ok(())
+    }
+
     /// Get all SOPs.
     pub fn all(&self) -> &[Sop] {
         &self.sops
@@ -490,7 +503,10 @@ Use web_search to find current information.
             "# erme-memory-engine — ERME 记忆引擎\nTags: memory\n\n空闲时自我迭代。\n",
         );
         let score = sop.match_score("让记忆引擎在空闲时自我迭代");
-        assert!(score > 0.0, "Chinese SOP query must score above zero; got {score}");
+        assert!(
+            score > 0.0,
+            "Chinese SOP query must score above zero; got {score}"
+        );
     }
 
     #[test]
@@ -499,8 +515,11 @@ Use web_search to find current information.
         let sop = Sop::from_markdown(&path, "# web_search — Search the web\nTags: web\n\nBody.\n");
         // haystack hits "web" and "search" at 0.3 each, plus the reverse tag
         // match on "web" (query contains the tag) at +0.2
-        assert!((sop.match_score("web search") - 0.8).abs() < 1e-6,
-                "got {}", sop.match_score("web search"));
+        assert!(
+            (sop.match_score("web search") - 0.8).abs() < 1e-6,
+            "got {}",
+            sop.match_score("web search")
+        );
     }
 
     #[test]

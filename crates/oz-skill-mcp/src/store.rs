@@ -240,6 +240,11 @@ impl SkillMcpStore {
         self.sops.record_success(name, turns)
     }
 
+    /// Record a failed SOP usage (see `SopManager::record_failure`).
+    pub fn record_sop_failure(&mut self, name: &str) -> Result<(), SkillMcpError> {
+        self.sops.record_failure(name)
+    }
+
     // ── Memory operations (delegated) ──
 
     /// Distill a fact or insight into persistent memory.

@@ -75,14 +75,44 @@ impl SseEvent {
         context_tokens: usize,
         exit_reason: Option<&str>,
     ) -> Self {
+        Self::done_with_quality(
+            session_id,
+            response,
+            tokens_in,
+            tokens_out,
+            context_tokens,
+            exit_reason,
+            None,
+        )
+    }
+
+    /// Same, plus the delivery-quality verdict.
+    ///
+    /// The frontend renders a three-state badge (verified / issues but
+    /// released / unverified) from `data.quality.review_status`; anything
+    /// unrecognized shows as unverified, never as passed (round5 P0-6 ③).
+    #[allow(clippy::too_many_arguments)]
+    pub fn done_with_quality(
+        session_id: &str,
+        response: Option<&str>,
+        tokens_in: usize,
+        tokens_out: usize,
+        context_tokens: usize,
+        exit_reason: Option<&str>,
+        quality: Option<&serde_json::Value>,
+    ) -> Self {
+        let mut inner = serde_json::json!({
+            "full_response": response,
+            "input_tokens_est": tokens_in,
+            "output_tokens_est": tokens_out,
+            "context_tokens_est": context_tokens,
+        });
+        if let Some(q) = quality {
+            inner["quality"] = q.clone();
+        }
         let data = serde_json::json!({
             "exit_reason": exit_reason,
-            "data": {
-                "full_response": response,
-                "input_tokens_est": tokens_in,
-                "output_tokens_est": tokens_out,
-                "context_tokens_est": context_tokens,
-            }
+            "data": inner,
         });
         Self::new(session_id, "done", &data.to_string())
     }

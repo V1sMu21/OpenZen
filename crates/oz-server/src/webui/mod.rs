@@ -247,6 +247,8 @@ pub struct ChatRequest {
     pub session_name: Option<String>,
     #[serde(default)]
     pub model_name: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 fn default_session_id() -> String {
@@ -653,6 +655,7 @@ async fn handle_chat(
         &state.config_path,
         &state.sse_bus,
         req.model_name.as_deref(),
+        req.reasoning_effort.as_deref(),
     ))
     .catch_unwind()
     .await
@@ -781,6 +784,7 @@ async fn run_agent_for_session(
     config_path: &str,
     sse_bus: &SseBus,
     model_name: Option<&str>,
+    reasoning_effort: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     let lang = std::env::var("OZ_LANG").unwrap_or_default();
     let sys_prompt_filename = if lang == "en" {
@@ -797,6 +801,7 @@ async fn run_agent_for_session(
         skill_mcp_dir: None,
         harness_dir: None,
         session_id: session_id.to_string(),
+        tool_budget_secs: 0,
     };
 
     // Load config
@@ -812,6 +817,10 @@ async fn run_agent_for_session(
         .get(session_name)
         .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found in config"))?
         .clone();
+    // Per-message thinking-dial override from the webui input box.
+    if let Some(effort) = reasoning_effort {
+        sess_config.reasoning_effort = Some(effort.to_string());
+    }
     // Provider session-routing tag (opencode.ai x-opencode-session).
     sess_config.session_tag = Some(session_id.to_string());
     let sess_type = cfg.session_type(session_name);
@@ -1245,13 +1254,18 @@ async fn run_agent_for_session(
         .unwrap_or(0) as usize;
 
     let exit_reason_str = outcome.exit_reason.clone();
-    let _ = sse_bus.send(SseEvent::done(
+    // The browser UI renders the same three-state badge as the desktop one;
+    // it was dropped on this last hop, so a gated run showed as "not_run"
+    // there no matter what the gate decided (review B10).
+    let quality_block = outcome.data.as_ref().and_then(|d| d.get("quality"));
+    let _ = sse_bus.send(SseEvent::done_with_quality(
         session_id,
         full_response.as_deref(),
         tokens_in,
         tokens_out,
         context_tokens,
         Some(exit_reason_str.as_str()),
+        quality_block,
     ));
 
     if let Some(ref response_text) = full_response {
@@ -1283,8 +1297,7 @@ async fn run_agent_for_session(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                let rel_now =
-                    now_ms.saturating_sub(start_ms.lock().unwrap().unwrap_or(now_ms));
+                let rel_now = now_ms.saturating_sub(start_ms.lock().unwrap().unwrap_or(now_ms));
                 events
                     .iter()
                     .enumerate()
@@ -1318,6 +1331,10 @@ async fn run_agent_for_session(
                     "timestamp": now.to_rfc3339(),
                 });
 
+                // Same compaction as the desktop path: the replay log is a
+                // display skeleton, not history (round5 P0-1).
+                let stream_events_json =
+                    oz_core_types::event::compact_stream_events(&stream_events_json);
                 if !stream_events_json.is_empty() {
                     msg["streamEvents"] = serde_json::Value::Array(stream_events_json);
                 }
@@ -1572,6 +1589,7 @@ async fn delete_session(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mut sessions = state.sessions.write().await;
+    let working_dir = sessions.get(&id).and_then(|e| e.working_dir.clone());
     if sessions.delete(&id) {
         // Tidy up any per-session state (run-guard, stop signal,
         // intervention queue) so the maps don't grow without bound. The
@@ -1582,7 +1600,27 @@ async fn delete_session(
         state.run_guards.lock().unwrap().remove(&id);
         state.stop_signals.lock().unwrap().remove(&id);
         state.interventions.lock().unwrap().remove(&id);
-        Ok(Json(serde_json::json!({ "status": "deleted" })))
+        // Reclaim this session's checkpoint + WAL files. The desktop path
+        // does this too; without it a webui/HTTP delete left up to tens of
+        // MB per session behind forever, and the startup orphan sweep only
+        // exists in the Tauri process (review finding E-8).
+        drop(sessions);
+        let mut dirs = vec![oz_core::checkpoint::checkpoint_dir(std::path::Path::new(
+            &state.working_dir,
+        ))];
+        if let Some(wd) = working_dir {
+            let d = oz_core::checkpoint::checkpoint_dir(std::path::Path::new(&wd));
+            if !dirs.contains(&d) {
+                dirs.push(d);
+            }
+        }
+        let mut reclaimed = 0usize;
+        for d in &dirs {
+            reclaimed += oz_core::checkpoint::purge_session_checkpoints(d, &id);
+        }
+        Ok(Json(
+            serde_json::json!({ "status": "deleted", "reclaimed_files": reclaimed }),
+        ))
     } else {
         Err((StatusCode::NOT_FOUND, format!("Session {id} not found")))
     }
@@ -1801,21 +1839,82 @@ async fn handle_compress(
         None
     };
 
-    // Inject LLM summary into session if generated
-    if let Some(ref ls) = llm_summary {
-        let mut sessions = state.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&id) {
-            session.messages.insert(
-                0,
-                serde_json::json!({
-                    "role": "system",
-                    "content": format!("[Compression summary]: {ls}"),
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                }),
-            );
-            sessions.save();
+    // Inject the summary into the session.
+    //
+    // The removed window is already gone from the store (it was replaced
+    // above), so this is the only record of it. When the LLM summary is
+    // unavailable (not configured, timed out, budget exhausted) fall back to
+    // the deterministic template instead of writing nothing — the Tauri path
+    // already did this, and the two implementations disagreed (review
+    // finding A-F4).
+    let used_llm_summary = llm_summary.as_ref().is_some_and(|s| !s.trim().is_empty());
+    let mut summary_inserted = false;
+    if saved_chars > 0 {
+        let body = if used_llm_summary {
+            llm_summary.clone().unwrap_or_default()
+        } else {
+            oz_core::compress::build_compression_summary(&compaction.removed, "")
+        };
+        if !body.trim().is_empty() {
+            let header = if used_llm_summary {
+                "[Compression summary]"
+            } else {
+                "[Compression summary (template — LLM summary unavailable)]"
+            };
+            let mut sessions = state.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&id) {
+                session.messages.insert(
+                    0,
+                    serde_json::json!({
+                        "role": "system",
+                        "content": format!("{header}: {body}"),
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                    }),
+                );
+                sessions.save();
+                summary_inserted = true;
+            }
         }
     }
+
+    // The summary we just inserted IS part of what the next run will carry,
+    // so the reported "after" must include it — otherwise the numbers promise
+    // a size the store does not have (the persisted-log invariant asserted by
+    // `test_compress_endpoint_folds_tool_traffic`).
+    let (after_chars, after_tokens, saved_chars, saved_tokens, saved_pct) = if summary_inserted {
+        let stored: usize = {
+            let sessions = state.sessions.read().await;
+            sessions
+                .get(&id)
+                .map(|s| {
+                    s.messages
+                        .iter()
+                        .map(oz_core::compress::store_message_payload_chars)
+                        .sum()
+                })
+                .unwrap_or(after_chars)
+        };
+        let at = stored / 4;
+        (
+            stored,
+            at,
+            before_chars.saturating_sub(stored),
+            (before_chars / 4).saturating_sub(at),
+            if before_chars > 0 {
+                (before_chars.saturating_sub(stored)) as f64 / before_chars as f64 * 100.0
+            } else {
+                0.0
+            },
+        )
+    } else {
+        (
+            after_chars,
+            after_tokens,
+            saved_chars,
+            saved_tokens,
+            saved_pct,
+        )
+    };
 
     Ok(Json(serde_json::json!({
         "session_id": id,
@@ -1831,7 +1930,7 @@ async fn handle_compress(
         "metrics": metrics_str,
         "summary": summary,
         "llm_summary": llm_summary,
-        "strategy": if saved_chars == 0 && llm_summary.is_none() {
+        "strategy": if saved_chars == 0 && !used_llm_summary {
             // Nothing was foldable: say so instead of reporting a successful
             // compression that released 0 tokens.
             format!(
@@ -1841,7 +1940,7 @@ async fn handle_compress(
         } else {
             format!("compressed {}→{} messages, saved {:.1}% tokens{}",
                 before_count, after_count, saved_pct,
-                if llm_summary.is_some() { " (LLM summary)" } else { " (template)" })
+                if used_llm_summary { " (LLM summary)" } else { " (template)" })
         },
     })))
 }
@@ -1914,6 +2013,7 @@ async fn handle_regenerate(
         &state.working_dir,
         &state.config_path,
         &state.sse_bus,
+        None,
         None,
     )
     .await;
@@ -2521,7 +2621,10 @@ mod tests {
             "expected real savings, got {json}"
         );
         assert!(json["changed"].as_bool().unwrap());
-        assert!(!json["strategy"].as_str().unwrap().contains("nothing to compress"));
+        assert!(!json["strategy"]
+            .as_str()
+            .unwrap()
+            .contains("nothing to compress"));
 
         // …and the persisted log is what the next run will rebuild from.
         let sessions = state.sessions.read().await;
@@ -2542,7 +2645,9 @@ mod tests {
             let mut sessions = state.sessions.write().await;
             sessions.create_with_id("cmp-small", "small");
             let entry = sessions.get_mut("cmp-small").unwrap();
-            entry.messages.push(serde_json::json!({"role": "user", "content": "hi"}));
+            entry
+                .messages
+                .push(serde_json::json!({"role": "user", "content": "hi"}));
             entry
                 .messages
                 .push(serde_json::json!({"role": "assistant", "content": "hello"}));
@@ -2565,7 +2670,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(!json["changed"].as_bool().unwrap());
         assert_eq!(json["saved_tokens"].as_u64().unwrap(), 0);
-        assert!(json["strategy"].as_str().unwrap().starts_with("nothing to compress"));
+        assert!(json["strategy"]
+            .as_str()
+            .unwrap()
+            .starts_with("nothing to compress"));
     }
 
     #[tokio::test]

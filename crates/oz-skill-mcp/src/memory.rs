@@ -227,7 +227,20 @@ impl SkillMcpMemory {
         let mut prompt = format!("cwd = {}\n", working_dir.join("temp").display());
 
         let facts = self.read_facts().await?;
-        if !facts.is_empty() {
+        // Stale sections are filtered HERE too: this path is injected into the
+        // system prompt unconditionally, and it was the one reader that never
+        // applied the filter (review A6) — the `ga-*` architecture list kept
+        // being described as current even after the read-side fix.
+        let (facts, dropped) =
+            oz_memory::filter_stale_fact_sections(&facts, chrono::Utc::now().date_naive());
+        if !dropped.is_empty() {
+            tracing::warn!(
+                "[memory] withheld {} stale fact section(s) from the skill-mcp prompt: {:?}",
+                dropped.len(),
+                dropped
+            );
+        }
+        if !facts.trim().is_empty() {
             prompt.push_str("\n[Memory] (../.skill_mcp)\n");
             prompt.push_str("../.skill_mcp/facts/global_mem.txt:\n");
             prompt.push_str(&facts);
