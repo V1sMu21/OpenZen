@@ -156,7 +156,21 @@ mod e2e_tests {
         for _ in 0..100 {
             let _ = store.find_skills("search the web for information");
         }
-        assert!(start.elapsed().as_millis() < 50);
+        let elapsed_ms = start.elapsed().as_millis();
+        // A wall-clock bound is only meaningful for optimised code: the same
+        // 100 lookups take ~30 ms in release and >50 ms unoptimised, so in a
+        // debug build this assertion failed on every machine — which made the
+        // workspace test gate (and therefore `release.sh` and CI) red for a
+        // reason that had nothing to do with a regression. Verified at the
+        // pristine HEAD in a separate worktree before changing it.
+        if cfg!(debug_assertions) {
+            println!("[perf] 100 find_skills over 50 skills: {elapsed_ms} ms (debug build — bound not enforced)");
+        } else {
+            assert!(
+                elapsed_ms < 50,
+                "100 find_skills took {elapsed_ms} ms (release bound: 50 ms)"
+            );
+        }
     }
 
     #[test]
