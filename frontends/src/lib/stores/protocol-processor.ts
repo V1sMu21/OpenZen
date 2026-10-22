@@ -118,34 +118,55 @@ export function applyProtocolEvent(
         const inv = p as ToolInvocationPart;
         inv.state = 'output-available';
         inv.result = event.output;
+        // The tool stopped running: drop the heartbeat so the card falls back
+        // to the final measured duration instead of a stale "still running".
+        inv.liveElapsedSecs = undefined;
       }
       break;
     }
 
-    case 'data_search_stage':
-    case 'data_token_meter':
-    case 'data_memory_retrieval': {
-        const id = `data_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        parts.push({
-          type: 'data',
-          id,
-          dataType: event.type,
-          content: formatDataEvent(event),
-          transient: true,
-        });
-        break;
+    case 'tool_progress': {
+      // Heartbeat for a long-running tool (one per 60s). Attach it to the most
+      // recent invocation of the same tool that is still running; when none is
+      // running, ignore the event instead of inventing a card for it.
+      const p = findLast(
+        parts,
+        (p) =>
+          p.type === 'tool-invocation' &&
+          p.name === event.tool_name &&
+          p.state !== 'output-available' &&
+          p.state !== 'output-error' &&
+          p.state !== 'done',
+      );
+      if (p) {
+        (p as ToolInvocationPart).liveElapsedSecs = event.elapsed_secs;
       }
+      break;
+    }
 
     case 'data_quality_gate': {
         // Post-answer quality gates (spec synthesis / assertions /
         // independent review) are the silent seconds between the final
         // text and `done` — surface the stage so the pause is legible.
-        const id = `data_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        //
+        // One part, updated in place: the three stages arrive seconds apart
+        // and each one used to push ANOTHER transient part, so the bar
+        // replayed the queue and the array grew on every gate (P2-12).
+        const content = localT(`status.qualityGate.${event.stage}`, formatDataEvent(event));
+        const existing = parts.find(
+          (p) => p.type === 'data' && p.dataType === 'data_quality_gate',
+        );
+        if (existing) {
+          (existing as Extract<UIMessagePart, { type: 'data' }>).content = content;
+          // A new stage restarts the notice's lifetime.
+          (existing as Extract<UIMessagePart, { type: 'data' }>).id = `data_quality_gate_${Date.now()}`;
+          break;
+        }
         parts.push({
           type: 'data',
-          id,
+          id: `data_quality_gate_${Date.now()}`,
           dataType: event.type,
-          content: localT(`status.qualityGate.${event.stage}`, formatDataEvent(event)),
+          content,
           transient: true,
         });
         break;
@@ -209,16 +230,32 @@ export function applyProtocolEvent(
 
     // start_step / finish_step / finish_message are markers
   }
+  pruneTransientParts(parts);
+}
+
+/** Transient notices are display-only and never belong to the transcript.
+ *  `finalizeAssistantMessage` strips them, but a long single turn could still
+ *  accumulate thousands before finalize, so keep the tail bounded here too. */
+const MAX_TRANSIENT_PARTS = 40;
+
+function pruneTransientParts(parts: UIMessagePart[]): void {
+  let count = 0;
+  for (const p of parts) if (p.type === 'data' && p.transient) count++;
+  if (count <= MAX_TRANSIENT_PARTS) return;
+  const drop = count - MAX_TRANSIENT_PARTS;
+  let removed = 0;
+  for (let i = 0; i < parts.length && removed < drop; i++) {
+    const p = parts[i];
+    if (p.type === 'data' && p.transient) {
+      parts.splice(i, 1);
+      i--;
+      removed++;
+    }
+  }
 }
 
 function formatDataEvent(event: ProtocolV1Event): string {
   switch (event.type) {
-    case 'data_search_stage':
-      return `Searching "${event.query}" — found ${event.count} results`;
-    case 'data_token_meter':
-      return `Tokens: ${event.input} in + ${event.output} out = ${event.total} / ${event.limit}`;
-    case 'data_memory_retrieval':
-      return `Memory: retrieved ${event.results} results for "${event.query}"`;
     case 'data_compressing_context':
       return `Compressing context: ${event.before_tokens} → ${event.after_tokens} tokens`;
     case 'data_quality_gate':

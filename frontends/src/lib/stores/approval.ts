@@ -26,6 +26,11 @@ export interface ApprovalState {
   current: ApprovalRequest | null;
   showModal: boolean;
   countdown: number;
+  /** Set when the decision could not be delivered to the backend. The modal
+   *  stays open (and the queue does NOT advance) so the user can retry —
+   *  advancing would look like the tool was approved while the backend is
+   *  still waiting, and the run would silently stall. */
+  sendError: string | null;
 }
 
 function createApprovalStore() {
@@ -34,11 +39,15 @@ function createApprovalStore() {
     current: null,
     showModal: false,
     countdown: 30,
+    sendError: null,
   });
 
   // The interval handle is UI-irrelevant bookkeeping — keep it out of the
   // reactive state so interval churn doesn't trigger subscriber noise.
   let countdownInterval: ReturnType<typeof setInterval> | null = null;
+  // Last decision that failed to reach the backend, so "retry" re-sends the
+  // SAME answer instead of guessing (a failed deny must not become an allow).
+  let lastFailedDecision: string | null = null;
 
   function clearCountdownInterval() {
     if (countdownInterval) {
@@ -83,6 +92,7 @@ function createApprovalStore() {
         current,
         showModal: true,
         countdown: 30,
+        sendError: null,
       };
     });
   }
@@ -90,6 +100,9 @@ function createApprovalStore() {
   async function respond(decision: string) {
     stopCountdown();
     await respondInner(decision);
+    // On failure the modal stays open with the error + Retry; the countdown
+    // is deliberately NOT re-armed (a failing auto-deny every 30s would just
+    // spam the backend).
   }
 
   async function respondInner(decision: string) {
@@ -117,8 +130,17 @@ function createApprovalStore() {
       }
     } catch (err) {
       console.error("[approval] failed to send response:", err);
+      // Keep `current` and surface the failure: the backend never received
+      // the decision, so the request is still pending.
+      lastFailedDecision = decision;
+      update((s) => ({
+        ...s,
+        sendError: err instanceof Error ? err.message : String(err),
+      }));
+      return;
     }
 
+    lastFailedDecision = null;
     // Advance queue
     update((s) => {
       const current = s.queue[0] ?? null;
@@ -129,13 +151,20 @@ function createApprovalStore() {
           queue: s.queue.slice(1),
           current,
           countdown: 30,
+          sendError: null,
         };
       }
-      return { ...s, queue: [], current: null, showModal: false, countdown: 0 };
+      return { ...s, queue: [], current: null, showModal: false, countdown: 0, sendError: null };
     });
   }
 
-  return { subscribe, push, respond };
+  /** Re-send the decision that failed, without touching the queue. */
+  async function retry() {
+    if (!lastFailedDecision) return;
+    await respondInner(lastFailedDecision);
+  }
+
+  return { subscribe, push, respond, retry };
 }
 
 export const approval = createApprovalStore();
