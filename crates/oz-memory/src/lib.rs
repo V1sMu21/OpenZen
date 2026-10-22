@@ -599,7 +599,6 @@ mod fact_freshness_tests {
         let legacy = "## Crate 架构清单 (2026-06-13)\n\n- ga-agent: 智能体循环\n- ga-core: 核心\n- ga-memory: 记忆层\n\n这里是正文，必须被完整保留。\n";
         let good = "## 当前架构\n\n- oz-core: 核心\n";
         std::fs::write(&path, format!("{legacy}{good}")).unwrap();
-        let before = std::fs::read_to_string(&path).unwrap();
 
         let dropped = quarantine_stale_fact_sections(
             &path,
