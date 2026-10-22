@@ -168,7 +168,12 @@ if [[ $DRY_RUN -eq 0 ]]; then
   # Same rule as the gates: judge the exit code, not the tail of the output.
   # A failed build used to continue into `git tag` and publish a half-made
   # Release (review C4).
-  run_gate "cargo tauri build" cargo tauri build \
+  #
+  # CI=true: tauri's bundle_dmg.sh otherwise drives Finder via AppleScript to
+  # lay out the .dmg window, which times out here (AppleEvent -1712) and fails
+  # the whole build AFTER the .app was already built. With CI=true the script
+  # skips that cosmetic step (verified: 18 MB dmg produced, exit 0).
+  run_gate "cargo tauri build" env CI=true cargo tauri build \
     || die "构建失败，发布中止（未创建 tag）。"
   DMG="target/release/bundle/dmg/OpenZen_${VERSION_NO_V}_aarch64.dmg"
   [[ -f "$DMG" ]] && log "产物: $DMG" || die "未找到预期 dmg: ${DMG}（构建未产出可发布产物）"
