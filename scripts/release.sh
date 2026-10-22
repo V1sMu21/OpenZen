@@ -20,7 +20,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."   # workspace 根
 
 DRY_RUN=0
-if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=1; fi
+EXPLICIT_VERSION=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --version) shift; EXPLICIT_VERSION="${1:-}" ;;
+    --version=*) EXPLICIT_VERSION="${1#--version=}" ;;
+    *) die "未知参数: $1（支持 --dry-run / --version <x.y.z>）" ;;
+  esac
+  shift || true
+done
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { echo -e "${GREEN}==>${NC} $*"; }
@@ -106,11 +115,17 @@ run_gate "cargo test --workspace -- --test-threads=1" \
   || die "测试未全绿，发布中止。修复后再试。"
 
 # ---------- 3. 推导版本号 ----------
+if [[ -n "$EXPLICIT_VERSION" ]]; then
+  NEW_VERSION="$EXPLICIT_VERSION"
+  log "使用显式指定版本号: ${NEW_VERSION}（跳过 git-cliff 推导）"
+  warn "注意：显式版本绕过了 conventional-commit 推导；仅在补丁版需要压过历史 feat: 时使用"
+else
 log "推导下一个版本号..."
 NEW_VERSION=$(git-cliff --bumped-version 2>/dev/null || true)
 if [[ -z "$NEW_VERSION" ]]; then
   warn "git-cliff 无法从 commit 推导版本（可能自上次 tag 后无 conventional commits）"
   die "请先使用 conventional commit 风格提交（feat:/fix:/refactor:/docs: 等前缀）"
+fi
 fi
 # 统一为 v 前缀（git-cliff 可能输出 "0.1.0" 或 "v0.1.0"）
 NEW_VERSION="v${NEW_VERSION#v}"
@@ -156,7 +171,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
   run_gate "cargo tauri build" cargo tauri build \
     || die "构建失败，发布中止（未创建 tag）。"
   DMG="target/release/bundle/dmg/OpenZen_${VERSION_NO_V}_aarch64.dmg"
-  [[ -f "$DMG" ]] && log "产物: $DMG" || die "未找到预期 dmg: $DMG（构建未产出可发布产物）"
+  [[ -f "$DMG" ]] && log "产物: $DMG" || die "未找到预期 dmg: ${DMG}（构建未产出可发布产物）"
 fi
 
 # ---------- 7. commit + tag ----------
