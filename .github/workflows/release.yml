@@ -36,11 +36,16 @@ jobs:
   test:
     name: Test gate
     runs-on: macos-latest
+    env:
+      # 与 ci.yml 的 test job 同一策略：docs/ 是本地保留的开发文档，干净
+      # checkout 里没有它，33 个依赖 docs 的断言必须**显式声明跳过**，否则
+      # 它们会 panic（这正是 docs 不入库的代价，见 docs/README.md）。
+      OZ_TESTS_ALLOW_DOCS_SKIP: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: cargo test
-        run: cargo test --workspace -- --test-threads=1
+        run: cargo test --workspace -- --test-threads=1 --nocapture
 
   # 门禁 3: tag 与三处版本字段一致（版本号曾经互不一致）
   version-check:
