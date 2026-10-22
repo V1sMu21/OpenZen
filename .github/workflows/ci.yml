@@ -147,15 +147,22 @@ jobs:
         # 「唯一正确的产物路径是 cargo tauri build」直接矛盾：裸 build
         # **不嵌入前端资源**，产出的是白屏 app（产物小 ~4MB），CI 却给绿灯。
         run: cargo tauri build --bundles app
-      - name: CLI binary size check
+      - name: Binary size check
+        # 这里以前检查 `target/release/openzen`（CLI 二进制）—— 那个文件由裸
+        # `cargo build --release` 产出。构建改成 `cargo tauri build` 之后它
+        # 不再存在，于是这一步在 CI 上恒失败（stat: No such file）。
+        # 现在检查这一 job 真正产出的两个东西：Tauri 可执行文件与 app bundle。
         run: |
-          SIZE=$(stat -f%z target/release/openzen)
           MAX=$((50 * 1024 * 1024))
-          if [ "$SIZE" -gt "$MAX" ]; then
-            echo "Binary size $SIZE exceeds 50MB limit"
-            exit 1
-          fi
-          echo "Binary size: $SIZE bytes"
+          fail=0
+          for f in target/release/openzen-tauri \
+                   target/release/bundle/macos/OpenZen.app/Contents/MacOS/openzen-tauri; do
+            if [ ! -f "$f" ]; then echo "missing: $f"; fail=1; continue; fi
+            SIZE=$(stat -f%z "$f")
+            echo "$f: $SIZE bytes"
+            if [ "$SIZE" -gt "$MAX" ]; then echo "  exceeds 50MB limit"; fail=1; fi
+          done
+          exit $fail
       - name: App bundle smoke check
         # 三条静态检查（bundle 存在 / 可执行 / 前端已嵌入）+ 一次启动冒烟。
         # macOS runner 没有窗口服务，起不来时脚本记 SKIP 而不是 FAIL，
