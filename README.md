@@ -10,7 +10,7 @@
 
 **English** · [中文](README.zh-CN.md)
 
-<img src="docs/screenshots/runtime-demo.gif" width="100%">
+<img src="assets/bench/runtime-demo.gif" width="100%">
 
 *Real runtime capture — a local model, a ~2.5-minute task compressed into a 7-second loop: Kai-style handwriting **thinking blocks**, **tool calls** as underglaze patterns (one write fails, auto-relocates and succeeds), tokens **streaming into the glaze**, a 2/2 checklist closing out, the 📋 **delivery contract**, and Ah-Qing settling back into its "done" pose.*
 
@@ -217,7 +217,7 @@ A single-file HTML/CSS/JS game; ≥6 ComfyUI-generated art assets required; judg
 | Peak RSS | **192MB** | 680MB | 613MB |
 | Duration | **43 min** | 83 min | 81 min |
 | Deliverables | 12 assets | 10 | 10 |
-| Screenshot | <img src="docs/bench/screenshots/task1-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task1-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task1-hermes.gif" width="300"> |
+| Screenshot | <img src="assets/bench/task1-openzen.gif" width="300"> | <img src="assets/bench/task1-zcode.gif" width="300"> | <img src="assets/bench/task1-hermes.gif" width="300"> |
 
 ### TASK 2 · Brand site "Qinglan Tea House"
 
@@ -229,7 +229,7 @@ A single-page brand site; ≥8 ComfyUI assets; judged by screenshots.
 | Peak RSS | **195MB** | 480MB | 562MB |
 | Duration | **23 min** | 26 min | 25 min |
 | Deliverables | 9 | 10 | 9 |
-| Screenshot | <img src="docs/bench/screenshots/task2-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task2-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task2-hermes.gif" width="300"> |
+| Screenshot | <img src="assets/bench/task2-openzen.gif" width="300"> | <img src="assets/bench/task2-zcode.gif" width="300"> | <img src="assets/bench/task2-hermes.gif" width="300"> |
 
 ### TASK 3 · Indie game industry 2026 research report
 
@@ -242,7 +242,7 @@ An illustrated report; ≥4 ComfyUI images; volume & completeness judged by revi
 | Duration | **22 min** | 124 min | 52 min |
 | Deliverables | 7 images, complete | 7 | 6 |
 | Report size | **706KB** | — | 7.16MB |
-| Screenshot | <img src="docs/bench/screenshots/task3-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task3-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task3-hermes.gif" width="300"> |
+| Screenshot | <img src="assets/bench/task3-openzen.gif" width="300"> | <img src="assets/bench/task3-zcode.gif" width="300"> | <img src="assets/bench/task3-hermes.gif" width="300"> |
 
 **How to read this**: across the three tasks OpenZen delivered equal or more complete results with roughly **1/4–1/9 the token consumption, ~1/3 the memory, and about half the time**. Don't over-index on single-round cache hit rates — the **absolute tokens spent per unit of work** is the real evidence of efficiency.
 

@@ -10,7 +10,7 @@
 
 [English](README.md) · **中文**
 
-<img src="docs/screenshots/runtime-demo.gif" width="100%">
+<img src="assets/bench/runtime-demo.gif" width="100%">
 
 *真实运行画面——本地模型，约 2.5 分钟的任务压缩为 7 秒循环：楷体手迹的**思考块**、釉下暗纹式的**工具调用**（一次落笔失败后自动改道成功）、token **流式入釉**、清单 2/2 收束、📋 **交付说明**契约，以及阿青回到「完成」形态。*
 
@@ -235,7 +235,7 @@ token 经济学 + 恒定成本渲染。系统提示词保持 ~4.4KB；Skill/SOP 
 | 峰值 RSS | **192MB** | 680MB | 613MB |
 | 耗时 | **43 分钟** | 83 分钟 | 81 分钟 |
 | 交付物 | 12 素材 | 10 | 10 |
-| 交付物截图 | <img src="docs/bench/screenshots/task1-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task1-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task1-hermes.gif" width="300"> |
+| 交付物截图 | <img src="assets/bench/task1-openzen.gif" width="300"> | <img src="assets/bench/task1-zcode.gif" width="300"> | <img src="assets/bench/task1-hermes.gif" width="300"> |
 
 ### TASK 2 · 品牌营销网站「青岚茶事」
 
@@ -247,7 +247,7 @@ token 经济学 + 恒定成本渲染。系统提示词保持 ~4.4KB；Skill/SOP 
 | 峰值 RSS | **195MB** | 480MB | 562MB |
 | 耗时 | **23 分钟** | 26 分钟 | 25 分钟 |
 | 交付物 | 9 | 10 | 9 |
-| 交付物截图 | <img src="docs/bench/screenshots/task2-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task2-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task2-hermes.gif" width="300"> |
+| 交付物截图 | <img src="assets/bench/task2-openzen.gif" width="300"> | <img src="assets/bench/task2-zcode.gif" width="300"> | <img src="assets/bench/task2-hermes.gif" width="300"> |
 
 ### TASK 3 · 独立游戏行业 2026 调研报告
 
@@ -260,7 +260,7 @@ token 经济学 + 恒定成本渲染。系统提示词保持 ~4.4KB；Skill/SOP 
 | 耗时 | **22 分钟** | 124 分钟 | 52 分钟 |
 | 交付物 | 7 图全齐 | 7 | 6 |
 | 报告体积 | **706KB** | — | 7.16MB |
-| 交付物截图 | <img src="docs/bench/screenshots/task3-openzen.gif" width="300"> | <img src="docs/bench/screenshots/task3-zcode.gif" width="300"> | <img src="docs/bench/screenshots/task3-hermes.gif" width="300"> |
+| 交付物截图 | <img src="assets/bench/task3-openzen.gif" width="300"> | <img src="assets/bench/task3-zcode.gif" width="300"> | <img src="assets/bench/task3-hermes.gif" width="300"> |
 
 **读法**：OpenZen 在三个任务里用**约 1/4–1/9 的 token 消耗、约 1/3 的内存、约为一半的耗时**交付了同等或更完整的成品。不必纠结单轮缓存命中率（90–98% 随会话结构波动，长任务更高）——**每单位工作消耗的绝对 token 数**才是效率的证据。
 
