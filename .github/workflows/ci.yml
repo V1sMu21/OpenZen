@@ -37,15 +37,91 @@ jobs:
       - name: Frontend type check (svelte-check, errors fail the build)
         working-directory: frontends
         run: npm ci && npm run check
+      - name: Frontend unit tests (vitest)
+        # 纯逻辑测试：SSE 事件归并 / streamEvents→parts 重建 / markdown 转义 /
+        # artifactType 判定。这四段是"最易回归且能纯函数验证"的部分
+        # （round5 P1-13④）；组件渲染与真实交互仍由 tauri-e2e 覆盖。
+        working-directory: frontends
+        run: npm test
 
   test:
     name: Run tests
     runs-on: macos-latest
+    env:
+      # docs/ 是本地保留的开发文档（用户决定 2026-10-22，见 .gitignore 与
+      # scripts/verify_gates.sh 的 G13）：干净 checkout 里没有它，33 个依赖
+      # docs 的断言无法运行。显式声明跳过 —— 每次跳过都会打印
+      # `[oz-tests] SKIP requires-docs: <name>`，下面的守卫要求这个数字
+      # 恰好等于 33，所以"静默跳过"依然会被抓住。
+      OZ_TESTS_ALLOW_DOCS_SKIP: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: cargo test
-        run: cargo test --workspace -- --test-threads=1
+        # tee 到文件：下一步要统计 passed/ignored，并把数字写进 job summary。
+        # 关键点是 **ignored 必须可见** —— 36 个测试静默 return 也算"通过"
+        # 是 round5 P1-13③ 的原始问题。
+        run: |
+          set -o pipefail
+          # --nocapture: the docs-skip markers are println! from passing tests
+          # and would otherwise be swallowed by the test harness.
+          cargo test --workspace -- --test-threads=1 --nocapture 2>&1 | tee /tmp/cargo-test.log
+      - name: Test summary (passed / ignored / skipped)
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import re, pathlib
+          log = pathlib.Path("/tmp/cargo-test.log")
+          text = log.read_text(errors="ignore") if log.exists() else ""
+          passed = ignored = measured = failed = 0
+          for m in re.finditer(r"test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored", text):
+              passed += int(m.group(2)); failed += int(m.group(3)); ignored += int(m.group(4))
+          skip_markers = len(re.findall(r"\[oz-tests\] SKIP requires-docs", text))
+          print("## Test summary")
+          print()
+          print("| metric | count |")
+          print("|---|---|")
+          print(f"| passed | {passed} |")
+          print(f"| failed | {failed} |")
+          print(f"| ignored (harness) | {ignored} |")
+          print(f"| explicit docs-skips | {skip_markers} |")
+          print()
+          if ignored or skip_markers:
+              print("> `ignored` 是 harness 层显式标注的（例如 report-only eval）；")
+              print("> `docs-skips` 是 oz-tests 在缺 docs/ 树时的显式跳过标记 —— 两者都不算通过。")
+          PY
+      - name: "Guard: oz-tests must really assert"
+        # 33 个 docs 断言曾经是"缺文件就 return（= 通过）"。现在缺 docs/ 会
+        # 直接 panic；这条守卫再兜一层：真实断言数必须 >= 30，否则说明又出现
+        # 了静默跳过。
+        env:
+          OZ_TESTS_ALLOW_DOCS_SKIP: "1"
+        run: |
+          # pipefail: without it the pipeline's status is tee's (always 0), so
+          # "one target green + another target red" reported success. And sum
+          # EVERY `test result` line — `head -1` only saw the first target
+          # (review C5).
+          set -o pipefail
+          # --nocapture is REQUIRED here: cargo captures stdout for passing
+          # tests, so without it the SKIP markers never reach this log and the
+          # guard below would always read 0 (verified locally: 0 vs 33).
+          cargo test -p oz-tests -- --nocapture 2>&1 | tee /tmp/oz-tests.log
+          PASSED=$(grep -oE 'test result: ok\. [0-9]+ passed' /tmp/oz-tests.log \
+            | grep -oE '[0-9]+' | paste -sd+ - | bc)
+          SKIPS=$(grep -c '\[oz-tests\] SKIP requires-docs' /tmp/oz-tests.log || true)
+          REAL=$(( ${PASSED:-0} - ${SKIPS:-0} ))
+          echo "oz-tests: ${PASSED:-0} passed, ${SKIPS:-0} docs-skips (docs/ is local-only), ${REAL} real assertions"
+          # docs/ 不进仓库，所以跳过是预期的 —— 但必须**恰好 33 个**：
+          # 多了说明有人加了 docs 断言却没更新这个数字；少了说明本该声明的
+          # 跳过变成了静默通过（正是 P1-13③ 要消灭的东西）。
+          if [ "${SKIPS:-0}" -ne 33 ]; then
+            echo "::error::expected exactly 33 declared docs-skips, got ${SKIPS:-0} — a docs test is skipping silently or a new one was added without updating this guard"
+            exit 1
+          fi
+          if [ "${REAL:-0}" -lt 2 ]; then
+            echo "::error::only ${REAL:-0} non-docs assertions ran (expected >= 2)"
+            exit 1
+          fi
 
   build:
     name: Release build
@@ -62,9 +138,16 @@ jobs:
       - name: Build frontend
         working-directory: frontends
         run: npm ci && npm run build
-      - name: cargo build --release
-        run: cargo build --release
-      - name: Check binary size
+      - name: Install tauri-cli
+        # 与 release.yml 用同一个 pin：上游 tauri-cli 的破坏性变更曾经在
+        # 没有任何本地复现的情况下打断发布。升级要和 tauri crate 一起做。
+        run: cargo install tauri-cli --version "^2.11" --locked
+      - name: cargo tauri build (app bundle)
+        # 这里以前是裸 `cargo build --release` —— 与 AGENTS.md
+        # 「唯一正确的产物路径是 cargo tauri build」直接矛盾：裸 build
+        # **不嵌入前端资源**，产出的是白屏 app（产物小 ~4MB），CI 却给绿灯。
+        run: cargo tauri build --bundles app
+      - name: CLI binary size check
         run: |
           SIZE=$(stat -f%z target/release/openzen)
           MAX=$((50 * 1024 * 1024))
@@ -73,11 +156,16 @@ jobs:
             exit 1
           fi
           echo "Binary size: $SIZE bytes"
+      - name: App bundle smoke check
+        # 三条静态检查（bundle 存在 / 可执行 / 前端已嵌入）+ 一次启动冒烟。
+        # macOS runner 没有窗口服务，起不来时脚本记 SKIP 而不是 FAIL，
+        # 但"二进制里一个前端标记都没有"（白屏 app）始终是 FAIL。
+        run: bash scripts/ci_smoke_app.sh
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: openzen-release
           path: |
             target/release/openzen
-            target/release/openzen-tauri
+            target/release/bundle/macos/OpenZen.app
           if-no-files-found: error

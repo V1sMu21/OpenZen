@@ -87,9 +87,10 @@ fn default_context_win() -> usize {
 /// Top-level mykey.toml keys that hold configuration, not session entries.
 /// `from_file` skips them when collecting sessions; writers of the file
 /// (settings panel) must reject model names that would collide with them.
-pub const RESERVED_TOP_LEVEL_KEYS: [&str; 7] = [
+pub const RESERVED_TOP_LEVEL_KEYS: [&str; 8] = [
     "default_session",
     "summary_model",
+    "review_model",
     "memory_backend",
     "erme_idle_interval_secs",
     "tui",
@@ -136,6 +137,12 @@ pub struct MyKeyConfig {
     pub default_session: Option<String>,
     /// Model to use for compression summaries. When set, overrides auto-detection.
     pub summary_model: Option<String>,
+    /// Model used by the DELIVERY QUALITY GATE (independent review + assertion
+    /// synthesis). Deliberately separate from `summary_model`: the summary
+    /// model is chosen to be small and fast (it folds text), while a reviewer
+    /// needs to actually reason. Sharing them meant a 230M model graded
+    /// delivery quality — 33 reviews, 0 failures (round5 P0-6).
+    pub review_model: Option<String>,
     /// Memory backend: "file" (legacy full-text fallback) or "erme"
     /// (semantic memory engine — the default).
     pub memory_backend: String,
@@ -214,6 +221,10 @@ impl MyKeyConfig {
             .map(|s| s.to_string());
         let summary_model = raw
             .get("summary_model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let review_model = raw
+            .get("review_model")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let memory_backend = match raw.get("memory_backend") {
@@ -296,10 +307,7 @@ impl MyKeyConfig {
                 );
             }
             if !table.contains_key("apikey") {
-                table.insert(
-                    "apikey".to_string(),
-                    toml::Value::String(p.apikey.clone()),
-                );
+                table.insert("apikey".to_string(), toml::Value::String(p.apikey.clone()));
             }
         }
 
@@ -365,6 +373,7 @@ impl MyKeyConfig {
         Ok(MyKeyConfig {
             default_session,
             summary_model,
+            review_model,
             memory_backend,
             erme_idle_interval_secs,
             tui: TuiConfig::default(),
@@ -788,6 +797,7 @@ model = "mixin-llm"
             sessions: HashMap::new(),
             default_session: None,
             summary_model: None,
+            review_model: None,
             memory_backend: "erme".to_string(),
             erme_idle_interval_secs: None,
             tui: TuiConfig::default(),
@@ -817,6 +827,7 @@ model = "mixin-llm"
             sessions,
             default_session: None,
             summary_model: None,
+            review_model: None,
             memory_backend: "erme".to_string(),
             erme_idle_interval_secs: None,
             tui: TuiConfig::default(),
@@ -1036,8 +1047,13 @@ context_win = 128000
         );
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert_eq!(cfg.providers.len(), 1);
-        assert_eq!(cfg.providers["local_omlx"].apibase, "http://127.0.0.1:8000/v1");
-        let sess = cfg.get("gpt4").expect("provider-referencing entry must parse");
+        assert_eq!(
+            cfg.providers["local_omlx"].apibase,
+            "http://127.0.0.1:8000/v1"
+        );
+        let sess = cfg
+            .get("gpt4")
+            .expect("provider-referencing entry must parse");
         assert_eq!(sess.apibase, "http://127.0.0.1:8000/v1");
         assert_eq!(sess.apikey, "sk-local");
         assert_eq!(sess.provider.as_deref(), Some("local_omlx"));
@@ -1137,7 +1153,10 @@ model = "m2"
         );
         let cfg = MyKeyConfig::from_file(&path).unwrap();
         assert!(cfg.get("ok").is_some());
-        assert!(cfg.get("broken").is_none(), "unresolvable entry must be skipped, not fail the file");
+        assert!(
+            cfg.get("broken").is_none(),
+            "unresolvable entry must be skipped, not fail the file"
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

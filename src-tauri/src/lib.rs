@@ -15,10 +15,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::JoinHandle;
 
 mod approval;
-pub mod projects;
-mod sidepanel;
 #[cfg(test)]
 mod import_write_path_tests;
+pub mod projects;
+mod sidepanel;
 
 const SESSION_STATE_FILE: &str = "openzen/sessions.json";
 
@@ -58,7 +58,22 @@ impl DebugLogWriter {
 
     fn rotate(&mut self) {
         self.file = None;
-        let _ = std::fs::remove_file(self.path.with_extension("log.1"));
+        // Keep 7 generations (log.1 … log.7) instead of a single `.log.1`:
+        // the effective retention window was one rotation, which on a busy
+        // day is hours, not the "40 MB" the size cap suggests
+        // (round5 P1-10 ③).
+        for i in (1..7).rev() {
+            let from = if i == 1 {
+                self.path.with_extension("log.1")
+            } else {
+                self.path.with_extension(format!("log.{i}"))
+            };
+            let to = self.path.with_extension(format!("log.{}", i + 1));
+            if from.exists() {
+                let _ = std::fs::remove_file(&to);
+                let _ = std::fs::rename(&from, &to);
+            }
+        }
         let _ = std::fs::rename(&self.path, self.path.with_extension("log.1"));
         self.file = std::fs::OpenOptions::new()
             .create(true)
@@ -73,6 +88,15 @@ impl DebugLogWriter {
         use std::io::Write as _;
         if let Some(f) = self.file.as_mut() {
             let _ = f.flush();
+        }
+    }
+
+    /// Append one line (used by the panic hook, which must not go through
+    /// the tracing subscriber).
+    fn write_line(&mut self, line: &str) {
+        use std::io::Write as _;
+        if let Some(f) = self.file.as_mut() {
+            let _ = writeln!(f, "{line}");
         }
     }
 }
@@ -174,6 +198,102 @@ pub(crate) fn data_dir() -> PathBuf {
     profile
         .data_dir
         .unwrap_or_else(|| home_dir().join(".openzen"))
+}
+
+/// Default agent working directory: `<data root>/workspace`.
+///
+/// Deliberately NOT `$HOME`. The working directory is the fence root for
+/// `read` / `write` / `edit` / `patch` / `grep` / `glob` / `ls`, so falling
+/// back to the home directory handed an unapproved tool call the entire
+/// `$HOME` — dotfiles, `~/.npmrc`, `~/.netrc`, `~/.kube/config`, other
+/// projects — and, combined with the免审批 `web_fetch`, a ready-made
+/// exfiltration path (round5 P1-8d). Sessions without a project get this
+/// sandboxed scratch directory instead, and the user can still point a
+/// session at a real project directory explicitly.
+pub(crate) fn default_workspace_dir() -> PathBuf {
+    data_dir().join("workspace")
+}
+
+/// Directories that may hold checkpoint artifacts for a session: the data
+/// root's workspace (the default working dir) plus the session's own project
+/// directory. Used by delete-session cleanup and the startup orphan sweep.
+pub(crate) fn checkpoint_dirs_for(working_dir: &Option<String>) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![oz_core::checkpoint::checkpoint_dir(&default_workspace_dir())];
+    if let Some(wd) = working_dir {
+        let p = oz_core::checkpoint::checkpoint_dir(std::path::Path::new(wd));
+        if !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    dirs
+}
+
+/// Startup sweep: remove checkpoint/WAL files whose session no longer exists
+/// in the store, and enforce the per-session byte budget. Runs in the
+/// background — it is pure disk housekeeping and must never delay the window.
+pub(crate) fn spawn_checkpoint_gc(state: &Arc<AppState>) {
+    let state = Arc::clone(state);
+    std::thread::Builder::new()
+        .name("checkpoint-gc".into())
+        .spawn(move || {
+            let live: std::collections::HashSet<String> =
+                lock_poison_guard(&state.sessions).list().into_iter().map(|s| s.id).collect();
+            let dirs = {
+                let store = lock_poison_guard(&state.sessions);
+                let mut d = vec![oz_core::checkpoint::checkpoint_dir(&default_workspace_dir())];
+                for info in store.list() {
+                    if let Some(wd) = info.working_dir {
+                        let p = oz_core::checkpoint::checkpoint_dir(std::path::Path::new(&wd));
+                        if !d.contains(&p) {
+                            d.push(p);
+                        }
+                    }
+                }
+                d
+            };
+            let mut removed = 0usize;
+            let mut freed: u64 = 0;
+            for dir in &dirs {
+                if !dir.exists() {
+                    continue;
+                }
+                freed += dir_size(dir);
+                removed += oz_core::checkpoint::gc_orphan_checkpoints(
+                    dir,
+                    &live,
+                    std::time::Duration::from_secs(3600),
+                );
+            }
+            if removed > 0 {
+                tracing::info!(
+                    "[gc] removed {removed} orphan checkpoint file(s); checkpoint dirs hold {:.1} MB",
+                    freed as f64 / (1024.0 * 1024.0)
+                );
+            }
+        })
+        .map_err(|e| tracing::warn!("failed to spawn checkpoint gc: {e}"))
+        .ok();
+}
+
+/// Recursive byte size of a directory (best effort).
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| {
+            e.metadata()
+                .map(|m| {
+                    if m.is_dir() {
+                        dir_size(&e.path())
+                    } else {
+                        m.len()
+                    }
+                })
+                .unwrap_or(0)
+        })
+        .sum()
 }
 
 /// Resolve the mykey.toml config path: explicit state path first, then the
@@ -559,6 +679,7 @@ pub(crate) fn tauri_ctx() -> ToolContext {
         skill_mcp_dir,
         harness_dir: Some(ledger_dir.to_string_lossy().to_string()),
         session_id: String::new(),
+        tool_budget_secs: 0,
     }
 }
 
@@ -621,6 +742,12 @@ pub struct AppState {
     /// "完全访问" (full access): when set, the approval handler auto-allows
     /// every request so the agent never asks the user for permission.
     pub full_access: Arc<AtomicBool>,
+    /// Runtime memory switch. Initialised from `mykey.toml`'s
+    /// `memory_backend`, but flipped in-process so the soul tab's switch
+    /// takes effect on the NEXT message instead of the next app start
+    /// (round5 P1-12 ①: memory could only be toggled by editing the config
+    /// and restarting).
+    pub memory_enabled: Arc<AtomicBool>,
     /// Long-lived ERME runtime (semantic store + L0 soul layer).
     /// Created once at startup; None when construction failed.
     /// ERME runtime, initialized on a BACKGROUND thread: the L3 snapshot
@@ -654,8 +781,9 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let data_root = data_dir();
-        // Agent working dir lives under the data root, never the source tree.
-        let working_dir = data_root.join("workspace");
+        // Agent working dir lives under the data root, never the source tree
+        // and never $HOME (see `default_workspace_dir`).
+        let working_dir = default_workspace_dir();
         let _ = std::fs::create_dir_all(&working_dir);
 
         // Data migration: ensure projects.json exists (first-run)
@@ -713,6 +841,7 @@ impl AppState {
             .as_ref()
             .and_then(|c| c.erme_idle_interval_secs)
             .unwrap_or(300);
+        let memory_backend_is_erme = memory_backend == "erme";
         let last_user_activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let erme_store: Arc<std::sync::OnceLock<Option<Arc<ErmeRuntime>>>> =
             Arc::new(std::sync::OnceLock::new());
@@ -788,6 +917,7 @@ impl AppState {
             // ERME semantic layer and user facts never accumulated.
             crystallization_enabled: AtomicBool::new(true),
             full_access: Arc::new(AtomicBool::new(false)),
+            memory_enabled: Arc::new(AtomicBool::new(memory_backend_is_erme)),
             erme_store,
             platform_registry: std::sync::Mutex::new(None),
             scheduler_shutdown: std::sync::Mutex::new(None),
@@ -1125,19 +1255,147 @@ pub fn run() {
             "unknown payload".into()
         };
         let msg = format!("PANIC at {location}: {payload}");
-        tracing::info!("{msg}");
+        // The hook must never block: `tracing::info!` goes through the same
+        // non-reentrant `std::sync::Mutex` as `debug_log`, so a panic that
+        // happens while that lock is held would self-deadlock — worse than
+        // the crash itself for a 7x24 process (round5 P1-10 ④).
         let bt = std::backtrace::Backtrace::force_capture();
-        tracing::info!("{bt}");
-        // Also write crash log for post-mortem
-        let crash_path = std::path::PathBuf::from("/tmp/openzen-crash.log");
-        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        let _ = std::fs::write(&crash_path, format!("{ts} {msg}\n{bt}"));
+        if let Some(writer) = DEBUG_LOG_WRITER.get() {
+            if let Ok(mut guard) = writer.try_lock() {
+                let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                guard.write_line(&format!("{ts} {msg}"));
+                guard.write_line(&bt.to_string());
+                guard.flush();
+            }
+        }
+        // Crash file lives in the DATA ROOT (a single overwritten slot in
+        // /tmp is wiped by the OS and invisible to the user), one file per
+        // panic so two crashes do not erase each other.
+        let log_dir = data_dir().join("logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let crash_path = log_dir.join(format!("crash-{stamp}.log"));
+        let _ = std::fs::write(
+            &crash_path,
+            format!(
+                "{} {msg}\nversion={}\n\n{bt}",
+                chrono::Local::now().to_rfc3339(),
+                env!("CARGO_PKG_VERSION"),
+            ),
+        );
+        // Keep the last 10 crash files; a crash loop must not fill the disk.
+        if let Ok(entries) = std::fs::read_dir(&log_dir) {
+            let mut crashes: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().starts_with("crash-"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            crashes.sort();
+            while crashes.len() > 10 {
+                let oldest = crashes.remove(0);
+                let _ = std::fs::remove_file(oldest);
+            }
+        }
     }));
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
     let _guard = rt.enter();
 
+    // Tool-call audit log (round5 P1-10 ①): every tool call is written as one
+    // JSON line with a redacted argument digest, so "what did it actually run"
+    // is answerable after the fact (the previous only record was a debug-level
+    // tracing line, and release builds filter debug out).
+    oz_core::audit::set_audit_dir(data_dir().join("logs"));
+
     let app_state = Arc::new(AppState::new());
+    // Disk housekeeping in the background: drop checkpoint/WAL files whose
+    // session is gone (measured 175 orphans / 64 MB on the author's machine)
+    // and report the directory size. Never blocks the first window.
+    spawn_checkpoint_gc(&app_state);
+    // One-time fact hygiene: move sections of `memory/global_mem.txt` that
+    // contradict the current tree (the pre-rename `ga-*` architecture list)
+    // into `global_mem.stale.txt`. The read path also filters them, so the
+    // prompt is clean even before this runs — this only tidies the file, and
+    // keeps the removed text on disk.
+    {
+        let wd = app_state.working_dir.clone();
+        let root = data_dir();
+        std::thread::Builder::new()
+            .name("fact-hygiene".into())
+            .spawn(move || {
+                // Every facts file on disk, not just `memory/`: the real
+                // `ga-*` list lived in `workspace/facts/global_mem.txt` while
+                // this only looked at `workspace/memory/global_mem.txt`, so
+                // the quarantine reported 0 and the stale text stayed
+                // (review A6).
+                let roots = [
+                    std::path::Path::new(&wd).join("memory"),
+                    std::path::Path::new(&wd).join("facts"),
+                    std::path::Path::new(&wd).join(".skill_mcp").join("facts"),
+                    root.clone(),
+                ];
+                // EVERY candidate, not just the first one that exists: the
+                // real data root has `memory/global_mem.txt` (clean) AND
+                // `facts/global_mem.txt` (the stale ga-* list), and breaking on
+                // the first hit meant the stale file was never examined
+                // (found on the author's machine, 2026-10-22).
+                // EVERY candidate, not just the first one that exists: the
+                // real data root has `memory/global_mem.txt` (clean) AND
+                // `facts/global_mem.txt` (the stale ga-* list), and breaking on
+                // the first hit meant the stale file was never examined
+                // (found on the author's machine, 2026-10-22).
+                let mut total = 0usize;
+                let mut hit_files: Vec<String> = Vec::new();
+                for root in &roots {
+                    let candidate = root.join("global_mem.txt");
+                    if !candidate.exists() {
+                        continue;
+                    }
+                    match oz_memory::quarantine_stale_fact_sections(
+                        &candidate,
+                        chrono::Utc::now().date_naive(),
+                    ) {
+                        Ok(0) => {}
+                        Ok(n) => {
+                            total += n;
+                            hit_files.push(format!("{} ({n})", candidate.display()));
+                        }
+                        Err(e) => tracing::warn!(
+                            "[memory] fact hygiene failed for {}: {e}",
+                            candidate.display()
+                        ),
+                    }
+                }
+                if total > 0 {
+                    tracing::warn!(
+                        "[memory] quarantined {total} stale fact section(s) from {}",
+                        hit_files.join(", ")
+                    );
+                    // Record the correction in the harness ledger too, as an
+                    // explicit NEGATIVE example: the next time the model is
+                    // tempted to describe the crate layout from memory, the
+                    // ledger says which list is wrong (round5 P1-11 ②).
+                    let dir = harness_dir();
+                    let mut state = oz_core::harness::HarnessState::load(&dir);
+                    let _ = state.apply_refine(
+                        oz_core::harness::HarnessKind::Memory,
+                        "OpenZen 的 crate 前缀是 `oz-`（oz-core / oz-tools / oz-agent…）。\n\
+                         反例：数据根里那份写着 `ga-agent` / `ga-core` / `ga-memory` 的\"Crate \
+                         架构清单\"是 2026-06 的重命名前快照，已过期并移入 `global_mem.stale.txt`；\
+                         不要照它回答架构问题，要看仓库真实目录。",
+                        "fact-hygiene: quarantined the pre-rename ga-* architecture list",
+                        "stale facts were being injected into every system prompt",
+                        "upsert",
+                    );
+                    let _ = state.save(&dir);
+                }
+            })
+            .ok();
+    }
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1380,8 +1638,17 @@ pub fn run() {
                     std::sync::Arc::new(move |max_idle_days| {
                         let threshold =
                             chrono::Utc::now() - chrono::Duration::days(max_idle_days);
+                        // Live set: a session whose agent is running (or
+                        // detached but still finishing) must never be
+                        // ghost-flipped to Stopped — that used to turn Stop
+                        // into a no-op for any run longer than 30 minutes.
+                        let live: std::collections::HashSet<String> = {
+                            let running = lock_poison_guard(&pruner_state.running_agents);
+                            let detached = lock_poison_guard(&pruner_state.detached_agents);
+                            running.keys().chain(detached.keys()).cloned().collect()
+                        };
                         let mut store = lock_poison_guard(&pruner_state.sessions);
-                        store.prune_expired(threshold) as u32
+                        store.prune_expired(threshold, &live) as u32
                     }),
                 )),
             };
@@ -1495,6 +1762,16 @@ commands::get_working_dir_for_session,
             commands::set_soul_identity,
             commands::get_soul_portrait,
             commands::remove_portrait_fact,
+            // round5 P1-12: memory must be closable / exportable / deletable.
+            commands::set_memory_enabled,
+            commands::export_memory,
+            commands::list_memories,
+            commands::forget_memory,
+            commands::clear_memory,
+            commands::log_frontend,
+            commands::export_diagnostics,
+            commands::reveal_path,
+            commands::submit_message_feedback,
             commands::upsert_model,
             commands::delete_model,
             commands::set_default_model,

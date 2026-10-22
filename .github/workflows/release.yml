@@ -74,9 +74,14 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      - name: Frontend type check + unit tests
+        # 发布闸门以前只做 `vite build`（**不做类型检查**），于是 svelte-check
+        # 能抓到的类型错误可以一路进到 Release（round5 P1-13⑤）。
+        working-directory: frontends
+        run: npm ci && npm run check && npm test
       - name: Build frontend
         working-directory: frontends
-        run: npm ci && npm run build
+        run: npm run build
 
       - name: Install scripts deps
         working-directory: scripts

@@ -1,0 +1,10 @@
+{
+  "tool_timeout_secs": "330",
+  "max_turns": "u32::MAX",
+  "max_wal_records": "1",
+  "checkpoint_interval": "3",
+  "max_concurrent_tools": "6",
+  "global_tool_sem": "16",
+  "summary_wait_secs": "600",
+  "processing_timeout": "30 * 60 * 1000"
+}

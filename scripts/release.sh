@@ -3,7 +3,8 @@
 #
 # 流程:
 #   1. 前置检查（工作树干净 / git-cliff 存在）
-#   2. 测试闸门（cargo test --workspace 全绿才继续 —— 本地预检，CI 是最终闸门）
+#   2. 静态闸门（check / fmt / clippy / 前端 check+test —— 与 CI 的 check job 逐字一致）
+#   2b. 测试闸门（cargo test --workspace 全绿才继续 —— 本地预检，CI 是最终闸门）
 #   3. git-cliff --bump 推导下一个版本号（feat→minor, fix→patch, breaking→major）
 #   4. 同步版本号到 tauri.conf.json + frontends/package.json
 #   5. 更新 CHANGELOG.md（git-cliff 自动生成新段）
@@ -37,13 +38,72 @@ if [[ $DRY_RUN -eq 0 ]]; then
     die "请先提交或 stash 全部变更再发布（release.sh 会自己生成 commit）"
   fi
   [[ "$(git branch --show-current)" == "main" ]] || die "发布必须在 main 分支（当前: $(git branch --show-current)）"
+else
+  # dry-run 允许脏树（正是用来预览"提交后会推出什么版本"），但要明确告知：
+  # 版本号推导依赖已提交的 conventional commits，未提交的改动不计入。
+  if [[ -n "$(git status --porcelain)" ]]; then
+    warn "[dry-run] 工作树有 $(git status --porcelain | wc -l | tr -d ' ') 项未提交变更；"
+    warn "[dry-run] 它们不计入版本推导 —— 下面预览的是**已提交历史**推出的版本。"
+  fi
 fi
 
-# ---------- 2. 测试闸门 ----------
-log "运行测试闸门: cargo test --workspace -- --test-threads=1"
-if ! cargo test --workspace -- --test-threads=1 2>&1 | tail -5; then
-  die "测试未全绿，发布中止。修复后再试。"
+# ---------- 2. 静态闸门（与 CI 的 check job 对齐）----------
+# round5 P1-13②：release.sh 曾经只跑 `cargo test`，比 CI 弱 —— CI 还会跑
+# fmt / clippy / 前端类型检查与单测。于是"本地 release.sh 通过"不等于
+# "CI 会通过"，发布可能打在一个 CI 已经判红的提交上。
+#
+# ⚠️ 闸门命令**不能直接接管道**：Rust 程序默认忽略 SIGPIPE，`cargo … | head`
+# 在 head 提前退出时会拿到 exit 0，闸门就形同虚设（本脚本第一版踩过：
+# fmt 明明有 77 处 diff 却继续往下跑）。统一走 run_gate：落盘 → 判退出码 →
+# 失败时打印尾部。
+run_gate() {
+  local name="$1"; shift
+  local logf; logf="$(mktemp -t oz-gate)"
+  if "$@" >"$logf" 2>&1; then
+    log "  ✓ ${name}"
+    rm -f "$logf"
+    return 0
+  fi
+  warn "${name} 失败，输出尾部："
+  tail -25 "$logf" >&2
+  rm -f "$logf"
+  return 1
+}
+
+log "静态闸门 1/4: cargo check --workspace"
+run_gate "cargo check" cargo check --workspace || die "cargo check 失败，发布中止。"
+
+log "静态闸门 2/4: cargo fmt --check"
+if ! run_gate "cargo fmt --check" cargo fmt --check; then
+  warn "修复：在 main 上单独提交一次 'style: cargo fmt --all'（不要混进功能提交）——"
+  warn "CI 的 check job 跑同一条命令，所以 fmt 红 = CI 红 = 不该发布。"
+  die "cargo fmt --check 失败，发布中止。"
 fi
+
+log "静态闸门 3/4: cargo clippy --workspace -- -D warnings"
+# 与 CI **逐字一致**（不加 --all-targets）：release.sh 的目标是"不弱于 CI"，
+# 而不是比 CI 更严 —— 更严会把 CI 根本不看的测试代码 lint 变成发布阻塞。
+run_gate "cargo clippy" cargo clippy --workspace -- -D warnings \
+  || die "clippy 有 warning/error，发布中止。"
+
+log "静态闸门 4/4: 前端 svelte-check + 单测"
+if [[ -d frontends/node_modules ]]; then
+  ( cd frontends && run_gate "svelte-check" npm run check ) \
+    || die "前端类型检查失败（svelte-check），发布中止。"
+  ( cd frontends && run_gate "vitest" npm test ) \
+    || die "前端单测失败（vitest），发布中止。"
+else
+  warn "frontends/node_modules 不存在，跳过前端闸门（CI 仍会跑；发布前建议先 npm ci）"
+fi
+
+# ---------- 2b. 测试闸门 ----------
+# NOTE: no pipe here. `cargo test … | tail` takes its exit status from tail
+# (always 0), so a fully red suite sailed through and got tagged — the exact
+# trap the 4 static gates above already avoid with run_gate (review C3).
+log "运行测试闸门: cargo test --workspace -- --test-threads=1"
+run_gate "cargo test --workspace -- --test-threads=1" \
+  cargo test --workspace -- --test-threads=1 \
+  || die "测试未全绿，发布中止。修复后再试。"
 
 # ---------- 3. 推导版本号 ----------
 log "推导下一个版本号..."
@@ -90,9 +150,13 @@ fi
 # ---------- 6. 构建 ----------
 if [[ $DRY_RUN -eq 0 ]]; then
   log "构建 release 产物: cargo tauri build"
-  cargo tauri build 2>&1 | tail -15
+  # Same rule as the gates: judge the exit code, not the tail of the output.
+  # A failed build used to continue into `git tag` and publish a half-made
+  # Release (review C4).
+  run_gate "cargo tauri build" cargo tauri build \
+    || die "构建失败，发布中止（未创建 tag）。"
   DMG="target/release/bundle/dmg/OpenZen_${VERSION_NO_V}_aarch64.dmg"
-  [[ -f "$DMG" ]] && log "产物: $DMG" || warn "未找到预期 dmg: $DMG（手动检查 bundle 目录）"
+  [[ -f "$DMG" ]] && log "产物: $DMG" || die "未找到预期 dmg: $DMG（构建未产出可发布产物）"
 fi
 
 # ---------- 7. commit + tag ----------

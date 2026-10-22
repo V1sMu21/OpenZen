@@ -66,6 +66,41 @@ Note `INTERNAL_TAGS` also lacked `"think"`, so a `</think>` close could never
 be matched and Qwen3-style replies could trap in the reasoning channel — the
 original Bug-1 this fallback was written for.
 
+**Fix (2026-10-03, second pass after the noon session continued on the new build)**:
+- Tier-1 **JSON reconstruction** in `repair_parameter_style_args`: the gateway
+  sometimes splices junk (`<parameter: `) between a half-open key and an
+  otherwise-complete JSON continuation —
+  `{"file_path"><parameter: "/p", "content": "…\n"}`. Pair extraction only
+  recovered `file_path` and the write still failed `missing content`. Tier 1
+  rebuilds `{"KEY": <everything from the first quote of the remainder>}` and
+  accepts it only when it parses (the tail usually carries its own closing
+  brace; add one only when the call was truncated).
+- The system-reminder `Prior task failures: .openzen/reflections.jsonl` now
+  carries the **absolute** workspace path — the bare relative form was being
+  resolved against the data root by the model, landed outside the sandbox,
+  and the read was rejected every session.
+
+**Third pass (2026-10-03 evening run)** — the gateway evolved to a THIRD
+shape: VALID JSON whose string values silently swallow the model's DSML
+parameters (`{"file_path": "/p.sh</parameter>\n<｜DSML｜  parameter
+name=\"content\"…>#!/bin/bash…"}` — parses fine, so no repair path ran,
+but `content` was buried inside `file_path`). Added
+`sanitize_dsml_pollution` (cuts values at the `</parameter>` boundary when
+DSML/parameter junk follows and lifts the embedded named params back into
+the object) plus nameless-DSML mapping (`<｜DSML｜: "…" → the tool's first
+missing canonical param, via `canonical_param_names`) in the repair path.
+The tier-1 reconstruction now refuses when the gap before the first quote
+crosses a `</parameter>` boundary (that quote belongs to a nameless value,
+not the opener key).
+
+**Thinking dial (2026-10-03)**: per-model `reasoning_effort` now flows end to
+end: ChatInput pills → `send_message` (tauri `reasoningEffort` / webui
+`reasoning_effort`) → `run_agent_for_session` → `SessionConfig.reasoning_effort`
+→ `openai.rs` payload (`reasoning_effort` for chat_completions, `reasoning.effort`
+for the Responses API; claude.rs already consumed it). UI levels: 默认 (follow
+mykey.toml, sends nothing) / low / medium / high. The opencode zen gateway
+accepts minimal/low/medium/high and rejects `off` (422) — hence no "off" option.
+
 **Fix (2026-10-03)**:
 - `crates/oz-llm/src/stream.rs` → `repair_parameter_style_args` recovers
   key/value pairs from the leaked shapes (values may run to end-of-string

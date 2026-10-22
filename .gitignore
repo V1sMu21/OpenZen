@@ -42,7 +42,10 @@ session-*.md
 *.bg-bak
 
 # Test screenshots (large, regenerable)
-docs/test-screenshots/
+# docs/ —— 本地保留（用户决定 2026-10-22）：开发方案/ADR/审查报告/验证报告
+# 含个人画像摘录与真实遥测数值，永不进远程仓库。
+# 原始会话记录另存于 ~/.openzen/session-archives/。
+docs/
 
 # macOS
 .DS_Store
@@ -75,8 +78,25 @@ src-tauri/docs/
 *.sqlite-wal
 *.sqlite-shm
 
+# ── docs/ 分层：决策类文档入库，本地草稿/截图不入库（round5 P1-13①）─────
+# 背景：整个 docs/ 曾被忽略 → 四轮优化方案、执行记录、ADR、安全方案都不在
+# 仓库里，换机/新维护者拿不到任何决策依据；crates/oz-tests 的 ADR 一致性
+# 测试也因此在 CI 上静默跳过（36 个测试里 33 个 return = 通过）。
+#
+# 判定标准：**回答"为什么这样设计/为什么改"的文档入库；
+# 原始 AI 会话记录、截图、跑分中间产物不入库。**
+#
+# 规则顺序敏感：先整体忽略 docs 的子项，再逐条放行；父目录必须先放行，
+# 其内容才会被 git 看到。新增 docs 子目录时，同步更新本清单与
+# docs/README.md，并用 `scripts/doc_hygiene.sh` 跑一遍敏感值检测。
+# ADR —— 架构决策的唯一权威来源
+# 方案 / 执行记录 / 验收 / 路线图 / 基准报告等决策与证据类文档
+# 安全方案、验证报告、审查报告
+# 基准任务定义与跑分报告（可复现证据）
+# 兜底：以下内容永不入库（即使上面的白名单被放宽）
+# 原始 AI 会话记录（MB 级、含个人上下文）—— 本地保留
+
 # Local-only dev artifacts (not for repo)
-docs/
 TESTING_GUIDE.md
 tests/longtask-rag-and-vision-design.md
 count_lines.py
@@ -102,8 +122,10 @@ todo_20260622.md
 VERIFICATION_REPORT.md
 
 # ZCode tool dir + benchmark run data (local only)
+# NOTE: anchored (`/bench/`) — an unanchored `bench/` also swallowed
+# assets/bench/, which holds the README's published demo GIFs.
 .zcode/
-bench/
+/bench/
 
 # Pet dev-only raw animation frames (~144MB loose PNGs; runtime uses frames_webp/, builds strip frames/ via vite plugin)
 frontends/public/pet/frames/
@@ -112,4 +134,6 @@ frontends/public/pet/frames/
 design/
 
 # 3.2GB of vendored long-task fixtures under tests/longtask/ — never tracked.
-tests/
+# NOTE: anchored — an unanchored `tests/` also swallowed crates/*/tests/ (real
+# Rust integration tests that must stay tracked).
+/tests/

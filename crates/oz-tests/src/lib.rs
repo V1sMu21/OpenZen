@@ -4,19 +4,66 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    /// `docs/` is local-retention only (git-skill 维度 18); clean checkouts
-    /// only carry `docs/bench/screenshots` and `docs/screenshots` (README
-    /// GIFs), so gate on the full local doc tree — if `risk-register.md` is
-    /// absent, skip docs-content assertions instead of failing CI.
+    /// The decision-document set under `docs/` is versioned now (round5
+    /// P1-13①), so these assertions DO run in CI. They still need a guard for
+    /// a partial checkout, but the old guard was a silent `return` — 33 of 36
+    /// tests could report "ok" without asserting anything, which is exactly
+    /// the failure mode verify-check exists to prevent.
+    ///
+    /// The replacement is an **explicit, counted skip**: it prints a
+    /// machine-readable marker that CI parses into the job summary, so
+    /// "skipped" can never masquerade as "passed". Locally, when the full
+    /// tree is present, the tests run normally (no `#[ignore]` needed).
+    const DOCS_SKIP_MARKER: &str = "[oz-tests] SKIP requires-docs";
+
+    fn docs_tree_present() -> bool {
+        docs_dir().join("risk-register.md").exists()
+    }
+
     macro_rules! docs_only {
         () => {
-            if !docs_dir().join("risk-register.md").exists() {
-                eprintln!(
-                    "[oz-tests] full docs/ tree not present in this checkout (local-retention); skipping"
+            if !docs_tree_present() {
+                // The decision documents are versioned (round5 P1-13①), so a
+                // checkout without them is broken, not "just a partial
+                // checkout". Failing loudly is the whole point: the previous
+                // silent `return` let 33 of 36 tests report "ok" without
+                // asserting anything.
+                if std::env::var_os("OZ_TESTS_ALLOW_DOCS_SKIP").is_none() {
+                    panic!(
+                        "docs/risk-register.md is missing from this checkout. These tests assert on \
+                         the versioned decision documents under docs/ — without them the assertions \
+                         cannot run, and reporting 'ok' would be a lie.\n\
+                         Fix: check out the full tree.\n\
+                         Deliberate partial checkout? Set OZ_TESTS_ALLOW_DOCS_SKIP=1 to skip \
+                         explicitly; every skip then prints '{}' so it can be counted.",
+                        DOCS_SKIP_MARKER
+                    );
+                }
+                // Marker is parsed by .github/workflows/ci.yml (job summary);
+                // keep the format stable.
+                println!(
+                    "{}: {} (docs/risk-register.md missing in this checkout)",
+                    DOCS_SKIP_MARKER,
+                    function_name!()
                 );
                 return;
             }
         };
+    }
+
+    /// Name of the enclosing test, for the skip marker. `std::any::type_name`
+    /// is the stable no-dependency trick (there is no `function_name!` in
+    /// stable Rust).
+    macro_rules! function_name {
+        () => {{
+            fn f() {}
+            fn type_name_of<T>(_: T) -> &'static str {
+                std::any::type_name::<T>()
+            }
+            let name = type_name_of(f);
+            // strip the trailing `::f`
+            name.strip_suffix("::f").unwrap_or(name)
+        }};
     }
 
     fn adr_dir() -> PathBuf {
@@ -618,9 +665,18 @@ mod tests {
         assert!(ci_path.exists(), "CI workflow not found at {:?}", ci_path);
         let ci_content = read_file(&ci_path);
         assert!(ci_content.contains("cargo test"), "CI missing test step");
+        // Assert the REAL build command. The old assertion looked for
+        // "cargo build --release", which after the CI hardening only matched a
+        // Chinese comment — the step had already become `cargo tauri build`,
+        // so the test proved nothing and would break on a comment edit
+        // (review C7).
         assert!(
-            ci_content.contains("cargo build --release"),
-            "CI missing release build"
+            ci_content.contains("cargo tauri build"),
+            "CI missing the app build step (cargo tauri build)"
+        );
+        assert!(
+            ci_content.contains("npm run build"),
+            "CI missing the frontend build step"
         );
         assert!(
             ci_content.contains("cargo clippy"),

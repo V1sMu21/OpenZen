@@ -29,6 +29,9 @@
     "core:window:allow-unminimize",
     "core:window:allow-destroy",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "dialog:allow-confirm",
+    "dialog:allow-ask",
+    "dialog:allow-message"
   ]
 }

@@ -361,6 +361,13 @@ async fn main() -> anyhow::Result<()> {
                 skill_mcp_dir: None,
                 harness_dir: None,
                 session_id: String::new(),
+                // The MCP `/tools/call` endpoint has no outer timeout of its
+                // own, so give `code_run` the same budget the agent loop uses
+                // (LoopConfig::default().tool_timeout_secs = 330) — otherwise
+                // `tool_budget_secs == 0` disables the inner clamp and a
+                // client with a 60s HTTP timeout gives up before the tool
+                // returns its structured timeout result (review finding B-7).
+                tool_budget_secs: 330,
             };
             let registry = ToolRegistry::build_default();
             let state = Arc::new(tokio::sync::Mutex::new(oz_server::McpState::new(
@@ -661,6 +668,7 @@ async fn run_ask(
             .map(|p| p.to_string_lossy().to_string()),
         harness_dir: None,
         session_id: String::new(),
+        tool_budget_secs: 0,
     };
 
     let memory = MemorySystem::new(working_dir, &lang);

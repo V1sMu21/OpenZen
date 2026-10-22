@@ -158,12 +158,7 @@ pub async fn import_sessions(
                 .directory
                 .clone()
                 .unwrap_or_else(|| state.working_dir.clone());
-            let info = store.create_with_project(
-                &session.title,
-                None,
-                None,
-                Some(&working_dir),
-            );
+            let info = store.create_with_project(&session.title, None, None, Some(&working_dir));
             let message_count = session.messages.len();
             if let Some(entry) = store.get_mut(&info.id) {
                 entry.messages = session.messages;
@@ -175,7 +170,13 @@ pub async fn import_sessions(
                     entry.info.created_at = created.to_rfc3339();
                 }
             }
-            ledger.record(src, &session.source_id, &info.id, &session.title, message_count);
+            ledger.record(
+                src,
+                &session.source_id,
+                &info.id,
+                &session.title,
+                message_count,
+            );
             imported.push(serde_json::json!({
                 "source_id": session.source_id,
                 "session_id": info.id,
@@ -192,6 +193,77 @@ pub async fn import_sessions(
     }
 
     Ok(serde_json::json!({ "imported": imported, "errors": errors }))
+}
+
+/// Bundle the evidence a bug report needs into one directory.
+///
+/// Returns the directory path; the UI offers to reveal it. Deliberately
+/// copies only logs, version info and a REDACTED config summary — never
+/// session content or API keys.
+#[tauri::command]
+pub fn export_diagnostics(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let dir = crate::data_dir().join("logs");
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let out = crate::data_dir().join(format!("diagnostics-{stamp}"));
+    if let Err(e) = std::fs::create_dir_all(&out) {
+        return serde_json::json!({ "error": format!("create dir: {e}") });
+    }
+    let mut copied: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let interesting = name.starts_with("openzen.log")
+                || name.starts_with("crash-")
+                || name.starts_with("frontend-errors")
+                || name == "audit.jsonl";
+            if !interesting {
+                continue;
+            }
+            // Cap each file so a 20 MB log does not make a 20 MB bundle.
+            let data = std::fs::read(entry.path()).unwrap_or_default();
+            let slice = if data.len() > 4 * 1024 * 1024 {
+                &data[data.len() - 4 * 1024 * 1024..]
+            } else {
+                &data[..]
+            };
+            if std::fs::write(out.join(&name), slice).is_ok() {
+                copied.push(name);
+            }
+        }
+    }
+    // Redacted environment summary: shape of the config, never its values.
+    let cfg_path = crate::resolve_config_path(std::path::Path::new(&state.config_path));
+    let cfg_summary = match MyKeyConfig::from_file(&cfg_path) {
+        Ok(cfg) => serde_json::json!({
+            "config_path": cfg_path.to_string_lossy(),
+            "memory_backend": cfg.memory_backend,
+            "session_count": cfg.sessions.len(),
+            "model_names": cfg.sessions.keys().cloned().collect::<Vec<_>>(),
+        }),
+        Err(e) => {
+            serde_json::json!({ "config_path": cfg_path.to_string_lossy(), "error": e.to_string() })
+        }
+    };
+    let summary = serde_json::json!({
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "data_dir": crate::data_dir().to_string_lossy(),
+        "working_dir": state.working_dir,
+        "memory_enabled": state.memory_enabled.load(std::sync::atomic::Ordering::SeqCst),
+        "config": cfg_summary,
+        "log_files": copied,
+        "note": "Session content and API keys are NOT included.",
+    });
+    let _ = std::fs::write(
+        out.join("summary.json"),
+        serde_json::to_string_pretty(&summary).unwrap_or_default(),
+    );
+    serde_json::json!({
+        "path": out.to_string_lossy(),
+        "files": copied,
+    })
 }
 
 #[tauri::command]
@@ -218,15 +290,17 @@ pub fn ping(state: State<'_, Arc<AppState>>) -> serde_json::Value {
             })
             .collect(),
         Err(e) => {
-            debug_log(&format!("ping: config error: {}", e));
+            tracing::debug!("ping: config error: {e}");
             vec![]
         }
     };
-    debug_log(&format!(
+    // Demoted to debug: the UI pings every 30s, and these lines were 53–66%
+    // of the whole log, burying the events that matter (round5 P1-10 ③).
+    tracing::debug!(
         "ping: {} models, config_path={}",
         models.len(),
         cfg_path.display()
-    ));
+    );
     serde_json::json!({
         "status": "ok",
         "service": "openzen-tauri",
@@ -273,10 +347,136 @@ pub async fn computer_screenshot_data(path: String, working_dir: String) -> serd
 /// builds (no devtools) stay diagnosable. Cheap; used by startup paths and
 /// the heartbeat check. Flushes per line — this path is cold and the whole
 /// point is to see the line even if the app dies right after.
+///
+/// `level` is used by the top-level `window.onerror` /
+/// `unhandledrejection` handlers: the release webview has devtools disabled,
+/// so without this channel a white screen left ZERO evidence behind
+/// (round5 P1-10 ②). `error` lines are additionally appended to
+/// `logs/frontend-errors.log` so they are not rotated away by heartbeat noise.
 #[tauri::command]
-pub fn log_frontend(line: String) {
-    debug_log(&format!("[web] {}", line.trim_end()));
-    debug_log_flush();
+pub fn log_frontend(
+    line: Option<String>,
+    level: Option<String>,
+    message: Option<String>,
+    stack: Option<String>,
+) {
+    let level = level.unwrap_or_else(|| "info".into());
+    // Two call shapes reach this command: the heartbeat sends `{line}`, the
+    // global error handlers send `{level, message, stack}`.
+    let composed = match (message, line) {
+        (Some(m), Some(l)) => format!("{l} {m}"),
+        (Some(m), None) => m,
+        (None, Some(l)) => l,
+        (None, None) => String::new(),
+    };
+    let composed = match stack {
+        Some(st) if !st.trim().is_empty() => {
+            format!("{composed}\n{}", st.chars().take(2000).collect::<String>())
+        }
+        _ => composed,
+    };
+    let clipped: String = composed.trim_end().chars().take(4000).collect();
+    if clipped.is_empty() {
+        return;
+    }
+    match level.as_str() {
+        "warn" => {
+            tracing::warn!("[web] {clipped}");
+            debug_log(&format!("[web] WARN {clipped}"));
+        }
+        "error" => {
+            tracing::error!("[web] {clipped}");
+            debug_log(&format!("[web] ERROR {clipped}"));
+            let dir = crate::data_dir().join("logs");
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("frontend-errors.log"))
+            {
+                use std::io::Write as _;
+                let _ = writeln!(f, "{} [error] {clipped}", chrono::Local::now().to_rfc3339());
+            }
+        }
+        // Heartbeat/ping traffic is the bulk of the log (measured 53–66% of
+        // all lines) and buries real events. `debug` stays out of the file
+        // unless the user explicitly asks for debug logging.
+        "debug" => tracing::debug!("[web] {clipped}"),
+        _ => debug_log(&format!("[web] {clipped}")),
+    }
+    if level != "debug" {
+        debug_log_flush();
+    }
+}
+
+/// Reveal a path in the OS file manager (Finder on macOS).
+///
+/// The frontend has no opener/shell plugin dependency, so it had to degrade
+/// to "copy the path and press Cmd-Shift-G" — this makes the export/backup
+/// buttons actually useful (round5 P1-12 ①).
+#[tauri::command]
+pub fn reveal_path(path: String) -> serde_json::Value {
+    let p = std::path::PathBuf::from(&path);
+    if !p.exists() {
+        return serde_json::json!({ "ok": false, "error": "path does not exist" });
+    }
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open")
+        .arg("-R")
+        .arg(&p)
+        .status();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("explorer")
+        .arg("/select,")
+        .arg(&p)
+        .status();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open")
+        .arg(p.parent().unwrap_or(&p))
+        .status();
+    match result {
+        Ok(st) if st.success() => serde_json::json!({ "ok": true, "path": path }),
+        Ok(st) => serde_json::json!({ "ok": false, "error": format!("exit {st}") }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+/// Structured user feedback on one assistant message (round5 P2-28).
+///
+/// A correction in chat only ever became conversation text; this records a
+/// quality event so the learning loop can act on it (and so a 👎 is not
+/// silently lost).
+#[tauri::command]
+pub fn submit_message_feedback(
+    session_id: String,
+    message_index: i64,
+    verdict: String,
+    note: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> serde_json::Value {
+    let verdict = verdict.trim().to_lowercase();
+    if verdict != "up" && verdict != "down" {
+        return serde_json::json!({ "error": "verdict must be \"up\" or \"down\"" });
+    }
+    let working_dir = lock_poison_guard(&state.sessions)
+        .get(&session_id)
+        .and_then(|e| e.working_dir.clone())
+        .unwrap_or_else(|| state.working_dir.clone());
+    let note = note.unwrap_or_default();
+    let note: String = note.trim().chars().take(500).collect();
+    let summary = if note.is_empty() {
+        format!("message_feedback verdict={verdict} index={message_index}")
+    } else {
+        format!("message_feedback verdict={verdict} index={message_index} note={note}")
+    };
+    oz_core::quality::log_quality_event(&working_dir, "user_feedback", &summary);
+    // A 👎 is also a delivery-quality signal: record it where the quality
+    // report aggregates from, so "how often is the user unhappy" is visible.
+    if verdict == "down" {
+        oz_core::quality::log_reflection(&working_dir, "user_rejected", &summary);
+    }
+    tracing::info!("[feedback] session={session_id} {summary}");
+    serde_json::json!({ "ok": true, "recorded": summary })
 }
 
 #[tauri::command]
@@ -359,6 +559,8 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     let Some(runtime) = state.erme() else {
         return serde_json::json!({
             "enabled": false,
+            "backend": "file",
+            "erne_available": false,
             "harness": { "entry_count": 0 },
         });
     };
@@ -373,13 +575,26 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     let soul = {
         let handle = runtime.injector.soul();
         let model = handle.read().unwrap_or_else(|e| e.into_inner());
+        // `mood`/`energy`/`confidence` used to be the constants from
+        // `SoulState::new()` (nothing ever called `update`), and the UI
+        // rendered them as the assistant's feelings. They are now driven by
+        // real interaction, but they are still a coarse heuristic — so ship
+        // the facts that ARE exact (counts, timestamps) alongside them and
+        // let the UI label the rest honestly (round5 P0-5 (3)).
         serde_json::json!({
             "identity": model.core.identity,
             "mood": model.state.mood,
+            "energy": model.state.energy,
             "confidence": model.state.confidence,
+            "state_updated_at": model.state.last_updated_nanos,
             "portrait_facts": model.user_portrait.facts.len(),
+            "self_portrait_facts": model.self_portrait.facts.len(),
+            "user_traits": model.user_portrait.traits.len(),
+            "portrait_updated_at": model.user_portrait.last_updated_nanos,
+            "self_portrait_updated_at": model.self_portrait.last_updated_nanos,
             "narrative_chapters": model.narrative.chapters.len(),
             "version": model.version,
+            "heuristic": true,
         })
     };
     // Mirror what the distiller ingests (Memory kind only), so the UI number
@@ -388,8 +603,15 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
         .entries_of(oz_core::harness::HarnessKind::Memory)
         .len();
 
+    // The live flag, not a hardcoded true: the switch used to bounce back to
+    // "on" immediately after being turned off (review A11).
+    let enabled = state
+        .memory_enabled
+        .load(std::sync::atomic::Ordering::SeqCst);
     serde_json::json!({
-        "enabled": true,
+        "enabled": enabled,
+        "backend": if enabled { "erme" } else { "file" },
+        "erne_available": true,
         "embedding_kind": runtime.store.router().l2_engine().embedding_kind(),
         "soul": soul,
         "store": {
@@ -411,6 +633,284 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
             "recall_hit_rate": recall_hit_rate,
         },
         "harness": { "entry_count": harness_entry_count },
+    })
+}
+
+/// Toggle the memory backend at runtime AND persist the choice.
+///
+/// Before this, the only way to turn memory off was to edit `mykey.toml` and
+/// restart — for a 7x24 companion that is not a switch (round5 P1-12 ①).
+/// The in-process flag takes effect on the next message; the config write
+/// makes it survive a restart.
+#[tauri::command]
+pub fn set_memory_enabled(enabled: bool, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    state
+        .memory_enabled
+        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    let backend = if enabled { "erme" } else { "file" };
+    let path = crate::resolve_config_path(std::path::Path::new(&state.config_path));
+    let write_result = set_toml_string_key(&path, "memory_backend", backend);
+    // Read back: "the write returned Ok" is not evidence the key landed at the
+    // top level (review A11).
+    let verified = oz_config::mykey::MyKeyConfig::from_file(&path)
+        .map(|c| c.memory_backend == backend)
+        .unwrap_or(false);
+    if write_result.is_ok() && !verified {
+        return serde_json::json!({
+            "ok": false,
+            "backend": backend,
+            "config_path": path.to_string_lossy(),
+            "error": "config write did not take effect (key not at top level); a .bak was kept",
+        });
+    }
+    serde_json::json!({
+        "ok": write_result.is_ok(),
+        "backend": backend,
+        "persisted": verified,
+        "config_path": path.to_string_lossy(),
+        "error": write_result.err(),
+    })
+}
+
+/// Set a top-level `key = "value"` in a TOML file, preserving everything
+/// else. Backs the file up first; no-ops when the value is already right.
+fn set_toml_string_key(path: &std::path::Path, key: &str, value: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read config: {e}"))?;
+    let line = format!("{key} = \"{value}\"");
+    let mut out = String::with_capacity(text.len() + line.len() + 1);
+    let mut replaced = false;
+    for l in text.lines() {
+        let trimmed = l.trim_start();
+        let is_key = trimmed.starts_with(&format!("{key} "))
+            || trimmed.starts_with(&format!("{key}="))
+            || trimmed.starts_with(&format!("{key}\t"));
+        if is_key && !trimmed.starts_with('#') {
+            out.push_str(&line);
+            replaced = true;
+        } else {
+            out.push_str(l);
+        }
+        out.push('\n');
+    }
+    if !replaced {
+        // Append BEFORE the first `[table]` header: appending at EOF puts a
+        // top-level key inside whatever table happens to be last (the real
+        // mykey.toml ends with `[web_search]`, so `memory_backend` became
+        // `web_search.memory_backend` and was silently ignored — review A11).
+        let insert_at = out
+            .lines()
+            .position(|l| l.trim_start().starts_with('['))
+            .map(|idx| out.lines().take(idx).map(|l| l.len() + 1).sum::<usize>())
+            .unwrap_or(out.len());
+        out.insert_str(insert_at, &format!("{line}\n"));
+    }
+    let backup = path.with_extension("toml.bak");
+    let _ = std::fs::copy(path, &backup);
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, out).map_err(|e| format!("write config: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("commit config: {e}"))?;
+    Ok(())
+}
+
+/// Export every memory as one JSON document under the data root.
+#[tauri::command]
+pub fn export_memory(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let Some(runtime) = state.erme() else {
+        return serde_json::json!({ "error": "memory backend not enabled" });
+    };
+    let entries = collect_all_memories(&runtime.store, None);
+    let dir = crate::data_dir().join("openzen");
+    let _ = std::fs::create_dir_all(&dir);
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = dir.join(format!("memory_export_{stamp}.json"));
+    let doc = serde_json::json!({
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "count": entries.len(),
+        "entries": entries,
+    });
+    match serde_json::to_string_pretty(&doc)
+        .map_err(|e| e.to_string())
+        .and_then(|json| std::fs::write(&path, json).map_err(|e| e.to_string()))
+    {
+        Ok(()) => {
+            let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "bytes": bytes,
+                "entries": entries.len(),
+            })
+        }
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Every non-superseded memory in the store, newest/highest-importance first.
+fn collect_all_memories(
+    store: &entropy_memory_engine::memory_store::MemoryStore,
+    limit: Option<usize>,
+) -> Vec<serde_json::Value> {
+    let mut memories = store.router().l3_engine().storage().all();
+    memories.retain(|m| m.metadata.superseded_by.is_none());
+    memories.sort_by_key(|m| std::cmp::Reverse(m.metadata.created_at));
+    if let Some(n) = limit {
+        memories.truncate(n);
+    }
+    memories
+        .into_iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "content": m.content_text(),
+                "importance": m.metadata.importance,
+                "tags": m.tags,
+                "created_at": m.metadata.created_at,
+                "alias": m.alias,
+            })
+        })
+        .collect()
+}
+
+/// Browse memories (newest first) for the memory browser UI.
+#[tauri::command]
+pub fn list_memories(
+    limit: Option<usize>,
+    query: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> serde_json::Value {
+    let Some(runtime) = state.erme() else {
+        return serde_json::json!({ "entries": [], "enabled": false });
+    };
+    let needle = query.unwrap_or_default().trim().to_lowercase();
+    let mut entries = collect_all_memories(&runtime.store, None);
+    if !needle.is_empty() {
+        entries.retain(|e| {
+            e.get("content")
+                .and_then(|c| c.as_str())
+                .map(|c| c.to_lowercase().contains(&needle))
+                .unwrap_or(false)
+        });
+    }
+    let total = entries.len();
+    entries.truncate(limit.unwrap_or(200).clamp(1, 1000));
+    serde_json::json!({ "entries": entries, "total": total, "enabled": true })
+}
+
+/// Forget one memory. Also marks any portrait fact that quoted it as
+/// contradicted, so the next reflection pass does not re-derive it.
+#[tauri::command]
+pub fn forget_memory(id: u64, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let Some(runtime) = state.erme() else {
+        return serde_json::json!({ "error": "memory backend not enabled" });
+    };
+    let content = runtime
+        .store
+        .router()
+        .l3_engine()
+        .get_by_id(id)
+        .map(|m| m.content_text())
+        .unwrap_or_default();
+    let ok = runtime.store.forget(id);
+    if ok && !content.is_empty() {
+        // Deleting the memory alone is not enough: the distilled fact lives
+        // on in the portrait (and would be re-extracted on the next pass).
+        let handle = runtime.injector.soul();
+        let mut guard = handle.write().unwrap_or_else(|e| e.into_inner());
+        {
+            let model = &mut *guard;
+            let needle: String = content.chars().take(24).collect();
+            let hits: Vec<String> = model
+                .user_portrait
+                .facts
+                .iter()
+                .filter(|f| {
+                    !needle.is_empty()
+                        && entropy_memory_engine::l0::portrait::lexical_compatibility(
+                            &f.statement,
+                            &content,
+                        ) >= 0.5
+                })
+                .map(|f| f.statement.clone())
+                .collect();
+            for stmt in &hits {
+                model.user_portrait.remove_fact(stmt);
+            }
+            if !hits.is_empty() {
+                model.bump_version();
+                tracing::info!(
+                    "[memory] forget {id}: also removed {} portrait fact(s)",
+                    hits.len()
+                );
+            }
+        }
+    }
+    serde_json::json!({ "ok": ok, "id": id })
+}
+
+/// Clear every memory. Always writes a backup first and requires an explicit
+/// confirmation flag, because this is irreversible from the UI.
+#[tauri::command]
+pub fn clear_memory(confirm: bool, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    if !confirm {
+        return serde_json::json!({ "error": "confirmation required" });
+    }
+    let Some(runtime) = state.erme() else {
+        return serde_json::json!({ "error": "memory backend not enabled" });
+    };
+    let entries = collect_all_memories(&runtime.store, None);
+    let dir = crate::data_dir().join("openzen");
+    let _ = std::fs::create_dir_all(&dir);
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let backup = dir.join(format!("memory_backup_{stamp}.json"));
+    let doc = serde_json::json!({
+        "backed_up_at": chrono::Utc::now().to_rfc3339(),
+        "count": entries.len(),
+        "entries": entries,
+    });
+    let backup_path = match serde_json::to_string_pretty(&doc)
+        .map_err(|e| e.to_string())
+        .and_then(|json| std::fs::write(&backup, json).map_err(|e| e.to_string()))
+    {
+        Ok(()) => backup.to_string_lossy().to_string(),
+        Err(e) => return serde_json::json!({ "error": format!("backup failed: {e}") }),
+    };
+    let mut removed = 0usize;
+    for id in collect_all_memories(&runtime.store, None)
+        .iter()
+        .filter_map(|e| e.get("id").and_then(|v| v.as_u64()))
+    {
+        if runtime.store.forget(id) {
+            removed += 1;
+        }
+    }
+    // Portrait facts came from those memories; keeping them would resurrect
+    // the "memory" the user just cleared.
+    //
+    // …and the cleared model must reach DISK: this used to only touch memory,
+    // so a restart re-read soul.json (185 facts) and the "cleared" memories
+    // came back. `remove_portrait_fact` already saved; this path did not
+    // (review A4).
+    let persist_error = match runtime.injector.soul().write() {
+        Ok(mut model) => {
+            model.user_portrait.facts.clear();
+            model.user_portrait.traits.clear();
+            model.bump_version();
+            let path = crate::data_dir().join("memory_erme").join("soul.json");
+            match model.save_atomic(&path) {
+                Ok(()) => None,
+                Err(e) => Some(format!("soul.json save failed: {e}")),
+            }
+        }
+        Err(e) => Some(format!("soul lock poisoned: {e}")),
+    };
+    if let Some(ref err) = persist_error {
+        tracing::error!("[memory] clear_memory could not persist the soul: {err}");
+    }
+    tracing::warn!("[memory] cleared {removed} entries; backup at {backup_path}");
+    serde_json::json!({
+        "ok": persist_error.is_none(),
+        "backup_path": backup_path,
+        "removed": removed,
+        "error": persist_error,
     })
 }
 
@@ -623,12 +1123,7 @@ fn session_table_from_args(args: &serde_json::Value) -> toml::Table {
         let normalized = normalize_modalities(Some(&names));
         t.insert(
             "modalities".into(),
-            toml::Value::Array(
-                normalized
-                    .into_iter()
-                    .map(toml::Value::String)
-                    .collect(),
-            ),
+            toml::Value::Array(normalized.into_iter().map(toml::Value::String).collect()),
         );
     }
     t
@@ -875,7 +1370,9 @@ fn collect_provider_orphans(
         if prefix.is_empty() && oz_config::mykey::RESERVED_TOP_LEVEL_KEYS.contains(&key.as_str()) {
             continue;
         }
-        let Some(sub) = value.as_table() else { continue };
+        let Some(sub) = value.as_table() else {
+            continue;
+        };
         let full = if prefix.is_empty() {
             key.clone()
         } else {
@@ -949,14 +1446,14 @@ pub(crate) fn migrate_mykey_to_providers(config_path: &str) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let mut backed_up = Vec::new();
-    for candidate in [
-        path.to_path_buf(),
-        path.with_extension("toml.enc"),
-    ] {
+    for candidate in [path.to_path_buf(), path.with_extension("toml.enc")] {
         if candidate.exists() {
             let bak = candidate.with_file_name(format!(
                 "{}.bak-providers-{ts}",
-                candidate.file_name().and_then(|n| n.to_str()).unwrap_or("mykey.toml")
+                candidate
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("mykey.toml")
             ));
             match std::fs::copy(&candidate, &bak) {
                 Ok(_) => backed_up.push(bak),
@@ -973,14 +1470,9 @@ pub(crate) fn migrate_mykey_to_providers(config_path: &str) {
         }
     }
 
-    match write_mykey_toml(config_path, |table| {
-        apply_provider_migration(table)
-    }) {
+    match write_mykey_toml(config_path, apply_provider_migration) {
         Ok(()) => {
-            let merged: Vec<String> = backed_up
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect();
+            let merged: Vec<String> = backed_up.iter().map(|p| p.display().to_string()).collect();
             tracing::info!(
                 "provider migration: merged duplicated credentials into [providers] (backup: {})",
                 merged.join(", ")
@@ -1050,7 +1542,9 @@ fn apply_provider_migration(table: &mut toml::Table) -> Result<(), String> {
         if oz_config::mykey::RESERVED_TOP_LEVEL_KEYS.contains(&name.as_str()) {
             continue;
         }
-        let Some(t) = value.as_table_mut() else { continue };
+        let Some(t) = value.as_table_mut() else {
+            continue;
+        };
         let (Some(apibase), Some(apikey)) = (
             t.get("apibase").and_then(|v| v.as_str()),
             t.get("apikey").and_then(|v| v.as_str()),
@@ -1086,10 +1580,20 @@ fn derive_provider_id(apibase: &str, taken: &toml::Table) -> String {
         .unwrap_or(without_scheme);
     let base: String = authority
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let base = base.trim_matches('_').to_string();
-    let stem = if base.is_empty() { "provider".to_string() } else { base };
+    let stem = if base.is_empty() {
+        "provider".to_string()
+    } else {
+        base
+    };
     let mut id = stem.clone();
     let mut n = 1;
     while taken.contains_key(&id) {
@@ -1309,8 +1813,14 @@ fn message_tokens(m: &serde_json::Value) -> (u64, u64) {
 /// totals, per-day (UTC date from message timestamps) and per-model sums.
 #[tauri::command]
 pub fn get_token_stats(limit: Option<usize>, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    // No unconditional `reload()`: re-reading + re-parsing the whole
+    // (measured: 93 MB) sessions file on every stats read was the original
+    // problem (round5 P1-7). `reload_if_stale()` keeps cross-process
+    // correctness — webui/TUI/CLI can share one data root, and a full-file
+    // write from this side would otherwise erase their new sessions — at the
+    // cost of one `stat` (review finding A-F5).
     let mut store = lock_poison_guard(&state.sessions);
-    store.reload();
+    store.reload_if_stale();
     let max = limit.unwrap_or(50).clamp(1, 500);
     let mut infos: Vec<_> = store.list();
     infos.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -1373,8 +1883,9 @@ pub fn get_token_stats(limit: Option<usize>, state: State<'_, Arc<AppState>>) ->
 /// {data_dir}/openzen/quality_report.json so nightly tooling can diff runs.
 #[tauri::command]
 pub fn get_quality_report(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    // See get_token_stats: stat-based staleness check, not a full re-parse.
     let mut store = lock_poison_guard(&state.sessions);
-    store.reload();
+    store.reload_if_stale();
     let mut dirs: Vec<String> = store
         .list()
         .iter()
@@ -1387,6 +1898,12 @@ pub fn get_quality_report(state: State<'_, Arc<AppState>>) -> serde_json::Value 
     let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
     let mut week: std::collections::BTreeMap<String, u64> = Default::default();
     let mut total: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut unparsable: u64 = 0;
+    // Per-run quality rows are the honest denominator: exactly one per run,
+    // including the ones that skipped the gate (round5 P2-22).
+    let mut runs_week: u64 = 0;
+    let mut runs_total: u64 = 0;
+    let mut gate_skipped_total: std::collections::BTreeMap<String, u64> = Default::default();
     for dir in &dirs {
         let path = Path::new(dir).join(".openzen").join("reflections.jsonl");
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -1394,6 +1911,9 @@ pub fn get_quality_report(state: State<'_, Arc<AppState>>) -> serde_json::Value 
         };
         for line in content.lines() {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                // Torn lines used to be dropped silently, so a writer bug
+                // looked identical to "no data" (round5 P2-26).
+                unparsable += 1;
                 continue;
             };
             let kind = v
@@ -1402,12 +1922,21 @@ pub fn get_quality_report(state: State<'_, Arc<AppState>>) -> serde_json::Value 
                 .unwrap_or("unknown")
                 .to_string();
             *total.entry(kind.clone()).or_insert(0) += 1;
+            if kind == "run_quality" {
+                runs_total += 1;
+                if let Some(reason) = v.get("gate_skipped").and_then(|r| r.as_str()) {
+                    *gate_skipped_total.entry(reason.to_string()).or_insert(0) += 1;
+                }
+            }
             if let Some(ts) = v
                 .get("ts")
                 .and_then(|t| t.as_str())
                 .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
             {
                 if ts.with_timezone(&chrono::Utc) >= cutoff {
+                    if kind == "run_quality" {
+                        runs_week += 1;
+                    }
                     *week.entry(kind).or_insert(0) += 1;
                 }
             }
@@ -1420,10 +1949,19 @@ pub fn get_quality_report(state: State<'_, Arc<AppState>>) -> serde_json::Value 
     let count_of = |map: &std::collections::BTreeMap<String, u64>, key: &str| -> u64 {
         map.get(key).copied().unwrap_or(0)
     };
+    // The denominator is RUNS, not events: one run can emit
+    // review_failed (round 1) and review_passed (round 2), which used to show
+    // as a 50% pass rate for a run that passed, and a run whose second round
+    // failed emitted nothing at all (review B8). `run_quality` rows are
+    // exactly one per run — including every abnormal exit.
     let rates_for = |map: &std::collections::BTreeMap<String, u64>| -> serde_json::Value {
+        let runs = count_of(map, "run_quality");
         let passed = count_of(map, "review_passed");
         let failed = count_of(map, "review_failed");
-        let attempts = passed + failed;
+        let unavailable = count_of(map, "review_unavailable");
+        let not_run = count_of(map, "review_not_run");
+        let blocked = count_of(map, "assertion_blocked_by_policy");
+        // Per-run verdicts: a run counts once, by its FINAL state.
         let deliveries = count_of(map, "delivery_success");
         let assertion_failures = count_of(map, "assertion_failed");
         let rate = |num: u64, den: u64| -> Option<f64> {
@@ -1434,13 +1972,29 @@ pub fn get_quality_report(state: State<'_, Arc<AppState>>) -> serde_json::Value 
             }
         };
         serde_json::json!({
-            "review_attempts": attempts,
-            "review_pass_rate": rate(passed, attempts),
-            "review_rework_rate": rate(failed, attempts),
+            // Raw counters first: the UI reads these directly and a missing
+            // key shows up as 0, which is indistinguishable from "never ran"
+            // (round5 P2-22 / frontend contract).
+            "review_passed": passed,
+            "review_failed": failed,
+            "review_unavailable": unavailable,
+            "review_not_run": not_run,
+            "assertion_failed": assertion_failures,
+            "assertion_blocked_by_policy": blocked,
+            "runs": runs,
+            "review_attempts": passed + failed,
+            // Both rates use the run count as the denominator, so they answer
+            // "of the runs we ran, how many ended verified?".
+            "review_pass_rate": rate(passed, runs),
+            "review_rework_rate": rate(failed, runs),
             "deliveries": deliveries,
             // How often a delivery needed an assertion-failure round.
             "assertion_failure_rate": rate(assertion_failures, deliveries),
-            "review_coverage": rate(attempts, deliveries),
+            // Coverage counts UNREVIEWED and UNAVAILABLE in the denominator:
+            // "100% pass rate" over 33% coverage was the misleading number
+            // this whole phase exists to fix.
+            "review_coverage": rate(passed + failed, runs),
+            "review_coverage_of_deliveries": rate(passed + failed, deliveries),
         })
     };
 
@@ -1450,6 +2004,11 @@ pub fn get_quality_report(state: State<'_, Arc<AppState>>) -> serde_json::Value 
         "window_days": 7,
         "week": week,
         "total": total,
+        "runs_week": runs_week,
+        "runs_total": runs_total,
+        "gate_skipped_total": gate_skipped_total,
+        // A torn telemetry line is a writer bug, not "no data".
+        "unparsable_lines": unparsable,
         "rates_week": rates_for(&week),
         "rates_total": rates_for(&total),
     });
@@ -1466,8 +2025,10 @@ pub fn list_sessions(
     project_id: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Vec<SessionInfo> {
+    // See get_token_stats: reload only when another process actually wrote
+    // (one `stat`), instead of re-parsing the whole file on every refresh.
     let mut store = lock_poison_guard(&state.sessions);
-    store.reload();
+    store.reload_if_stale();
     let interrupted: Vec<String> = store
         .list()
         .iter()
@@ -1618,6 +2179,8 @@ pub fn get_session(
                 .get(&id)
                 .and_then(|e| e.working_dir.clone())
                 .unwrap_or_else(|| state.working_dir.clone());
+            // (`idx` is attached per message by the pagination block below —
+            // that is what `submit_message_feedback` resolves against.)
             if entry.status == SessionStatus::Running {
                 let agents = lock_poison_guard(&state.running_agents);
                 if !agents.contains_key(&id) {
@@ -1869,6 +2432,7 @@ fn checkpoint_messages_to_store(
                     "id": tid,
                 }));
             }
+            let events = oz_core_types::event::compact_stream_events(&events);
             let mut msg = serde_json::json!({
                 "role": "assistant",
                 "content": text,
@@ -1919,8 +2483,58 @@ pub fn delete_session(
     if lock_poison_guard(&state.running_agents).contains_key(&id) {
         return Err("Session is running; stop the agent before deleting".to_string());
     }
+    let working_dir = lock_poison_guard(&state.sessions)
+        .get(&id)
+        .map(|e| e.working_dir.clone())
+        .unwrap_or(None);
     lock_poison_guard(&state.sessions).delete(&id);
-    Ok(serde_json::json!({"status":"ok"}))
+    // Reclaim the session's checkpoint + WAL files. Deleting a session used
+    // to leave them behind forever (round5 P0-2).
+    let dirs = crate::checkpoint_dirs_for(&working_dir);
+    let mut removed = 0usize;
+    for d in &dirs {
+        removed += oz_core::checkpoint::purge_session_checkpoints(d, &id);
+    }
+    if removed > 0 {
+        tracing::info!("[sessions] delete {id}: reclaimed {removed} checkpoint file(s)");
+    }
+    Ok(serde_json::json!({"status":"ok", "reclaimed_files": removed}))
+}
+
+/// Keep the most recent `keep` `compact_removed_*.json` dumps and at most
+/// `max_bytes` in total.
+///
+/// The dump exists so a bad compression can be inspected by hand, but each
+/// one is a whole removed window (tool results, sometimes inline images) and
+/// nothing ever deleted them — an unbounded writer added in the same round
+/// that bounded checkpoints (review findings C-F4 / D-8).
+fn rotate_compact_dumps(dir: &std::path::Path, keep: usize, max_bytes: u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut dumps: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.starts_with("compact_removed_") || !name.ends_with(".json") {
+                return None;
+            }
+            let meta = e.metadata().ok()?;
+            Some((meta.modified().ok()?, meta.len(), e.path()))
+        })
+        .collect();
+    // Newest first.
+    dumps.sort_by_key(|d| std::cmp::Reverse(d.0));
+    let mut total = 0u64;
+    for (i, (_, size, path)) in dumps.iter().enumerate() {
+        total = total.saturating_add(*size);
+        if i >= keep || total > max_bytes {
+            match std::fs::remove_file(path) {
+                Ok(()) => debug_log(&format!("compact: rotated out {}", path.display())),
+                Err(e) => tracing::warn!("compact: failed to rotate {}: {e}", path.display()),
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -1934,15 +2548,17 @@ pub async fn stop_session(
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
     let state = state.inner().clone();
-    if lock_poison_guard(&state.sessions)
-        .get(&id)
-        .map(|e| e.status != SessionStatus::Running)
-        .unwrap_or(false)
-    {
-        return Ok(serde_json::json!({"status": "already_stopped"}));
-    }
+    // Always signal. The old early-return on `status != Running` made Stop a
+    // no-op in exactly the case that mattered: a session whose stored status
+    // had been flipped to Stopped (ghost flip after 30 minutes without a
+    // persisted message) while its agent was still executing. `stop_session`
+    // also has to work as an "abort whatever is running under this id" verb.
+    let was_running = lock_poison_guard(&state.running_agents).contains_key(&id)
+        || lock_poison_guard(&state.detached_agents).contains_key(&id);
     stop_running_agent(&id, &state).await;
-    Ok(serde_json::json!({"status": "ok"}))
+    Ok(serde_json::json!({
+        "status": if was_running { "ok" } else { "signalled" },
+    }))
 }
 
 /// Hard cap on user-supplied message bodies accepted over IPC — a webview
@@ -2269,8 +2885,15 @@ pub(crate) fn start_reminder_run(state: &Arc<AppState>, app: &AppHandle, session
         let inner_state = state_clone.clone();
         let inner_app = app_clone.clone();
         let inner = tokio::spawn(async move {
-            runner::run_agent_for_session(&inner_app, &inner_state, &inner_session, None, false)
-                .await
+            runner::run_agent_for_session(
+                &inner_app,
+                &inner_state,
+                &inner_session,
+                None,
+                false,
+                None,
+            )
+            .await
         });
         match inner.await {
             Ok(Ok(())) => {}
@@ -2329,7 +2952,12 @@ async fn stop_running_agent(session_id: &str, state: &Arc<AppState>) {
             sig.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
-    // Wait up to 10s for graceful exit via stop_signal
+    // Wait up to 10s for graceful exit via stop_signal. With the tool-level
+    // stop poll fixed (agent_loop), an in-flight tool now returns
+    // "interrupted by user stop" within ~100ms, so this window is normally
+    // enough. If it is not, we still detach — the task keeps unwinding on
+    // its own and a new run aborts it — but we say so loudly instead of
+    // pretending the session stopped.
     for _ in 0..100 {
         {
             let agents = lock_poison_guard(&state.running_agents);
@@ -2339,7 +2967,7 @@ async fn stop_running_agent(session_id: &str, state: &Arc<AppState>) {
         } // MutexGuard dropped before await
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    // Still running after 10s — detach, don't abort.
+    // Still running after 10s — detach, don't abort mid-write.
     // The task will finish naturally when stop_signal takes effect.
     // Move the handle to detached_agents: the task keeps running, but a
     // new run for this session will abort it (see abort_detached_agent)
@@ -2347,6 +2975,10 @@ async fn stop_running_agent(session_id: &str, state: &Arc<AppState>) {
     let handle = lock_poison_guard(&state.running_agents).remove(session_id);
     if let Some(handle) = handle {
         lock_poison_guard(&state.detached_agents).insert(session_id.to_string(), handle);
+        tracing::warn!(
+            "[stop] session={session_id} did not acknowledge stop within 10s; \
+             detached (still finishing — not aborted to avoid a half-written file)"
+        );
         debug_log(&format!(
             "stop_running_agent: detaching slow agent session={}",
             session_id
@@ -2407,6 +3039,7 @@ pub async fn send_message(
     session_id: String,
     session_name: Option<String>,
     model_name: Option<String>,
+    reasoning_effort: Option<String>,
     app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SendMessageResponse, String> {
@@ -2455,6 +3088,7 @@ pub async fn send_message(
     let app_clone = app_handle.clone();
     let session_id_clone = session_id.clone();
     let model_name_clone = model_name.clone();
+    let reasoning_effort_clone = reasoning_effort.clone();
 
     abort_detached_agent(&session_id, &state);
 
@@ -2485,6 +3119,7 @@ pub async fn send_message(
         let inner_state = state_clone.clone();
         let inner_app = app_clone.clone();
         let inner_model = model_name_clone.clone();
+        let inner_effort = reasoning_effort_clone.clone();
         let inner = tokio::spawn(async move {
             runner::run_agent_for_session(
                 &inner_app,
@@ -2492,6 +3127,7 @@ pub async fn send_message(
                 &inner_session,
                 inner_model.as_deref(),
                 false,
+                inner_effort.as_deref(),
             )
             .await
         });
@@ -2580,7 +3216,7 @@ pub async fn regenerate(
             let app = app_clone.clone();
             let state = state_clone.clone();
             let sid = sid.clone();
-            async move { runner::run_agent_for_session(&app, &state, &sid, None, false).await }
+            async move { runner::run_agent_for_session(&app, &state, &sid, None, false, None).await }
         });
         match inner.await {
             Ok(Ok(())) => {}
@@ -2678,7 +3314,8 @@ pub async fn resume_session(
             let sid = sid.clone();
             let model = model_name.clone();
             async move {
-                runner::run_agent_for_session(&app, &state, &sid, model.as_deref(), true).await
+                runner::run_agent_for_session(&app, &state, &sid, model.as_deref(), true, None)
+                    .await
             }
         });
         match inner.await {
@@ -2820,12 +3457,8 @@ pub async fn compress_session(
     let saved_chars = compaction.saved_chars();
     let saved_pct = compaction.saved_pct();
     let messages_removed = compaction.removed.len();
-    let metrics = oz_core::compress::CompressionMetrics::compute(
-        before_chars,
-        after_chars,
-        before,
-        after,
-    );
+    let metrics =
+        oz_core::compress::CompressionMetrics::compute(before_chars, after_chars, before, after);
     let template_summary = oz_core::compress::build_compression_summary(&removed_json, "");
 
     let lang = lock_poison_guard(&state.locale).clone();
@@ -2842,14 +3475,48 @@ pub async fn compress_session(
         None
     };
 
-    if let Some((ref summary, _)) = llm_summary {
+    // The removed window is already gone from the store (deleted above), so
+    // whatever we write here is the ONLY record of it. Two rules:
+    //   1. never leave the store without a summary — when the LLM summary is
+    //      unavailable (small local model, gateway timeout, 600s budget
+    //      exhausted) fall back to the deterministic template instead of
+    //      silently dropping the whole window (round5 P0-9);
+    //   2. keep a copy of the removed messages on disk so a bad compression
+    //      can be inspected/recovered by hand.
+    if saved_chars > 0 {
+        let (summary_text, used_llm) = match llm_summary {
+            Some((ref s, _)) if !s.trim().is_empty() => (s.clone(), true),
+            _ => (template_summary.clone(), false),
+        };
+        let dump_dir = crate::data_dir().join("openzen");
+        let _ = std::fs::create_dir_all(&dump_dir);
+        {
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let path = dump_dir.join(format!("compact_removed_{stamp}.json"));
+            if let Ok(json) = serde_json::to_string_pretty(&removed_json) {
+                match std::fs::write(&path, json) {
+                    Ok(()) => debug_log(&format!(
+                        "compact: removed window dumped to {} ({} messages)",
+                        path.display(),
+                        removed_json.len()
+                    )),
+                    Err(e) => tracing::warn!("compact: failed to dump removed window: {e}"),
+                }
+            }
+            rotate_compact_dumps(&dump_dir, 3, 20 * 1024 * 1024);
+        }
+        let header = if used_llm {
+            "[Compression summary]"
+        } else {
+            "[Compression summary (template — LLM summary unavailable)]"
+        };
         let mut store = lock_poison_guard(&state.sessions);
         if let Some(entry) = store.get_mut(&id) {
             entry.messages.insert(
                 0,
                 serde_json::json!({
                     "role": "system",
-                    "content": format!("[Compression summary]: {summary}"),
+                    "content": format!("{header}: {summary_text}"),
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 }),
             );
@@ -2942,8 +3609,9 @@ fn resolve_entry(
 ///   2. `summary_model` from mykey.toml (the legacy behavior, kept for
 ///      callers that pass no model);
 ///   3. `default_session`.
-/// Returns (summary, model label) or None when nothing resolves / the call
-/// fails, in which case the caller keeps the deterministic template.
+///
+/// Returns `(summary, model label)`, or `None` when nothing resolves or the
+/// call fails — in which case the caller keeps the deterministic template.
 async fn generate_compact_summary(
     state: &AppState,
     template: &str,
@@ -2988,9 +3656,7 @@ async fn generate_compact_summary(
     let result =
         tokio::time::timeout(std::time::Duration::from_secs(600), client.chat(&msgs, &[])).await;
     match result {
-        Ok(Ok(resp)) if !resp.content.is_empty() => {
-            Some((resp.content, sess_config.model.clone()))
-        }
+        Ok(Ok(resp)) if !resp.content.is_empty() => Some((resp.content, sess_config.model.clone())),
         _ => None,
     }
 }
@@ -3378,15 +4044,40 @@ mod tests {
         let sid = "s1";
         // Future + run-scoped + normal finish → survives (this is the
         // periodic task; dropping it was the bug).
-        assert!(reminder_survives_run_end(&reminder(sid, now + 300_000, false), sid, now, false));
+        assert!(reminder_survives_run_end(
+            &reminder(sid, now + 300_000, false),
+            sid,
+            now,
+            false
+        ));
         // Overdue leftover of a finished run → dropped (2026-09-03 rule).
-        assert!(!reminder_survives_run_end(&reminder(sid, now - 1, false), sid, now, false));
+        assert!(!reminder_survives_run_end(
+            &reminder(sid, now - 1, false),
+            sid,
+            now,
+            false
+        ));
         // User pressed Stop / run failed → the whole schedule dies.
-        assert!(!reminder_survives_run_end(&reminder(sid, now + 300_000, false), sid, now, true));
+        assert!(!reminder_survives_run_end(
+            &reminder(sid, now + 300_000, false),
+            sid,
+            now,
+            true
+        ));
         // Durable reminders always survive.
-        assert!(reminder_survives_run_end(&reminder(sid, now - 1, true), sid, now, true));
+        assert!(reminder_survives_run_end(
+            &reminder(sid, now - 1, true),
+            sid,
+            now,
+            true
+        ));
         // Another session's reminders are never touched here.
-        assert!(reminder_survives_run_end(&reminder("other", now - 1, false), sid, now, true));
+        assert!(reminder_survives_run_end(
+            &reminder("other", now - 1, false),
+            sid,
+            now,
+            true
+        ));
     }
 
     fn mig_table(body: &str) -> toml::Table {
@@ -3463,13 +4154,20 @@ model = "m3"
         let providers = table["providers"].as_table().unwrap();
         assert_eq!(providers.len(), 1, "only the duplicated pair merges");
         let pid = providers.keys().next().unwrap();
-        assert_eq!(providers[pid]["apibase"].as_str(), Some("http://127.0.0.1:8000/v1"));
+        assert_eq!(
+            providers[pid]["apibase"].as_str(),
+            Some("http://127.0.0.1:8000/v1")
+        );
 
         let a = table["a"].as_table().unwrap();
         assert_eq!(a["provider"].as_str().unwrap(), pid, "entry gains the ref");
         assert!(a.get("apibase").is_none() && a.get("apikey").is_none());
         assert_eq!(a["model"].as_str(), Some("m1"));
-        assert_eq!(a["context_win"].as_integer(), Some(256000), "private fields kept");
+        assert_eq!(
+            a["context_win"].as_integer(),
+            Some(256000),
+            "private fields kept"
+        );
         assert_eq!(a["max_tokens"].as_integer(), Some(4096));
 
         let b = table["b"].as_table().unwrap();
@@ -3480,7 +4178,11 @@ model = "m3"
         assert!(c.get("provider").is_none());
         assert_eq!(c["apibase"].as_str(), Some("http://other:9000/v1"));
 
-        assert_eq!(table["default_session"].as_str(), Some("a"), "names unchanged");
+        assert_eq!(
+            table["default_session"].as_str(),
+            Some("a"),
+            "names unchanged"
+        );
     }
 
     #[test]

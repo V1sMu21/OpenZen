@@ -21,7 +21,8 @@ use oz_tools::registry::ToolRegistry;
 use tauri::{AppHandle, Emitter};
 
 use crate::{
-    data_dir, debug_log, home_dir, load_system_prompt, lock_poison_guard, tauri_ctx, AppState,
+    data_dir, debug_log, default_workspace_dir, home_dir, load_system_prompt, lock_poison_guard,
+    tauri_ctx, AppState,
 };
 
 /// Truncate a string to at most `max` chars (boundary-safe) for use in
@@ -85,14 +86,22 @@ impl McpMemoryDistiller {
 struct ErmeMemoryDistiller {
     store: std::sync::Arc<entropy_memory_engine::memory_store::MemoryStore>,
     harness_dir: Option<std::path::PathBuf>,
+    /// `project:<id>` scope stamped on every fact this distiller writes, so
+    /// recall can be filtered per project (round5 P1-11).
+    scope: Vec<String>,
 }
 
 impl ErmeMemoryDistiller {
     fn new(
         store: std::sync::Arc<entropy_memory_engine::memory_store::MemoryStore>,
         harness_dir: Option<std::path::PathBuf>,
+        scope: Vec<String>,
     ) -> Self {
-        ErmeMemoryDistiller { store, harness_dir }
+        ErmeMemoryDistiller {
+            store,
+            harness_dir,
+            scope,
+        }
     }
 }
 
@@ -141,10 +150,11 @@ impl oz_core::memory_job::MemoryDistiller for ErmeMemoryDistiller {
     async fn distill(&self, session_id: &str, transcript: &str) -> Result<usize, String> {
         let store = std::sync::Arc::clone(&self.store);
         let harness_dir = self.harness_dir.clone();
+        let scope = self.scope.clone();
         let transcript = transcript.to_string();
         let result = tokio::task::spawn_blocking(move || -> Result<usize, String> {
             let mut stored = store
-                .distill_and_store(&transcript)
+                .distill_and_store_scoped(&transcript, &scope)
                 .map_err(|e| e.to_string())?;
             if let Some(dir) = &harness_dir {
                 stored += ingest_harness_entries(&store, dir);
@@ -377,6 +387,7 @@ pub async fn run_agent_for_session(
     session_id: &str,
     model_name: Option<&str>,
     resume: bool,
+    reasoning_effort: Option<&str>,
 ) -> anyhow::Result<()> {
     // Mark user activity so the ERME idle soul cycle yields while the
     // user is actively conversing (it would otherwise compete for
@@ -407,6 +418,11 @@ pub async fn run_agent_for_session(
         .get(session_name)
         .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found"))?
         .clone();
+    // Per-message thinking-dial override from the input box. `None` keeps
+    // whatever mykey.toml configured for this model.
+    if let Some(effort) = reasoning_effort {
+        sess_config.reasoning_effort = Some(effort.to_string());
+    }
     // Stable conversation tag for provider session-routing headers
     // (opencode.ai x-opencode-session): one OpenZen conversation = one
     // gateway session, so routing + prompt cache survive across runs.
@@ -507,11 +523,15 @@ pub async fn run_agent_for_session(
     let mut client = oz_llm::NativeToolClient::new(backend);
 
     // Resolve working directory from session → project → fallback.
-    // Priority: session.working_dir > project.root_path > home_dir.
+    // Priority: session.working_dir > project.root_path > data-root workspace.
+    let session_project_id = {
+        let store = lock_poison_guard(&state.sessions);
+        store.get(session_id).and_then(|e| e.project_id.clone())
+    };
     let (project_root, project_ga_dir) = {
         let store = lock_poison_guard(&state.sessions);
         let sess_working_dir = store.get(session_id).and_then(|e| e.working_dir.clone());
-        let pid = store.get(session_id).and_then(|e| e.project_id.clone());
+        let pid = session_project_id.clone();
         drop(store);
         // Use session's stored working_dir if available (eagerly resolved at creation)
         if let Some(ref wd) = sess_working_dir {
@@ -539,16 +559,16 @@ pub async fn run_agent_for_session(
                 (root, ga)
             } else {
                 debug_log(&format!(
-                    "run_agent: session={} has project_id={} but project not found among {} projects, using home_dir",
+                    "run_agent: session={} has project_id={} but project not found among {} projects, using data-root workspace",
                     session_id, pid, project_count
                 ));
-                let root = home_dir();
+                let root = default_workspace_dir();
                 (root.clone(), root.join("openzen"))
             }
         } else {
-            let root = home_dir();
+            let root = default_workspace_dir();
             debug_log(&format!(
-                "run_agent: session={} has no project_id or working_dir, using home_dir={}",
+                "run_agent: session={} has no project_id or working_dir, using data-root workspace={}",
                 session_id,
                 root.display()
             ));
@@ -558,8 +578,31 @@ pub async fn run_agent_for_session(
     ctx.working_dir = project_root.to_string_lossy().to_string();
     let _ = std::fs::create_dir_all(&project_ga_dir);
 
+    // Memory scope for this session: `project:<id>` when the session belongs
+    // to a project, otherwise a stable hash of the working directory. Used to
+    // tag writes and to filter recall (round5 P1-11: memories from unrelated
+    // projects used to share one pool).
+    let memory_scope: Vec<String> = {
+        let tag = match session_project_id.as_deref() {
+            Some(pid) if !pid.is_empty() => format!("project:{pid}"),
+            _ => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(&project_root.to_string_lossy().to_string(), &mut hasher);
+                format!("workspace:{:x}", std::hash::Hasher::finish(&hasher))
+            }
+        };
+        vec![tag]
+    };
+
     let memory = MemorySystem::new(&project_root, &ctx.lang);
-    let memory_context = if cfg.memory_backend == "erme" {
+    // `cfg.memory_backend` is the startup value; the runtime switch in the
+    // soul tab flips `state.memory_enabled` so turning memory off takes
+    // effect on the NEXT message instead of the next app start.
+    let memory_on = cfg.memory_backend == "erme"
+        && state
+            .memory_enabled
+            .load(std::sync::atomic::Ordering::SeqCst);
+    let memory_context = if memory_on {
         // ERME semantic recall: inject top-k memories relevant to the user
         // message instead of the legacy full-text scan.
         match state.erme() {
@@ -595,13 +638,47 @@ pub async fn run_agent_for_session(
                 // The recall task consumes `query`; keep a copy for the FTS
                 // fallback below.
                 let query_for_fts = query.clone();
-                let recalls = tokio::task::spawn_blocking(move || store.recall_by_text(&query, 5))
-                    .await
-                    .unwrap_or_else(|e| {
-                        debug_log(&format!("ERME recall task failed: {e}"));
-                        Ok(Vec::new())
-                    })
-                    .unwrap_or_default();
+                let scope_for_recall = memory_scope.clone();
+                let recalls = tokio::task::spawn_blocking(move || {
+                    // Recall with a project scope first: the pool is shared
+                    // by every project, and unfiltered recall returned
+                    // unrelated work (round5 P1-11).
+                    let scoped = {
+                        let mut q = entropy_memory_engine::core::Query::by_text(&query);
+                        q.tags_include = Some(scope_for_recall.clone());
+                        q.top_k = 8;
+                        store.recall(&q, 8)
+                    };
+                    let (mut hits, scoped_used) = match scoped {
+                        Ok(h) if !h.is_empty() => (h, true),
+                        _ => (store.recall_by_text(&query, 8).unwrap_or_default(), false),
+                    };
+                    if !scoped_used {
+                        debug_log(
+                            "ERME recall: no memory carries this project's scope tag yet \
+                             (pre-migration entries) — using the global pool",
+                        );
+                    }
+                    // Quality floor. Real recall distances were 0.85–0.92
+                    // (near-orthogonal) and all five were injected anyway.
+                    // Distances here are cosine-style (lower = closer).
+                    const MAX_RECALL_DIST: f32 = 0.65;
+                    let before = hits.len();
+                    hits.retain(|(_, dist, _)| *dist <= MAX_RECALL_DIST);
+                    if before != hits.len() {
+                        debug_log(&format!(
+                            "ERME recall dropped {} of {before} hits above dist {MAX_RECALL_DIST}",
+                            before - hits.len()
+                        ));
+                    }
+                    Ok::<_, entropy_memory_engine::core::MemoryError>(hits)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    debug_log(&format!("ERME recall task failed: {e}"));
+                    Ok(Vec::new())
+                })
+                .unwrap_or_default();
                 if recalls.is_empty() {
                     // FTS fallback on the ERME read path: the semantic layer
                     // (hash embeddings) can miss while trigram keyword search
@@ -610,10 +687,33 @@ pub async fn run_agent_for_session(
                     let fts_context: Option<String> = {
                         async fn fts_fallback(state: &AppState, query: &str) -> Option<String> {
                             let dir = state.skill_mcp_dir.as_deref()?;
-                            let fts = oz_memory::MemoryFts::open(
-                                &std::path::Path::new(dir).join("memory_fts.sqlite"),
-                            )
-                            .ok()?;
+                            let db = std::path::Path::new(dir).join("memory_fts.sqlite");
+                            // Freshness gate: the real index was 40 days stale
+                            // (10 rows, mtime 2026-09-11), so the fallback kept
+                            // re-injecting the same old rows AND masked the
+                            // "recall returned 0" signal (round5 P1-11).
+                            const MAX_FTS_AGE_SECS: u64 = 7 * 24 * 3600;
+                            let age_secs = std::fs::metadata(&db)
+                                .and_then(|m| m.modified())
+                                .ok()
+                                .and_then(|t| t.elapsed().ok())
+                                .map(|d| d.as_secs());
+                            match age_secs {
+                                Some(age) if age > MAX_FTS_AGE_SECS => {
+                                    debug_log(&format!(
+                                        "FTS fallback skipped: index is {} days old (> {} days)",
+                                        age / 86400,
+                                        MAX_FTS_AGE_SECS / 86400
+                                    ));
+                                    return None;
+                                }
+                                None => {
+                                    debug_log("FTS fallback skipped: index missing");
+                                    return None;
+                                }
+                                _ => {}
+                            }
+                            let fts = oz_memory::MemoryFts::open(&db).ok()?;
                             let q = query.to_string();
                             let hits = tokio::task::spawn_blocking(move || fts.search(&q, 5))
                                 .await
@@ -755,9 +855,14 @@ pub async fn run_agent_for_session(
     // carries volatile mood/energy/focus, so putting it first (the old
     // behavior) invalidated the cache from byte 0 on every reflection
     // tick. Now the stable prefix stays cacheable across turns.
-    if cfg.memory_backend == "erme" {
+    if memory_on {
         if let Some(runtime) = state.erme() {
-            let prefix = runtime.injector.build_system_prefix();
+            // Ranked against the CURRENT message: injecting the three
+            // oldest facts meant three opening pleasantries regardless of
+            // topic (round5 P0-5 (2)).
+            let prefix = runtime
+                .injector
+                .build_system_prefix_with_query(&user_message);
             if !prefix.is_empty() {
                 system_prompt.push_str(&prefix);
             }
@@ -847,21 +952,21 @@ pub async fn run_agent_for_session(
     // Background memory distillation (U3): a worker drains the job queue so
     // session distillation never blocks the agent loop. The distiller is
     // selected by memory_backend: ERME semantic store vs legacy skill/MCP.
-    let distiller: std::sync::Arc<dyn oz_core::memory_job::MemoryDistiller> =
-        if cfg.memory_backend == "erme" {
-            match state.erme() {
-                Some(runtime) => std::sync::Arc::new(ErmeMemoryDistiller::new(
-                    std::sync::Arc::clone(&runtime.store),
-                    ctx.harness_dir.as_ref().map(std::path::PathBuf::from),
-                )),
-                None => {
-                    debug_log("ERME store unavailable; using MCP distiller for memory jobs");
-                    std::sync::Arc::new(McpMemoryDistiller::new())
-                }
+    let distiller: std::sync::Arc<dyn oz_core::memory_job::MemoryDistiller> = if memory_on {
+        match state.erme() {
+            Some(runtime) => std::sync::Arc::new(ErmeMemoryDistiller::new(
+                std::sync::Arc::clone(&runtime.store),
+                ctx.harness_dir.as_ref().map(std::path::PathBuf::from),
+                memory_scope.clone(),
+            )),
+            None => {
+                debug_log("ERME store unavailable; using MCP distiller for memory jobs");
+                std::sync::Arc::new(McpMemoryDistiller::new())
             }
-        } else {
-            std::sync::Arc::new(McpMemoryDistiller::new())
-        };
+        }
+    } else {
+        std::sync::Arc::new(McpMemoryDistiller::new())
+    };
     let memory_scheduler =
         std::sync::Arc::new(oz_core::memory_job::MemoryJobScheduler::new(distiller));
     // The 30s drain tick is aborted when the run finishes — previously it
@@ -960,6 +1065,85 @@ pub async fn run_agent_for_session(
         }
     }
 
+    // Quality-gate model routing (round5 P2-25).
+    //
+    // The independent review and the assertion synthesis used to ride on the
+    // small summary model (the author's machine used a 230M model for both),
+    // which is why 33 reviews produced 0 failures. Resolution order:
+    //   1. explicit `review_model` in mykey.toml (by section or model name);
+    //   2. otherwise the first NON-local (capable) model in the config;
+    //   3. otherwise the summary model, and the outcome records exactly which
+    //      one ran so "the reviewer was a 230M model" is visible instead of
+    //      being an invisible constant.
+    // When the chosen reviewer differs from the summary model we route the
+    // review through the MAIN client (`review_use_summary = false`) — the main
+    // client is the capable model, and the loop then reports its name.
+    let review_pick: Option<(String, String)> = {
+        let by_name = |name: &str| -> Option<(String, String)> {
+            cfg.get(name)
+                .map(|sc| (name.to_string(), sc.model.clone()))
+                .or_else(|| {
+                    cfg.sessions
+                        .iter()
+                        .find(|(_, sc)| sc.model == name)
+                        .map(|(n, sc)| (n.clone(), sc.model.clone()))
+                })
+        };
+        let chosen = cfg
+            .review_model
+            .as_deref()
+            .and_then(|name| {
+                let hit = by_name(name);
+                if hit.is_none() {
+                    debug_log(&format!(
+                        "WARNING: review_model '{name}' not found in mykey.toml; \
+                         falling back to a capable local model"
+                    ));
+                }
+                hit
+            })
+            .or_else(|| {
+                cfg.sessions
+                    .iter()
+                    .find(|(_, sc)| !crate::is_local_deploy(&sc.apibase))
+                    .map(|(n, sc)| (n.clone(), sc.model.clone()))
+            });
+        chosen
+    };
+    // Which model the MAIN client runs, for the quality telemetry: the review
+    // may execute on the main client, and the outcome must name it (review B5).
+    loop_config.main_model_name = Some(sess_config.model.clone());
+
+    match &review_pick {
+        Some((section, model)) => {
+            let same_as_summary = loop_config
+                .summary_model_name
+                .as_deref()
+                .map(|s| s == model.as_str())
+                .unwrap_or(false);
+            debug_log(&format!(
+                "quality gate reviewer: {section} ({model}); via {}",
+                if same_as_summary {
+                    "summary model"
+                } else {
+                    "main client"
+                }
+            ));
+            loop_config.review_model = Some(model.clone());
+            if !same_as_summary {
+                // A different model than the summarizer: the summary channel
+                // cannot reach it, so use the main client for the review.
+                loop_config.review_use_summary = false;
+            }
+        }
+        None => {
+            debug_log(
+                "quality gate reviewer: none configured — the outcome will record \
+                 review_model=summary/main so the report can show what graded it",
+            );
+        }
+    }
+
     let trust_store = oz_safety::TrustStore::new(Some(project_ga_dir.join("trust.json")));
     let mut guard = oz_safety::SafetyGuard::new(trust_store);
     // B7a: project trust level from {data_dir}/trust.json gates coarse
@@ -1034,7 +1218,53 @@ pub async fn run_agent_for_session(
         let start_for_collector = start_ms.clone();
         let lang_for_collector = ctx.lang.clone();
         tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
+            // ── Outgoing event batching ──
+            // One IPC per token meant thousands of `emit`s (each with two
+            // JSON serializations) for a single streamed reply, plus two
+            // JSON.parse calls on the frontend. Events are now coalesced for
+            // at most BATCH_MS (or BATCH_MAX entries) and delivered as one
+            // `protocol_v1_batch` envelope; 16 ms keeps the UI at ~60fps
+            // while cutting the IPC count by one to two orders of magnitude
+            // (round5 P1-5).
+            const BATCH_MS: u64 = 16;
+            const BATCH_MAX: usize = 64;
+            let mut pending: Vec<serde_json::Value> = Vec::new();
+            let mut flush_at =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(BATCH_MS);
+            macro_rules! emit_pending {
+                () => {
+                    if !pending.is_empty() {
+                        let batch = std::mem::take(&mut pending);
+                        let payload = serde_json::json!({
+                            "type": "protocol_v1_batch",
+                            "events": batch,
+                        });
+                        let sse_ev = SseEvent::protocol_v1_json(&sid, &payload);
+                        let _ = app_for_collector.emit(
+                            "sse_event",
+                            serde_json::to_value(&sse_ev).unwrap_or_default(),
+                        );
+                    }
+                };
+            }
+            macro_rules! reset_deadline {
+                () => {
+                    flush_at =
+                        tokio::time::Instant::now() + std::time::Duration::from_millis(BATCH_MS);
+                };
+            }
+            loop {
+                let event = tokio::select! {
+                    maybe = event_rx.recv() => match maybe {
+                        Some(e) => e,
+                        None => break,
+                    },
+                    _ = tokio::time::sleep_until(flush_at) => {
+                        emit_pending!();
+                        reset_deadline!();
+                        continue;
+                    }
+                };
                 let event = truncate_stream_event(event);
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1087,14 +1317,16 @@ pub async fn run_agent_for_session(
 
                 if !matches!(event, oz_core_types::StreamEvent::ToolCallReady { .. }) {
                     if let Ok(value) = serde_json::to_value(&event) {
-                        let sse_ev = SseEvent::protocol_v1_json(&sid, &value);
-                        let _ = app_for_collector.emit(
-                            "sse_event",
-                            serde_json::to_value(&sse_ev).unwrap_or_default(),
-                        );
+                        pending.push(value);
                     }
                 }
+                if pending.len() >= BATCH_MAX {
+                    emit_pending!();
+                    reset_deadline!();
+                }
             }
+            // Stream ended: deliver whatever is still buffered.
+            emit_pending!();
         })
     };
 
@@ -1123,8 +1355,38 @@ pub async fn run_agent_for_session(
     )
     .await;
 
-    // Drain any final memory jobs, then stop the 30s drain tick task.
-    memory_scheduler.drain().await;
+    // Consume the L0 reflection queue NOW, not at the next idle tick.
+    //
+    // `process_pending()` was only ever called from the idle loop, and that
+    // loop skips entirely whenever the user spoke within the last
+    // `idle_interval_secs` — so during hours of continuous use the queue only
+    // grew and the portrait never moved. That is the mechanism behind "it
+    // gets less useful the more I use it" (round5 P0-5 (4)).
+    if let Some(runtime) = state.erme() {
+        let drained = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.reflection.process_pending()
+        }))
+        .unwrap_or(0);
+        if drained > 0 {
+            debug_log(&format!(
+                "ERME reflection consumed {drained} pending events at run end"
+            ));
+        }
+    }
+
+    // Finish the remaining memory jobs OFF the completion path. `drain()`
+    // runs up to 100 distillation cycles (each a full ERME distill, possibly
+    // through a local model), and it used to run before FinishMessage and
+    // before the assistant message was persisted — so the UI kept showing
+    // "running" for as long as the queue was deep, on a run that had already
+    // finished (round5 P2-36). The scheduler is an Arc, so the work outlives
+    // this function safely.
+    {
+        let scheduler = std::sync::Arc::clone(&memory_scheduler);
+        tokio::spawn(async move {
+            scheduler.drain().await;
+        });
+    }
     drop(memory_tick_handle);
     {
         let err_msg = outcome
@@ -1247,8 +1509,7 @@ pub async fn run_agent_for_session(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                let rel_now = now_ms
-                    .saturating_sub(lock_poison_guard(&start_ms).unwrap_or(now_ms));
+                let rel_now = now_ms.saturating_sub(lock_poison_guard(&start_ms).unwrap_or(now_ms));
                 events
                     .iter()
                     .enumerate()
@@ -1267,6 +1528,13 @@ pub async fn run_agent_for_session(
                     })
                     .collect()
             };
+            // Compact before persisting: the raw log duplicates content /
+            // thinking / tool_use_blocks / tool_results and used to make
+            // sessions.json 93 MB for under a thousand messages (round5
+            // P0-1). Rendering is unaffected — every consumer rebuilds the
+            // same bubbles from the surviving skeleton.
+            let stream_events_json =
+                oz_core_types::event::compact_stream_events(&stream_events_json);
             if !stream_events_json.is_empty() {
                 msg["streamEvents"] = serde_json::Value::Array(stream_events_json);
             }
@@ -1304,6 +1572,13 @@ pub async fn run_agent_for_session(
                 }
                 if let Some(ct) = data.get("context_tokens_est").and_then(|v| v.as_u64()) {
                     msg["contextTokens"] = serde_json::Value::Number(ct.into());
+                }
+                // Persist the quality verdict WITH the message. Without this
+                // the three-state badge lived only in the live event: reloading
+                // a session (or restarting the app) turned a reviewed delivery
+                // back into "not_run / 未验证" (review B9).
+                if let Some(q) = data.get("quality") {
+                    msg["quality"] = q.clone();
                 }
             }
 
@@ -1431,13 +1706,15 @@ pub async fn run_agent_for_session(
         .and_then(|d| d.get("context_tokens_est"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
-    let done_evt = SseEvent::done(
+    let quality_block = outcome.data.as_ref().and_then(|d| d.get("quality"));
+    let done_evt = SseEvent::done_with_quality(
         session_id,
         full_response.as_deref(),
         tokens_in,
         tokens_out,
         context_tokens,
         Some(&outcome.exit_reason),
+        quality_block,
     );
     let _ = app.emit(
         "sse_event",
