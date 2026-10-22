@@ -1,4 +1,88 @@
 
+## Unreleased
+
+### ⚙️ Miscellaneous Tasks
+
+- **release:** Publish only the tagged version's notes
+- **release:** Keep only bug fixes and features on the release page
+- **ci,ui:** Frontend type check gate, dependabot, a11y toggles; zero svelte-check errors
+- **ui:** Remove dead components (zero references)
+- **ci:** Drop dependabot config
+- **repo:** Keep development docs local and move published assets to assets/
+- **ci:** Restore a trustworthy release and test pipeline
+
+### ⚡ Performance
+
+- **tauri:** Initialize ERME on a background thread (first window no longer blocks)
+- **tauri,ci:** Excel parse on the blocking pool; bounded git diff; release gates
+
+### 🎨 Styling
+
+- Clippy needless-character-iteration
+- Apply rustfmt to the remaining drifted files
+
+### 🐛 Bug Fixes
+
+- **ui:** Paragraph wrapping keeps block markup intact; stream holds trailing newlines
+- **tools:** Close path-fence bypasses ($TMPDIR traversal, symlinks, unfenced grep/glob/ls)
+- **llm,quality:** Utility calls clear tools; unparseable reviews are unavailable, not passes
+- **browser:** Bound CDP requests, discover the real DevTools port, unique profile
+- **security:** Drop allow-same-origin from the srcdoc artifact iframe
+- **frontend:** Key the stream join cache by message id — no cross-session bleed
+- **llm:** Mixin failover re-arms after spring-back; desktop supports mixin
+- **daemon,platform:** Supervisor survives child races; health self-heals
+- **tauri:** Approvals reach a closed session window's fallback; window map cleaned on destroy
+- **tools:** SSRF checks resolve DNS; web_fetch streams with a byte cap
+- **core:** Verifier keyword boundaries + project-aware commands
+- **tui:** Handle the new ToolProgress event variant
+- **i18n:** Status words and folded-label go through $t (no hardcoded Chinese in en UI)
+- **ui:** Approval dialog a11y+Esc, live regions, side panel follows the session
+- **ui:** Status-color tokens; locale-aware timestamps
+- **sidepanel:** Unfreeze picker; keep panel across sessions
+- Code_run pipes, reminder wake, compaction, LLM retry notices
+- **webui:** Show user interventions where they were injected
+- **core:** Serialise tool-error envelopes as valid JSON
+- **llm:** Stop killing turns at the 10-minute stream mark
+- **core:** Truncate serialized args on char boundaries
+- **llm:** Recover leaked tool args so reply escapes thinking channel
+- **core:** Stop long-task stalls, storage growth and silent data loss
+- **memory:** Make the portrait tell the truth about the user
+- **quality:** Make the delivery gate able to fail
+- **ui:** Surface verification state and stop the confirms from failing silently
+- **ui:** Drop the stale tool heartbeat and keep the panel in sync
+- **ci:** Brace variables followed by multibyte text in release.sh
+- **ci:** Brace the variable followed by multibyte text in the smoke script
+- **ci:** Skip Finder automation when bundling the dmg
+
+### 📚 Documentation
+
+- **readme:** Lead with what it is, the demo and the download
+- **agents:** Record HTML-report output preference
+
+### 🚀 Features
+
+- **core:** ToolProgress heartbeat keeps long tool runs visible
+- **erme:** Chinese rule-based fact extraction; consolidation cadence gated to 12h
+- **erme:** Recall byte cap; index-health metrics surfaced in the UI
+- **core:** Bound the harness ledger (entry size + per-kind cap with eviction)
+- **soul:** Portrait correction loop — see and delete what the agent believes
+- **ui:** Session rename (F2 / double-click) and delete confirmation
+- **ui:** Keyboard navigation for the slash-command palette; Esc/F2 documented
+- **reminders:** Durable reminders survive the run and app restarts
+- **soul:** SoulCard — the companion presence surface with a return line
+- **quality:** Report rates, not just counts (attempts, pass/rework, coverage)
+- **pet:** Key-window focus handoff, walk-out farewell, new frames
+- **models:** Provider-centric config; running badge; wider panel
+- **ux:** Session-model /compact; quality-gate progress notice
+- **skill-mcp:** Multi-level tokenizer for skill/SOP matching [skip ci]
+- **tools:** Keyless search engines (Tavily, Firecrawl)
+- **chat:** Per-turn changed-files card with side-panel preview
+- **import:** Add ZCode/DSH session importer to desktop app
+- **tools:** Canonicalize model-emitted tool argument aliases
+
+### 🧪 Testing
+
+- **skill-mcp:** Make the matching perf bound release-only
 ## v0.2.2 (2026-09-19)
 
 ### ⚙️ Miscellaneous Tasks
