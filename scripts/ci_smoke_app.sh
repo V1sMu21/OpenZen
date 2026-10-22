@@ -48,7 +48,7 @@ echo "── ci_smoke_app: app=${APP} dist=${DIST}"
 if [[ -d "$APP" ]]; then
   pass "app bundle 存在：$APP"
 else
-  fail "app bundle 缺失：$APP（必须用 cargo tauri build 产出，裸 cargo build 不会生成）"
+  fail "app bundle 缺失：${APP}（必须用 cargo tauri build 产出，裸 cargo build 不会生成）"
 fi
 
 BIN="$APP/Contents/MacOS/openzen-tauri"
