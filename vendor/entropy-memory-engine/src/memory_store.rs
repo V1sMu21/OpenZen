@@ -234,12 +234,25 @@ impl MemoryStore {
     /// Returns the number of facts persisted; 0 when extraction yields nothing.
     /// Errors are returned as MemoryError (callers should log and continue).
     pub fn distill_and_store(&self, raw_text: &str) -> MemoryResult<usize> {
+        self.distill_and_store_scoped(raw_text, &[])
+    }
+
+    /// Same as [`Self::distill_and_store`], but stamps every extracted fact
+    /// with `tags` (OpenZen passes `project:<id>`).
+    ///
+    /// Without a scope tag the store was one global pool: the real
+    /// `erme_memory.bin` held shot003 pose reconstruction, a Jilin party
+    /// archive and Krea-2 LoRA training side by side, and every project saw
+    /// every other project's memories (round5 P1-11). `MemoryInput.tags` and
+    /// `Query.tags_include` already existed — nothing ever wrote a tag.
+    pub fn distill_and_store_scoped(&self, raw_text: &str, tags: &[String]) -> MemoryResult<usize> {
         let facts = self.consolidation.extract_from_interaction(raw_text);
         let mut stored = 0usize;
         for (subject, predicate, object, confidence) in facts {
-            let input =
+            let mut input =
                 MemoryInput::new(MemoryContent::Fact(Fact::new(subject, predicate, object)))
                     .with_importance(confidence.clamp(0.0, 1.0));
+            input.tags = tags.to_vec();
             self.store(input)?;
             stored += 1;
         }

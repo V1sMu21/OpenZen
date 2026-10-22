@@ -20,12 +20,21 @@ impl PromptInjector {
 
     /// 组装四段式系统前缀。
     pub fn build_system_prefix(&self) -> String {
+        self.build_system_prefix_with_query("")
+    }
+
+    /// Same, but the portrait segment is ranked against the CURRENT topic.
+    ///
+    /// Without a query the portrait injected the three OLDEST facts — real
+    /// data showed three opening pleasantries being injected while the user
+    /// was asking about an unrelated project (round5 P0-5 (2)).
+    pub fn build_system_prefix_with_query(&self, query: &str) -> String {
         let model = self.soul.read().unwrap();
         format!(
             "You are an AI with a persistent soul-model. Here is your current self-state:\n\n{}\n\n{}\n\n{}\n\n{}\n\n",
             segment_identity(&model),
             segment_narrative(&model),
-            segment_portrait(&model),
+            segment_portrait(&model, query),
             segment_directives(&model),
         )
     }
@@ -72,13 +81,16 @@ fn segment_narrative(model: &SoulModel) -> String {
 }
 
 /// 段3：画像与关系
-fn segment_portrait(model: &SoulModel) -> String {
+fn segment_portrait(model: &SoulModel, query: &str) -> String {
+    const PORTRAIT_FACTS: usize = 3;
     let mut parts = vec!["[Portrait]".to_string()];
     let self_line = model.self_portrait.summary_line();
     if !self_line.is_empty() {
         parts.push(format!("self: {}", self_line));
     }
-    let user_line = model.user_portrait.summary_line();
+    let user_line = model
+        .user_portrait
+        .summary_line_with_query(query, PORTRAIT_FACTS);
     if !user_line.is_empty() {
         parts.push(format!("user: {}", user_line));
     }

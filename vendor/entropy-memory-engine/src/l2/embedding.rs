@@ -275,7 +275,10 @@ impl MLXEmbedding {
 
         // Bounded wait: a child that stopped answering must never block recall
         // — and, through this mutex, every other embedder — forever.
-        let response = io.responses.recv_timeout(embed_reply_timeout()).map_err(|_| ())?;
+        let response = io
+            .responses
+            .recv_timeout(embed_reply_timeout())
+            .map_err(|_| ())?;
         let trimmed = response.trim();
         if trimmed.is_empty() || trimmed.starts_with("{\"error\"") {
             return Err(());
@@ -693,4 +696,3 @@ mod tests {
         assert_eq!(find_local_model(&dir, &roots), Some(dir));
     }
 }
-
