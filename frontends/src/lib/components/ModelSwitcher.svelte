@@ -6,6 +6,18 @@
   let models: ModelEntry[] = $state([]);
   let loading = $state(true);
   let switching = $state<string | null>(null);
+  let dialogEl: HTMLDivElement | undefined = $state();
+
+  // Focus management, same shape as ApprovalModal: a modal that opens
+  // without moving focus leaves the keyboard on the page behind it, so
+  // Escape/Tab act on the wrong element and screen readers never announce
+  // the dialog. Focus returns to the pill that opened it.
+  $effect(() => {
+    queueMicrotask(() => dialogEl?.focus());
+    return () => {
+      document.querySelector<HTMLElement>(".model-pill")?.focus();
+    };
+  });
 
   /** Provider-grouped view, first-appearance order; "" = standalone. */
   let groups = $derived.by(() => {
@@ -62,7 +74,14 @@
 <svelte:window onkeydown={onKeydown} />
 
 <div class="switcher-backdrop" onclick={onBackdropClick} role="presentation">
-  <div class="switcher-dialog" role="dialog" aria-modal="true" aria-labelledby="switcher-title">
+  <div
+    class="switcher-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="switcher-title"
+    tabindex="-1"
+    bind:this={dialogEl}
+  >
     <div class="switcher-header">
       <div class="switcher-title-block">
         <h2 class="switcher-title" id="switcher-title">{$t("model.title")}</h2>
@@ -174,8 +193,8 @@
   }
 
   .switcher-dialog {
-    background: var(--color-surface, #1a1a1c);
-    border: 1px solid var(--color-hairline, #2a2a2e);
+    background: var(--color-surface);
+    border: 1px solid var(--color-hairline);
     border-radius: 12px;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2);
     width: 100%;
@@ -193,7 +212,7 @@
     align-items: flex-start;
     gap: 12px;
     padding: 18px 18px 14px;
-    border-bottom: 1px solid var(--color-hairline, #2a2a2e);
+    border-bottom: 1px solid var(--color-hairline);
   }
 
   .switcher-title-block {
@@ -205,14 +224,14 @@
     margin: 0;
     font-size: 14px;
     font-weight: 600;
-    color: var(--color-ink, #e8e8ea);
+    color: var(--color-ink);
     line-height: 1.35;
   }
 
   .switcher-subtitle {
     margin: 3px 0 0;
     font-size: 12px;
-    color: var(--color-dim, #8a8a90);
+    color: var(--color-dim);
     line-height: 1.4;
   }
 
@@ -220,7 +239,7 @@
     flex-shrink: 0;
     background: transparent;
     border: none;
-    color: var(--color-dim, #8a8a90);
+    color: var(--color-dim);
     cursor: pointer;
     padding: 4px;
     border-radius: 4px;
@@ -231,8 +250,8 @@
   }
 
   .switcher-close:hover {
-    background: var(--color-hairline, #2a2a2e);
-    color: var(--color-ink, #e8e8ea);
+    background: var(--color-hairline);
+    color: var(--color-ink);
   }
 
   .switcher-body {
@@ -245,7 +264,7 @@
   .switcher-empty {
     text-align: center;
     padding: 32px 16px;
-    color: var(--color-dim, #8a8a90);
+    color: var(--color-dim);
     font-size: 13px;
   }
 
@@ -260,7 +279,7 @@
     font-size: 11px;
     padding: 1px 4px;
     border-radius: 3px;
-    background: var(--color-surface-soft, #15151a);
+    background: var(--color-surface-soft);
   }
 
   .switcher-list {
@@ -272,7 +291,7 @@
   .switcher-group-head {
     font-size: 10px;
     letter-spacing: 0.12em;
-    color: var(--color-dim, #8a8a90);
+    color: var(--color-dim);
     padding: 8px 12px 2px;
   }
 
@@ -282,8 +301,8 @@
     padding: 0 5px;
     margin-left: 4px;
     border-radius: 999px;
-    border: 1px solid var(--color-hairline, #2a2a2e);
-    color: var(--color-dim, #8a8a90);
+    border: 1px solid var(--color-hairline);
+    color: var(--color-dim);
     vertical-align: 1px;
   }
 
@@ -297,7 +316,7 @@
     border-radius: 8px;
     border: 1px solid transparent;
     background: transparent;
-    color: var(--color-ink, #e8e8ea);
+    color: var(--color-ink);
     cursor: pointer;
     text-align: left;
     font-family: inherit;
@@ -305,13 +324,13 @@
   }
 
   .switcher-item:hover:not(:disabled) {
-    background: var(--color-surface-soft, #15151a);
-    border-color: var(--color-hairline, #2a2a2e);
+    background: var(--color-surface-soft);
+    border-color: var(--color-hairline);
   }
 
   .switcher-item.active {
-    background: color-mix(in srgb, var(--color-primary, #81b5c7) 8%, transparent);
-    border-color: color-mix(in srgb, var(--color-primary, #81b5c7) 25%, transparent);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    border-color: color-mix(in srgb, var(--color-primary) 25%, transparent);
   }
 
   .switcher-item:disabled {
@@ -340,7 +359,7 @@
   .switcher-item-model {
     font-size: 11px;
     font-family: var(--font-mono);
-    color: var(--color-dim, #8a8a90);
+    color: var(--color-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -364,24 +383,24 @@
   }
 
   .switcher-item-provider.local {
-    background: color-mix(in srgb, var(--color-info, #5dade2) 15%, transparent);
-    color: var(--color-info, #5dade2);
+    background: color-mix(in srgb, var(--color-info) 15%, transparent);
+    color: var(--color-info);
   }
 
   .switcher-item-provider.online {
-    background: color-mix(in srgb, var(--color-accent, #81b5c7) 15%, transparent);
-    color: var(--color-accent, #81b5c7);
+    background: color-mix(in srgb, var(--color-accent) 15%, transparent);
+    color: var(--color-accent);
   }
 
   .switcher-item-ctx {
     font-size: 10px;
-    color: var(--color-dim, #8a8a90);
+    color: var(--color-dim);
     font-family: var(--font-mono);
   }
 
   .switcher-item-check {
     font-size: 14px;
-    color: var(--color-primary, #81b5c7);
+    color: var(--color-primary);
     font-weight: 600;
   }
 
@@ -389,7 +408,7 @@
     display: flex;
     justify-content: flex-end;
     padding: 12px 18px 14px;
-    border-top: 1px solid var(--color-hairline, #2a2a2e);
+    border-top: 1px solid var(--color-hairline);
   }
 
   .switcher-btn-secondary {
@@ -401,12 +420,12 @@
     cursor: pointer;
     transition: background 0.1s, color 0.1s, border-color 0.1s;
     background: transparent;
-    border: 1px solid var(--color-hairline, #2a2a2e);
-    color: var(--color-dim, #8a8a90);
+    border: 1px solid var(--color-hairline);
+    color: var(--color-dim);
   }
 
   .switcher-btn-secondary:hover {
-    border-color: var(--color-dim, #8a8a90);
-    color: var(--color-ink, #e8e8ea);
+    border-color: var(--color-dim);
+    color: var(--color-ink);
   }
 </style>

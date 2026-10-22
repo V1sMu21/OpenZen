@@ -33,6 +33,11 @@ export type ToolInvocationPart = {
   state: ToolInvocationState;
   result?: string;
   durationMs?: number;
+  /** Backend-authoritative elapsed seconds for a tool that is still running
+   *  (`tool_progress` heartbeat, one per 60s). While set, the card prefers it
+   *  over the locally measured time — a single long tool emits no other event,
+   *  so without it the UI can only say "running". */
+  liveElapsedSecs?: number;
 };
 
 export type UIMessagePart = TextPart | ReasoningPart | ToolInvocationPart | DataPart;
@@ -62,12 +67,10 @@ export type ProtocolV1Event =
   | { type: 'tool_input_delta'; tool_call_id: string; delta: string }
   | { type: 'tool_input_available'; tool_call_id: string; name: string; args: string }
   | { type: 'tool_output_available'; tool_call_id: string; name: string; output: string }
+  | { type: 'tool_progress'; tool_name: string; elapsed_secs: number }
   | { type: 'start_step' }
   | { type: 'finish_step' }
   | { type: 'finish_message'; stop_reason: string }
-  | { type: 'data_search_stage'; stage: string; query: string; count: number }
-  | { type: 'data_token_meter'; input: number; output: number; total: number; limit: number }
-  | { type: 'data_memory_retrieval'; results: number; query: string }
   | { type: 'data_compressing_context'; before_tokens: number; after_tokens: number }
   | { type: 'data_quality_gate'; stage: string }
   | { type: 'llm_retry'; attempt: number; max_attempts: number; reason: string; retry_in_secs: number }
@@ -346,9 +349,6 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
       case 'finish_message':
       case 'start_step':
       case 'finish_step':
-      case 'data_search_stage':
-      case 'data_token_meter':
-      case 'data_memory_retrieval':
       case 'data_compressing_context':
       case 'data_quality_gate':
         // Markers — no-op for replay; we don't re-render progress

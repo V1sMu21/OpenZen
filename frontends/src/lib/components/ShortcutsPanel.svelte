@@ -2,6 +2,14 @@
   let { show = $bindable(false) } = $props();
   import { t } from "../i18n";
 
+  let panelEl: HTMLDivElement | undefined = $state();
+
+  // The panel already carried `tabindex="0"` but never took focus, so it was
+  // unreachable by keyboard and Tab started from the page behind it.
+  $effect(() => {
+    if (show) queueMicrotask(() => panelEl?.focus());
+  });
+
   function close() {
     show = false;
   }
@@ -18,7 +26,15 @@
 
 {#if show}
   <div class="shortcuts-backdrop" onclick={close} role="presentation">
-    <div class="shortcuts-panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-label={$t("shortcuts.title")} tabindex="0">
+    <div
+      class="shortcuts-panel"
+      onclick={(e) => e.stopPropagation()}
+      role="dialog"
+      aria-modal="true"
+      aria-label={$t("shortcuts.title")}
+      tabindex="-1"
+      bind:this={panelEl}
+    >
       <div class="shortcuts-header">
         <h2>{$t("shortcuts.title")}</h2>
         <button class="shortcuts-close" onclick={close} aria-label={$t("shortcuts.dialogClose")}>

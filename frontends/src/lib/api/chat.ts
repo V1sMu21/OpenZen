@@ -88,6 +88,27 @@ export interface ProviderUpsertArgs {
 
 let cachedAuthToken: string | null = null;
 
+/** Record a 👍/👎 on one assistant message (P2-28).
+ *
+ *  The backend writes a `quality_event(user_rejected)` and down-weights the
+ *  SOP/skill that produced the answer, so a thumbs-down is training signal,
+ *  not just a widget. `messageIndex` is the message's position in the
+ *  session's raw message list (the same indexing `get_session` returns). */
+export async function submitMessageFeedback(
+  sessionId: string,
+  messageIndex: number,
+  verdict: "up" | "down",
+  note = "",
+): Promise<{ ok?: boolean }> {
+  if (!isTauri()) throw new Error("submit_message_feedback is desktop-only");
+  return (await tauriInvoke("submit_message_feedback", {
+    sessionId,
+    messageIndex,
+    verdict,
+    note,
+  })) as { ok?: boolean };
+}
+
 export function setAuthToken(token: string) {
   cachedAuthToken = token;
   try { localStorage.setItem("openzen_auth_token", token); } catch { /* ignore */ }
@@ -174,6 +195,7 @@ export async function sendMessage(
   sessionId: string,
   sessionName?: string,
   modelName?: string,
+  reasoningEffort?: string,
 ): Promise<ChatResponse> {
   if (isTauri()) {
     await tauriInvoke("send_message", {
@@ -181,6 +203,7 @@ export async function sendMessage(
       sessionId,
       sessionName: sessionName || null,
       modelName: modelName || null,
+      reasoningEffort: reasoningEffort || null,
     });
     return { session_id: sessionId, status: "completed" };
   }
@@ -192,6 +215,7 @@ export async function sendMessage(
       session_id: sessionId,
       session_name: sessionName,
       model_name: modelName || null,
+      reasoning_effort: reasoningEffort || null,
     }),
   });
 

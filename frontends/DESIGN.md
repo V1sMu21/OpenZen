@@ -43,8 +43,14 @@ tool.
 /* Text — rice paper / moon white */
 --color-ink:             #e4ddca;
 --color-body:            #b8b0a3;
---color-muted:           #7a7366;
---color-dim:             #8a8170;  /* AA on canvas/surface */
+/* Light theme (html.theme-light): muted #635c51, dim #5f594e — both AA on
+   every light surface, including --bg-tertiary. */
+--color-muted:           #8d8475;  /* ≥4.6:1 on canvas/surface/surface-soft;
+                                      ≥12px non-critical text only
+                                      (elevated 4.49, overlay 4.23) */
+--color-dim:             #9e957f;  /* AA (≥4.5:1) on every surface, overlay
+                                      included — secondary text that must
+                                      stay readable in modals */
 
 /* Borders — azure-tinted hairlines */
 --color-hairline:        rgba(147, 195, 214, 0.12);
@@ -55,6 +61,19 @@ tool.
 --color-warning:         #c4a877;
 --color-error:           #c05a3e;  /* cinnabar seal */
 --color-info:            #93c3d6;
+
+/* Status aliases — the "state at a glance" trio used by run-state dots,
+   banners and switches. `--color-status-ok` aliases the accent so the
+   activity colour has one source. */
+--color-status-ok:       var(--color-primary);
+--color-status-warn:     #c8862a;
+--color-status-danger:   #c0392b;
+
+/* Diff stat (+N / −M). Not --color-success/--color-error: those are
+   semantic-only hues (and stay dark-valued in light mode), so diff counts
+   get their own pair that each theme tunes for contrast. */
+--color-diff-add:        #65b891;
+--color-diff-del:        #dc5a5a;
 
 /* Code */
 --color-code-bg:         #0f0d0a;
@@ -165,16 +184,53 @@ multi-column inside the message area.
 
 ## 6. Depth & Elevation
 
-**Flat by default. No drop shadows, box-shadows, or drop-shadow filters.**
-Elevation is communicated only by:
+**Flat by default.** Message rows, cards, list items and panels communicate
+elevation only by:
 - surface steps (`--color-surface-soft` → `--color-surface-elevated` →
   `--color-surface-overlay`)
 - 1px `--color-hairline` borders
 - type weight contrast
 
-**Exceptions:**
-- Modals: `--color-surface-overlay` with a stronger hairline border
-- Tool call cards: `--color-surface-soft` with a hairline border; no shadow
+A `box-shadow` on any of those elements is a defect.
+
+### 6.1 Permitted shadow roles (executable exception list)
+
+Exactly three roles may use `box-shadow`. Anything else — in particular a
+depth shadow on a card, row, or list item — is a violation. The whitelist
+below is the full set of call sites at the time of writing; `grep -rn
+"box-shadow" src/` must not return a component outside it.
+
+| Role | Recipe | Why it is not "depth" | Whitelisted call sites |
+|---|---|---|---|
+| **R1 · Overlay** | `0 20px 60px rgba(0,0,0,.4), 0 2px 8px rgba(0,0,0,.2)` (or a single softer step) | Separates a floating surface from the page so it reads as *above* the document; without it a modal over dense text is unreadable | `ApprovalModal`, `AskUserDialog`, `AuthDialog`, `ModelSwitcher`, `CommandPalette`, `ProjectList`, `ProjectItem` (context menu), `TodoDetailBubble`, `SettingsPanel` (edge shadow), `App.svelte` (toast) |
+| **R2 · Glaze** | `var(--glaze-shadow)` — `inset 0 1px 0 <hairline>` + `0 12px 40px rgba(0,0,0,.38)` | The composer/inset "釉光" treatment: an inner highlight plus a soft halo that makes an *input* read as recessed. Theme-aware via the token | `app.css` (`.glaze`), `ChatInput`, `ToolCallCard` (`.tcc-body`), plus `--glaze-shadow` itself |
+| **R3 · State ring / glow** | `0 0 0 <n>px <semantic token>` or `0 0 <n>px var(--state-color)` | Not depth at all: it is a focus/attention/status indicator drawn with a shadow primitive (ring, error pulse, run-state dot halo) | `app.css` (focus rings, primary glow), `ChatInput` (error ring + focus ring), `ChatMessage` (attention pulse), `App.svelte` (run-state dot) |
+| **R4 · Inset hairline** | `inset -1px 0 0.5px <hairline>` | A 1px edge drawn inset because a real border would change the element's box size (the sidebar is width-animated). Purely an edge, never a gradient | `Sidebar` (right edge) |
+
+Verification (run it after touching any component; every hit must be in
+R1–R4):
+
+```bash
+grep -rn "box-shadow" src/ --include=*.svelte --include=*.css
+```
+
+Rules for all three roles:
+- Colour comes from a token or from `rgba(0,0,0,α)`/`rgba(255,255,255,α)`
+  neutral scrim — never a second brand hue.
+- Rings must be `0 0 0 npx` (no blur) so they never read as depth.
+- A new overlay component may reuse R1 without asking; a new *card* may not.
+
+### 6.2 Brand inscriptions (deliberately not translated)
+
+Two strings in the title bar are **brand calligraphy, not UI copy**, and are
+exempt from the i18n rule (they are marked `aria-hidden` and carry no
+meaning a user must act on):
+
+- `修砚` — the app's own name when the user has not renamed the agent.
+- `丙午 制` — "made in the 丙午 year" (the 2026 sexagenary year), a seal-style
+  inscription. Rendering it in English would destroy the seal metaphor.
+
+Every other user-visible string must go through `$t()`.
 
 ---
 
@@ -186,13 +242,16 @@ Elevation is communicated only by:
 - Use surface steps and hairlines for hierarchy
 - Show streaming tokens character-by-character
 - Display tool calls as collapsible cards between messages
-- Show timestamp + token counts in `--color-muted`
+- Show timestamp + token counts in `--color-muted` (≥12px; it clears 4.6:1 on the
+  canvas/surface steps but not on `--color-surface-overlay` — use `--color-dim`
+  for text inside modals)
 - Keep all interactive targets ≥44px
 - Use local system font stacks (offline-first)
 
 **Don't:**
 - Use blue/purple gradients or a second brand accent
-- Add any shadow / glow / box-shadow — depth comes from color
+- Add any shadow / glow / box-shadow outside the three roles in §6.1 —
+  depth comes from color
 - Mix more than three families (sans/serif/mono)
 - Use emojis in UI chrome (message content may contain them)
 - Show raw JSON to users — render tool calls as readable cards

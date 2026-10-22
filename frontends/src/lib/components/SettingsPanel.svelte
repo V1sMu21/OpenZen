@@ -1,7 +1,8 @@
 <script lang="ts">
   import { settings } from "../stores/settings.svelte";
   import { t } from "../i18n";
-  import { formatTokenCount } from "../stores/types";
+  import { askConfirm } from "../stores/confirm";
+  import { formatTokenCount, formatWhen } from "../stores/types";
   import type {
     McpServerItem,
     ModelEntry,
@@ -28,10 +29,23 @@
     upsertProvider,
   } from "../api/settings";
   import type { PortraitFact } from "../api/settings";
-  import { soulDisplayName } from "../api/settings";
+  import {
+    soulDisplayName,
+    memoryStatus,
+    setMemoryEnabled,
+    exportMemory,
+    clearMemory,
+    listMemories,
+    forgetMemory,
+    revealInFileManager,
+    fetchQualityReport,
+    exportDiagnostics,
+    type MemoryEntry,
+    type QualityReport,
+  } from "../api/settings";
   import { soulStore } from "../stores/soul.svelte";
 
-  type Tab = "models" | "skills" | "soul" | "tokens";
+  type Tab = "models" | "skills" | "soul" | "tokens" | "quality";
 
   let tab = $state<Tab>("models");
   let loading = $state(false);
@@ -113,6 +127,178 @@
   let portraitLoaded = $state(false);
   let removingFact = $state<string | null>(null);
 
+  // ── P1-12 memory control: on/off, export, clear, browse ──
+  /** Normalized view — never fabricates a mood when the backend is off. */
+  let mem = $derived(memoryStatus(soul));
+  let memBusy = $state<"" | "toggle" | "export" | "clear">("");
+  let memError = $state("");
+  let memNotice = $state("");
+  let exportPath = $state("");
+  let backupPath = $state("");
+  /** Optimistic switch state; rolled back when the command fails. */
+  let memEnabledDraft = $state<boolean | null>(null);
+  let memEnabled = $derived(memEnabledDraft ?? mem.enabled);
+
+  // ── R5-5 quality report ──
+  // ── P1-10 diagnostics export ──
+  let diagBusy = $state(false);
+  let diagPath = $state("");
+  let diagError = $state("");
+
+  async function doExportDiagnostics() {
+    diagBusy = true;
+    diagError = "";
+    diagPath = "";
+    try {
+      const res = await exportDiagnostics();
+      diagPath = res?.path ?? "";
+    } catch (e) {
+      diagError = e instanceof Error ? e.message : String(e);
+    } finally {
+      diagBusy = false;
+    }
+  }
+
+  let quality = $state<QualityReport | null>(null);
+  let qualityLoading = $state(false);
+  let qualityError = $state("");
+
+  async function loadQuality() {
+    qualityLoading = true;
+    qualityError = "";
+    try {
+      quality = await fetchQualityReport();
+    } catch (e) {
+      qualityError = e instanceof Error ? e.message : String(e);
+    } finally {
+      qualityLoading = false;
+    }
+  }
+
+  /** Count of a reflection type in one bucket (0 when absent). */
+  function qCount(bucket: Record<string, number> | undefined, key: string): number {
+    return bucket?.[key] ?? 0;
+  }
+
+  function pct(v: number | null | undefined): string {
+    return v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`;
+  }
+
+  /** Does the ledger contain anything at all? */
+  let qualityHasData = $derived(
+    !!quality &&
+      Object.keys(quality.total ?? {}).length + Object.keys(quality.week ?? {}).length > 0,
+  );
+
+  let browserEntries = $state<MemoryEntry[]>([]);
+  let browserQuery = $state("");
+  let browserLoaded = $state(false);
+  let browserBusy = $state(false);
+  let browserError = $state("");
+  let forgettingId = $state<string | null>(null);
+
+  async function toggleMemory(next: boolean) {
+    memBusy = "toggle";
+    memError = "";
+    memNotice = "";
+    memEnabledDraft = next; // optimistic
+    try {
+      const res = await setMemoryEnabled(next);
+      memNotice = next
+        ? $t("memory.enabledNotice", "长期记忆已开启")
+        : $t("memory.disabledNotice", "长期记忆已关闭");
+      if (res?.backend) memNotice += ` · ${res.backend}`;
+      memEnabledDraft = null;
+      await soulStore.load();
+    } catch (e) {
+      memEnabledDraft = null; // roll the switch back
+      memError = `${$t("memory.toggleFailed", "切换失败")}: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      memBusy = "";
+    }
+  }
+
+  async function doExport() {
+    memBusy = "export";
+    memError = "";
+    memNotice = "";
+    exportPath = "";
+    try {
+      const res = await exportMemory();
+      exportPath = res?.path ?? "";
+      memNotice = $t("memory.exported", "已导出");
+      if (typeof res?.entries === "number") {
+        memNotice += ` · ${res.entries} ${$t("memory.entries", "条")}`;
+      }
+    } catch (e) {
+      memError = `${$t("memory.exportFailed", "导出失败")}: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      memBusy = "";
+    }
+  }
+
+  async function doClear() {
+    if (!(await askConfirm($t("memory.clearConfirm"), { danger: true }))) return;
+    memBusy = "clear";
+    memError = "";
+    memNotice = "";
+    backupPath = "";
+    try {
+      const res = await clearMemory();
+      backupPath = res?.backup_path ?? "";
+      memNotice = `${$t("memory.cleared", "已清空")} · ${res?.removed ?? 0} ${$t("memory.entries", "条")}`;
+      await soulStore.load();
+      browserLoaded = false;
+      await loadBrowser();
+    } catch (e) {
+      memError = `${$t("memory.clearFailed", "清空失败")}: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      memBusy = "";
+    }
+  }
+
+  async function loadBrowser() {
+    browserBusy = true;
+    browserError = "";
+    try {
+      const res = await listMemories(200, browserQuery);
+      browserEntries = res?.entries ?? [];
+      browserLoaded = true;
+    } catch (e) {
+      browserError = e instanceof Error ? e.message : String(e);
+    } finally {
+      browserBusy = false;
+    }
+  }
+
+  async function forget(entry: MemoryEntry) {
+    if (!(await askConfirm($t("memory.forgetConfirm"), { danger: true }))) return;
+    forgettingId = entry.id;
+    browserError = "";
+    try {
+      await forgetMemory(entry.id);
+      browserEntries = browserEntries.filter((x) => x.id !== entry.id);
+    } catch (e) {
+      browserError = e instanceof Error ? e.message : String(e);
+    } finally {
+      forgettingId = null;
+    }
+  }
+
+  async function reveal(path: string) {
+    if (!path) return;
+    memError = "";
+    try {
+      const how = await revealInFileManager(path);
+      memNotice =
+        how === "copied"
+          ? $t("memory.pathCopied", "路径已复制到剪贴板（在访达里按 ⌘⇧G 粘贴）")
+          : $t("memory.revealed", "已在访达中显示");
+    } catch {
+      memError = $t("memory.revealUnavailable", "无法在文件管理器中打开");
+    }
+  }
+
   // ── tokens tab ──
   let stats = $state<TokenStats | null>(null);
 
@@ -156,7 +342,11 @@
         sops = list.sops;
         servers = sv.servers;
       });
+    } else if (tab === "quality") {
+      if (!quality && !qualityLoading) void loadQuality();
     } else if (tab === "soul") {
+      // Lazy: the browser is only fetched when the tab is actually opened.
+      if (!browserLoaded && !browserBusy && mem.enabled) void loadBrowser();
       void run(async () => {
         await soulStore.load();
         const portrait = await fetchSoulPortrait();
@@ -251,7 +441,7 @@
   }
 
   async function removeModel(name: string) {
-    if (!window.confirm(`${$t("settings.model.confirmDelete")} ${name}`)) return;
+    if (!(await askConfirm(`${$t("settings.model.confirmDelete")} ${name}`))) return;
     await run(async () => {
       await deleteModel(name);
       await refreshModels();
@@ -302,7 +492,7 @@
     const msg = p.model_count > 0
       ? $t("settings.provider.confirmDeleteModels").replace("{n}", String(p.model_count))
       : $t("settings.provider.confirmDelete");
-    if (!window.confirm(`${msg} (${p.id})`)) return;
+    if (!(await askConfirm(`${msg} (${p.id})`))) return;
     await run(async () => {
       await deleteProvider(p.id);
       await refreshModels();
@@ -488,7 +678,7 @@
     </header>
 
     <nav class="settings-tabs">
-      {#each [["models", "settings.tab.models"], ["skills", "settings.tab.skills"], ["soul", "settings.tab.soul"], ["tokens", "settings.tab.tokens"]] as [key, label] (key)}
+      {#each [["models", "settings.tab.models"], ["skills", "settings.tab.skills"], ["soul", "settings.tab.soul"], ["tokens", "settings.tab.tokens"], ["quality", "settings.tab.quality"]] as [key, label] (key)}
         <button class="settings-tab" class:on={tab === key} onclick={() => (tab = key as Tab)}>
           {$t(label)}
         </button>
@@ -651,12 +841,85 @@
               <button class="btn ghost" onclick={startRename}>{$t("soul.rename")}</button>
             {/if}
           </div>
+          <!-- ── P1-12 memory control ─────────────────────────────── -->
+          <div class="group">
+            <div class="group-head">{$t("memory.title", "长期记忆")}</div>
+            <div class="mem-row">
+              <label class="mem-switch">
+                <input
+                  type="checkbox"
+                  checked={memEnabled}
+                  disabled={memBusy === "toggle"}
+                  onchange={(e) => toggleMemory(e.currentTarget.checked)}
+                />
+                <span>{memEnabled ? $t("memory.on", "已开启") : $t("memory.off", "已关闭")}</span>
+              </label>
+              <span class="mem-backend">
+                {$t("memory.backend", "后端")}: {mem.backend ?? "—"}
+                {#if mem.erneAvailable === false}
+                  <span class="mem-warn">· {$t("memory.erneUnavailable", "语义引擎不可用（已降级）")}</span>
+                {/if}
+              </span>
+            </div>
+            <div class="mem-actions">
+              <button class="btn ghost" onclick={doExport} disabled={memBusy !== ""}>
+                {$t("memory.export", "导出全部记忆")}
+              </button>
+              <button class="btn ghost danger" onclick={doClear} disabled={memBusy !== ""}>
+                {$t("memory.clear", "清空记忆")}
+              </button>
+            </div>
+            {#if memError}<div class="mem-error" role="alert">{memError}</div>{/if}
+            {#if memNotice}<div class="mem-notice" role="status">{memNotice}</div>{/if}
+            {#if exportPath}
+              <div class="mem-path">
+                <code>{exportPath}</code>
+                <button class="btn ghost" onclick={() => reveal(exportPath)}>
+                  {$t("memory.reveal", "在访达中显示")}
+                </button>
+              </div>
+            {/if}
+            {#if backupPath}
+              <div class="mem-path">
+                <span class="mem-backup-label">{$t("memory.backup", "备份")}:</span>
+                <code>{backupPath}</code>
+                <button class="btn ghost" onclick={() => reveal(backupPath)}>
+                  {$t("memory.reveal", "在访达中显示")}
+                </button>
+              </div>
+            {/if}
+          </div>
+
           <div class="stat-grid">
-            <span class="stat-key">{$t("soul.mood")}</span><span class="stat-val">{soul.soul.mood}</span>
-            <span class="stat-key">{$t("soul.confidence")}</span><span class="stat-val">{Math.round(soul.soul.confidence * 100)}%</span>
-            <span class="stat-key">{$t("soul.memories")}</span><span class="stat-val">{soul.store?.total_entries ?? 0}</span>
-            <span class="stat-key">{$t("soul.recalls")}</span><span class="stat-val">{soul.store?.recalls ?? 0} · {$t("soul.hitRate")} {Math.round((soul.store?.recall_hit_rate ?? 0) * 100)}%</span>
-            <span class="stat-key">{$t("soul.portraitFacts")}</span><span class="stat-val">{soul.soul.portrait_facts}</span>
+            <!-- Only real, always-observable numbers here. `mood`/`energy`
+                 are LLM-written self-report and are shown ONLY when the
+                 backend actually reports them — otherwise the panel said
+                 "mood: 宁静" for a disabled backend, which reads as a
+                 feeling the agent does not have (P1-12). -->
+            {#if mem.mood}
+              <span class="stat-key">{$t("soul.mood")}</span><span class="stat-val">{mem.mood}</span>
+            {/if}
+            {#if mem.energy !== null}
+              <span class="stat-key">{$t("soul.energy", "精力")}</span><span class="stat-val">{Math.round(mem.energy * 100)}%</span>
+            {/if}
+            {#if mem.confidence !== null}
+              <span class="stat-key">{$t("soul.confidence")}</span><span class="stat-val">{Math.round(mem.confidence * 100)}%</span>
+            {/if}
+            <span class="stat-key">{$t("soul.memories")}</span><span class="stat-val">{mem.totalEntries ?? 0}</span>
+            <span class="stat-key">{$t("soul.recalls")}</span><span class="stat-val">{mem.recalls ?? 0} · {$t("soul.hitRate")} {Math.round((mem.hitRate ?? 0) * 100)}%</span>
+            <span class="stat-key">{$t("soul.portraitFacts")}</span><span class="stat-val">{mem.userFactCount ?? 0}</span>
+            {#if mem.selfFactCount !== null}
+              <span class="stat-key">{$t("soul.selfFacts", "自我认知")}</span><span class="stat-val">{mem.selfFactCount}</span>
+            {/if}
+            {#if mem.pendingEvents !== null}
+              <span class="stat-key">{$t("soul.pendingEvents", "待处理事件")}</span><span class="stat-val">{mem.pendingEvents}</span>
+            {/if}
+            {#if mem.portraitUpdatedAt}
+              <span class="stat-key">{$t("soul.portraitUpdated", "画像更新于")}</span><span class="stat-val">{formatWhen(mem.portraitUpdatedAt)}</span>
+            {/if}
+            {#if mem.lastDrainAt}
+              <span class="stat-key">{$t("soul.lastDrain", "上次整理")}</span><span class="stat-val">{formatWhen(mem.lastDrainAt)}</span>
+            {/if}
             <span class="stat-key">{$t("soul.narrative")}</span><span class="stat-val">{soul.soul.narrative_chapters} {$t("soul.chapters")}</span>
             <span class="stat-key">{$t("soul.embeddings")}</span><span class="stat-val">{soul.embedding_kind ?? "—"}</span>
             {#if soul.store?.l3_storage_bytes != null}
@@ -666,6 +929,62 @@
               <span class="stat-key">{$t("soul.harness")}</span><span class="stat-val">{soul.harness.entry_count}</span>
             {/if}
           </div>
+          <!-- ── Memory browser (P1-12) ───────────────────────────── -->
+          <div class="group">
+            <div class="group-head">{$t("memory.browser", "记忆浏览器")}</div>
+            <div class="mem-search">
+              <input
+                class="soul-input"
+                bind:value={browserQuery}
+                placeholder={$t("memory.searchPlaceholder", "搜索记忆内容…")}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") loadBrowser();
+                }}
+              />
+              <button class="btn ghost" onclick={loadBrowser} disabled={browserBusy}>
+                {$t("memory.search", "搜索")}
+              </button>
+            </div>
+            {#if browserError}
+              <div class="mem-error" role="alert">{browserError}</div>
+            {/if}
+            {#if !browserLoaded && !browserBusy}
+              <button class="btn ghost" onclick={loadBrowser}>
+                {$t("memory.loadList", "加载记忆列表")}
+              </button>
+            {:else if browserBusy}
+              <div class="settings-empty">{$t("memory.loading", "加载中…")}</div>
+            {:else if browserEntries.length === 0}
+              <!-- The empty state must explain what "no memories" MEANS,
+                   not just show a blank box: with memory off, or before the
+                   first distillation, an empty list is expected. -->
+              <div class="settings-empty">
+                {memEnabled
+                  ? $t("memory.emptyEnabled", "还没有可浏览的记忆条目。记忆在每轮对话结束后由蒸馏任务写入，通常需要先完成一次任务。")
+                  : $t("memory.emptyDisabled", "长期记忆当前是关闭的，所以没有任何条目。开启后，后续对话会被蒸馏成记忆。")}
+              </div>
+            {:else}
+              <div class="mem-list">
+                {#each browserEntries as entry (entry.id)}
+                  <div class="mem-item" class:superseded={entry.superseded}>
+                    <span class="mem-item-text" title={entry.content}>{entry.content}</span>
+                    <span class="mem-item-meta">
+                      {#if entry.layer}<span class="mem-tag">{entry.layer}</span>{/if}
+                      {#if entry.created_at}<span class="mem-when">{formatWhen(entry.created_at)}</span>{/if}
+                    </span>
+                    <button
+                      class="portrait-del"
+                      onclick={() => forget(entry)}
+                      disabled={forgettingId === entry.id}
+                      aria-label={$t("memory.forget", "忘记这条")}
+                      title={$t("memory.forget", "忘记这条")}
+                    >✕</button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
           {#if portraitLoaded}
             <div class="group">
               <div class="group-head">{$t("soul.portraitFacts")}</div>
@@ -690,6 +1009,87 @@
         {:else}
           <div class="settings-empty">{$t("settings.empty")}</div>
         {/if}
+      {:else if tab === "quality"}
+        <!-- ── R5-5 delivery-quality report ─────────────────────────── -->
+        {#if qualityError}
+          <div class="mem-error" role="alert">{qualityError}</div>
+          <button class="btn ghost" onclick={loadQuality}>{$t("settings.retry", "重试")}</button>
+        {:else if qualityLoading && !quality}
+          <div class="settings-empty">{$t("memory.loading", "加载中…")}</div>
+        {:else if !qualityHasData}
+          <!-- Empty must say WHAT is empty, not render a blank box. -->
+          <div class="settings-empty">
+            {$t("quality.noData", "还没有数据。评审记录会在每次交付后写入 reflections.jsonl，跑完一次带评审的任务后这里就有内容。")}
+          </div>
+        {:else}
+          <div class="group">
+            <div class="group-head">{$t("quality.last7", "最近 7 天")}</div>
+            <div class="stat-grid">
+              <span class="stat-key">{$t("quality.reviewed", "已评审")}</span>
+              <span class="stat-val">{qCount(quality?.week, "review_passed")} {$t("quality.passedWord", "通过")} · {qCount(quality?.week, "review_failed")} {$t("quality.failedWord", "未通过")}</span>
+              <span class="stat-key">{$t("quality.passRate", "通过率")}</span>
+              <span class="stat-val">{pct(quality?.rates_week?.review_pass_rate)}</span>
+              <span class="stat-key">{$t("quality.coverage", "评审覆盖率")}</span>
+              <span class="stat-val">{pct(quality?.rates_week?.review_coverage)}</span>
+              <span class="stat-key">{$t("quality.deliveries", "交付次数")}</span>
+              <span class="stat-val">{quality?.rates_week?.deliveries ?? 0}</span>
+              <span class="stat-key">{$t("quality.assertionFailed", "断言失败")}</span>
+              <span class="stat-val">{qCount(quality?.week, "assertion_failed")} · {pct(quality?.rates_week?.assertion_failure_rate)}</span>
+              <span class="stat-key">{$t("quality.unavailableWord", "评审不可用")}</span>
+              <span class="stat-val">{qCount(quality?.week, "review_unavailable")}</span>
+            </div>
+          </div>
+          <div class="group">
+            <div class="group-head">{$t("quality.lifetime", "终身")}</div>
+            <div class="stat-grid">
+              <span class="stat-key">{$t("quality.reviewed", "已评审")}</span>
+              <span class="stat-val">{qCount(quality?.total, "review_passed")} {$t("quality.passedWord", "通过")} · {qCount(quality?.total, "review_failed")} {$t("quality.failedWord", "未通过")}</span>
+              <span class="stat-key">{$t("quality.passRate", "通过率")}</span>
+              <span class="stat-val">{pct(quality?.rates_total?.review_pass_rate)}</span>
+              <span class="stat-key">{$t("quality.coverage", "评审覆盖率")}</span>
+              <span class="stat-val">{pct(quality?.rates_total?.review_coverage)}</span>
+              <span class="stat-key">{$t("quality.deliveries", "交付次数")}</span>
+              <span class="stat-val">{quality?.rates_total?.deliveries ?? 0}</span>
+              <span class="stat-key">{$t("quality.assertionFailed", "断言失败")}</span>
+              <span class="stat-val">{qCount(quality?.total, "assertion_failed")} · {pct(quality?.rates_total?.assertion_failure_rate)}</span>
+            </div>
+            {#if quality?.generated_at}
+              <div class="quality-foot">
+                {$t("quality.generatedAt", "生成于")} {formatWhen(quality.generated_at)}
+                {#if quality?.projects_scanned != null}
+                  · {quality.projects_scanned} {$t("quality.projects", "个项目")}
+                {/if}
+              </div>
+            {/if}
+            <div class="mem-actions">
+              <button class="btn ghost" onclick={loadQuality} disabled={qualityLoading}>
+                {$t("settings.refresh", "刷新")}
+              </button>
+            </div>
+          </div>
+        {/if}
+        <!-- Diagnostics export lives here (not in a 6th tab): it is the
+             "something went wrong, get me the evidence" button. -->
+        <div class="group">
+          <div class="group-head">{$t("diagnostics.title", "诊断")}</div>
+          <p class="diag-hint">
+            {$t("diagnostics.hint", "把日志、配置与状态打包成一个压缩包，用于排查问题。前端异常也会自动写进日志。")}
+          </p>
+          <div class="mem-actions">
+            <button class="btn ghost" onclick={doExportDiagnostics} disabled={diagBusy}>
+              {$t("diagnostics.export", "导出诊断包")}
+            </button>
+          </div>
+          {#if diagError}<div class="mem-error" role="alert">{diagError}</div>{/if}
+          {#if diagPath}
+            <div class="mem-path">
+              <code>{diagPath}</code>
+              <button class="btn ghost" onclick={() => reveal(diagPath)}>
+                {$t("memory.reveal", "在访达中显示")}
+              </button>
+            </div>
+          {/if}
+        </div>
       {:else}
         {#if stats}
           <div class="token-totals">
@@ -737,6 +1137,133 @@
 {/if}
 
 <style>
+  /* ── memory control + browser (P1-12) ── */
+  .mem-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    font-size: 13px;
+  }
+  .mem-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    color: var(--color-body);
+  }
+  .mem-switch input {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--color-primary);
+    cursor: pointer;
+  }
+  .mem-backend {
+    color: var(--color-muted);
+    font-size: 12px;
+  }
+  .mem-warn {
+    color: var(--color-status-warn);
+  }
+  .mem-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .diag-hint {
+    font-size: 12.5px;
+    color: var(--color-muted);
+    margin: 0 0 4px;
+  }
+  .quality-foot {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--color-muted);
+  }
+  .mem-error {
+    margin-top: 8px;
+    font-size: 12.5px;
+    color: var(--color-error);
+  }
+  .mem-notice {
+    margin-top: 8px;
+    font-size: 12.5px;
+    color: var(--color-success);
+  }
+  .mem-path {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 12px;
+  }
+  .mem-path code {
+    font-family: var(--font-mono);
+    color: var(--color-dim);
+    word-break: break-all;
+  }
+  .mem-backup-label {
+    color: var(--color-muted);
+  }
+  .mem-search {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .mem-search .soul-input {
+    flex: 1;
+  }
+  .mem-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .mem-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border: 1px solid var(--color-hairline);
+    border-radius: 6px;
+    background: var(--color-surface-soft);
+    font-size: 12.5px;
+  }
+  .mem-item.superseded .mem-item-text {
+    text-decoration: line-through;
+    color: var(--color-muted);
+  }
+  .mem-item-text {
+    flex: 1;
+    color: var(--color-body);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mem-item-meta {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    flex: 0 0 auto;
+  }
+  .mem-tag {
+    color: var(--color-primary);
+    border: 1px solid var(--color-hairline);
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 11px;
+  }
+  .mem-when {
+    color: var(--color-dim);
+    font-size: 11px;
+  }
+  .btn.danger {
+    color: var(--color-error);
+    border-color: var(--color-error);
+  }
+
   .settings-backdrop {
     position: fixed;
     inset: 0;
@@ -817,8 +1344,8 @@
     padding: 6px 10px;
     border-radius: 6px;
     font-size: 11.5px;
-    color: var(--color-error, #c05a3e);
-    background: color-mix(in srgb, var(--color-error, #c05a3e) 10%, transparent);
+    color: var(--color-error);
+    background: color-mix(in srgb, var(--color-error) 10%, transparent);
     word-break: break-word;
   }
 
@@ -879,7 +1406,7 @@
   }
 
   .btn.danger:hover {
-    color: var(--color-error, #c05a3e);
+    color: var(--color-error);
   }
 
   .model-row,
@@ -1290,7 +1817,7 @@
     justify-content: space-between;
     gap: 8px;
     padding: 4px 0;
-    border-bottom: 1px solid var(--color-line, rgba(127, 127, 127, 0.15));
+    border-bottom: 1px solid var(--color-hairline);
   }
   .portrait-text {
     overflow: hidden;
@@ -1307,6 +1834,6 @@
     padding: 2px 6px;
   }
   .portrait-del:hover:not(:disabled) {
-    color: var(--color-danger, #c0392b);
+    color: var(--color-error);
   }
 </style>

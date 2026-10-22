@@ -12,6 +12,8 @@
   import Sidebar from "./lib/components/Sidebar.svelte";
   import ChatMessage from "./lib/components/ChatMessage.svelte";
   import SoulCard from "./lib/components/SoulCard.svelte";
+  import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
+  import { askConfirm } from "./lib/stores/confirm";
   import ChatInput from "./lib/components/ChatInput.svelte";
   import AskUserDialog from "./lib/components/AskUserDialog.svelte";
   import ModelSwitcher from "./lib/components/ModelSwitcher.svelte";
@@ -30,6 +32,34 @@
   import { soulDisplayName } from "./lib/api/settings";
   import { soulStore } from "./lib/stores/soul.svelte";
   import { isTauri, tauriInvoke } from "./lib/api/tauri";
+
+/** Wire window.onerror + unhandledrejection to the backend log, once.
+ *  Errors are also echoed to the webview console so devtools still works. */
+let globalErrorHandlersInstalled = false;
+function installGlobalErrorHandlers() {
+  if (globalErrorHandlersInstalled || typeof window === "undefined") return;
+  globalErrorHandlersInstalled = true;
+  void import("./lib/api/settings").then(({ logFrontend }) => {
+    window.addEventListener("error", (event) => {
+      const err = event.error as Error | undefined;
+      console.error("[global error]", event.message, err);
+      void logFrontend(
+        "error",
+        String(event.message ?? err?.message ?? "unknown error"),
+        String(err?.stack ?? `${event.filename ?? ""}:${event.lineno ?? 0}:${event.colno ?? 0}`),
+      );
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason as { message?: string; stack?: string } | undefined;
+      console.error("[unhandled rejection]", event.reason);
+      void logFrontend(
+        "error",
+        `unhandled rejection: ${String(reason?.message ?? event.reason ?? "unknown")}`,
+        String(reason?.stack ?? ""),
+      );
+    });
+  });
+}
 
   // 顶栏标题：用户给 agent 起的名字（null = 未命名，保持器物底款默认）。
   // 读共享 soul store：设置面板/灵魂卡里改名后这里即时更新。
@@ -115,7 +145,7 @@
       console.error("[pet] create failed", e);
       const msg = e instanceof Error ? e.message : String(e);
       // P2-s: native alert() blocks the whole webview — use the in-page toast.
-      showPetToast("⚠️ 宠物窗创建失败: " + msg);
+      showPetToast($t("pet.createFailed").replace("{msg}", msg));
     }
   }
 
@@ -127,7 +157,28 @@
   let workingDir = $state("");
   let crystallizationOn = $state(false);
   let fullAccessOn = $state(false);
-  let showThinkingTimer = $state(false);
+  // Elapsed-time display. It is the ONLY switch behind every per-step
+  // duration in the UI (tool cards, thinking blocks, skill cards), so it
+  // defaults ON: a long task must be able to answer "how long has this been
+  // running" without the user finding a toggle first.
+  const TIMER_PREF_KEY = "openzen.showTimers.v1";
+  function loadShowTimers(): boolean {
+    try {
+      const raw = localStorage.getItem(TIMER_PREF_KEY);
+      return raw === null ? true : raw === "1";
+    } catch {
+      return true;
+    }
+  }
+  let showThinkingTimer = $state(loadShowTimers());
+  function setShowTimers(on: boolean) {
+    showThinkingTimer = on;
+    try {
+      localStorage.setItem(TIMER_PREF_KEY, on ? "1" : "0");
+    } catch {
+      /* private mode / storage disabled — the in-memory value still applies */
+    }
+  }
   let messagesEnd: HTMLDivElement | undefined = $state();
   let isDragOver = $state(false);
 
@@ -144,6 +195,12 @@
       });
     }
   }
+
+  // ── P1-10 global error capture ──────────────────────────────────────
+  // Installed before anything else so an exception during startup is
+  // captured too. Both handlers forward to the backend log (openzen.log),
+  // which is what "导出诊断包" bundles.
+  installGlobalErrorHandlers();
 
   onMount(() => {
     try {
@@ -329,7 +386,34 @@
     msgs: Message[];
     version: number;
     offsets: Float64Array;
+    index: Map<string, number>;
   } | null = null;
+  /** Lowest row index whose height changed since the last prefix rebuild.
+   *  Streaming changes exactly one row (the live tail), so patching from
+   *  here is O(1) instead of rebuilding the whole prefix array every 250ms. */
+  let rowDirtyFrom = Number.POSITIVE_INFINITY;
+
+  /** Bound on remembered row heights. A 5000-message session would otherwise
+   *  keep 5000 entries forever; the prefix sum only needs the ids currently
+   *  in `visibleMessages`, and an evicted id simply re-measures on mount. */
+  const ROW_HEIGHTS_MAX = 2000;
+
+  /** Record a measured height and remember where the prefix sum went stale. */
+  function setRowHeight(id: string, h: number) {
+    if (rowHeights.size >= ROW_HEIGHTS_MAX && !rowHeights.has(id)) {
+      // Map preserves insertion order → drop the oldest ~10%.
+      const drop = Math.ceil(ROW_HEIGHTS_MAX * 0.1);
+      let n = 0;
+      for (const k of rowHeights.keys()) {
+        rowHeights.delete(k);
+        if (++n >= drop) break;
+      }
+    }
+    rowHeights.set(id, h);
+    const idx = rowPrefixCache?.index.get(id);
+    if (idx !== undefined && idx < rowDirtyFrom) rowDirtyFrom = idx;
+    else if (idx === undefined) rowDirtyFrom = 0; // unknown row: full rebuild
+  }
 
   function rowPrefixOffsets(msgs: Message[]): Float64Array {
     if (
@@ -339,12 +423,28 @@
     ) {
       return rowPrefixCache.offsets;
     }
+    // Same message array, only some heights changed → patch the tail from
+    // the first changed index. Everything before it is still correct.
+    if (rowPrefixCache && rowPrefixCache.msgs === msgs) {
+      const offsets = rowPrefixCache.offsets;
+      const from = Number.isFinite(rowDirtyFrom) ? rowDirtyFrom : 0;
+      for (let i = from; i < msgs.length; i++) {
+        offsets[i + 1] =
+          offsets[i] + (rowHeights.get(msgs[i].id) ?? VIRTUAL_ROW_ESTIMATE_PX);
+      }
+      rowPrefixCache.version = heightsVersion;
+      rowDirtyFrom = Number.POSITIVE_INFINITY;
+      return offsets;
+    }
     const offsets = new Float64Array(msgs.length + 1);
+    const index = new Map<string, number>();
     for (let i = 0; i < msgs.length; i++) {
+      index.set(msgs[i].id, i);
       offsets[i + 1] =
         offsets[i] + (rowHeights.get(msgs[i].id) ?? VIRTUAL_ROW_ESTIMATE_PX);
     }
-    rowPrefixCache = { msgs, version: heightsVersion, offsets };
+    rowDirtyFrom = Number.POSITIVE_INFINITY;
+    rowPrefixCache = { msgs, version: heightsVersion, offsets, index };
     return offsets;
   }
 
@@ -437,9 +537,27 @@
   // So every actually-rendered row is always re-recorded; rows skipped by
   // content-visibility report a placeholder size and are ignored via
   // checkVisibility instead of heuristics.
-  function measureRowHeights() {
+  // Only the rows at the WINDOW BOUNDARY can feed the mount/unmount
+  // oscillation: a stale height there moves the boundary, which remounts the
+  // row, which re-measures, which moves the boundary again. Rows in the
+  // middle of the window have no such feedback loop. Measuring every mounted
+  // row (`getBoundingClientRect` is a forced synchronous layout) on a 250ms
+  // timer during streaming therefore bought nothing and cost a full layout
+  // pass four times a second on long sessions.
+  const BOUNDARY_ROWS = 3;
+
+  function measureRowHeights(mode: "all" | "boundary" = "all") {
+    const all = document.querySelectorAll<HTMLElement>("[data-message-id]");
+    let rows: HTMLElement[];
+    if (mode === "all" || all.length <= BOUNDARY_ROWS * 2) {
+      rows = Array.from(all);
+    } else {
+      const head = Array.from(all).slice(0, BOUNDARY_ROWS);
+      const tail = Array.from(all).slice(all.length - BOUNDARY_ROWS);
+      rows = head.concat(tail);
+    }
     let changed = false;
-    for (const row of document.querySelectorAll<HTMLElement>("[data-message-id]")) {
+    for (const row of rows) {
       const id = row.dataset.messageId;
       if (!id) continue;
       const h = row.getBoundingClientRect().height;
@@ -450,7 +568,7 @@
       }
       const known = rowHeights.get(id);
       if (known === undefined || Math.abs(known - h) > 1) {
-        rowHeights.set(id, h);
+        setRowHeight(id, h);
         changed = true;
       }
     }
@@ -465,13 +583,13 @@
   let settleTimer: ReturnType<typeof setTimeout> | undefined;
   function scheduleSettleMeasure(delay = 150) {
     clearTimeout(settleTimer);
-    settleTimer = setTimeout(measureRowHeights, delay);
+    settleTimer = setTimeout(() => measureRowHeights("all"), delay);
   }
 
   $effect(() => {
     void virtualWindow.slice;
-    measureRowHeights();
-    const t = window.setTimeout(measureRowHeights, 150);
+    measureRowHeights("all");
+    const t = window.setTimeout(() => measureRowHeights("all"), 150);
     return () => window.clearTimeout(t);
   });
 
@@ -484,7 +602,7 @@
   // touches ~30 rows and bumps nothing when heights are unchanged).
   $effect(() => {
     if (!$chat.isProcessing) return;
-    const iv = window.setInterval(measureRowHeights, 250);
+    const iv = window.setInterval(() => measureRowHeights("boundary"), 250);
     return () => window.clearInterval(iv);
   });
 
@@ -604,7 +722,12 @@
     // (The old body also subscribed to the whole messages array for a
     // lastIsFinished value that was never used, re-running the effect
     // on every streaming frame.)
-    disableInput = $chat.pendingAskUser != null;
+    // Minimising the ask_user dialog must give the input box back: the
+  // backend keeps blocking on the question either way, and the dialog can be
+  // reopened from the title-bar pill. Gating on the raw pending question left
+  // the textarea disabled with no visible dialog, which users read as a hung
+  // session (review finding C-F3).
+  disableInput = $chat.pendingAskUser != null && !$chat.askUserMinimized;
   });
 
   // Auto-scroll to bottom when the messages-scroll's content changes.
@@ -911,9 +1034,15 @@
     invoke("set_crystallization", { enabled: crystallizationOn }).catch(() => {});
   }
 
-  function toggleFullAccess() {
-    fullAccessOn = !fullAccessOn;
-    invoke("set_full_access", { enabled: fullAccessOn }).catch(() => {});
+  async function toggleFullAccess() {
+    const next = !fullAccessOn;
+    // Enabling is the dangerous direction: it removes the approval prompt for
+    // every tool. Ask first; disabling needs no confirmation.
+    // `window.confirm` is a silent no-op in this app (Tauri routes it to
+    // `plugin:dialog|confirm`, which the ACL rejects) — use the in-app dialog.
+    if (next && !(await askConfirm($t("status.fullAccessConfirm"), { danger: true }))) return;
+    fullAccessOn = next;
+    invoke("set_full_access", { enabled: next }).catch(() => {});
   }
 
   function focusSidebar() {
@@ -1166,9 +1295,13 @@
           {/if}
         </svg>
       </button>
-      <span class="seal" title="阿青 · 显示/隐藏桌面宠物" onclick={() => handlePetClick()} style="cursor:pointer"><img class="seal-icon" src="/cat-icon.png" alt="OpenZen" /></span>
+      <span class="seal" title={$t("pet.toggleTitle")} onclick={() => handlePetClick()} style="cursor:pointer"><img class="seal-icon" src="/cat-icon.png" alt="OpenZen" /></span>
       <span class="title-name">{agentName ?? "修砚"}</span>
-      <span class="inscription era">丙午 制</span>
+      <!-- 品牌印记 (brand seal): 丙午 = the 2026 sexagenary year. Decorative
+           calligraphy, deliberately NOT translated — documented in
+           frontends/DESIGN.md §"Brand inscriptions". -->
+      <!-- i18n-allow: brand seal (DESIGN.md §6.2, not translated) -->
+      <span class="inscription era" aria-hidden="true">丙午 制</span>
       <!-- 运行状态指示: 活跃态(运行中/待确认)带墨滴涟漪动画, 完成态静态圆点 -->
       <span class="run-state {runState.cls}" title={$t(runState.key)}>
         {#if runState.cls === "done"}
@@ -1182,27 +1315,45 @@
         {/if}
         <span class="state-label">{$t(runState.key)}</span>
       </span>
+      {#if $chat.pendingAskUser && $chat.askUserMinimized}
+        <!-- The agent is still blocked on the answer: keep a permanent way
+             back to the dialog after the user collapses it. -->
+        <button
+          class="askuser-pill"
+          title={$t("status.askUserPendingTitle")}
+          onclick={() => chat.restoreAskUser()}
+        >
+          {$t("status.askUserPending")}
+        </button>
+      {/if}
       {#if workingDir}
         <span class="title-path" title={workingDir}>{workingDir}</span>
       {/if}
       <span class="header-spacer"></span>
       <!-- 结晶 / 计时开关 (标题栏最右) -->
-      <label class="crystallization-switch" title={crystallizationOn ? $t("status.autoCrystallize") + "：开" : $t("status.autoCrystallize") + "：关"}>
+      <label class="crystallization-switch" title={crystallizationOn ? $t("status.autoCrystallizeOn") : $t("status.autoCrystallizeOff")}>
         <input type="checkbox" checked={crystallizationOn} onchange={toggleCrystallization} />
         <span class="switch-track"></span>
         <span class="switch-label">{$t("status.autoCrystallize")}</span>
       </label>
       <label class="crystallization-switch" title={showThinkingTimer ? $t("status.timer") + "：" + $t("status.on") : $t("status.timer") + "：" + $t("status.off")}>
-        <input type="checkbox" checked={showThinkingTimer} onchange={() => showThinkingTimer = !showThinkingTimer} />
+        <input type="checkbox" checked={showThinkingTimer} onchange={() => setShowTimers(!showThinkingTimer)} />
         <span class="switch-track"></span>
         <span class="switch-label">{$t("status.timer")}</span>
       </label>
-      <!-- 完全访问: 开启后 agent 执行任务不再请求权限 (免弹窗自动放行) -->
-      <label class="crystallization-switch" title={$t("status.fullAccess") + "：" + (fullAccessOn ? $t("status.on") : $t("status.off"))}>
+      <!-- 免审批执行（危险）: 开启后 agent 执行任务不再请求权限 (免弹窗自动放行) -->
+      <label class="crystallization-switch" class:danger={fullAccessOn} title={$t("status.fullAccessDanger") + "：" + (fullAccessOn ? $t("status.on") : $t("status.off"))}>
         <input type="checkbox" checked={fullAccessOn} onchange={toggleFullAccess} />
         <span class="switch-track"></span>
-        <span class="switch-label">{$t("status.fullAccess")}</span>
+        <span class="switch-label">{$t("status.fullAccessDanger")}</span>
       </label>
+      {#if fullAccessOn}
+        <!-- Persistent, non-dismissable reminder that the safety boundary is
+             currently off. -->
+        <span class="full-access-badge" role="status" title={$t("status.fullAccessDanger")}>
+          {$t("status.fullAccessBadge")}
+        </span>
+      {/if}
       <!-- 自动更新入口: 平时隐藏, 检测到新版本时以绿色图标出现在标题栏右侧 -->
       <UpdateButton />
       <ThemeSwitcher />
@@ -1245,6 +1396,7 @@
       {:else}
         <div class="messages-scroll">
           <!-- 卷轴天头: 竖排款识 -->
+          <!-- i18n-allow: brand seal (DESIGN.md §6.2, not translated) -->
           <span class="vertical-rl qing head-rl">卷 一 · 修 砚 之 录</span>
           <div class="messages-list">
             {#if $chat.hasMoreMessages}
@@ -1324,7 +1476,7 @@
       <!-- Input area -->
       <ChatInput disabled={disableInput} />
 
-      {#if $chat.pendingAskUser}
+      {#if $chat.pendingAskUser && !$chat.askUserMinimized}
         <AskUserDialog pending={$chat.pendingAskUser} />
       {/if}
 
@@ -1358,6 +1510,21 @@
             <span class="m-tag m-tag-in">
               <span class="m-tag-label">{$t("status.in")}</span>
               <span class="m-tag-num">{formatTokenCount(ctxTokens)}</span>
+            </span>
+          {/if}
+          {#if $chat.cumulativeInputTokens > 0 || $chat.cumulativeOutputTokens > 0}
+            <!-- Run-cumulative usage reported by the backend. Previously this
+                 was stored but never shown, so a long task had no cost signal
+                 at all. -->
+            <span class="m-tag m-tag-cum" title={$t("status.cumulativeTitle")}>
+              <span class="m-tag-num">↑{formatTokenCount($chat.cumulativeInputTokens)}</span>
+              <span class="m-tag-num">↓{formatTokenCount($chat.cumulativeOutputTokens)}</span>
+            </span>
+          {/if}
+          {#if $chat.currentTurn > 0}
+            <span class="m-tag m-tag-muted" title={$t("status.turnTitle")}>
+              <span class="m-tag-label">{$t("status.turn")}</span>
+              <span class="m-tag-num">{$chat.currentTurn}</span>
             </span>
           {/if}
           <!-- ctx 用量: 输入/输出统计右边, 后端状态左边 -->
@@ -1396,6 +1563,9 @@
   {#if petToast}
     <div class="pet-toast">{petToast}</div>
   {/if}
+
+<ConfirmDialog />
+
 </div>
 
 <AuthDialog />
@@ -1473,7 +1643,7 @@
   }
   .header-btn:hover {
     color: var(--text-primary, #eee);
-    background: var(--bg-hover, #2a2a4e);
+    background: var(--bg-hover);
   }
   .header-spacer { flex: 1; }
 
@@ -1706,10 +1876,10 @@
     align-items: center;
     gap: 8px;
     padding: 8px 16px;
-    background: var(--color-error-bg, rgba(220, 38, 38, 0.1));
-    border: 1px solid var(--color-error, #dc2626);
+    background: color-mix(in srgb, var(--color-error) 12%, transparent);
+    border: 1px solid var(--color-error);
     border-radius: 8px;
-    color: var(--color-error, #dc2626);
+    color: var(--color-error);
     font-size: 13px;
   }
 
@@ -1804,6 +1974,22 @@
   }
   .run-state.done {
     color: var(--color-dim);
+  }
+  .askuser-pill {
+    margin-left: 8px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--color-status-warn);
+    background: transparent;
+    color: var(--color-status-warn);
+    font-family: var(--font-sans);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: background 0.2s var(--ease-soak, ease);
+  }
+  .askuser-pill:hover {
+    background: color-mix(in srgb, var(--color-status-warn) 14%, transparent);
   }
   .state-dot {
     width: 6px;
@@ -1905,7 +2091,7 @@
 
   .m-tag-err {
     font-size: 10px;
-    color: var(--color-error, #c05a3e);
+    color: var(--color-error);
     max-width: 320px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1933,6 +2119,20 @@
     gap: 5px;
     cursor: pointer;
     user-select: none;
+  }
+  .crystallization-switch.danger .switch-label {
+    color: var(--color-status-danger);
+  }
+  .full-access-badge {
+    margin-left: 6px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--color-status-danger);
+    background: color-mix(in srgb, var(--color-status-danger) 14%, transparent);
+    color: var(--color-status-danger);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
   }
   .crystallization-switch input {
     /* Visually hidden but FOCUSABLE: display:none removed the safety

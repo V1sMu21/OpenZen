@@ -6,6 +6,7 @@ import type { UIMessagePart, ProtocolV1Event, ToolInvocationPart, DataPart } fro
 import { sidepanel } from "./sidepanel.svelte";
 import { convertStreamEventsToParts, generatePartId, isSameReplyText } from "./parts";
 import { applyProtocolEvent, clearReasoningTimers } from "./protocol-processor";
+import { localT } from "../i18n";
 import { sessions } from "./sessions";
 import { isTauri, tauriInvoke } from "../api/tauri";
 import { sendMessage as httpSendMessage } from "../api/chat";
@@ -60,6 +61,63 @@ const RENDER_ONLY_EVENTS = new Set([
   "tool_output_available",
 ]);
 
+/** Reasoning-effort dial for the current model (matches OpenAI levels). */
+export type ThinkingLevel = "default" | "low" | "medium" | "high";
+
+const THINKING_LEVELS_KEY = "openzen.thinkingLevels.v1";
+
+function loadThinkingLevels(): Record<string, ThinkingLevel> {
+  try {
+    const raw = localStorage.getItem(THINKING_LEVELS_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, ThinkingLevel>;
+    }
+  } catch {
+    // corrupted storage — fall back to defaults
+  }
+  return {};
+}
+
+const SESSION_MODELS_KEY = "openzen.sessionModels.v1";
+
+/** Per-session model choice. Without this, switching sessions (or reloading)
+ *  silently reset the model to "default" and the reasoning-effort dial —
+ *  which is keyed by model name — stopped travelling with the message. */
+function loadSessionModels(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(SESSION_MODELS_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, string>;
+    }
+  } catch {
+    // corrupted storage — fall back to no remembered choice
+  }
+  return {};
+}
+
+function persistSessionModel(sessionId: string, model: string | null) {
+  try {
+    const map = loadSessionModels();
+    if (model) map[sessionId] = model;
+    else delete map[sessionId];
+    localStorage.setItem(SESSION_MODELS_KEY, JSON.stringify(map));
+  } catch {
+    // storage full/unavailable — the in-memory selection still works
+  }
+}
+
+function persistThinkingLevels(levels: Record<string, ThinkingLevel>) {
+  try {
+    localStorage.setItem(THINKING_LEVELS_KEY, JSON.stringify(levels));
+  } catch {
+    // storage full/unavailable — the in-memory selection still works
+  }
+}
+
 export interface ChatState {
   messages: Message[];
   isProcessing: boolean;
@@ -71,6 +129,8 @@ export interface ChatState {
   modelList: ModelEntry[];
   /** Whether the model switcher dialog is visible */
   showModelSwitcher: boolean;
+  /** Reasoning-effort dial per model session name ("default" = follow config) */
+  thinkingLevels: Record<string, ThinkingLevel>;
   /** The parts of the currently streaming assistant message.
    *  During streaming, the last mutable part may have state='streaming'. */
   streamingParts: UIMessagePart[];
@@ -80,6 +140,10 @@ export interface ChatState {
    * it here so the UI can pop a dialog and let the user respond.
    */
    pendingAskUser: PendingAskUser | null;
+    /** True while the user has collapsed the ask_user dialog. The dialog is
+     *  only hidden — the backend agent loop is still blocked on the answer, so
+     *  the title-bar entry point that brings it back must stay visible. */
+    askUserMinimized: boolean;
     /** File and image attachments for the next message. */
     attachments: Attachment[];
     /** Todo items from the agent's todowrite/todoupdate tools. */
@@ -91,6 +155,10 @@ export interface ChatState {
    compressionNotice: string | null;
    cumulativeInputTokens: number;
    cumulativeOutputTokens: number;
+   /** Latest `DataContextUsage.turn` — which agent turn the live run is on.
+    *  Rendered in the model bar so a long task shows progress, not just a
+    *  spinning pill. */
+   currentTurn: number;
    /** Pagination window: true when older persisted messages are available. */
    hasMoreMessages?: boolean;
    /** True while a "load earlier" page request is in flight. */
@@ -199,14 +267,17 @@ function createChatStore() {
     selectedModel: null,
     modelList: [],
      showModelSwitcher: false,
+     thinkingLevels: loadThinkingLevels(),
      streamingParts: [],
      pendingAskUser: null,
+     askUserMinimized: false,
       attachments: [],
       todos: [],
       reminders: [],
      compressionNotice: null,
      cumulativeInputTokens: 0,
      cumulativeOutputTokens: 0,
+     currentTurn: 0,
    });
 
   // Per-session state cache — preserves in-progress agent output when
@@ -274,11 +345,38 @@ function createChatStore() {
     sessionViewCache.set(sessionId, entry); // refresh LRU insertion order
   }
 
+  /** Messages kept per cached view. The cache exists to paint the visible
+   *  tail instantly on switch-back, not to mirror the whole session — a
+   *  long session's `Message[]` (with every tool card's args and output) is
+   *  the single largest thing the store holds, times four cached sessions
+   *  (P2-16). Older messages are re-fetched by "load earlier". */
+  const SESSION_VIEW_CACHE_MESSAGES_MAX = 80;
+
   function storeSessionViewCache(
     sessionId: string,
     state: SessionViewCacheEntry['state'],
   ) {
-    sessionViewCache.set(sessionId, { at: Date.now(), state });
+    let entryState = state;
+    if (state.messages.length > SESSION_VIEW_CACHE_MESSAGES_MAX) {
+      const dropped = state.messages.length - SESSION_VIEW_CACHE_MESSAGES_MAX;
+      entryState = {
+        ...state,
+        messages: state.messages.slice(dropped),
+        // The cached window no longer reaches the start of the session.
+        hasMoreMessages: true,
+      };
+      // Keep paging coherent: the dropped messages are no longer in memory,
+      // so "load earlier" must resume from an offset that far back or the
+      // gap would be skipped silently.
+      const prev = sessionPageState.get(sessionId);
+      if (prev) {
+        sessionPageState.set(sessionId, {
+          offset: Math.max(0, prev.offset - dropped),
+          hasMore: true,
+        });
+      }
+    }
+    sessionViewCache.set(sessionId, { at: Date.now(), state: entryState });
     while (sessionViewCache.size > SESSION_VIEW_CACHE_MAX) {
       const oldestKey = sessionViewCache.keys().next().value;
       if (oldestKey === undefined) break;
@@ -316,6 +414,9 @@ function createChatStore() {
     modelInfo?: { model: string; provider: string; contextWindow: number; isLocal: boolean };
     exitReason?: string;
     exit_reason?: string;
+    /** Delivery-quality outcome, nested or flat depending on the writer. */
+    quality?: import("./types").MessageQuality;
+    quality_contract?: import("./types").MessageQuality;
     children?: string[];
   };
 
@@ -421,6 +522,9 @@ function createChatStore() {
           contextTokens: m.contextTokens,
           modelInfo: m.modelInfo,
           exitReason: m.exitReason ?? m.exit_reason,
+          // Delivery-quality outcome (R5-5). Absent on older messages.
+          quality: m.quality ?? m.quality_contract ?? undefined,
+          serverIndex: typeof m.idx === "number" ? m.idx : undefined,
           children: m.children ?? [],
         };
       });
@@ -597,17 +701,20 @@ function createChatStore() {
       isProcessing: state.isProcessing,
       error: null,
       modelInfo: state.modelInfo,
-      selectedModel: null,
+      selectedModel: loadSessionModels()[sessionId] ?? null,
       modelList: [],
       showModelSwitcher: false,
+      thinkingLevels: loadThinkingLevels(),
       streamingParts: [],
       pendingAskUser: state.pendingAskUser,
+      askUserMinimized: false,
       attachments: [],
       todos: state.todos,
       reminders: state.reminders,
       compressionNotice: null,
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
+      currentTurn: 0,
       hasMoreMessages: state.hasMoreMessages,
       loadingEarlier: false,
       loadingSession: false,
@@ -913,9 +1020,9 @@ function createChatStore() {
       update((s) => ({
         ...s,
         isProcessing: false,
-        error: "Processing timed out",
+        error: localT("error.processingTimedOut"),
         streamingParts: [],
-        messages: s.messages.map((m) => m.streaming ? { ...m, streaming: false, content: m.content || "—interrupted—" } : m),
+        messages: s.messages.map((m) => m.streaming ? { ...m, streaming: false, content: m.content || localT("message.interrupted") } : m),
       }));
     }, PROCESSING_TIMEOUT_MS);
   }
@@ -1027,6 +1134,8 @@ function createChatStore() {
     },
 
     setSelectedModel(name: string) {
+      const sid = get(sessions).currentId;
+      if (sid) persistSessionModel(sid, name);
       update((s) => ({ ...s, selectedModel: name }));
     },
 
@@ -1040,6 +1149,14 @@ function createChatStore() {
 
     closeModelSwitcher() {
       update((s) => ({ ...s, showModelSwitcher: false }));
+    },
+
+    setThinkingLevel(model: string, level: ThinkingLevel) {
+      update((s) => {
+        const levels = { ...s.thinkingLevels, [model]: level };
+        persistThinkingLevels(levels);
+        return { ...s, thinkingLevels: levels };
+      });
     },
 
     addUserMessage(text: string) {
@@ -1137,7 +1254,14 @@ function createChatStore() {
       });
     },
 
-    finalizeAssistantMessage(tokensIn?: number, tokensOut?: number, exitReason?: string, preferredContent?: string, contextTokens?: number) {
+    finalizeAssistantMessage(
+      tokensIn?: number,
+      tokensOut?: number,
+      exitReason?: string,
+      preferredContent?: string,
+      contextTokens?: number,
+      quality?: import("./types").MessageQuality,
+    ) {
       clearProcessingWatchdog();
       const currentSid = get(sessions).currentId;
       if (currentSid) sessionCache.delete(currentSid);
@@ -1153,6 +1277,15 @@ function createChatStore() {
         // We use the part-id-keyed `partArrivalTimes` map so the
         // index stays stable even when data_* events push extra
         // parts into `streamingParts` between _start events.
+        // Key → position, built once. `partArrivalOrder.indexOf(key)` inside
+        // the per-part map made finalize O(N²): on a long run (hundreds of
+        // tool cards) that is hundreds of thousands of string compares on the
+        // one path that must be instant — the end of the turn (P2-11).
+        const arrivalIndex = new Map<string, number>();
+        for (let i = 0; i < partArrivalOrder.length; i++) {
+          if (!arrivalIndex.has(partArrivalOrder[i])) arrivalIndex.set(partArrivalOrder[i], i);
+        }
+
         const finalParts: UIMessagePart[] = s.streamingParts.map((p) => {
           const key = arrivalKey(p);
           const startMs = partArrivalTimes.get(key);
@@ -1168,8 +1301,8 @@ function createChatStore() {
 
           let nextArr = endMs;
           if (nextArr === undefined && startMs !== undefined) {
-            const curIdx = partArrivalOrder.indexOf(key);
-            if (curIdx >= 0) {
+            const curIdx = arrivalIndex.get(key);
+            if (curIdx !== undefined) {
               for (let j = curIdx + 1; j < partArrivalOrder.length; j++) {
                 const nk = partArrivalOrder[j];
                 if (nk === key) continue;
@@ -1188,9 +1321,16 @@ function createChatStore() {
           return { ...p, state: 'done' as const, durationMs: dur };
         }) as UIMessagePart[];
 
+        // Transient notices ("compressing context", "delivery check running",
+        // "model not responding") are display-only: they were never removed
+        // from `streamingParts`, so they accumulated for the life of the
+        // session and were then persisted into the transcript, where they
+        // replayed as stale banners on every reload (P2-12).
+        const persistedParts = finalParts.filter((p) => !(p.type === 'data' && p.transient));
+
         // Use preferredContent (authoritative full_response from backend) when available;
         // fall back to content assembled from streaming parts.
-        const content = preferredContent ?? contentFromParts(finalParts);
+        const content = preferredContent ?? contentFromParts(persistedParts);
 
         // The final answer text only ever arrives inside `done.full_response`
         // (respond rounds never stream it as text_start/text_delta events).
@@ -1214,23 +1354,23 @@ function createChatStore() {
           // supersede the streamed version, because the backend appends the
           // delivery-contract block to `full_response` and dropping that
           // would silently delete the 交付说明 section.
-          const alreadyShown = finalParts.some(
+          const alreadyShown = persistedParts.some(
             (p) => p.type === 'text' && p.text && norm(p.text) === target,
           );
           if (!alreadyShown) {
             let tailIdx = -1;
-            for (let i = finalParts.length - 1; i >= 0; i--) {
-              const p = finalParts[i];
+            for (let i = persistedParts.length - 1; i >= 0; i--) {
+              const p = persistedParts[i];
               if (p.type === 'text' || p.type === 'tool-invocation') {
                 tailIdx = i;
                 break;
               }
             }
-            const tail = tailIdx >= 0 ? finalParts[tailIdx] : undefined;
+            const tail = tailIdx >= 0 ? persistedParts[tailIdx] : undefined;
             if (tail && tail.type === 'text' && isSameReplyText(tail.text, preferredContent)) {
-              finalParts[tailIdx] = { ...tail, text: preferredContent, state: 'done' as const };
+              persistedParts[tailIdx] = { ...tail, text: preferredContent, state: 'done' as const };
             } else {
-              finalParts.push({ type: 'text', id: generatePartId(), text: preferredContent, state: 'done' as const });
+              persistedParts.push({ type: 'text', id: generatePartId(), text: preferredContent, state: 'done' as const });
             }
           }
         }
@@ -1258,13 +1398,15 @@ function createChatStore() {
                 ...m,
                 streaming: false,
                 content,
-                parts: finalParts,
+                // `persistedParts` = finalParts minus the transient notices.
+                parts: persistedParts,
                 duration: last.timestamp ? Date.now() - new Date(last.timestamp).getTime() : 0,
                 completedAt: new Date().toISOString(),
                 tokensIn: tokensIn ?? m.tokensIn,
                 tokensOut: tokensOut ?? (content ? estimateTokens(content) : m.tokensOut),
                 contextTokens: contextTokens ?? m.contextTokens,
                 exitReason: exitReason ?? m.exitReason,
+                quality: quality ?? m.quality,
               };
             }
             // Defensive: any other still-streaming message is an orphan —
@@ -1483,12 +1625,13 @@ function createChatStore() {
       update((s) => ({
         ...s,
         messages: s.messages.map((m) =>
-          m.streaming ? { ...m, streaming: false, content: m.content || "—interrupted—" } : m
+          m.streaming ? { ...m, streaming: false, content: m.content || localT("message.interrupted") } : m
         ),
         isProcessing: false,
         error: null,
         streamingParts: [],
         pendingAskUser: null,
+        askUserMinimized: false,
       }));
       partArrivalTimes.clear();
       partArrivalOrder.length = 0;
@@ -1536,6 +1679,7 @@ function createChatStore() {
                 messages: msgs,
                 cumulativeInputTokens: ev.total_input_tokens ?? s.cumulativeInputTokens,
                 cumulativeOutputTokens: ev.total_output_tokens ?? s.cumulativeOutputTokens,
+                currentTurn: ev.turn ?? s.currentTurn,
               };
             });
           }
@@ -1617,12 +1761,19 @@ function createChatStore() {
           let tokensIn: number | undefined;
           let tokensOut: number | undefined;
           let contextTokens: number | undefined;
+          let quality: import("./types").MessageQuality | undefined;
           if (typeof doneData === "object" && doneData !== null) {
             const dd = doneData as Record<string, unknown>;
             responseText = dd.full_response as string | undefined;
             tokensIn = dd.input_tokens_est as number | undefined;
             tokensOut = dd.output_tokens_est as number | undefined;
             contextTokens = dd.context_tokens_est as number | undefined;
+            // The backend may report the delivery-gate outcome either as a
+            // nested `quality` object or as `qualityContract` (R5-5).
+            const q = dd.quality ?? dd.quality_contract ?? doneEvent?.quality;
+            if (q && typeof q === "object") {
+              quality = q as import("./types").MessageQuality;
+            }
           }
           this.finalizeAssistantMessage(
             tokensIn,
@@ -1630,6 +1781,7 @@ function createChatStore() {
             exitReason,
             responseText,
             contextTokens,
+            quality,
           );
 
           if (tokensIn != null || tokensOut != null) {
@@ -1646,6 +1798,7 @@ function createChatStore() {
                     tokensOut: tokensOut ?? m.tokensOut,
                     contextTokens: contextTokens ?? m.contextTokens,
                     exitReason: exitReason ?? m.exitReason,
+                    quality: quality ?? m.quality,
                     content: responseText ?? m.content,
                   } : m
                 ),
@@ -1811,17 +1964,20 @@ function createChatStore() {
           isProcessing: cached.isProcessing,
           error: null,
           modelInfo: cached.modelInfo,
-          selectedModel: null,
+          selectedModel: loadSessionModels()[sessionId] ?? null,
           modelList: [],
           showModelSwitcher: false,
+     thinkingLevels: loadThinkingLevels(),
           streamingParts: cached.streamingParts,
           pendingAskUser: cached.pendingAskUser,
+          askUserMinimized: false,
           attachments: cached.attachments,
           todos: cached.todos,
           reminders: scanRemindersFromMessages(cached.messages),
           compressionNotice: cached.compressionNotice,
           cumulativeInputTokens: 0,
           cumulativeOutputTokens: 0,
+          currentTurn: 0,
           hasMoreMessages: false,
           loadingSession: false,
         });
@@ -1863,6 +2019,7 @@ function createChatStore() {
           error: `Failed to load session: ${err instanceof Error ? err.message : String(err)}`,
           streamingParts: [],
           pendingAskUser: null,
+          askUserMinimized: false,
           loadingSession: false,
         }));
       }
@@ -1917,6 +2074,7 @@ function createChatStore() {
         messages: [],
         isProcessing: false,
         error: null,
+        askUserMinimized: false,
         modelInfo: null,
         streamingParts: [],
         pendingAskUser: null,
@@ -1924,11 +2082,13 @@ function createChatStore() {
         selectedModel: s.selectedModel,
         modelList: s.modelList,
         showModelSwitcher: false,
+     thinkingLevels: loadThinkingLevels(),
         todos: [],
         reminders: [],
         compressionNotice: null,
         cumulativeInputTokens: 0,
         cumulativeOutputTokens: 0,
+        currentTurn: 0,
       }));
     },
 
@@ -1941,7 +2101,7 @@ function createChatStore() {
       // resumes in the same run. askId (tool_use_id) lets the loop match
       // this reply to its exact question (P1-i).
       const askId = readState().pendingAskUser?.askId;
-      update((s) => ({ ...s, pendingAskUser: null }));
+      update((s) => ({ ...s, pendingAskUser: null, askUserMinimized: false }));
       if (!sid) return;
       try {
         if (isTauri()) {
@@ -1964,10 +2124,16 @@ function createChatStore() {
     },
 
     dismissAskUser() {
-      // Best-effort: the agent loop is still blocked on ask_user_rx;
-      // we just hide the dialog. The loop will unblock once the user
-      // submits a real reply, or the run can be cancelled via Stop.
-      update((s) => ({ ...s, pendingAskUser: null }));
+      // The agent loop is still blocked on ask_user_rx, so this only HIDES
+      // the dialog — dropping `pendingAskUser` would strand the run with no
+      // way to answer it (the input box is enabled again and the title bar
+      // goes back to "running"). The title-bar pill calls restoreAskUser().
+      update((s) => ({ ...s, askUserMinimized: true }));
+    },
+
+    /** Bring the collapsed ask_user dialog back (title-bar pill). */
+    restoreAskUser() {
+      update((s) => ({ ...s, askUserMinimized: false }));
     },
 
     /**
@@ -2017,7 +2183,9 @@ function createChatStore() {
     },
 
     setPendingAskUser(pending: PendingAskUser) {
-      update((s) => ({ ...s, pendingAskUser: pending }));
+      // A fresh question must never inherit a previous "minimized" flag,
+      // otherwise the dialog would stay hidden while the agent blocks on it.
+      update((s) => ({ ...s, pendingAskUser: pending, askUserMinimized: false }));
     },
 
     setTodos(items: Array<{id:string;content:string;status:string;priority:string;order:number}>) {
@@ -2049,9 +2217,17 @@ function createChatStore() {
       const sid = get(sessions).currentId;
       if (!sid) return;
       let modelName: string | undefined;
+      let reasoningEffort: string | undefined;
       let attachments: Attachment[] = [];
       update((s) => {
         modelName = s.selectedModel ?? undefined;
+        // The dial is keyed by model name. When the user never picked one
+        // explicitly, fall back to the model of the last run (modelInfo) so an
+        // explicit level still travels instead of being silently dropped.
+        const dialKey = modelName ?? s.modelInfo?.model ?? undefined;
+        const level = dialKey ? s.thinkingLevels[dialKey] : undefined;
+        // "default" = follow mykey.toml; only explicit levels travel.
+        reasoningEffort = level && level !== "default" ? level : undefined;
         attachments = [...s.attachments];
         s.attachments = [];
         return s;
@@ -2071,7 +2247,7 @@ function createChatStore() {
       this.addUserMessage(fullMessage);
       this.startAssistantMessage();
       try {
-        await httpSendMessage(fullMessage, sid, undefined, modelName);
+        await httpSendMessage(fullMessage, sid, undefined, modelName, reasoningEffort);
       } catch (err) {
         this.setError(err instanceof Error ? err.message : String(err));
       }

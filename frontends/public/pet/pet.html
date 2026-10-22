@@ -29,7 +29,10 @@
     <div id="cardState">状态：休息中</div>
     <div id="cardProgress"><span>步骤</span><div id="progressBar"><div id="progressFill"></div></div><span id="progressText">--</span></div>
     <div id="cardContext">上下文 <span id="contextText">--</span></div>
-    <div id="cardSoul">心情：<span id="moodText">宁静</span> · 亲密度 <span id="affText">0</span></div>
+    <!-- `soulLabel` is swapped between "心情" and "状态" by pet.js: the pet
+         only claims a mood when the memory backend actually reports one,
+         otherwise it is an honest task-state indicator. -->
+    <div id="cardSoul"><span id="soulLabel">状态</span>：<span id="moodText">休息中</span> · 亲密度 <span id="affText">0</span></div>
   </div>
 
   <!-- 改名对话框：WKWebView 没有原生 prompt()（静默返回 undefined），

@@ -24,6 +24,53 @@
     display: { visible: true, size: 160, x: 100, y: 100 },
   };
 
+  // ── Real memory status (P1-12) ──────────────────────────────────────
+  // The card used to show a mood the pet wrote to localStorage itself
+  // ("宁静" → "开心" after a pet), which is not a feeling the agent has.
+  // It now reflects what the backend actually reports; when long-term
+  // memory is off the pet degrades to a plain task-state indicator.
+  const MEM_STATUS_POLL_MS = 60000;
+  let memStatus = { enabled: false, energy: null, pendingEvents: null, soulVersion: null, mood: null };
+  let memStatusLoaded = false;
+
+  function normalizeMemStatus(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const num = function (v) { return typeof v === "number" ? v : null; };
+    const str = function (v) { return typeof v === "string" && v.trim() !== "" ? v : null; };
+    var soul = raw.soul || {};
+    return {
+      enabled: raw.enabled === true,
+      energy: num(raw.energy),
+      pendingEvents: num(raw.pending_events),
+      soulVersion: num(raw.soul_version) != null ? num(raw.soul_version) : num(soul.version),
+      mood: str(raw.mood) || str(soul.mood),
+    };
+  }
+
+  function refreshMemStatus() {
+    invokeTauri("get_memory_status", {}).then(function (raw) {
+      var norm = normalizeMemStatus(raw);
+      if (!norm) return;
+      memStatus = norm;
+      memStatusLoaded = true;
+      updateCard();
+      applyExpressionFromMemory();
+    }).catch(function () { /* not in Tauri, or command missing: stay degraded */ });
+  }
+
+  /** Energy/pending work nudge the resting expression. Only meaningful when
+   *  memory is actually on — otherwise the pet stays a task indicator. */
+  function applyExpressionFromMemory() {
+    if (!memStatus.enabled || active !== "idle_sleep") return;
+    if (memStatus.pendingEvents != null && memStatus.pendingEvents > 0) {
+      requestState("thinking", false);
+      return;
+    }
+    if (memStatus.energy != null && memStatus.energy < 0.25) {
+      requestState("idle_sleep", false);
+    }
+  }
+
   let active = "idle_sleep";
   let frameIdx = 0;
   let lastEventAt = 0;
@@ -88,6 +135,7 @@
     lastTs = performance.now();
     raf = requestAnimationFrame(loop);
     updateText();
+    startMemStatusPolling();
   }
   // 兜底：极个别帧迟迟不回时 2.5s 后强行起播（未就绪帧由 drawImage 跳过）
   setTimeout(function () { tryStart(); }, 2500);
@@ -230,7 +278,7 @@
     let target = null;
 
     if (type === "ask_user_pending" || itype === "ask_user_pending" || type === "approval_needed") target = "waiting";
-    else if (type === "done") { target = "done"; pet.soul.tasksDone++; pet.affinity.treats++; pet.soul.lastTaskAt = Date.now(); pet.soul.mood = "开心"; save(); }
+    else if (type === "done") { target = "done"; pet.soul.tasksDone++; pet.affinity.treats++; pet.soul.lastTaskAt = Date.now(); save(); refreshMemStatus(); }
     else if (type === "error" || itype === "error") target = "error";
     else if (itype.indexOf("reasoning") === 0) target = "thinking";
     else if (itype === "data_todo_update" && inner) { todo = { current: inner.current || 0, total: inner.total || 0 }; target = "working"; }
@@ -267,7 +315,21 @@
     document.getElementById("progressText").textContent = has ? todo.current + "/" + todo.total : "--";
     document.getElementById("progressFill").style.width = has ? (todo.current / todo.total * 100) + "%" : "0%";
     document.getElementById("contextText").textContent = contextPct + "%";
-    document.getElementById("moodText").textContent = pet.soul.mood;
+    // Label + value both switch on whether memory is really reporting.
+    const labelEl = document.getElementById("soulLabel");
+    const moodEl = document.getElementById("moodText");
+    if (memStatus.enabled && memStatus.mood) {
+      if (labelEl) labelEl.textContent = "心情";
+      moodEl.textContent = memStatus.mood;
+    } else if (memStatus.enabled) {
+      if (labelEl) labelEl.textContent = "记忆";
+      moodEl.textContent =
+        memStatus.pendingEvents != null ? memStatus.pendingEvents + " 待处理" : "已开启";
+    } else {
+      // Memory off (or unknown): the pet is a task-state indicator, and says so.
+      if (labelEl) labelEl.textContent = "状态";
+      moodEl.textContent = memStatusLoaded ? "记忆未启用" : STATE_TEXTS[active][0];
+    }
     document.getElementById("affText").textContent = pet.affinity.points;
   }
 
@@ -486,7 +548,7 @@
     const now = Date.now();
     if (now - pet.affinity.lastPetAt >= 10000) {
       pet.affinity.points++; pet.affinity.pets++; pet.affinity.lastPetAt = now;
-      pet.soul.mood = "开心"; save(); updateCard();
+      save(); updateCard();
     }
     const prev = active === "petted" ? "idle_sleep" : active;
     requestState("petted", true);
@@ -521,6 +583,13 @@
     if (T && T.webviewWindow && T.webviewWindow.getCurrentWebviewWindow) return T.webviewWindow.getCurrentWebviewWindow();
     return null;
   }
+  // Kick off the status poll (and refresh on a timer) once the frames are
+  // loading — `invokeTauri` is defined below but hoisted as a function.
+  function startMemStatusPolling() {
+    refreshMemStatus();
+    setInterval(refreshMemStatus, MEM_STATUS_POLL_MS);
+  }
+
   function invokeTauri(cmd, args) {
     const T = globalThis;
     if (T.__TAURI_INTERNALS__ && T.__TAURI_INTERNALS__.invoke) {

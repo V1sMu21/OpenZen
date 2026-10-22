@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { askConfirm } from "../stores/confirm";
   import { sessions } from "../stores/sessions";
   import { projects } from "../stores/projects";
   import { runningSessionIds } from "../stores/running";
@@ -19,11 +20,13 @@
   let renamingId = $state<string | null>(null);
   let renameDraft = $state("");
 
-  function confirmDelete(name: string): boolean {
+  async function confirmDelete(name: string): Promise<boolean> {
     const label = name || localT("session.defaultName", "session");
-    return window.confirm(
-      localT("session.deleteConfirm", "Delete this session?").replace("{name}", label),
+    const msg = localT("session.deleteConfirm", "Delete this session?").replace(
+      "{name}",
+      label,
     );
+    return askConfirm(msg, { danger: true });
   }
 
   function startRename(e: Event, session: SessionInfo) {
@@ -80,7 +83,7 @@
   async function handleDelete(e: Event, id: string) {
     e.stopPropagation();
     const labeled = items.find((item) => item.id === id);
-    if (!confirmDelete(labeled?.name ?? "")) {
+    if (!(await confirmDelete(labeled?.name ?? ""))) {
       return;
     }
     // Get project_id before removing from local list
@@ -101,7 +104,7 @@
     }
   }
 
-  function handleKeydown(e: KeyboardEvent) {
+  async function handleKeydown(e: KeyboardEvent) {
     if (items.length === 0) return;
 
     if ((e.metaKey || e.ctrlKey) && e.key === "f") {
@@ -129,7 +132,7 @@
         e.preventDefault();
         if (focusedIndex >= 0 && focusedIndex < items.length) {
           const target = items[focusedIndex];
-          if (confirmDelete(target.name ?? "")) {
+          if (await confirmDelete(target.name ?? "")) {
             void handleDelete(new Event("keyboard"), target.id);
           }
         }
@@ -279,7 +282,7 @@
     height: 8px;
     margin-left: 2px;
     border-radius: 999px;
-    background: var(--color-info, #5dade2);
+    background: var(--color-info);
   }
 
   .running-dot::after {
@@ -287,7 +290,7 @@
     position: absolute;
     inset: -3px;
     border-radius: inherit;
-    background: color-mix(in srgb, var(--color-info, #5dade2) 40%, transparent);
+    background: color-mix(in srgb, var(--color-info) 40%, transparent);
     animation: run-halo 1.6s ease-out infinite;
   }
 

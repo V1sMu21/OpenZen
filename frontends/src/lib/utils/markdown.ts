@@ -187,6 +187,11 @@ const MARKDOWN_CACHE_MAX = 256;
 // Byte budget on top of the entry count: 256 entries x a 100KB code dump
 // would pin tens of MB of strings in a 7x24 session.
 const MARKDOWN_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+// A single entry larger than this is rendered but NOT cached: one 10MB tool
+// dump would otherwise blow the whole budget, and the eviction loop can only
+// evict *other* entries — the oversized one would stay pinned and the cache
+// would sit above its limit until the next render (P2-16).
+const MARKDOWN_CACHE_MAX_ENTRY_BYTES = 512 * 1024;
 
 interface MarkdownCacheEntry {
   text: string;
@@ -462,11 +467,17 @@ export function renderMarkdown(
   // Replacing an existing (verified-mismatch) entry must first release
   // its byte share; then evict to budget and insert.
   const prev = markdownRenderCache.get(hash);
-  if (prev) markdownCacheBytes -= entryBytes(prev);
-  evictMarkdownCache();
+  if (prev) {
+    markdownCacheBytes -= entryBytes(prev);
+    markdownRenderCache.delete(hash);
+  }
   const entry: MarkdownCacheEntry = { text: originalText, highlight, html };
-  markdownRenderCache.set(hash, entry);
-  markdownCacheBytes += entryBytes(entry);
+  const bytes = entryBytes(entry);
+  if (bytes <= MARKDOWN_CACHE_MAX_ENTRY_BYTES) {
+    evictMarkdownCache();
+    markdownRenderCache.set(hash, entry);
+    markdownCacheBytes += bytes;
+  }
 
   return html;
 }

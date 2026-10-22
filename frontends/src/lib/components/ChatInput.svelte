@@ -7,6 +7,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import CommandPalette from "./CommandPalette.svelte";
 import { filterCommands } from "../utils/slashCommands";
 import { t, localT, locale } from "../i18n";
+import { clickOutside } from "../actions/clickOutside";
 
 let {
   disabled = $bindable(false),
@@ -15,9 +16,42 @@ let {
 let inputText = $state("");
 let showCommands = $state(false);
 let attachMenuOpen = $state(false);
+let thinkingMenuOpen = $state(false);
+
+import type { ThinkingLevel } from "../stores/chat";
+
+const THINKING_LEVELS: { value: ThinkingLevel; labelKey: string }[] = [
+  { value: "default", labelKey: "thinking.default" },
+  { value: "low", labelKey: "thinking.low" },
+  { value: "medium", labelKey: "thinking.medium" },
+  { value: "high", labelKey: "thinking.high" },
+];
+
+const currentModel = $derived($chat.selectedModel ?? "");
+// Display key must match the write key (pickLevel) and the send key
+// (chat.sendMessage): `selectedModel ?? modelInfo.model`.
+const dialKey = $derived($chat.selectedModel ?? $chat.modelInfo?.model ?? "");
+const currentLevel = $derived(
+  (dialKey ? $chat.thinkingLevels[dialKey] : undefined) ?? "default"
+);
+
+function pickLevel(level: ThinkingLevel) {
+  // Same key the send path reads (`selectedModel ?? modelInfo.model`).
+  // Writing only when a model was explicitly picked meant the dial silently
+  // did nothing in a brand-new session — no pill change, no stored level, no
+  // `reasoningEffort` on the wire (review finding B-5).
+  const key = $chat.selectedModel ?? $chat.modelInfo?.model;
+  if (key) {
+    chat.setThinkingLevel(key, level);
+  } else {
+    console.warn("[thinking] no model to key the level on yet");
+  }
+  thinkingMenuOpen = false;
+}
 let textareaEl: HTMLTextAreaElement | undefined = $state();
-  let stuckCount = $state(0);
-  let stuckTimer: ReturnType<typeof setTimeout> | null = null;
+  let thinkingPillEl: HTMLButtonElement | undefined = $state();
+  let stopArmed = $state(false);
+  let stopArmTimer: ReturnType<typeof setTimeout> | null = null;
 
   function handleInput() {
     if (textareaEl) {
@@ -180,7 +214,7 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
           "**" + localT("shortcuts.input") + "**\n" +
           "`Enter` " + localT("shortcuts.sendMsg") + "\n" +
           "`⇧Enter` " + localT("shortcuts.newline") + "\n" +
-          "`Esc` " + localT("shortcuts.cancelTask") + " (" + localT("shortcuts.forceReset") + ")\n" +
+          "`Esc` " + localT("shortcuts.cancelTask") + "\n" +
           "`/xxx` " + localT("shortcuts.command") + "\n\n" +
           "**" + localT("shortcuts.dialog") + "**\n" +
           "`Esc` " + localT("shortcuts.dialogClose") + "\n" +
@@ -273,29 +307,33 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
       send();
     }
     if (e.key === "Escape") {
+      // Esc must never silently kill a running task: users press it to close
+      // a popover. First press closes overlays and arms a 3s "press again to
+      // stop" hint; only a second press inside that window stops the run.
+      // forceReset() is intentionally NOT reachable from Esc — it stays on
+      // its explicit entry point only.
+      showCommands = false;
       if ($chat.isProcessing) {
-        stuckCount++;
-        if (stuckCount >= 3) {
-          stuckCount = 0;
-          chat.forceReset();
-          if (stuckTimer) { clearTimeout(stuckTimer); stuckTimer = null; }
-          return;
+        if (stopArmed) {
+          stopArmed = false;
+          if (stopArmTimer) { clearTimeout(stopArmTimer); stopArmTimer = null; }
+          chat.cancelCurrent();
+        } else {
+          stopArmed = true;
+          if (stopArmTimer) clearTimeout(stopArmTimer);
+          stopArmTimer = setTimeout(() => { stopArmed = false; stopArmTimer = null; }, 3000);
         }
-        if (!stuckTimer) {
-          stuckTimer = setTimeout(() => { stuckCount = 0; stuckTimer = null; }, 4000);
-        }
-        chat.cancelCurrent();
       } else {
-        showCommands = false;
+        stopArmed = false;
       }
     }
   }
 
-  // Reset stuck count when processing ends normally
+  // Disarm the "press again to stop" hint as soon as the run ends.
   $effect(() => {
     if (!$chat.isProcessing) {
-      stuckCount = 0;
-      if (stuckTimer) { clearTimeout(stuckTimer); stuckTimer = null; }
+      stopArmed = false;
+      if (stopArmTimer) { clearTimeout(stopArmTimer); stopArmTimer = null; }
     }
   });
 
@@ -343,6 +381,13 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
   {/if}
 
   <div class="composer-box">
+    {#if stopArmed}
+      <!-- Second Esc within 3s stops the run. Without this the first press
+           would look like nothing happened. -->
+      <div class="stop-hint" role="status" aria-live="polite">
+        {$t("input.escStopHint")}
+      </div>
+    {/if}
     <textarea
       bind:this={textareaEl}
       bind:value={inputText}
@@ -378,6 +423,54 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
               </svg>
               {$t("chat.attachMenuImage")}
             </button>
+          </div>
+        {/if}
+      </div>
+      <div class="attach-wrap">
+        <button
+          class="attach-btn model-pill"
+          onclick={() => chat.openModelSwitcher()}
+          aria-label={$t("model.title")}
+          aria-haspopup="dialog"
+          title={$t("model.title")}
+        >{currentModel || $t("input.model")}</button>
+      </div>
+      <div class="attach-wrap">
+        <button
+          class="attach-btn thinking-pill"
+          class:open={thinkingMenuOpen}
+          class:engaged={currentLevel !== "default"}
+          onclick={() => (thinkingMenuOpen = !thinkingMenuOpen)}
+          aria-label={$t("thinking.title")}
+          aria-haspopup="menu"
+          aria-expanded={thinkingMenuOpen}
+          title={$t("thinking.title")}
+          bind:this={thinkingPillEl}
+        >{currentLevel === "default" ? $t("thinking.default") : $t(`thinking.${currentLevel}`)}</button>
+        {#if thinkingMenuOpen}
+          <div
+            class="attach-menu thinking-menu"
+            role="menu"
+            use:clickOutside={{
+              handler: () => (thinkingMenuOpen = false),
+              except: [thinkingPillEl],
+            }}
+          >
+            {#each THINKING_LEVELS as lvl (lvl.value)}
+              <button
+                class="attach-menu-item"
+                class:on={lvl.value === currentLevel}
+                role="menuitemradio"
+                aria-checked={lvl.value === currentLevel}
+                onclick={() => pickLevel(lvl.value)}
+              >
+                <span class="am-ic">{lvl.value === currentLevel ? "✓" : ""}</span>
+                {$t(lvl.labelKey)}
+                {#if lvl.value === "default"}
+                  <span class="tm-desc">{$t("thinking.defaultDesc")}</span>
+                {/if}
+              </button>
+            {/each}
           </div>
         {/if}
       </div>
@@ -476,6 +569,12 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
     background: var(--color-surface-soft);
     box-shadow: var(--glaze-shadow, none);
     transition: border-color 0.4s var(--ease-soak, ease), box-shadow 0.4s var(--ease-soak, ease);
+  }
+  .stop-hint {
+    padding: 4px 12px 0;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    color: var(--color-status-warn);
   }
   .composer-box:focus-within {
     border-color: var(--color-primary);
@@ -607,6 +706,26 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
     font-size: 10px;
     color: var(--color-primary);
     flex: none;
+  }
+  .model-pill {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .thinking-pill.engaged {
+    border-color: var(--color-primary);
+    color: var(--color-primary-hover);
+  }
+  .thinking-menu {
+    min-width: 180px;
+  }
+  .attach-menu-item.on {
+    color: var(--color-primary);
+  }
+  .tm-desc {
+    margin-left: auto;
+    font-size: 10px;
+    opacity: 0.6;
   }
 
   /* 快捷键提示 (与原型一致: 发送 · 换行) */

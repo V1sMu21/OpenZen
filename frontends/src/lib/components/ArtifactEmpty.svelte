@@ -3,9 +3,10 @@
 </script>
 
 <div class="empty-state">
-  <div class="empty-icon">📋</div>
   <p class="empty-title">{$t("sidepanel.emptyTitle")}</p>
   <p class="empty-hint">
+    <!-- i18n-allow: the two quoted strings below are literal UI labels being
+         emphasised inside a translated sentence, not untranslated copy. -->
     {@html $t("sidepanel.emptyHint").replace(
       '"Preview in Side Panel"',
       '<strong>"Preview in Side Panel"</strong>'

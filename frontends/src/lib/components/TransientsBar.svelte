@@ -31,24 +31,32 @@
     }
   });
 
-  // Auto-dismiss. The 4s timeout lives in its own effect keyed only on the
+  // How long the current notice stays. Quality-gate notices describe work
+  // that runs for many seconds (assertion commands, a review inference) — a
+  // 4s flash would vanish mid-wait and leave the user staring at an
+  // apparently frozen bubble again. An LLM-retry notice is the only sign of
+  // life during a gateway outage, whose backoff steps reach 60s, so it must
+  // outlive them.
+  //
+  // Derived, because the progress bar below must run for exactly as long as
+  // the notice lives: it was hard-coded to 4s, so a 15s/60s notice showed a
+  // bar that finished and sat full for the remaining 11–56s — which reads as
+  // "stuck", the opposite of what the bar is for (P2-10).
+  let ttl = $derived(
+    current?.dataType === "data_quality_gate"
+      ? 15000
+      : current?.dataType === "llm_retry"
+        ? 60000
+        : 4000,
+  );
+
+  // Auto-dismiss. The timeout lives in its own effect keyed only on the
   // current part's id — the enqueue effect re-runs on every parts change
   // and used to clear this very timeout in its cleanup, so the bar got
   // stuck on the first notification forever.
   $effect(() => {
     const id = current?.id;
     if (!id) return;
-    // Quality-gate notices describe work that runs for many seconds
-    // (assertion commands, a review inference) — a 4s flash would vanish
-    // mid-wait and leave the user staring at an apparently frozen bubble
-    // again. An LLM-retry notice is the only sign of life during a gateway
-    // outage, whose backoff steps reach 60s, so it must outlive them.
-    const ttl =
-      current?.dataType === "data_quality_gate"
-        ? 15000
-        : current?.dataType === "llm_retry"
-          ? 60000
-          : 4000;
     const t = setTimeout(() => {
       if (current?.id === id) current = null;
     }, ttl);
@@ -57,9 +65,10 @@
 </script>
 
 {#if current}
-  <div class="transients-bar">
+  <div class="transients-bar" role="status" aria-live="polite">
     <span class="transient-message">{current.content}</span>
-    <div class="transient-progress"></div>
+    <!-- Duration must match the auto-dismiss timer, otherwise the bar lies. -->
+    <div class="transient-progress" style="animation-duration:{ttl}ms"></div>
   </div>
 {/if}
 
@@ -85,6 +94,8 @@
     background: var(--color-primary);
     margin-top: 4px;
     border-radius: 1px;
+    /* Duration comes from the component (`animation-duration` inline) so the
+       bar always matches the TTL; 4s here is only a fallback. */
     animation: shrinkBar 4s linear;
     transform-origin: left;
   }

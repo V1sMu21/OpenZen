@@ -14,9 +14,10 @@
    */
   import { onMount } from "svelte";
   import { soulStore } from "../stores/soul.svelte";
-  import { soulDisplayName } from "../api/settings";
+  import { soulDisplayName, memoryStatus } from "../api/settings";
   import { chat } from "../stores/chat";
   import { t } from "../i18n";
+  import { formatWhen } from "../stores/types";
 
   const ACK_KEY = "openzen:soulcard:ack";
   const RETURN_AFTER_MS = 6 * 60 * 60 * 1000;
@@ -31,7 +32,8 @@
   });
 
   let status = $derived(soulStore.status);
-  let enabled = $derived(!!status?.enabled);
+  let mem = $derived(memoryStatus(status));
+  let enabled = $derived(mem.enabled);
   let name = $derived(soulDisplayName(status) ?? $t("soul.newborn", "记忆体"));
   let openTodos = $derived(
     ($chat.todos ?? []).filter((todo) => todo.status !== "completed").length,
@@ -50,13 +52,23 @@
   <div class="soul-card" role="status">
     <div class="soul-line">
       <span class="soul-name">{name}</span>
-      {#if status?.soul?.mood}<span class="soul-mood">{status.soul.mood}</span>{/if}
+      <!-- `mood` is LLM self-report, and it used to render as a constant
+           ("宁静") even when the backend was off. Only shown when the
+           backend actually reports one. -->
+      {#if mem.mood}<span class="soul-mood">{mem.mood}</span>{/if}
+      <!-- Real, always-observable facts first. -->
       <span class="soul-stat">
-        {$t("soul.memories")} {status?.store?.total_entries ?? 0}
+        {$t("soul.memories")} {mem.totalEntries ?? 0}
       </span>
       <span class="soul-stat">
-        {$t("soul.portraitFacts")} {status?.soul?.portrait_facts ?? 0}
+        {$t("soul.portraitFacts")} {mem.userFactCount ?? 0}
       </span>
+      {#if mem.pendingEvents !== null && mem.pendingEvents > 0}
+        <span class="soul-stat">· {mem.pendingEvents} {$t("soul.pendingEvents", "pending")}</span>
+      {/if}
+      {#if mem.portraitUpdatedAt}
+        <span class="soul-stat">· {$t("soul.portraitUpdated", "updated")} {formatWhen(mem.portraitUpdatedAt)}</span>
+      {/if}
       {#if openTodos > 0}
         <span class="soul-stat">· {openTodos} {$t("status.todos", "todos")}</span>
       {/if}
@@ -69,7 +81,7 @@
       <div class="soul-welcome">
         {$t("soul.welcomeBack", "Welcome back")}{#if openTodos > 0} — {openTodos}
           {$t("soul.pendingWork", "open item(s) from last time")}{/if}{#if status?.soul?.narrative_chapters}
-          · {$t("soul.narrative")} {status.soul.narrative_chapters} {$t("soul.chapters")}{/if}
+          · {$t("soul.narrative")} {status?.soul?.narrative_chapters} {$t("soul.chapters")}{/if}
       </div>
     {/if}
   </div>

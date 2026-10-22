@@ -24,8 +24,16 @@
   /* Text — 宣纸/月白 */
   --color-ink: #e4ddca;
   --color-body: #b8b0a3;
-  --color-muted: #7a7366;
-  --color-dim: #918875; /* WCAG AA: ≥4.5:1 on canvas/surface/elevated */
+  /* Raised for WCAG AA: muted was 3.32–3.98:1 (below AA) on every surface.
+     Now 5.07 canvas / 4.84 surface / 4.70 surface-soft — still a step below
+     --color-dim, so the muted→dim→body hierarchy is preserved. Documented
+     caveat: 4.49 on elevated / 4.23 on overlay → muted is for ≥12px
+     non-critical text only; use --color-dim inside modals. */
+  --color-muted: #8d8475;
+  /* Dim was 4.44:1 on --color-surface-overlay (below AA) while being the
+     documented colour for secondary text; brightened so it clears AA on
+     every surface, overlay included (5.24:1 there). */
+  --color-dim: #9e957f;
 
   /* Borders — 青调发丝线 */
   --color-hairline: rgba(147, 195, 214, 0.12);
@@ -143,9 +151,10 @@ html.theme-light {
   --color-accent-soft: rgba(79, 142, 168, 0.05);
   --color-ink: #2c2820;
   --color-body: #5c564a;
-  /* Light theme: previous values were ~1.9:1 / 3.2:1 on the light
-     canvas — far below WCAG AA. */
-  --color-muted: #6f6a5e;
+  /* Light theme: previous values were ~1.9:1 / 3.2:1 on the light canvas.
+     Muted is now ≥4.7:1 on every light surface (the old #6f6a5e was 3.83:1
+     on --bg-tertiary), dim ≥4.9:1. Same muted→dim→body hierarchy. */
+  --color-muted: #635c51;
   --color-dim: #5f594e;
   --color-hairline: rgba(79, 142, 168, 0.16);
   --color-hairline-strong: rgba(79, 142, 168, 0.28);

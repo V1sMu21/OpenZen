@@ -45,6 +45,84 @@ export interface SoulStatus {
     last_consolidation?: number | null;
   };
   harness?: { entry_count: number };
+
+  // ── P1-12 memory-control fields ──────────────────────────────────────
+  // The backend is being extended with an explicit memory-control surface
+  // (on/off, export, clear, browse). These are OPTIONAL here and read
+  // through `memoryStatus()` below, which normalizes both the old and the
+  // new shape — so this file works before and after the Rust side lands.
+  backend?: string;
+  erne_available?: boolean;
+  mood?: string | null;
+  energy?: number | null;
+  confidence?: number | null;
+  soul_version?: number;
+  user_fact_count?: number;
+  self_fact_count?: number;
+  self_portrait_updated_at?: string | null;
+  last_event_drain_at?: string | null;
+  pending_events?: number;
+}
+
+/** Normalized, always-present view of the memory status.
+ *
+ *  Every field is nullable on purpose: the settings panel must be able to
+ *  say "未启用 / unknown" instead of rendering a fabricated mood. Values that
+ *  the backend does not report stay `null` and the UI hides them. */
+export interface MemoryStatusView {
+  enabled: boolean;
+  backend: string | null;
+  erneAvailable: boolean | null;
+  mood: string | null;
+  energy: number | null;
+  confidence: number | null;
+  soulVersion: number | null;
+  userFactCount: number | null;
+  selfFactCount: number | null;
+  portraitUpdatedAt: string | null;
+  lastDrainAt: string | null;
+  pendingEvents: number | null;
+  totalEntries: number | null;
+  recalls: number | null;
+  hitRate: number | null;
+}
+
+/** Fold either status shape into one. Never invents a value: a field the
+ *  backend did not send stays null so the UI can say "not reported". */
+export function memoryStatus(status: SoulStatus | null | undefined): MemoryStatusView {
+  const s = status ?? undefined;
+  const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+  const str = (v: unknown): string | null =>
+    typeof v === "string" && v.trim() !== "" ? v : null;
+  return {
+    enabled: s?.enabled === true,
+    backend: str(s?.backend) ?? str(s?.embedding_kind),
+    erneAvailable:
+      typeof s?.erne_available === "boolean" ? s.erne_available : null,
+    mood: str(s?.mood) ?? str(s?.soul?.mood),
+    energy: num(s?.energy),
+    confidence: num(s?.confidence) ?? num(s?.soul?.confidence),
+    soulVersion: num(s?.soul_version) ?? num(s?.soul?.version),
+    userFactCount: num(s?.user_fact_count) ?? num(s?.soul?.portrait_facts),
+    selfFactCount: num(s?.self_fact_count),
+    portraitUpdatedAt: str(s?.self_portrait_updated_at),
+    lastDrainAt: str(s?.last_event_drain_at),
+    pendingEvents: num(s?.pending_events),
+    totalEntries: num(s?.store?.total_entries),
+    recalls: num(s?.store?.recalls),
+    hitRate: num(s?.store?.recall_hit_rate),
+  };
+}
+
+/** One entry in the memory browser. */
+export interface MemoryEntry {
+  id: string;
+  content: string;
+  layer?: string;
+  importance?: number;
+  tags?: string[];
+  created_at?: string;
+  superseded?: boolean;
 }
 
 type MutationResult = { status?: string; error?: string };
@@ -159,6 +237,127 @@ export async function removePortraitFact(statement: string): Promise<MutationRes
     await invoke<MutationResult>("remove_portrait_fact", { statement }),
     "remove_portrait_fact",
   );
+}
+
+/** Turn long-term memory on/off. Writes mykey.toml and takes effect
+ *  immediately; the caller must roll its switch back if this throws. */
+export async function setMemoryEnabled(enabled: boolean): Promise<{ ok?: boolean; backend?: string }> {
+  return invoke<{ ok?: boolean; backend?: string }>("set_memory_enabled", { enabled });
+}
+
+/** Export every memory entry to a JSON file under the data root. */
+export async function exportMemory(): Promise<{ path?: string; bytes?: number; entries?: number }> {
+  return invoke<{ path?: string; bytes?: number; entries?: number }>("export_memory");
+}
+
+/** Delete all memories. Always backs up first (the returned `backup_path`
+ *  is what the user can restore from), and the caller must have asked for
+ *  confirmation — the backend takes an explicit `confirm` flag for that. */
+export async function clearMemory(): Promise<{ ok?: boolean; backup_path?: string; removed?: number }> {
+  return invoke<{ ok?: boolean; backup_path?: string; removed?: number }>("clear_memory", {
+    confirm: true,
+  });
+}
+
+/** Browse memories (newest first). `query` filters by substring. */
+export async function listMemories(
+  limit = 100,
+  query = "",
+): Promise<{ entries: MemoryEntry[] }> {
+  return invoke<{ entries: MemoryEntry[] }>("list_memories", {
+    limit,
+    query: query.trim() === "" ? null : query.trim(),
+  });
+}
+
+/** Forget one memory by id. */
+export async function forgetMemory(id: string): Promise<{ ok?: boolean; id?: string }> {
+  return invoke<{ ok?: boolean; id?: string }>("forget_memory", { id });
+}
+
+/** Reveal a path in the OS file manager (Finder).
+ *
+ *  Three routes, in order of preference:
+ *   1. `reveal_path` — the app's own command (requested from the Rust side;
+ *      the opener plugin is not a dependency of this frontend);
+ *   2. the opener/shell plugin, if it is ever added;
+ *   3. clipboard — always available, and "paste into Finder's Go to Folder"
+ *      is what the user would do anyway. Returns how it was handled so the
+ *      caller can tell the user the truth instead of pretending Finder
+ *      opened. */
+export async function revealInFileManager(
+  path: string,
+): Promise<"revealed" | "copied"> {
+  const w = window as any;
+  if (isTauri()) {
+    try {
+      await tauriInvoke("reveal_path", { path });
+      return "revealed";
+    } catch {
+      /* command not registered yet — fall through */
+    }
+  }
+  const plugin = w.__TAURI__?.opener ?? w.__TAURI__?.shell;
+  if (plugin?.revealItemInDir) {
+    await plugin.revealItemInDir(path);
+    return "revealed";
+  }
+  if (navigator?.clipboard?.writeText) {
+    await navigator.clipboard.writeText(path);
+    return "copied";
+  }
+  throw new Error("reveal unavailable");
+}
+
+/** Delivery-quality counters from the reflexion ledger (R5-5).
+ *  `week`/`total` are reflection-type → count maps; `rates_*` are the
+ *  denominators-and-rates view. Everything is optional: a fresh install has
+ *  an empty ledger and the UI must say "no data yet". */
+export interface QualityReport {
+  generated_at?: string;
+  projects_scanned?: number;
+  window_days?: number;
+  week?: Record<string, number>;
+  total?: Record<string, number>;
+  rates_week?: QualityRates;
+  rates_total?: QualityRates;
+}
+
+export interface QualityRates {
+  review_attempts?: number;
+  review_pass_rate?: number | null;
+  review_rework_rate?: number | null;
+  deliveries?: number;
+  assertion_failure_rate?: number | null;
+  review_coverage?: number | null;
+}
+
+/** Read the quality report (also persisted to openzen/quality_report.json). */
+export async function fetchQualityReport(): Promise<QualityReport> {
+  return invoke<QualityReport>("get_quality_report");
+}
+
+/** Forward a frontend error to the backend log (P1-10).
+ *
+ *  A renderer-side exception used to be invisible: it died in the webview
+ *  console, which the user never opens and which is not in openzen.log.
+ *  Never throws — a logging failure must not become a second error. */
+export async function logFrontend(
+  level: "error" | "warn" | "info",
+  message: string,
+  stack = "",
+): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    await tauriInvoke("log_frontend", { level, message, stack });
+  } catch {
+    /* logging must never throw */
+  }
+}
+
+/** Bundle logs + config + state into one archive for a bug report. */
+export async function exportDiagnostics(): Promise<{ path?: string; bytes?: number }> {
+  return invoke<{ path?: string; bytes?: number }>("export_diagnostics");
 }
 
 export async function setSoulIdentity(name: string): Promise<MutationResult> {

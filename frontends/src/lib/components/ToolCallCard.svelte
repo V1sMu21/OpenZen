@@ -14,6 +14,7 @@
     showTimer = $bindable(false),
     hasError = false,
     workingDir = "",
+    liveElapsedSecs = undefined as number | undefined,
   } = $props();
 
   let collapsed = $state(true);
@@ -521,12 +522,31 @@
   // Pick the right duration: static `durationMs` once finalized, live
   // counter while running. If we somehow have neither (e.g. just mounted
   // and the first tick hasn't fired), fall back to 0.
+  //
+  // While a tool is still running the backend's `tool_progress` heartbeat is
+  // authoritative (it measures from the tool's own start, not from the args
+  // settling), so prefer it over the locally measured clock.
+  let liveLabel = $derived(
+    liveElapsedSecs != null
+      ? formatDuration(liveElapsedSecs * 1000)
+      : argsSettled
+        ? formatDuration(liveRunningMs)
+        : "…"
+  );
   let durationLabel = $derived(
-    isRunning
-      ? (argsSettled
-          ? formatDuration(liveRunningMs)
-          : "…")
-      : formatDuration(durationMs ?? liveRunningMs)
+    isRunning ? liveLabel : formatDuration(durationMs ?? liveRunningMs)
+  );
+  // A running tool must always show how long it has been going: a single
+  // long tool emits no other signal, so gating this behind the (default-off)
+  // duration toggle left the user with just the word "running".
+  let showDuration = $derived(!!durationLabel && (showTimer || isRunning));
+  // Header argument summary. `summaryArg` JSON-parses the args, and the
+  // template used to call it twice per render (once for the guard, once for
+  // the text) on every streaming frame.
+  let argSummary = $derived(
+    toolCall
+      ? summaryArg(toolCall.arguments, toolCall.name, String(toolCall.result ?? ''))
+      : ''
   );
 </script>
 
@@ -538,10 +558,10 @@
       {#if repeatCount != null && repeatCount > 1}
         <span class="tcc-count">&times;{repeatCount}</span>
       {/if}
-      {#if summaryArg(toolCall.arguments, toolCall.name, String(toolCall.result ?? ''))}
-        <span class="tcc-arg">{summaryArg(toolCall.arguments, toolCall.name, String(toolCall.result ?? ''))}</span>
+      {#if argSummary}
+        <span class="tcc-arg">{argSummary}</span>
       {/if}
-      {#if durationLabel && showTimer}
+      {#if showDuration}
         <span class="tcc-duration" title="Execution time">{durationLabel}</span>
       {/if}
       {#if hasError}

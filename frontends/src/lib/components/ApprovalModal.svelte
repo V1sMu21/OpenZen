@@ -82,9 +82,11 @@
       <!-- Trusted summary -->
       <div class="approval-trust-info">
         {#if req.approvedCount > 0}
-          ✅ {trustedMsg(req.approvedCount, req.currentLevel)}
+          <span class="trust-dot" aria-hidden="true"></span>
+          {trustedMsg(req.approvedCount, req.currentLevel)}
         {:else}
-          ⚡ {$t("approval.firstTime")}
+          <span class="trust-dot trust-dot-first" aria-hidden="true"></span>
+          {$t("approval.firstTime")}
         {/if}
       </div>
 
@@ -93,6 +95,18 @@
         <div class="approval-tool-name">{req.toolName}</div>
         <pre class="approval-args">{JSON.stringify(req.arguments, null, 2)}</pre>
       </div>
+
+      {#if $approval.sendError}
+        <!-- The decision never reached the backend, so this request is still
+             pending. Say so instead of closing the modal and pretending the
+             tool was approved. -->
+        <div class="approval-error" role="alert">
+          <span class="approval-error-text">{$t("approval.sendFailed")}</span>
+          <button class="btn btn-retry" onclick={() => approval.retry()}>
+            {$t("approval.retry")}
+          </button>
+        </div>
+      {/if}
 
       <!-- Action buttons -->
       <div class="approval-actions">
@@ -145,7 +159,8 @@
 
       <!-- Hint -->
       <p class="approval-hint">
-        💡 {trustHintMsg(req.toolName, req.pattern)}
+        <span class="trust-dot trust-dot-hint" aria-hidden="true"></span>
+        {trustHintMsg(req.toolName, req.pattern)}
         {$t("approval.autoUpgrade")}
       </p>
     </div>
@@ -153,6 +168,26 @@
 {/if}
 
 <style>
+  /* Status marker replacing the former ✅/⚡/💡 emoji (DESIGN.md §"Never":
+     "Use emojis in UI chrome"). A 6px token-coloured dot carries the same
+     "state at a glance" signal without shipping a font glyph. */
+  .trust-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    margin-right: 6px;
+    vertical-align: middle;
+    flex: 0 0 auto;
+  }
+  .trust-dot-first {
+    background: var(--color-primary);
+  }
+  .trust-dot-hint {
+    background: var(--color-warning);
+  }
+
   .approval-overlay {
     position: fixed;
     inset: 0;
@@ -170,7 +205,7 @@
     max-width: 90vw;
     max-height: 85vh;
     overflow-y: auto;
-    background: var(--color-surface, #1a1a1a);
+    background: var(--color-surface);
     border: 1px solid var(--color-hairline, #333);
     border-radius: 16px;
     padding: 24px;
@@ -188,7 +223,7 @@
   }
 
   .approval-icon {
-    color: var(--color-accent, #f0b850);
+    color: var(--color-accent);
     flex-shrink: 0;
   }
 
@@ -196,7 +231,7 @@
     flex: 1;
     font-size: 16px;
     font-weight: 600;
-    color: var(--color-ink, #e0e0e0);
+    color: var(--color-ink);
     margin: 0;
   }
 
@@ -204,7 +239,7 @@
     font-size: 13px;
     font-family: var(--font-mono, monospace);
     color: var(--color-dim, #888);
-    background: var(--color-surface-elevated, #262626);
+    background: var(--color-surface-elevated);
     padding: 2px 8px;
     border-radius: 6px;
   }
@@ -224,12 +259,32 @@
     padding: 12px;
     background: var(--color-surface-soft, #222);
   }
+  .approval-error {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--color-error);
+    background: color-mix(in srgb, var(--color-error) 12%, transparent);
+    color: var(--color-error);
+    font-size: 12px;
+  }
+  .approval-error-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .btn-retry {
+    padding: 3px 10px;
+    font-size: 12px;
+  }
 
   .approval-tool-name {
     font-family: var(--font-mono, monospace);
     font-size: 14px;
     font-weight: 600;
-    color: var(--color-accent, #f0b850);
+    color: var(--color-accent);
     margin-bottom: 8px;
   }
 
@@ -243,7 +298,7 @@
     overflow-y: auto;
     margin: 0;
     padding: 8px;
-    background: var(--color-surface, #1a1a1a);
+    background: var(--color-surface);
     border-radius: 6px;
     line-height: 1.5;
   }
@@ -281,23 +336,23 @@
   }
 
   .btn-allow {
-    background: color-mix(in srgb, var(--color-accent, #f0b850) 12%, transparent);
-    border-color: var(--color-accent, #f0b850);
-    color: var(--color-accent, #f0b850);
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+    border-color: var(--color-accent);
+    color: var(--color-accent);
   }
 
   .btn-allow:hover {
-    background: color-mix(in srgb, var(--color-accent, #f0b850) 22%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
   }
 
   .btn-trust-session {
-    background: color-mix(in srgb, var(--color-accent, #f0b850) 18%, transparent);
-    border-color: var(--color-accent, #f0b850);
-    color: var(--color-accent, #f0b850);
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    border-color: var(--color-accent);
+    color: var(--color-accent);
   }
 
   .btn-trust-session:hover {
-    background: color-mix(in srgb, var(--color-accent, #f0b850) 30%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 30%, transparent);
   }
 
   .btn-block {

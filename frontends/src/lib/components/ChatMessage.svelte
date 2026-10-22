@@ -1,6 +1,8 @@
   <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import type { ToolCallInfo } from "../stores/types";
+  import { qualityContract, type ToolCallInfo } from "../stores/types";
+  import { submitMessageFeedback } from "../api/chat";
+  import { sessions } from "../stores/sessions";
   import type { UIMessagePart, ToolInvocationPart } from "../stores/parts";
   import { convertStreamEventsToParts } from "../stores/parts";
   import { chat } from "../stores/chat";
@@ -93,6 +95,75 @@ import { t, locale, tSync } from "../i18n";
    *  SINGLE source of truth for "is the backend still working on
    *  THIS turn?".  Delegates entirely to `isLive`. */
   let isBackendStillWorking = $derived(isLive);
+
+  /** Stable `{name, arguments, result}` view of a tool part.
+   *
+   *  The parts array is rebuilt on every streaming flush while the part
+   *  OBJECTS inside are mutated in place, so building the literal inline made
+   *  ToolCallCard/SkillMcpCard see a brand-new prop on every frame and re-run
+   *  their parse work. This returns the same object while the three fields it
+   *  renders are unchanged, and a fresh one the moment any of them moves. */
+  const toolCallInfoCache = new WeakMap<
+    Extract<UIMessagePart, { type: "tool-invocation" }>,
+    { info: { name: string; arguments: string; result?: string }; args: string; result?: string }
+  >();
+  function toolCallInfoFor(
+    p: Extract<UIMessagePart, { type: "tool-invocation" }>,
+  ): { name: string; arguments: string; result?: string } {
+    const hit = toolCallInfoCache.get(p);
+    if (hit && hit.args === p.args && hit.result === p.result) return hit.info;
+    const info = { name: p.name, arguments: p.args, result: p.result };
+    toolCallInfoCache.set(p, { info, args: p.args, result: p.result });
+    return info;
+  }
+
+  /** Normal endings don't deserve a warning tone in the footer label. */
+  // Normal endings must not be tinted as warnings. The backend's most
+  // common value is `EXITED`, and a respond-path finish without an explicit
+  // reason lands on `CURRENT_TASK_DONE` — both used to be flagged abnormal
+  // (review findings B-3 / E-6).
+  const NORMAL_EXIT_REASONS = new Set([
+    "end_turn",
+    "EXITED",
+    "CURRENT_TASK_DONE",
+    "completed",
+  ]);
+  let isAbnormalExit = $derived(
+    !!message.exitReason && !NORMAL_EXIT_REASONS.has(message.exitReason)
+  );
+
+  // Delivery-gate state. Always rendered (never hover-only): "not verified"
+  // must be as visible as "passed", otherwise an unchecked delivery reads as
+  // a checked one (R5-5).
+  let contract = $derived(qualityContract(message.quality));
+
+  // ── P2-28 user feedback ──
+  let feedback = $state<"up" | "down" | null>(null);
+  let feedbackNote = $state("");
+  let noteOpen = $state(false);
+  let feedbackBusy = $state(false);
+  let feedbackError = $state("");
+
+  async function sendFeedback(verdict: "up" | "down") {
+    const sid = $sessions.currentId;
+    if (!sid) return;
+    feedbackBusy = true;
+    feedbackError = "";
+    try {
+      await submitMessageFeedback(
+        sid,
+        message.serverIndex ?? -1,
+        verdict,
+        verdict === "down" ? feedbackNote.trim() : "",
+      );
+      feedback = verdict;
+      noteOpen = false;
+    } catch (e) {
+      feedbackError = e instanceof Error ? e.message : String(e);
+    } finally {
+      feedbackBusy = false;
+    }
+  }
 
   /** What this turn produced, aggregated across every edit/patch/write —
    *  plus the deliverables the agent announced with `open_side_panel`, which
@@ -420,15 +491,16 @@ import { t, locale, tSync } from "../i18n";
               />
             {:else if p.type === "tool-invocation" && isSkillOrMcpInvocation(p.name)}
               <SkillMcpCard
-                toolCall={{ name: p.name, arguments: p.args, result: p.result }}
+                toolCall={toolCallInfoFor(p)}
                 durationMs={p.durationMs}
                 completed={isToolPartDone(p)}
                 showTimer={showTimer}
               />
             {:else if p.type === "tool-invocation"}
               <ToolCallCard
-                toolCall={{ name: p.name, arguments: p.args, result: p.result }}
+                toolCall={toolCallInfoFor(p)}
                 durationMs={p.durationMs}
+                liveElapsedSecs={p.liveElapsedSecs}
                 completed={isToolPartDone(p)}
                 showTimer={showTimer}
                 hasError={p.state === "output-error"}
@@ -503,7 +575,82 @@ import { t, locale, tSync } from "../i18n";
                 {/if}
               </span>
             </span>
+            {#if message.exitReason}
+              <!-- Always visible, not only on abnormal endings: "why did it
+                   stop" is one of the three questions a long task must answer
+                   without the user opening anything. -->
+              <span class="footer-sep" aria-hidden="true"></span>
+              <span
+                class="footer-exit"
+                class:warn={isAbnormalExit}
+                title={$t("message.exitReasonTitle")}
+              >
+                {$t(`exit.${message.exitReason}`, message.exitReason)}
+              </span>
+            {/if}
+            {#if !isLive}
+              <!-- P2-28 feedback: thumbs are training signal, not decoration. -->
+              <span class="footer-sep" aria-hidden="true"></span>
+              {#if feedback}
+                <span class="footer-feedback-done" role="status">
+                  <span class="quality-dot" aria-hidden="true"></span>
+                  {$t("feedback.recorded", "已记录")}
+                </span>
+              {:else}
+                <span class="footer-feedback">
+                  <button
+                    class="fb-btn"
+                    onclick={() => sendFeedback("up")}
+                    disabled={feedbackBusy}
+                    aria-label={$t("feedback.good", "这条回答有用")}
+                    title={$t("feedback.good", "这条回答有用")}
+                  >▲</button>
+                  <button
+                    class="fb-btn"
+                    class:on={noteOpen}
+                    onclick={() => (noteOpen = !noteOpen)}
+                    disabled={feedbackBusy}
+                    aria-label={$t("feedback.bad", "这条回答有问题")}
+                    title={$t("feedback.bad", "这条回答有问题")}
+                  >▼</button>
+                </span>
+              {/if}
+              <!-- Delivery contract: three distinguishable states. -->
+              <span class="footer-sep" aria-hidden="true"></span>
+              <span
+                class="footer-quality"
+                class:ok={contract.tone === "ok"}
+                class:warn={contract.tone === "warn"}
+                class:muted={contract.tone === "muted"}
+                title={message.quality?.note ?? $t(`${contract.labelKey}Title`)}
+                data-review-status={contract.status}
+              >
+                <span class="quality-dot" aria-hidden="true"></span>
+                {$t(contract.labelKey)}
+              </span>
+            {/if}
           </div>
+          {#if noteOpen && !feedback}
+            <div class="feedback-note">
+              <textarea
+                class="feedback-input"
+                bind:value={feedbackNote}
+                rows="2"
+                placeholder={$t("feedback.notePlaceholder", "哪里不对？（可选，会用来修正技能/SOP 的评分）")}
+              ></textarea>
+              <div class="feedback-actions">
+                <button class="fb-send" onclick={() => sendFeedback("down")} disabled={feedbackBusy}>
+                  {$t("feedback.submit", "提交")}
+                </button>
+                <button class="fb-cancel" onclick={() => (noteOpen = false)}>
+                  {$t("settings.close")}
+                </button>
+              </div>
+            </div>
+          {/if}
+          {#if feedbackError}
+            <div class="feedback-error" role="alert">{feedbackError}</div>
+          {/if}
         {/if}
 
       {:else}
@@ -583,7 +730,7 @@ import { t, locale, tSync } from "../i18n";
        内容收缩（flex 项 shrink-to-fit），长消息铺满消息列而不是顶在
        旧 68% 上限上堆行高；百分比上限随窗口拉伸自动适应。 */
     background: var(--color-primary-muted, rgba(147,195,214,0.07));
-    border-left: 2px solid var(--color-primary, #93c3d6);
+    border-left: 2px solid var(--color-primary);
     border-radius: 2px;
     max-width: 100%;
   }
@@ -759,15 +906,15 @@ import { t, locale, tSync } from "../i18n";
     font-size: 0.95em;
   }
   .markdown-content :global(.md-link) {
-    color: var(--color-accent, #5b9bd5);
+    color: var(--color-accent);
     text-decoration: underline;
     text-underline-offset: 2px;
     text-decoration-thickness: 1px;
-    text-decoration-color: color-mix(in srgb, var(--color-accent, #5b9bd5) 40%, transparent);
+    text-decoration-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
     transition: text-decoration-color 0.15s;
   }
   .markdown-content :global(.md-link:hover) {
-    text-decoration-color: var(--color-accent, #5b9bd5);
+    text-decoration-color: var(--color-accent);
   }
   .markdown-content :global(.math-block) {
     font-family: var(--font-mono, "JetBrains Mono", "CMU Serif", monospace);
@@ -812,7 +959,7 @@ import { t, locale, tSync } from "../i18n";
   }
   .timeline-err {
     margin-left: auto;
-    color: var(--color-error, #c05a3e);
+    color: var(--color-error);
     font-size: 10.5px;
     font-family: var(--font-mono);
   }
@@ -821,9 +968,9 @@ import { t, locale, tSync } from "../i18n";
     padding: 6px 10px;
     border-radius: 6px;
     font-size: 12px;
-    background: var(--bg-warning, #3a2d00);
-    color: var(--text-warning, #ffd966);
-    border: 1px solid var(--border-warning, #5c4800);
+    background: var(--color-surface-soft);
+    color: var(--color-status-warn);
+    border: 1px solid var(--color-hairline-strong, rgba(147, 195, 214, 0.22));
     line-height: 1.4;
   }
   .bubble-footer {
@@ -832,7 +979,7 @@ import { t, locale, tSync } from "../i18n";
     gap: 8px;
     margin-top: 8px;
     padding-top: 6px;
-    border-top: 1px dashed var(--color-hairline, #1d1d1f);
+    border-top: 1px dashed var(--color-hairline);
     font-size: 11px;
     color: var(--text-tertiary);
     flex-wrap: wrap;
@@ -849,7 +996,7 @@ import { t, locale, tSync } from "../i18n";
   .footer-sep {
     width: 1px;
     height: 10px;
-    background: var(--color-hairline, #1d1d1f);
+    background: var(--color-hairline);
     opacity: 0.6;
   }
   .footer-time-group,
@@ -874,6 +1021,109 @@ import { t, locale, tSync } from "../i18n";
     font-variant-numeric: tabular-nums;
     line-height: 1;
     color: var(--text-bright);
+  }
+  .footer-exit {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    color: var(--color-dim);
+    white-space: nowrap;
+  }
+  .footer-feedback {
+    display: inline-flex;
+    gap: 2px;
+  }
+  .fb-btn {
+    border: none;
+    background: transparent;
+    color: var(--color-muted);
+    cursor: pointer;
+    font-size: 9px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 3px;
+  }
+  .fb-btn:hover:not(:disabled) {
+    color: var(--color-body);
+    background: var(--color-surface-soft);
+  }
+  .fb-btn.on {
+    color: var(--color-status-warn);
+  }
+  .fb-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .footer-feedback-done {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--color-success);
+  }
+  .feedback-note {
+    margin: 6px 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .feedback-input {
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--color-body);
+    background: var(--color-surface-soft);
+    border: 1px solid var(--color-hairline);
+    border-radius: 6px;
+    padding: 6px 8px;
+    resize: vertical;
+  }
+  .feedback-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .fb-send,
+  .fb-cancel {
+    font-family: inherit;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    border: 1px solid var(--color-hairline);
+    background: transparent;
+    color: var(--color-body);
+  }
+  .fb-send:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+  .feedback-error {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--color-error);
+  }
+  .footer-quality {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+  }
+  .footer-quality .quality-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: 0 0 auto;
+  }
+  .footer-quality.ok {
+    color: var(--color-success);
+  }
+  .footer-quality.warn {
+    color: var(--color-status-warn);
+  }
+  .footer-quality.muted {
+    color: var(--color-muted);
+  }
+  .footer-exit.warn {
+    color: var(--color-status-warn);
   }
   .footer-stat-label {
     font-size: 9px;

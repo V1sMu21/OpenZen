@@ -28,7 +28,7 @@ export const heartbeat = writable<HeartbeatStatus>({
 });
 
 /** Event types whose data field is a JSON-encoded object (not plain text) */
-const OBJECT_EVENTS = new Set(["tool_call", "tool_result", "done", "model_info", "protocol_v1", "approval_needed", "ask_user_pending", "reminder_fired"]);
+const OBJECT_EVENTS = new Set(["tool_call", "tool_result", "done", "model_info", "protocol_v1", "protocol_v1_batch", "approval_needed", "ask_user_pending", "reminder_fired"]);
 
 /** Try to JSON-parse a string; return parsed value on success, original on failure */
 function tryParseJSON(s: string): unknown {
@@ -42,7 +42,7 @@ function tryParseJSON(s: string): unknown {
 /** Unwrap a protocol_v1 payload into the bare protocol event. The SSE path
  *  sends the event as a JSON string; the Tauri path wraps it in the full
  *  SseEvent object whose `data` field holds that string. */
-function protocolEventFrom(rawData: unknown): ProtocolV1Event | null {
+export function protocolEventFrom(rawData: unknown): ProtocolV1Event | null {
   let inner: unknown = rawData;
   if (inner && typeof inner === "object" && "data" in (inner as Record<string, unknown>)) {
     inner = (inner as { data: unknown }).data;
@@ -50,6 +50,24 @@ function protocolEventFrom(rawData: unknown): ProtocolV1Event | null {
   if (typeof inner === "string") inner = tryParseJSON(inner);
   if (inner && typeof inner === "object") return inner as ProtocolV1Event;
   return null;
+}
+
+/** Expand a `protocol_v1` or `protocol_v1_batch` payload into the ordered
+ *  list of protocol events it carries. The backend batches a burst of events
+ *  into one SSE message; order must be preserved. */
+export function protocolEventsFrom(rawData: unknown): ProtocolV1Event[] {
+  let inner: unknown = rawData;
+  if (inner && typeof inner === "object" && "data" in (inner as Record<string, unknown>)) {
+    inner = (inner as { data: unknown }).data;
+  }
+  if (typeof inner === "string") inner = tryParseJSON(inner);
+  if (!inner || typeof inner !== "object") return [];
+  const batch = (inner as { events?: unknown }).events;
+  if (Array.isArray(batch)) {
+    return batch.filter((e): e is ProtocolV1Event => !!e && typeof e === "object");
+  }
+  // A single protocol_v1 payload is its own event object.
+  return [inner as ProtocolV1Event];
 }
 
 let eventSource: EventSource | null = null;
@@ -74,7 +92,7 @@ function getReconnectDelay(): number {
  *  events (background included), so call it before the current-session
  *  filter in both dispatch paths. Run start is signaled by model_info
  *  (broadcast before the loop) and run activity; done/error end the run. */
-const RUN_START_EVENTS = new Set(["model_info", "token", "thinking", "tool_call", "tool_result", "protocol_v1"]);
+const RUN_START_EVENTS = new Set(["model_info", "token", "thinking", "tool_call", "tool_result", "protocol_v1", "protocol_v1_batch"]);
 const RUN_END_EVENTS = new Set(["done", "error"]);
 
 function trackRunState(sessionId: string | undefined, eventType: string | undefined) {
@@ -88,24 +106,43 @@ function trackRunState(sessionId: string | undefined, eventType: string | undefi
 
 function handleTauriEvent(raw: { session_id?: string; event_type?: string; data?: unknown }) {
   trackRunState(raw.session_id, raw.event_type);
-  // Filter by current session
+  // Strict session guard: an event belonging to another session must NEVER
+  // reach chat.handleSSEEvent. The old check required a current session to be
+  // selected already, so an event arriving in the window between
+  // `sessions.select(id)` and `loadSession()` resolving was painted into the
+  // PREVIOUS session's bubble (cross-session bleed).
   const currentId = get(sessions).currentId;
-  if (raw.session_id && currentId && raw.session_id !== currentId) {
+  const isBackground = !!raw.session_id && raw.session_id !== currentId;
+  if (isBackground) {
+    const sid = raw.session_id as string;
     // A background session finishing is still important: without this,
     // switching back would resurrect its pre-done streaming snapshot
     // from the processing cache (T3.6 stale-stream fix).
     if (raw.event_type === "done" || raw.event_type === "error") {
-      chat.noteSessionFinished(raw.session_id);
-    } else if (raw.event_type === "protocol_v1") {
+      chat.noteSessionFinished(sid);
+    } else if (raw.event_type === "protocol_v1" || raw.event_type === "protocol_v1_batch") {
       // Keep the background run's cached snapshot current so switching back
       // shows the cards produced while the user was elsewhere.
-      const protoEvent = protocolEventFrom(raw.data);
-      if (protoEvent) chat.applyBackgroundProtocolEvent(raw.session_id, protoEvent);
+      for (const protoEvent of protocolEventsFrom(raw.data)) {
+        chat.applyBackgroundProtocolEvent(sid, protoEvent);
+      }
     }
     return;
   }
   if (raw.event_type) {
     const eventType = raw.event_type as SSEEvent["type"];
+    if (eventType === "protocol_v1" || eventType === "protocol_v1_batch") {
+      // Single payload or a backend batch: apply every event, in order.
+      const events = protocolEventsFrom(raw.data);
+      if (events.length === 0) {
+        console.warn("[sse] dropped unparsable protocol payload", raw.event_type);
+        return;
+      }
+      for (const protoEvent of events) {
+        chat.handleSSEEvent({ type: "protocol_v1", data: protoEvent } as SSEEvent);
+      }
+      return;
+    }
     let eventData: unknown = raw.data;
     if (typeof eventData === "string" && OBJECT_EVENTS.has(eventType)) {
       eventData = tryParseJSON(eventData);
@@ -148,14 +185,32 @@ function handleSSEEvent(event: MessageEvent) {
     if (raw.session_id && currentId && raw.session_id !== currentId) {
       if (raw.event_type === "done" || raw.event_type === "error") {
         chat.noteSessionFinished(raw.session_id);
-      } else if (raw.event_type === "protocol_v1") {
-        const protoEvent = protocolEventFrom(raw.data);
-        if (protoEvent) chat.applyBackgroundProtocolEvent(raw.session_id, protoEvent);
+      } else if (
+        raw.event_type === "protocol_v1" ||
+        raw.event_type === "protocol_v1_batch"
+      ) {
+        for (const protoEvent of protocolEventsFrom(raw.data)) {
+          chat.applyBackgroundProtocolEvent(raw.session_id, protoEvent);
+        }
       }
       return;
     }
 
-    if (raw.event_type && raw.data !== undefined) {
+    if (raw.event_type === "protocol_v1" || raw.event_type === "protocol_v1_batch") {
+      // A batch envelope carries several events in `data.events`; expand it
+      // and apply them IN ORDER. This HTTP/EventSource path is separate from
+      // the Tauri one, and only the Tauri path used to expand batches — so
+      // the day `oz-server` starts batching, every streamed event in the
+      // browser would vanish without an error (review finding B-6).
+      const events = protocolEventsFrom(raw.data);
+      if (events.length === 0) {
+        console.warn("[sse] dropped unparsable protocol payload", raw.event_type);
+        return;
+      }
+      for (const protoEvent of events) {
+        chat.handleSSEEvent({ type: "protocol_v1", data: protoEvent } as SSEEvent);
+      }
+    } else if (raw.event_type && raw.data !== undefined) {
       const eventType = raw.event_type as SSEEvent["type"];
       const eventData = OBJECT_EVENTS.has(eventType)
         ? tryParseJSON(raw.data)
@@ -240,14 +295,14 @@ function scheduleReconnect() {
 async function checkHealth(): Promise<boolean> {
   if (isTauri()) {
     try {
-      void tauriInvoke("log_frontend", { line: "ping:start" }).catch(() => {});
+      void tauriInvoke("log_frontend", { line: "ping:start", level: "debug" }).catch(() => {});
       const result = await tauriInvoke("ping") as HeartbeatStatus;
-      void tauriInvoke("log_frontend", { line: "ping:ok" }).catch(() => {});
+      void tauriInvoke("log_frontend", { line: "ping:ok", level: "debug" }).catch(() => {});
       heartbeat.set({ ...result, connected: true, lastPing: Date.now(), lastError: undefined });
       return true;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      void tauriInvoke("log_frontend", { line: `ping:fail: ${msg}` }).catch(() => {});
+      void tauriInvoke("log_frontend", { line: `ping:fail: ${msg}`, level: "warn" }).catch(() => {});
       heartbeat.set({
         connected: false,
         lastPing: Date.now(),
