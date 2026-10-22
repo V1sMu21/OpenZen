@@ -267,8 +267,8 @@ pub async fn open_artifact_dialog(
             .add_filter(
                 "Documents",
                 &[
-                    "md", "html", "htm", "pdf", "doc", "docx", "txt", "rtf", "ppt", "pptx",
-                    "xls", "tex",
+                    "md", "html", "htm", "pdf", "doc", "docx", "txt", "rtf", "ppt", "pptx", "xls",
+                    "tex",
                 ],
             )
             .add_filter(
@@ -862,8 +862,14 @@ mod tests {
             "报告 修订版".into(),
         );
         assert_eq!(tabs.len(), 1, "one file must stay one tab");
-        assert_eq!(got.id, "a", "the existing id is reused so the panel focuses it");
-        assert_eq!(got.label, "报告", "the tab keeps the title it was opened with");
+        assert_eq!(
+            got.id, "a",
+            "the existing id is reused so the panel focuses it"
+        );
+        assert_eq!(
+            got.label, "报告",
+            "the tab keeps the title it was opened with"
+        );
     }
 
     /// The viewer must survive a re-open: a caller whose type is only an
@@ -874,11 +880,22 @@ mod tests {
             tab("a", "html", "/w/x.html", "X"),
             tab("b", "spreadsheet", "/w/data.json", "数据表"),
         ];
-        let got = focus_or_push(&mut tabs, "code".into(), "/w/data.json".into(), "data.json".into());
+        let got = focus_or_push(
+            &mut tabs,
+            "code".into(),
+            "/w/data.json".into(),
+            "data.json".into(),
+        );
         assert_eq!(tabs.len(), 2);
         assert_eq!(tabs[1].id, "b", "position is preserved — no reordering");
-        assert_eq!(got.artifact_type, "spreadsheet", "the declared viewer stays");
-        assert_eq!(got.label, "数据表", "the tab is not renamed by a coarser caller");
+        assert_eq!(
+            got.artifact_type, "spreadsheet",
+            "the declared viewer stays"
+        );
+        assert_eq!(
+            got.label, "数据表",
+            "the tab is not renamed by a coarser caller"
+        );
         assert_eq!(tabs[0].artifact_type, "html", "other tabs are untouched");
     }
 
@@ -901,9 +918,15 @@ mod tests {
         assert_eq!(tabs.len(), 2);
         assert_eq!(tabs[1].id, got.id);
         assert_eq!(got.path, "/w/y.md");
-        assert_eq!(got.artifact_type, "markdown", "a new tab uses the caller's type");
+        assert_eq!(
+            got.artifact_type, "markdown",
+            "a new tab uses the caller's type"
+        );
         assert_eq!(got.label, "Y");
-        assert!(!got.id.is_empty() && got.id != "a", "a new tab needs its own id");
+        assert!(
+            !got.id.is_empty() && got.id != "a",
+            "a new tab needs its own id"
+        );
     }
 
     #[test]

@@ -20,9 +20,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
-use crate::convert::{
-    args_to_string, content_parts_to_text, Exchange, RawBlock, AssistantTurn,
-};
+use crate::convert::{args_to_string, content_parts_to_text, AssistantTurn, Exchange, RawBlock};
 use crate::model::{ImportError, ImportedSession, SessionSummary, SourcePaths};
 
 fn open_db(path: &Path) -> Result<Connection, ImportError> {
@@ -76,10 +74,7 @@ pub fn list_sessions(paths: &SourcePaths) -> Result<Vec<SessionSummary>, ImportE
 }
 
 /// Parse one ZCode session into OpenZen messages.
-pub fn read_session(
-    source_id: &str,
-    paths: &SourcePaths,
-) -> Result<ImportedSession, ImportError> {
+pub fn read_session(source_id: &str, paths: &SourcePaths) -> Result<ImportedSession, ImportError> {
     let conn = open_db(&paths.zcode_db)?;
 
     let (title, directory, created): (Option<String>, Option<String>, Option<i64>) = conn
@@ -282,10 +277,9 @@ fn zcode_part_to_blocks(part: &Value) -> Vec<RawBlock> {
             // `error` is populated when status is error/failed and `output`
             // is absent; surface whichever exists so the card is never blank.
             let output = match state.get("output") {
-                Some(Value::Null) | None => state
-                    .get("error")
-                    .map(output_to_string)
-                    .unwrap_or_default(),
+                Some(Value::Null) | None => {
+                    state.get("error").map(output_to_string).unwrap_or_default()
+                }
                 Some(v) => output_to_string(v),
             };
             // The call and its result are emitted together: a ZCode `tool`

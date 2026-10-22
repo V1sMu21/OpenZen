@@ -84,7 +84,12 @@ impl ImportLedger {
         message_count: usize,
     ) {
         let key = ledger_key(source, source_id);
-        let previous = self.file.imports.get(&key).map(|e| e.import_count).unwrap_or(0);
+        let previous = self
+            .file
+            .imports
+            .get(&key)
+            .map(|e| e.import_count)
+            .unwrap_or(0);
         self.file.imports.insert(
             key,
             LedgerEntry {

@@ -182,10 +182,7 @@ fn parse_events(events: &[Value], collect_blocks: bool) -> ParsedDsh {
             "session" => {
                 // Header fields are top-level on this event.
                 parsed.created_at = event.get("createdAt").and_then(Value::as_i64);
-                parsed.cwd = event
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                parsed.cwd = event.get("cwd").and_then(Value::as_str).map(str::to_string);
                 parsed.origin = event
                     .get("origin")
                     .and_then(Value::as_str)
@@ -201,8 +198,7 @@ fn parse_events(events: &[Value], collect_blocks: bool) -> ParsedDsh {
                 // A `fallback` title is a truncated first message rather than
                 // a real title: better than nothing, but it never overrides
                 // one that already resolved.
-                if !title.trim().is_empty()
-                    && (source_kind != "fallback" || parsed.title.is_none())
+                if !title.trim().is_empty() && (source_kind != "fallback" || parsed.title.is_none())
                 {
                     parsed.title = Some(title.trim().to_string());
                 }
@@ -286,9 +282,8 @@ fn parse_events(events: &[Value], collect_blocks: bool) -> ParsedDsh {
                                 .and_then(Value::as_str)
                                 .unwrap_or("unknown")
                                 .to_string();
-                            let args = args_to_string(
-                                block.get("arguments").unwrap_or(&Value::Null),
-                            );
+                            let args =
+                                args_to_string(block.get("arguments").unwrap_or(&Value::Null));
                             seen_calls.insert(id.clone());
                             turn.blocks.push(RawBlock::ToolCall { id, name, args });
                         }
@@ -391,7 +386,10 @@ fn fallback_title(exchanges: &[Exchange]) -> Option<String> {
         .iter()
         .map(|e| e.user_text.trim())
         .find(|t| !t.is_empty())?;
-    let line = first.lines().find(|l| !l.trim().is_empty()).unwrap_or(first);
+    let line = first
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(first);
     let mut s: String = line.trim().chars().take(80).collect();
     if line.trim().chars().count() > 80 {
         s.push('…');
@@ -444,10 +442,7 @@ fn count_messages(exchanges: &[Exchange]) -> usize {
 }
 
 /// Parse one DSH session into OpenZen messages.
-pub fn read_session(
-    source_id: &str,
-    paths: &SourcePaths,
-) -> Result<ImportedSession, ImportError> {
+pub fn read_session(source_id: &str, paths: &SourcePaths) -> Result<ImportedSession, ImportError> {
     let files = discover_files(&paths.dsh_sessions_dir)?;
     let path = files
         .into_iter()
@@ -471,7 +466,9 @@ pub fn read_session(
         source_id: source_id.to_string(),
         title,
         directory: parsed.cwd,
-        created_at: parsed.created_at.and_then(chrono::DateTime::from_timestamp_millis),
+        created_at: parsed
+            .created_at
+            .and_then(chrono::DateTime::from_timestamp_millis),
         messages: crate::convert::exchanges_to_messages(&parsed.exchanges),
     })
 }
@@ -505,7 +502,10 @@ mod tests {
             "beforeafter"
         );
         // Unterminated reminder must not leak into the conversation.
-        assert_eq!(strip_system_reminders("prompt<system-reminder>dangling"), "prompt");
+        assert_eq!(
+            strip_system_reminders("prompt<system-reminder>dangling"),
+            "prompt"
+        );
     }
 
     /// A whole session built from synthetic events: reasoning + text +

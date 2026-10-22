@@ -137,7 +137,10 @@ fn validate(messages: &[serde_json::Value]) {
     if unfinished > 0 {
         println!("    !! {unfinished} assistant turns would render as still-Running");
     }
-    if let Some(first_user) = messages.iter().find(|m| m.get("role") == Some(&"user".into())) {
+    if let Some(first_user) = messages
+        .iter()
+        .find(|m| m.get("role") == Some(&"user".into()))
+    {
         println!("    first user msg  : {}", first_user);
     }
 }

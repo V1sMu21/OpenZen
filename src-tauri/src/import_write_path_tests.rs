@@ -25,10 +25,8 @@ use oz_server::webui::sessions::SessionStore;
 
 /// Isolated scratch directory (avoiding a tempfile dependency here).
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "openzen-import-test-{}-{name}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("openzen-import-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create scratch dir");
     dir

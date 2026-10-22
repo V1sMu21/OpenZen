@@ -70,7 +70,9 @@ pub async fn handle_key_command(action: &crate::KeyAction, working_dir: &Path) -
             if !no_verify {
                 print!("   verifying against api … ");
                 std::io::stdout().flush().ok();
-                match oz_tools::web_search::probe_engine_with_key(&engine, Some(&key), &working_dir).await {
+                match oz_tools::web_search::probe_engine_with_key(&engine, Some(&key), &working_dir)
+                    .await
+                {
                     Ok(count) => println!("ok — live search returned {count} results"),
                     Err(err) => {
                         println!("FAILED\n   ⚠️  key stored, but the live check failed: {err}");
@@ -107,7 +109,8 @@ pub async fn handle_key_command(action: &crate::KeyAction, working_dir: &Path) -
             };
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            let (updated, removed) = remove_section_value(&content, "web_search", toml_key_for(&engine));
+            let (updated, removed) =
+                remove_section_value(&content, "web_search", toml_key_for(&engine));
             if !removed {
                 println!(
                     "Nothing to remove: no [web_search] {} in {}",
@@ -158,7 +161,10 @@ fn warn_if_env_shadowed(engine: &str) {
         "firecrawl" => "FIRECRAWL_API_KEY",
         _ => return,
     };
-    if std::env::var(env_name).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+    if std::env::var(env_name)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
         println!(
             "⚠️  {env_name} is set in this environment and takes precedence over the file value."
         );
@@ -188,7 +194,14 @@ fn validate_key(engine: &str, key: &str) -> Result<()> {
 }
 
 fn mask(key: &str) -> String {
-    let tail: String = key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: String = key
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("••••{tail}")
 }
 
@@ -430,7 +443,12 @@ bot_token = \"t\"
 
     #[test]
     fn upsert_creates_missing_section() {
-        let updated = upsert_section_value("[local]\nmodel = \"m\"\n", "web_search", "tavily_api_key", "tv-1");
+        let updated = upsert_section_value(
+            "[local]\nmodel = \"m\"\n",
+            "web_search",
+            "tavily_api_key",
+            "tv-1",
+        );
         assert!(updated.contains("[web_search]\ntavily_api_key = \"tv-1\"\n"));
 
         let from_empty = upsert_section_value("", "web_search", "tavily_api_key", "tv-1");
@@ -445,7 +463,8 @@ bot_token = \"t\"
         assert!(updated.contains("[web_search]"));
         assert!(updated.contains("[platforms.telegram]"));
 
-        let (untouched, removed_again) = remove_section_value(&updated, "web_search", "bocha_api_key");
+        let (untouched, removed_again) =
+            remove_section_value(&updated, "web_search", "bocha_api_key");
         assert!(!removed_again);
         assert_eq!(untouched, updated);
     }
