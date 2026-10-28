@@ -2,7 +2,7 @@ import { chat } from "./chat";
 import { get, writable } from "svelte/store";
 import { sessions } from "./sessions";
 import { approval } from "./approval";
-import { markSessionFinished, markSessionRunning } from "./running";
+import { markSessionFinished, markSessionRunning, markSessionWaiting } from "./running";
 import type { SSEEvent } from "./types";
 import type { ProtocolV1Event } from "./parts";
 import { listen } from "@tauri-apps/api/event";
@@ -95,6 +95,15 @@ function getReconnectDelay(): number {
 const RUN_START_EVENTS = new Set(["model_info", "token", "thinking", "tool_call", "tool_result", "protocol_v1", "protocol_v1_batch"]);
 const RUN_END_EVENTS = new Set(["done", "error"]);
 
+function trackSessionState(sessionId: string | undefined, event: ProtocolV1Event) {
+  if (!sessionId) return;
+  if (event.type === "ask_user_pending") {
+    markSessionWaiting(sessionId);
+  } else if (event.type === "ask_user_answered") {
+    markSessionRunning(sessionId);
+  }
+}
+
 function trackRunState(sessionId: string | undefined, eventType: string | undefined) {
   if (!sessionId || !eventType) return;
   if (RUN_START_EVENTS.has(eventType)) {
@@ -124,6 +133,7 @@ function handleTauriEvent(raw: { session_id?: string; event_type?: string; data?
       // Keep the background run's cached snapshot current so switching back
       // shows the cards produced while the user was elsewhere.
       for (const protoEvent of protocolEventsFrom(raw.data)) {
+        trackSessionState(sid, protoEvent);
         chat.applyBackgroundProtocolEvent(sid, protoEvent);
       }
     }
@@ -139,6 +149,7 @@ function handleTauriEvent(raw: { session_id?: string; event_type?: string; data?
         return;
       }
       for (const protoEvent of events) {
+        trackSessionState(raw.session_id, protoEvent);
         chat.handleSSEEvent({ type: "protocol_v1", data: protoEvent } as SSEEvent);
       }
       return;
@@ -190,6 +201,7 @@ function handleSSEEvent(event: MessageEvent) {
         raw.event_type === "protocol_v1_batch"
       ) {
         for (const protoEvent of protocolEventsFrom(raw.data)) {
+          trackSessionState(raw.session_id, protoEvent);
           chat.applyBackgroundProtocolEvent(raw.session_id, protoEvent);
         }
       }
@@ -208,6 +220,7 @@ function handleSSEEvent(event: MessageEvent) {
         return;
       }
       for (const protoEvent of events) {
+        trackSessionState(raw.session_id, protoEvent);
         chat.handleSSEEvent({ type: "protocol_v1", data: protoEvent } as SSEEvent);
       }
     } else if (raw.event_type && raw.data !== undefined) {
@@ -384,6 +397,7 @@ function routeApproval(event: SSEEvent, sessionId?: string) {
     arguments: data.arguments,
     approvedCount: (data.approved_count as number) || 0,
     currentLevel: (data.current_level as string) || "AlwaysAsk",
+    origin: (data.origin as string) || undefined,
   });
 }
 

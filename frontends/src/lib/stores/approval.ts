@@ -19,6 +19,8 @@ export interface ApprovalRequest {
   arguments: unknown;
   approvedCount: number;
   currentLevel: string;
+  /** Set when the request came from a subagent (its label). */
+  origin?: string;
 }
 
 export interface ApprovalState {

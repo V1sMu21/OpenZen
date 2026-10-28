@@ -79,6 +79,10 @@
         <span class="approval-countdown">{$approval.countdown}s</span>
       </div>
 
+      {#if req.origin}
+        <p class="approval-origin">{$t("approval.fromSubagent")} · <b>{req.origin}</b></p>
+      {/if}
+
       <!-- Trusted summary -->
       <div class="approval-trust-info">
         {#if req.approvedCount > 0}
@@ -196,7 +200,6 @@
     align-items: center;
     justify-content: center;
     background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
     animation: fadeIn 0.15s ease;
   }
 
@@ -225,6 +228,13 @@
   .approval-icon {
     color: var(--color-accent);
     flex-shrink: 0;
+  }
+
+  .approval-origin {
+    margin: -2px 0 10px;
+    font-size: 11px;
+    color: var(--color-gold);
+    opacity: 0.9;
   }
 
   .approval-title {

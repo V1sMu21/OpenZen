@@ -47,6 +47,17 @@ impl SafetyGuard {
                 "todowrite".into(),
                 "todoupdate".into(),
                 "long_term".into(),
+                // Background-job controls are pure reads of this session's
+                // own registry (kill only cancels work the same session
+                // started). Leaving them approval-gated made every poll pop
+                // a dialog, which defeats background execution.
+                "job_output".into(),
+                "job_list".into(),
+                "job_kill".into(),
+                // Delegation itself is not a file/shell operation; the child
+                // inherits this conversation's guard for its own tools.
+                "spawn_agent".into(),
+                "send_message".into(),
             ],
             permissions: Permissions::default(),
             project_trust: ProjectTrustLevel::Full,

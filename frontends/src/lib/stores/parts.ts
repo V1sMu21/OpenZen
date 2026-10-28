@@ -77,6 +77,7 @@ export type ProtocolV1Event =
   | { type: 'data_todo_update'; items: Array<{id:string;content:string;status:string;priority:string;order:number}>; current: number; total: number }
   | { type: 'data_context_usage'; current_tokens: number; output_tokens: number; context_window: number; turn: number; message_count: number; total_input_tokens?: number; total_output_tokens?: number }
   | { type: 'ask_user_pending'; payload?: { data?: { question?: string; candidates?: string[] }; [k: string]: unknown } }
+  | { type: 'ask_user_answered'; tool_use_id?: string }
   | { type: 'open_artifact'; artifact_type: string; artifact_path: string; artifact_label: string }
   | { type: 'user_intervention'; content: string };
 

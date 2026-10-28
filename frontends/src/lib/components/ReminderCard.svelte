@@ -106,6 +106,9 @@
 
 <style>
   .reminder-card {
+    border-radius: 10px;
+    border: 1px solid var(--color-hairline);
+    background: var(--color-surface-soft);
     margin: 4px 0;
     position: relative;
   }

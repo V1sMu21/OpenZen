@@ -5,6 +5,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { t } from "../i18n";
   import { detectArtifactType } from "../utils/artifactType";
+  import { isTauri } from "../api/tauri";
 
   function rendererFor(artifact: Artifact): string {
     return artifact.type || detectArtifactType(artifact.path);
@@ -52,6 +53,27 @@
       if (String(e) !== "cancelled") fileError = String(e);
     } finally {
       openingFile = false;
+    }
+  }
+
+  // ── Path bar / footer actions ──
+  async function copyPath() {
+    const path = sidepanel.activeArtifact?.path;
+    if (!path) return;
+    try {
+      await navigator.clipboard.writeText(path);
+    } catch {
+      /* clipboard unavailable (webview without permission) — no-op */
+    }
+  }
+
+  async function revealActive() {
+    const path = sidepanel.activeArtifact?.path;
+    if (!path || !isTauri()) return;
+    try {
+      await invoke("reveal_in_finder", { path });
+    } catch (e) {
+      console.warn("[SidePanel] reveal failed:", e);
     }
   }
 
@@ -151,6 +173,13 @@
     </div>
     </div>
 
+    {#if sidepanel.activeArtifact && sidepanel.activeArtifact.type !== "background"}
+      <div class="sidepanel-path">
+        <span class="sp-path-text" title={sidepanel.activeArtifact.path}>{sidepanel.activeArtifact.path}</span>
+        <button class="sp-mini" onclick={copyPath} title={$t("sidepanel.copyPath")} aria-label={$t("sidepanel.copyPath")}>⧉</button>
+      </div>
+    {/if}
+
     {#if fileError}
       <div class="sidepanel-error" role="alert">
         {fileError}
@@ -177,19 +206,29 @@
         <ArtifactEmpty />
       {/if}
     </div>
+
+    <div class="sidepanel-foot">
+      <span class="sp-meta">{sidepanel.artifacts.length} {$t("sidepanel.tabsCount")}</span>
+      <span class="sp-grow"></span>
+      {#if sidepanel.activeArtifact?.type !== "background"}
+        <button class="sp-btn" onclick={revealActive}>{$t("sidepanel.reveal")}</button>
+        <button class="sp-btn" onclick={copyPath}>{$t("sidepanel.copyPath")}</button>
+      {/if}
+    </div>
   </aside>
 {/if}
 
 <style>
+  /* ── 右侧栏 (展卷): 56px 标签行 + 30px 路径条 + 44px 底栏 ── */
   .sidepanel {
     position: relative;
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: var(--color-surface-elevated);
+    background: var(--color-surface);
     border-left: 1px solid var(--color-hairline);
     overflow: hidden;
-    transition: width 250ms ease-out;
+    transition: width 250ms var(--ease-soak);
   }
   .sidepanel.dragging {
     transition: none;
@@ -226,7 +265,8 @@
     align-items: center;
     border-bottom: 1px solid var(--color-hairline);
     flex-shrink: 0;
-    min-height: 36px;
+    height: 56px;
+    padding: 0 8px 0 12px;
   }
   .sidepanel-header-spacer { flex: 1; }
   .sidepanel-close-btn {
@@ -234,10 +274,12 @@
     border: none;
     color: var(--color-muted);
     cursor: pointer;
-    font-size: 14px;
-    padding: 4px 10px;
-    border-radius: 4px;
+    font-size: 13px;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
     flex-shrink: 0;
+    transition: background 0.16s, color 0.16s;
   }
   .sidepanel-close-btn:hover {
     color: var(--color-ink);
@@ -246,35 +288,36 @@
 
   .sidepanel-tabbar {
     display: flex;
+    align-items: center;
     overflow-x: auto;
-    flex-shrink: 0;
-    padding: 4px 4px 0 8px;
-    gap: 2px;
+    min-width: 0;
+    flex-shrink: 1;
+    gap: 4px;
   }
 
   .sidepanel-tab {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 6px 10px;
-    border: none;
-    border-bottom: 2px solid transparent;
+    gap: 6px;
+    height: 30px;
+    padding: 0 9px;
+    border: 1px solid transparent;
     background: transparent;
     color: var(--color-muted);
     cursor: pointer;
-    font-family: var(--font-serif);
-    font-size: 12px;
-    letter-spacing: 0.08em;
-    border-radius: 3px 3px 0 0;
+    font-family: var(--font-sans);
+    font-size: 11.5px;
+    border-radius: 9px;
     white-space: nowrap;
-    max-width: 160px;
+    max-width: 190px;
+    flex: none;
     overflow: hidden;
-    transition: color 0.3s var(--ease-soak, ease), border-color 0.3s var(--ease-soak, ease);
+    transition: color 0.18s var(--ease-soak), background 0.18s, border-color 0.18s;
   }
   .sidepanel-tab.active {
-    background: transparent;
-    color: var(--color-primary);
-    border-bottom-color: var(--color-primary);
+    background: var(--color-surface-soft);
+    border-color: var(--color-hairline);
+    color: var(--color-ink);
   }
   .sidepanel-tab:hover {
     color: var(--color-ink);
@@ -298,20 +341,98 @@
     color: white;
   }
 
+  /* 文字按钮（终端 / 打开）：宽度跟随文字，中英文都不重叠 */
   .sidepanel-add-btn {
-    margin-left: 4px;
-    padding: 4px 8px;
+    margin-left: 2px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    padding: 0 9px;
+    font-family: var(--font-sans);
     font-size: 11px;
-    border: 1px dashed var(--color-hairline);
-    border-radius: 4px;
+    line-height: 1;
+    border: 1px solid var(--color-hairline);
+    border-radius: 8px;
     background: transparent;
-    color: var(--color-muted);
+    color: var(--color-dim);
     cursor: pointer;
     white-space: nowrap;
+    flex: none;
+    transition: background 0.16s, color 0.16s, border-color 0.16s;
+  }
+  .sidepanel-add-btn:hover {
+    background: var(--color-surface-soft);
+    color: var(--color-ink);
+    border-color: var(--color-hairline-strong);
   }
   .sidepanel-add-btn:hover {
     border-color: var(--color-primary);
     color: var(--color-primary);
+  }
+
+  .sidepanel-path {
+    height: 30px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--color-hairline);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-muted);
+  }
+  .sp-path-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sp-mini {
+    border: none;
+    background: none;
+    color: var(--color-muted);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 4px;
+    border-radius: 5px;
+  }
+  .sp-mini:hover { color: var(--color-ink); background: var(--color-surface-soft); }
+
+  .sidepanel-foot {
+    height: 44px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    border-top: 1px solid var(--color-hairline);
+    background: var(--color-surface);
+  }
+  .sp-grow { flex: 1; }
+  .sp-meta {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--color-muted);
+  }
+  .sp-btn {
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 8px;
+    border: 1px solid var(--color-hairline);
+    background: transparent;
+    color: var(--color-dim);
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    cursor: pointer;
+    transition: background 0.16s, color 0.16s, border-color 0.16s;
+  }
+  .sp-btn:hover {
+    background: var(--color-surface-soft);
+    color: var(--color-ink);
+    border-color: var(--color-hairline-strong);
   }
 
   .sidepanel-content {

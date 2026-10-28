@@ -306,6 +306,7 @@ mod tests {
 
     fn test_context() -> ToolContext {
         ToolContext {
+            is_subagent: false,
             working_dir: ".".into(),
             assets_dir: ".".into(),
             script_dir: ".".into(),

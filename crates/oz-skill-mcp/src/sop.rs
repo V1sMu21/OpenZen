@@ -322,6 +322,12 @@ impl SopManager {
         session_id: Option<String>,
         verified_by: Option<&str>,
     ) -> Result<Sop, SkillMcpError> {
+        // Callers may hand over a whole document where a title was expected:
+        // the `long_term` tool passed its entire payload as both name and
+        // description, which became a ~1000-character filename and failed with
+        // `File name too long (os error 63)` on every call (2026-10-23). Bound
+        // the name here so no caller can produce an unusable SOP path.
+        let name = bounded_title(name);
         let mut content = String::new();
         content.push_str(&format!("# {} — {}\n\n", name, description));
         content.push_str(&format!("**Purpose:** {}\n\n", description));
@@ -353,16 +359,16 @@ impl SopManager {
 
         let tags = extract_tags_from_tools(tool_sequence);
 
-        let mut meta = SkillMcpMetadata::new(name, description, tags.clone());
+        let mut meta = SkillMcpMetadata::new(&name, description, tags.clone());
         meta.source_session = session_id;
         meta.record_success(0);
 
         let sop = Sop {
-            name: name.to_string(),
+            name: name.clone(),
             description: description.to_string(),
             tags,
             content,
-            source_path: self.sops_dir.join(format!("{}.md", sanitize_name(name))),
+            source_path: self.sops_dir.join(format!("{}.md", sanitize_name(&name))),
             metadata: meta,
         };
 
@@ -415,8 +421,33 @@ impl SopManager {
 
 // ── Helpers ──
 
+/// Longest name (and therefore filename stem) derived from model input.
+/// macOS allows 255 *bytes* per component; CJK names cost 3 bytes each, so 80
+/// characters plus a short hash suffix stays comfortably inside the limit.
+const MAX_NAME_CHARS: usize = 80;
+
+/// First non-empty line of `s`, stripped of markdown heading marks and capped.
+///
+/// Used where a title is expected but the caller may pass a whole document.
+fn bounded_title(s: &str) -> String {
+    let first = s
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .trim_start_matches('#')
+        .trim();
+    let capped: String = first.chars().take(MAX_NAME_CHARS).collect();
+    if capped.trim().is_empty() {
+        "untitled".to_string()
+    } else {
+        capped
+    }
+}
+
 fn sanitize_name(s: &str) -> String {
-    s.chars()
+    let cleaned = s
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -424,9 +455,18 @@ fn sanitize_name(s: &str) -> String {
                 '_'
             }
         })
-        .collect::<String>()
-        .trim_matches('_')
-        .to_lowercase()
+        .collect::<String>();
+    let trimmed = cleaned.trim_matches('_').to_lowercase();
+    if trimmed.chars().count() <= MAX_NAME_CHARS {
+        return trimmed;
+    }
+    // Truncating alone would collide for two long names sharing a prefix, so
+    // keep a short content hash of the FULL name.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    let head: String = trimmed.chars().take(MAX_NAME_CHARS).collect();
+    format!("{head}_{:08x}", hasher.finish() as u32)
 }
 
 fn simplify_args(args: &serde_json::Value) -> serde_json::Value {

@@ -79,6 +79,18 @@ impl ReviewStatus {
     }
 }
 
+/// Does this review verdict name a defect the agent can act on?
+///
+/// Only a failed verdict, or high-severity issues (even when the reviewer said
+/// `pass`), warrants sending the run back to work. `insufficient_evidence` and
+/// an unavailable reviewer are states, not defects: the agent cannot fix "the
+/// reviewer could not judge", and a redo round just re-runs the verification
+/// the gate itself blocked. That loop kept a desktop run going after the work
+/// was finished (2026-10-23 12:52).
+pub fn review_requires_fix(v: &ReviewVerdict) -> bool {
+    v.status == ReviewStatus::Failed || v.issues.iter().any(|i| i.severity == "high")
+}
+
 /// Verdict of the independent review.
 #[derive(Debug, Clone)]
 pub struct ReviewVerdict {
@@ -384,18 +396,17 @@ pub async fn run_assertion_gate_checked(spec_text: &str, working_dir: &str) -> A
             Ok(()) => {}
             Err(reason) => {
                 tracing::warn!("[quality] assertion blocked by policy: `{cmd}` — {reason}");
+                // A rejected assertion is NOT a failure: it never ran, so the
+                // agent cannot fix it by re-running — only by rewriting the
+                // `[verify]` line. Counting it as a failure burned the whole
+                // fix budget and reported "验收断言未通过 … 修复预算已耗尽" for
+                // work that was never executed (2026-10-23 14:23 E2E run: the
+                // synthesized spec contained a pipe, which policy refuses).
                 if reason.contains("allow-list") {
                     outcome.needs_approval.push(cmd.clone());
                 } else {
                     outcome.blocked.push((cmd.clone(), reason.clone()));
                 }
-                outcome.failures.push(AssertionFailure {
-                    command: cmd.clone(),
-                    output: format!(
-                        "<not executed: {reason}>\nRewrite the assertion as a read-only or \
-                         in-project build command, or ask the user to run it manually."
-                    ),
-                });
                 continue;
             }
         }
@@ -418,6 +429,51 @@ pub async fn run_assertion_gate_checked(spec_text: &str, working_dir: &str) -> A
         }
     }
     outcome
+}
+
+/// Feedback prompt for `[verify]` lines the policy refuses to execute.
+///
+/// Blocked and needs-approval assertions cannot be "fixed" by re-running them;
+/// the only fix is rewriting the spec's `[verify]` lines into the executable
+/// subset. This is sent once per run (bounded by the gate budget) so an
+/// auto-synthesized spec has a chance to become verifiable instead of leaving
+/// the delivery permanently unverified.
+pub fn format_assertion_policy_feedback(outcome: &AssertionOutcome, lang: &str) -> Option<String> {
+    if outcome.blocked.is_empty() && outcome.needs_approval.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for (cmd, reason) in &outcome.blocked {
+        lines.push(format!("- `{cmd}` — {reason}"));
+    }
+    for cmd in &outcome.needs_approval {
+        lines.push(format!(
+            "- `{cmd}` — not on the read-only/build allow-list (needs human approval)"
+        ));
+    }
+    let listed = lines.join("\n");
+    Some(if lang == "zh" {
+        format!(
+            "[VERIFY-POLICY] task_spec.md 里以下验收断言**没有被执行**（不是失败，是命令不合规）：\n{listed}\n\n\
+             请把这几行改写成「单条、只读或项目内构建」命令后重新写入 task_spec.md，\
+             例如：`test -f <相对路径>`、`python3 -m py_compile <相对路径>`、\
+             `node --check <相对路径>`、`cargo check --quiet`。\
+             不要用管道/重定向/`&&`/`;`/反引号，不要引用项目外的绝对路径；\
+             确实无法自动执行的检查，请写进交付说明让用户手动复验，并从 [verify] 中删掉。"
+        )
+    } else {
+        format!(
+            "[VERIFY-POLICY] These task_spec.md acceptance assertions were NOT executed \
+             (not failures — the commands are not allowed):\n{listed}\n\n\
+             Rewrite them as single read-only or in-project build commands and write \
+             task_spec.md again, e.g. `test -f <relative path>`, \
+             `python3 -m py_compile <relative path>`, `node --check <relative path>`, \
+             `cargo check --quiet`. No pipes/redirection/`&&`/`;`/backticks, and no \
+             absolute paths outside the project. Checks that genuinely cannot run \
+             automatically: state them in the delivery note for the user and remove \
+             them from [verify]."
+        )
+    })
 }
 
 /// Hard cap on the total evidence text handed to the reviewer.
@@ -1715,7 +1771,9 @@ pub fn build_spec_synthesis_prompt(
             "从下面的用户需求生成交付前验收断言。\n\n【用户需求】\n{}\n\n【本次写动的文件】\n{}\n\n\
              要求：输出 2-4 行，每行格式严格为 `[verify] <shell命令>`；只允许存在性检查、构建/语法级命令\
              （如 test -f、python3 -m py_compile X、node --check X、cargo check --quiet）；禁止模糊断言。\
-             只输出这些行，不要解释。",
+             **每条必须是单条命令**：不得包含管道 `|`、重定向 `>`、`&&`、`;`、反引号、`$(`；\
+             不得引用项目外的绝对路径（用相对路径）；不要用 `python3 X.py` 这类不在白名单里的执行命令，\
+             要用 `python3 -m py_compile X` 做语法检查。只输出这些行，不要解释。",
             truncate(user_input, 1500),
             files
         )
@@ -1723,7 +1781,10 @@ pub fn build_spec_synthesis_prompt(
         format!(
             "Derive pre-delivery acceptance assertions from the user request below.\n\n[REQUEST]\n{}\n\n             [FILES WRITTEN]\n{}\n\nRules: output 2-4 lines, each strictly `[verify] <shell command>`; \
              existence checks and build/syntax-level commands only (test -f, python3 -m py_compile X, \
-             node --check X, cargo check --quiet); no vague assertions. Output only those lines.",
+             node --check X, cargo check --quiet); no vague assertions. Every line must be a SINGLE command: \
+             no pipes `|`, no redirection `>`, no `&&`, `;`, backticks or `$(`; no absolute paths outside \
+             the project (use relative paths); do not use `python3 X.py` (not on the allow-list) — use \
+             `python3 -m py_compile X` for a syntax check. Output only those lines.",
             truncate(user_input, 1500),
             files
         )
@@ -2351,11 +2412,14 @@ mod tests {
     #[tokio::test]
     async fn test_assertion_gate_reports_only_failures() {
         // P0-6 ⑤: assertions now go through the allow-list, so the fixtures
-        // use allowed commands (`true`/`echo` are no longer executed).
-        let spec = "[verify] test -d /tmp\n[verify] test -d /definitely-not-here\n";
+        // use allowed commands (`true`/`echo` are no longer executed), and an
+        // out-of-project absolute path (`/definitely-not-here`) is refused by
+        // policy instead of being counted as a failure — use an allowed temp
+        // path that genuinely does not exist.
+        let spec = "[verify] test -d /tmp\n[verify] test -d /tmp/definitely-not-here-dir\n";
         let failures = run_assertion_gate(spec, "/tmp").await;
         assert_eq!(failures.len(), 1, "failures: {failures:?}");
-        assert_eq!(failures[0].command, "test -d /definitely-not-here");
+        assert_eq!(failures[0].command, "test -d /tmp/definitely-not-here-dir");
     }
 
     #[tokio::test]
@@ -2675,6 +2739,49 @@ mod tests {
         assert_eq!(v3.status, ReviewStatus::Passed);
     }
 
+    /// Regression for the post-completion loop (2026-10-23 12:52): a reviewer
+    /// that cannot judge must NOT buy another fix round. Only real defects do.
+    #[test]
+    fn only_a_named_defect_earns_another_fix_round() {
+        let insufficient =
+            parse_review_response(r#"{"verdict":"insufficient_evidence","issues":[]}"#).unwrap();
+        assert!(
+            !review_requires_fix(&insufficient),
+            "insufficient_evidence is a state, not a defect — a redo round here \
+             re-runs verification the gate itself blocks"
+        );
+
+        let unavailable = ReviewVerdict {
+            pass: false,
+            issues: Vec::new(),
+            status: ReviewStatus::Unavailable,
+            derived_from_issues: false,
+        };
+        assert!(!review_requires_fix(&unavailable));
+
+        let failed = parse_review_response(
+            r#"{"verdict":"fail","issues":[{"severity":"medium","item":"x"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            review_requires_fix(&failed),
+            "an explicit fail is a defect even without high issues"
+        );
+
+        let passing_but_high = parse_review_response(
+            r#"{"verdict":"pass","pass":true,"issues":[{"severity":"high","item":"broken"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            review_requires_fix(&passing_but_high),
+            "a pass that lists a high-severity problem is still a must-fix (P0-6 ③)"
+        );
+
+        let clean_pass =
+            parse_review_response(r#"{"verdict":"pass","pass":true,"issues":[]}"#).unwrap();
+        assert!(!review_requires_fix(&clean_pass));
+    }
+
     /// T3.1: a missing `pass` field used to default to TRUE. It must now be
     /// derived from the issue severities and flagged as derived.
     #[test]
@@ -2786,12 +2893,52 @@ mod tests {
         assert_eq!(outcome.blocked.len(), 1, "blocked: {:?}", outcome.blocked);
         assert_eq!(outcome.status(), AssertionStatus::BlockedByPolicy);
         assert!(!marker.exists(), "a blocked assertion must NOT run");
-        // The blocked command still appears in the feedback (visible).
-        assert!(outcome
-            .failures
-            .iter()
-            .any(|f| f.output.contains("not executed")));
+        // A rejected assertion never ran, so it must NOT be reported as a
+        // failure — that is what made the gate burn its whole fix budget and
+        // print "验收断言未通过 … 修复预算已耗尽" for work it never executed.
+        // (`test -f does-not-exist` is allowed and genuinely fails, so the
+        // check is per-command, not "failures is empty".)
+        assert!(
+            !outcome
+                .failures
+                .iter()
+                .any(|f| f.command.contains("rm -rf")),
+            "the policy-rejected assertion must not be a failure: {:?}",
+            outcome.failures
+        );
+        // ...but it stays visible, and the agent gets actionable rewrite rules.
+        assert!(outcome.blocked[0].0.contains("rm -rf"));
+        let fb = format_assertion_policy_feedback(&outcome, "zh").expect("feedback for blocked");
+        assert!(
+            fb.contains("rm -rf"),
+            "the refused command must be named: {fb}"
+        );
+        assert!(
+            fb.contains("[verify]"),
+            "feedback must point at the spec lines"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The synthesized spec must be executable by the gate, otherwise every
+    /// auto-created task_spec.md lands in `blocked_by_policy` forever.
+    #[test]
+    fn synthesis_prompt_constrains_the_assertion_grammar() {
+        let prompt =
+            build_spec_synthesis_prompt("做一个 hello.py 并运行", &["hello.py".into()], "zh");
+        assert!(prompt.contains("[verify]"), "must ask for [verify] lines");
+        assert!(
+            prompt.contains("单条命令") && prompt.contains('|'),
+            "must forbid pipes and multi-command lines"
+        );
+        assert!(
+            prompt.contains("py_compile"),
+            "must steer clear of non-allow-listed `python3 X.py`"
+        );
+        assert!(
+            prompt.contains("相对路径"),
+            "must forbid out-of-project absolute paths"
+        );
     }
 
     /// T8: concurrent writers must never interleave bytes — 17 of 549 real

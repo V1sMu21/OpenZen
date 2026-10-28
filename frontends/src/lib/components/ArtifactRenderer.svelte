@@ -28,6 +28,8 @@
       case "diff": return () => import("./ArtifactDiffView.svelte");
       case "latex": return () => import("./ArtifactLatexView.svelte");
       case "image": return () => import("./ArtifactImageView.svelte");
+      case "plan": return () => import("./PlanReview.svelte");
+      case "background": return () => import("./BackgroundPanel.svelte");
       case "office":
         return artifact.path.toLowerCase().endsWith(".docx")
           ? () => import("./ArtifactDocxView.svelte")

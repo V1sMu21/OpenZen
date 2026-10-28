@@ -2,7 +2,7 @@
   import { askConfirm } from "../stores/confirm";
   import { sessions } from "../stores/sessions";
   import { projects } from "../stores/projects";
-  import { runningSessionIds } from "../stores/running";
+  import { runningSessionIds, waitingSessionIds } from "../stores/running";
   import type { SessionInfo } from "../api/sessions";
   import { t, locale, localT } from "../i18n";
 
@@ -75,6 +75,21 @@
         hour: "2-digit",
         minute: "2-digit",
       }).format(new Date(iso));
+    } catch {
+      return "";
+    }
+  }
+
+  /** One-line date for the list: time today, M/D otherwise. */
+  function shortDate(iso: string): string {
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "";
+      const now = new Date();
+      if (d.toDateString() === now.toDateString()) {
+        return new Intl.DateTimeFormat($locale, { hour: "2-digit", minute: "2-digit" }).format(d);
+      }
+      return new Intl.DateTimeFormat($locale, { month: "numeric", day: "numeric" }).format(d);
     } catch {
       return "";
     }
@@ -169,11 +184,13 @@
       class:focused={idx === focusedIndex}
       role="option"
       aria-selected={session.id === currentId}
-      aria-label={$runningSessionIds.has(session.id) ? $t("session.running") : undefined}
+      aria-label={$waitingSessionIds.has(session.id) ? $t("session.waiting") : $runningSessionIds.has(session.id) ? $t("session.running") : undefined}
       tabindex="-1"
       onclick={() => { onSelectSession(session.id); focusedIndex = idx; }}
     >
-      {#if $runningSessionIds.has(session.id)}
+      {#if $waitingSessionIds.has(session.id)}
+        <span class="waiting-dot" aria-hidden="true" title={$t("session.waiting")}></span>
+      {:else if $runningSessionIds.has(session.id)}
         <span class="running-dot" aria-hidden="true"></span>
       {/if}
       <div class="session-info">
@@ -203,14 +220,13 @@
                 e.stopPropagation();
               }
             }}
-            title={$t("session.renameHint")}
+            title={`${session.name || $t("session.defaultName")}\n${session.message_count} ${$t("session.msgs")} · ${formatDate(session.created_at)}`}
           >{session.name || $t("session.defaultName")}</div>
         {/if}
-        <div class="session-meta">
-          <span>{session.message_count} {$t("session.msgs")}</span>
-          <span>{formatDate(session.created_at)}</span>
-        </div>
       </div>
+      {#if renamingId !== session.id}
+        <span class="session-time" aria-hidden="true">{shortDate(session.created_at)}</span>
+      {/if}
       <button
         class="delete-btn"
         onclick={(e) => handleDelete(e, session.id)}
@@ -232,40 +248,50 @@
   .session-list {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 4px 8px;
+    gap: 1px;
+    padding: 2px 4px;
   }
 
   .session-list.indented {
-    padding: 2px 4px 2px 0;
+    padding: 1px 0 4px;
   }
 
   .session-item {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 6px 8px 6px calc(12px + var(--indent, 0px));
-    border-radius: 8px;
+    gap: 8px;
+    min-height: 32px;
+    padding: 7px 8px 7px calc(10px + var(--indent, 0px));
+    border-radius: 10px;
     background: transparent;
-    color: var(--color-body);
+    color: var(--color-dim);
     cursor: pointer;
     text-align: left;
     width: 100%;
-    transition: background 0.1s;
+    transition: background 0.15s var(--ease-soak), color 0.15s var(--ease-soak);
   }
 
   .session-item:hover {
     background: var(--color-surface-soft);
-  }
-
-  .session-item:hover .delete-btn {
-    opacity: 0.6;
+    color: var(--color-body);
   }
 
   .session-item.active {
-    background: var(--color-primary-muted);
-    border-left: 2px solid var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 9%, transparent);
     color: var(--color-ink);
+  }
+
+  /* 活动会话: 左缘一道 2px 天青线 (器物刻痕) */
+  .session-item.active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 9px;
+    bottom: 9px;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--color-primary);
   }
 
   .session-item.focused:not(.active) {
@@ -274,117 +300,118 @@
     background: var(--color-surface-soft);
   }
 
-  /* ── 运行中指示：晕染呼吸圆 (title 前的扩散光环) ── */
-  .running-dot {
+  /* ── 运行中 / 待确认: 呼吸点 + 扩散环 (transform/opacity only) ── */
+  .running-dot,
+  .waiting-dot {
     position: relative;
     flex: none;
-    width: 8px;
-    height: 8px;
-    margin-left: 2px;
-    border-radius: 999px;
-    background: var(--color-info);
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
   }
 
-  .running-dot::after {
+  .running-dot { background: var(--color-primary); color: var(--color-primary); }
+  .waiting-dot { background: var(--color-gold); color: var(--color-gold); }
+
+  .running-dot::after,
+  .waiting-dot::after {
     content: "";
     position: absolute;
     inset: -3px;
-    border-radius: inherit;
-    background: color-mix(in srgb, var(--color-info) 40%, transparent);
-    animation: run-halo 1.6s ease-out infinite;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.4;
+    animation: dot-halo 1.8s ease-out infinite;
   }
 
-  @keyframes run-halo {
-    0% {
-      transform: scale(0.55);
-      opacity: 0.9;
-    }
-    70% {
-      transform: scale(1.7);
-      opacity: 0;
-    }
-    100% {
-      transform: scale(1.7);
-      opacity: 0;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .running-dot::after {
-      animation: none;
-      opacity: 0.35;
-      transform: none;
-    }
+  @keyframes dot-halo {
+    0% { transform: scale(0.5); opacity: 0.5; }
+    70% { transform: scale(1.7); opacity: 0; }
+    100% { transform: scale(1.7); opacity: 0; }
   }
 
   .session-info {
     flex: 1;
     min-width: 0;
     display: flex;
-    flex-direction: column;
-    gap: 3px;
+    align-items: center;
   }
 
   .session-name {
-    font-family: var(--font-serif);
+    font-family: var(--font-sans);
     font-size: 12.5px;
-    letter-spacing: 0.06em;
+    letter-spacing: 0;
     font-weight: 500;
-    line-height: 1.3;
+    line-height: 1.35;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .session-meta {
-    display: flex;
-    gap: 8px;
-    font-size: 11px;
+  .session-time {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
     color: var(--color-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+    transition: opacity 0.15s;
+  }
+
+  .session-item:hover .session-time {
+    opacity: 0;
   }
 
   .delete-btn {
     flex-shrink: 0;
-    width: 28px;
-    height: 28px;
+    width: 24px;
+    height: 24px;
     display: flex;
     align-items: center;
     justify-content: center;
     background: none;
     border: none;
-    color: var(--color-dim);
-    border-radius: 6px;
+    color: var(--color-muted);
+    border-radius: 7px;
     cursor: pointer;
     opacity: 0;
-    transition: opacity 0.15s, background 0.1s;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
   }
 
+  .session-item:hover .delete-btn,
   .session-item.active .delete-btn {
-    opacity: 0.5;
+    opacity: 1;
   }
 
   .delete-btn:hover {
-    opacity: 1 !important;
-    background: color-mix(in srgb, var(--color-error) 20%, transparent);
+    background: color-mix(in srgb, var(--color-error) 16%, transparent);
     color: var(--color-error);
   }
 
   .empty-state {
-    padding: 24px 12px;
+    padding: 18px 12px;
     text-align: center;
-    font-size: 13px;
+    font-size: 12px;
     color: var(--color-muted);
   }
 
   .session-rename-input {
     width: 100%;
     font: inherit;
-    color: inherit;
+    color: var(--color-ink);
     background: var(--color-surface-soft);
     border: 1px solid var(--color-primary);
-    border-radius: 4px;
-    padding: 1px 4px;
+    border-radius: 7px;
+    padding: 2px 6px;
+    outline: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .running-dot::after,
+    .waiting-dot::after {
+      animation: none;
+      opacity: 0.2;
+      transform: none;
+    }
   }
 </style>

@@ -105,6 +105,7 @@ mod tests {
 
     fn ctx() -> ToolContext {
         ToolContext {
+            is_subagent: false,
             working_dir: "/tmp".into(),
             assets_dir: "/tmp".into(),
             script_dir: "/tmp".into(),

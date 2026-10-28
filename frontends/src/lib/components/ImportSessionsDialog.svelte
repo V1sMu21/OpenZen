@@ -84,6 +84,53 @@
   const activeList = $derived(activeSource ? lists[activeSource] : undefined);
   const rows = $derived(activeList?.sessions ?? []);
   const selectedIds = $derived(activeSource ? selection[activeSource] ?? [] : []);
+
+  /** 会话按项目归拢：同一目录（basename）下的会话合成一组，
+   *  这样 dsh / zcode 两个来源里的同名项目可以一眼看全。 */
+  interface RowGroup {
+    key: string;
+    name: string;
+    rows: ImportSession[];
+  }
+  const groups = $derived.by<RowGroup[]>(() => {
+    const map = new Map<string, RowGroup>();
+    for (const row of rows) {
+      const dir = (row.directory ?? "").replace(/[\\/]+$/, "");
+      const name = dir ? (dir.split(/[\\/]/).pop() || dir) : $t("import.ungrouped");
+      const key = dir || "__ungrouped__";
+      const g = map.get(key);
+      if (g) g.rows.push(row);
+      else map.set(key, { key, name, rows: [row] });
+    }
+    // 会话多的组排前面，空的/杂项沉底。
+    return [...map.values()].sort((a, b) => b.rows.length - a.rows.length);
+  });
+
+  function groupSelected(g: RowGroup): number {
+    return g.rows.filter((r) => isSelected(r.source_id)).length;
+  }
+
+  function toggleGroup(g: RowGroup) {
+    if (!activeSource || importing) return;
+    const cur = new Set(selection[activeSource] ?? []);
+    const allOn = g.rows.every((r) => cur.has(r.source_id));
+    for (const r of g.rows) {
+      if (allOn) cur.delete(r.source_id);
+      else cur.add(r.source_id);
+    }
+    selection[activeSource] = [...cur];
+  }
+
+  /** 一键导入整组：勾上本组里尚未导入的会话，直接开跑。 */
+  async function importGroup(g: RowGroup) {
+    if (!activeSource || importing) return;
+    const ids = g.rows.filter((r) => !r.already_imported).map((r) => r.source_id);
+    if (ids.length === 0) return;
+    const cur = new Set(selection[activeSource] ?? []);
+    for (const id of ids) cur.add(id);
+    selection[activeSource] = [...cur];
+    await runImport();
+  }
   const selectedCount = $derived(selectedIds.length);
   const unavailableSources = $derived(sources.filter((s) => !s.available));
 
@@ -415,8 +462,31 @@
           {:else if rows.length === 0}
             <div class="import-state">{$t("import.empty")}</div>
           {:else}
-            <ul class="import-rows">
-              {#each rows as row (row.source_id)}
+            <div class="import-groups">
+              {#each groups as g (g.key)}
+                {@const picked = groupSelected(g)}
+                <section class="import-group">
+                  <div class="import-group-head">
+                    <input
+                      type="checkbox"
+                      class="import-check"
+                      checked={picked === g.rows.length && g.rows.length > 0}
+                      disabled={importing}
+                      onchange={() => toggleGroup(g)}
+                      aria-label={g.name}
+                    />
+                    <span class="import-group-name" title={g.name}>{g.name}</span>
+                    <span class="import-group-count">{picked}/{g.rows.length}</span>
+                    <button
+                      type="button"
+                      class="import-link import-group-all"
+                      onclick={() => importGroup(g)}
+                      disabled={importing || g.rows.every((r) => r.already_imported)}
+                      title={$t("import.importGroupHint")}
+                    >{$t("import.importGroup")}</button>
+                  </div>
+                  <ul class="import-rows">
+              {#each g.rows as row (row.source_id)}
                 <li>
                   <label class="import-row" class:selected={isSelected(row.source_id)}>
                     <input
@@ -451,7 +521,10 @@
                   </label>
                 </li>
               {/each}
-            </ul>
+                  </ul>
+                </section>
+              {/each}
+            </div>
           {/if}
         </div>
       {/if}
@@ -504,6 +577,7 @@
   /* Scrim uses the same ink-night wash as the other modals (SettingsPanel):
      a scrim, not a palette colour. */
   .import-backdrop {
+    background: rgba(0, 0, 0, 0.5);
     position: fixed;
     inset: 0;
     background: rgba(20, 18, 14, 0.55);
@@ -522,6 +596,9 @@
 
   /* Depth = surface step + hairline. No shadow. */
   .import-dialog {
+    border-radius: 16px;
+    border: 1px solid var(--color-hairline-strong);
+    box-shadow: 0 30px 80px -20px rgba(0,0,0,.85);
     display: flex;
     flex-direction: column;
     width: 100%;
@@ -704,6 +781,58 @@
   .import-state.import-error {
     color: var(--color-error);
     word-break: break-word;
+  }
+
+  /* ── 项目分组 ── */
+  .import-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .import-group {
+    border: 1px solid var(--color-hairline);
+    border-radius: 12px;
+    background: var(--color-surface-soft);
+    overflow: hidden;
+  }
+
+  .import-group-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 34px;
+    padding: 0 10px;
+    border-bottom: 1px solid var(--color-hairline);
+    background: var(--color-surface-elevated);
+  }
+
+  .import-group-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--color-ink);
+    font-family: var(--font-mono);
+  }
+
+  .import-group-count {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--color-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .import-group-all {
+    flex: none;
+    font-size: 10.5px;
+  }
+
+  .import-group .import-rows {
+    padding: 4px;
   }
 
   .import-rows {

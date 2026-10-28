@@ -39,6 +39,7 @@ fn test_handler_integration() {
                 harness_dir: None,
                 session_id: String::new(),
                 tool_budget_secs: 0,
+                is_subagent: false,
             };
             handler.execute(serde_json::json!({"x": 1}), &ctx).await
         })

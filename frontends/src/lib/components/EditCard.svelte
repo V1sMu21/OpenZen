@@ -128,13 +128,19 @@
 </div>
 
 <style>
+  /* 预览规格：10 圆角 · 软底 + 发丝线 */
   .edit-card {
-    margin: 6px 0;
-    border: 1px solid var(--color-hairline, #1d1d1f);
-    border-radius: 8px;
-    background: var(--bg-secondary, #161618);
+    margin: 1px 0;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: none;
     overflow: hidden;
     font-size: 12px;
+    transition: background 0.16s, border-color 0.16s;
+  }
+  .edit-card:hover {
+    background: var(--color-surface-soft);
+    border-color: var(--color-hairline);
   }
   .edit-header {
     display: flex;
@@ -144,14 +150,16 @@
     padding: 7px 10px;
     background: transparent;
     border: none;
-    color: var(--text-secondary, #b8b0a3);
+    color: var(--color-body);
     cursor: pointer;
     text-align: left;
-    font-family: inherit;
+    font-family: var(--font-sans);
     font-size: 12px;
+    min-height: 32px;
+    border-radius: 10px;
   }
   .edit-header:hover {
-    background: rgba(255, 255, 255, 0.025);
+    color: var(--color-ink);
   }
   .chevron {
     flex: 0 0 auto;
@@ -167,15 +175,17 @@
   }
   .edit-label {
     font-weight: 500;
-    color: var(--text-bright, #d6cfc0);
+    color: var(--color-ink);
   }
   .edit-dir {
-    color: var(--text-tertiary, #4d483e);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--color-muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
   }
   .edit-name {
-    color: var(--text-bright, #d6cfc0);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--color-ink);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
     font-weight: 500;
   }
   .edit-meta {

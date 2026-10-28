@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 pub enum SessionStatus {
     Idle,
     Running,
+    /// The run is parked on an unanswered `ask_user` question. Distinct
+    /// from Running so the sidebar/title bar can say "waiting for you"
+    /// instead of pretending the model is still working.
+    Waiting,
     Stopped,
 }
 
@@ -19,6 +23,7 @@ impl SessionStatus {
         match self {
             SessionStatus::Idle => "idle",
             SessionStatus::Running => "running",
+            SessionStatus::Waiting => "waiting",
             SessionStatus::Stopped => "stopped",
         }
     }
@@ -42,6 +47,21 @@ pub struct SessionInfo {
     pub working_dir: Option<String>,
 }
 
+/// The question a waiting session is parked on. Persisted with the session
+/// so a page reload (or an app restart) can restore the dialog instead of
+/// showing a blank "running" row.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct PendingAskUserRecord {
+    pub tool_use_id: String,
+    #[serde(default)]
+    pub tool_call_id: String,
+    pub question: String,
+    #[serde(default)]
+    pub candidates: Vec<String>,
+    #[serde(default)]
+    pub asked_at: String,
+}
+
 /// Full session entry (internal).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEntry {
@@ -56,6 +76,9 @@ pub struct SessionEntry {
     /// Todo items restored from the latest checkpoint (for UI recovery).
     #[serde(default)]
     pub todos: Vec<oz_core_types::TodoItem>,
+    /// Open ask_user question when `status == Waiting`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_ask_user: Option<PendingAskUserRecord>,
     /// Bumped by every `get_mut` (i.e. every in-place mutation). The persist
     /// cache compares it so that a rewrite which changes a message's
     /// *content* without changing the message *count* — `/compact` folding
@@ -106,6 +129,7 @@ struct EntryFingerprint {
     info_message_count: usize,
     info_project_id: Option<String>,
     info_working_dir: Option<String>,
+    pending_ask_user: Option<PendingAskUserRecord>,
 }
 
 fn entry_fingerprint(e: &SessionEntry) -> EntryFingerprint {
@@ -119,6 +143,7 @@ fn entry_fingerprint(e: &SessionEntry) -> EntryFingerprint {
         info_message_count: e.info.message_count,
         info_project_id: e.info.project_id.clone(),
         info_working_dir: e.info.working_dir.clone(),
+        pending_ask_user: e.pending_ask_user.clone(),
     }
 }
 
@@ -327,7 +352,11 @@ impl SessionStore {
         let ids: Vec<String> = self
             .sessions
             .iter()
-            .filter(|(_, s)| s.status != SessionStatus::Running && last_activity(s) < threshold)
+            .filter(|(_, s)| {
+                s.status != SessionStatus::Running
+                    && s.status != SessionStatus::Waiting
+                    && last_activity(s) < threshold
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in &ids {
@@ -572,6 +601,7 @@ impl SessionStore {
                 project_id: project_id.map(|s| s.to_string()),
                 working_dir: working_dir.map(|s| s.to_string()),
                 todos: Vec::new(),
+                pending_ask_user: None,
                 revision: 0,
             },
         );
@@ -691,6 +721,31 @@ mod incremental_persist_tests {
     use super::*;
 
     #[test]
+    fn waiting_status_and_pending_question_roundtrip() {
+        let mut store = SessionStore::new();
+        let info = store.create("waiting");
+        {
+            let entry = store.get_mut(&info.id).expect("entry");
+            entry.status = SessionStatus::Waiting;
+            entry.pending_ask_user = Some(PendingAskUserRecord {
+                tool_use_id: "call_ask".into(),
+                tool_call_id: "tc_ask".into(),
+                question: "Pick one".into(),
+                candidates: vec!["a".into(), "b".into()],
+                asked_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+        assert_eq!(store.list()[0].status, "waiting");
+        let json = serde_json::to_string(store.get(&info.id).unwrap()).unwrap();
+        let back: SessionEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, SessionStatus::Waiting);
+        let pending = back.pending_ask_user.expect("pending question persisted");
+        assert_eq!(pending.question, "Pick one");
+        assert_eq!(pending.candidates.len(), 2);
+        assert_eq!(back.status.as_str(), "waiting");
+    }
+
+    #[test]
     fn snapshot_reserializes_only_changed_entries() {
         let dir = std::env::temp_dir().join(format!("oz-sess-incr-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -713,6 +768,7 @@ mod incremental_persist_tests {
             project_id: None,
             working_dir: None,
             todos: vec![],
+            pending_ask_user: None,
             revision: 0,
         };
         let e2 = SessionEntry {
@@ -798,6 +854,7 @@ mod fingerprint_regression_tests {
             project_id: None,
             working_dir: None,
             todos: vec![],
+            pending_ask_user: None,
             revision: 0,
         }
     }

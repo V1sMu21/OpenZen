@@ -8,6 +8,7 @@ import { convertStreamEventsToParts, generatePartId, isSameReplyText } from "./p
 import { applyProtocolEvent, clearReasoningTimers } from "./protocol-processor";
 import { localT } from "../i18n";
 import { sessions } from "./sessions";
+import { markSessionRunning, markSessionWaiting } from "./running";
 import { isTauri, tauriInvoke } from "../api/tauri";
 import { sendMessage as httpSendMessage } from "../api/chat";
 import { stopSession, type SessionPageData } from "../api/sessions";
@@ -658,7 +659,39 @@ function createChatStore() {
       const at = messages.indexOf(target);
       if (at >= 0) messages[at] = { ...target, parts };
     }
-    return messages.filter((m) => !interventionMsgs.has(m));
+    return uniqueMessageIds(messages.filter((m) => !interventionMsgs.has(m)));
+  }
+
+  /** Guarantee that no two messages share an id.
+   *
+   * Message ids are derived from the server-assigned `idx`
+   * (`${sessionId}-msg-${idx}`), and that index is only unique *within one
+   * page*: paging counts from the END of the message vector, so a page
+   * fetched before the run appended new messages can hand back an `idx` that
+   * a live message already uses. Svelte 5 throws `each_key_duplicate` for a
+   * duplicate key in a keyed `{#each}`, which aborts the whole message-list
+   * render (`frontend-errors.log`, 2026-10-23 12:46:33). Renaming the later
+   * duplicate keeps the list renderable — the stale page is dropped by the
+   * prepend filter anyway.
+   */
+  function uniqueMessageIds(list: Message[]): Message[] {
+    const seen = new Set<string>();
+    let renamed = 0;
+    const out = list.map((m) => {
+      if (!seen.has(m.id)) {
+        seen.add(m.id);
+        return m;
+      }
+      renamed += 1;
+      let candidate = `${m.id}#${renamed}`;
+      while (seen.has(candidate)) candidate = `${candidate}_`;
+      seen.add(candidate);
+      return { ...m, id: candidate };
+    });
+    if (renamed > 0) {
+      console.warn(`[chat] renamed ${renamed} duplicate message id(s) to keep the list renderable`);
+    }
+    return out;
   }
 
   function findPendingAskUserIn(messages: Message[]): PendingAskUser | null {
@@ -741,6 +774,10 @@ function createChatStore() {
     // this restore the UI painted 完成状态 and dropped every streaming event
     // (no live message to render into) while the agent was still working.
     const serverRunning = /^running$/i.test(String(data.status ?? ""));
+    const serverWaiting = /^waiting$/i.test(String(data.status ?? ""));
+    const persistedAsk = data.pending_ask_user as
+      | { tool_use_id?: string; question?: string; candidates?: string[] }
+      | undefined;
     const current = readState();
     const currentSid = get(sessions).currentId;
 
@@ -768,9 +805,20 @@ function createChatStore() {
       });
     } else {
       let pendingAskUser: PendingAskUser | null = null;
-      const lastMsg = messages[messages.length - 1];
-      if (lastMsg?.role === "assistant" && lastMsg.exitReason === "ASK_USER") {
-        pendingAskUser = findPendingAskUserIn(messages);
+      if (persistedAsk && typeof persistedAsk.question === "string" && persistedAsk.question.trim()) {
+        // The backend persists the open question on the session entry, so a
+        // page reload (or an app restart) restores the dialog even though
+        // the ask_user run never emitted a done/ASK_USER exit reason.
+        pendingAskUser = {
+          question: persistedAsk.question,
+          candidates: Array.isArray(persistedAsk.candidates) ? persistedAsk.candidates : [],
+          askId: typeof persistedAsk.tool_use_id === "string" ? persistedAsk.tool_use_id : undefined,
+        };
+      } else {
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg?.role === "assistant" && lastMsg.exitReason === "ASK_USER") {
+          pendingAskUser = findPendingAskUserIn(messages);
+        }
       }
       // Restore the live Running state: the backend reports the session's
       // status with the page, so a long task survives reloads and session
@@ -779,7 +827,8 @@ function createChatStore() {
       // running previous session would leak its flag into the newly selected
       // one and the freshly fetched page would never be painted.
       const belongsToTarget = liveSessionId === sessionId;
-      const sessionLive = (belongsToTarget && current.isProcessing) || serverRunning;
+      const sessionLive =
+        (belongsToTarget && current.isProcessing) || serverRunning || serverWaiting;
       const viewState = {
         messages,
         isProcessing: sessionLive,
@@ -802,7 +851,7 @@ function createChatStore() {
         // bubble and every card it had accumulated, leaving only the cards
         // that arrived afterwards. Keep the live state; just drop the veil.
         update((s) => ({ ...s, loadingSession: false }));
-        if (sessionLive) startProcessingWatchdog();
+        if (sessionLive && !pendingAskUser) startProcessingWatchdog();
         return;
       }
       setViewState(sessionId, viewState);
@@ -1015,6 +1064,11 @@ function createChatStore() {
 
   function startProcessingWatchdog() {
     clearProcessingWatchdog();
+    // Waiting for the user is not "processing". A 300-minute silence is
+    // expected while the dialog sits unanswered; arming the 30-minute
+    // watchdog here would eventually paint a timeout error over a run that
+    // is perfectly healthy (2026-10-23: the dialog outlived the watchdog).
+    if (readState().pendingAskUser) return;
     processingTimer = setTimeout(() => {
       console.warn("Processing watchdog fired");
       update((s) => ({
@@ -2102,10 +2156,27 @@ function createChatStore() {
       // this reply to its exact question (P1-i).
       const askId = readState().pendingAskUser?.askId;
       update((s) => ({ ...s, pendingAskUser: null, askUserMinimized: false }));
+      if (sid) {
+        markSessionRunning(sid);
+        // The 30-min watchdog was suspended while the dialog was open;
+        // re-arm it now that the run is active again.
+        if (readState().isProcessing) startProcessingWatchdog();
+      }
       if (!sid) return;
       try {
         if (isTauri()) {
-          await tauriInvoke("ask_user_response", { sessionId: sid, response: text, toolUseId: askId });
+          const result = await tauriInvoke("ask_user_response", {
+            sessionId: sid,
+            response: text,
+            toolUseId: askId,
+          });
+          if (result?.resume) {
+            // The run that asked died with a previous app process. Resume
+            // from the checkpoint; the backend carries the question and
+            // this answer in a one-shot note.
+            update((s) => ({ ...s, isProcessing: false, pendingAskUser: null }));
+            await this.resume();
+          }
         } else {
           const { fetchJson } = await import("../api/chat");
           const res = await fetchJson(`/api/sessions/${sid}/ask_user_response`, {
@@ -2185,6 +2256,10 @@ function createChatStore() {
     setPendingAskUser(pending: PendingAskUser) {
       // A fresh question must never inherit a previous "minimized" flag,
       // otherwise the dialog would stay hidden while the agent blocks on it.
+      // Waiting is not processing: park the watchdog until the user answers.
+      clearProcessingWatchdog();
+      const sid = get(sessions).currentId ?? undefined;
+      markSessionWaiting(sid);
       update((s) => ({ ...s, pendingAskUser: pending, askUserMinimized: false }));
     },
 

@@ -108,6 +108,7 @@ mod tests {
         let skill = dir_path.join(".skill_mcp");
         std::fs::create_dir_all(&skill).unwrap();
         ToolContext {
+            is_subagent: false,
             working_dir: dir_path.to_string_lossy().to_string(),
             assets_dir: String::new(),
             script_dir: String::new(),

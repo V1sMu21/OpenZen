@@ -224,6 +224,10 @@ pub struct LoopConfig {
     pub enable_compression: bool,
     /// Path to checkpoint directory for resume (None = no resume).
     pub resume_from: Option<String>,
+    /// One-shot user context appended after the checkpoint is restored —
+    /// used when the reply to a parked ask_user question arrives after an
+    /// app restart, so the model still learns the question and the answer.
+    pub resume_note: Option<String>,
     /// Session identifier for checkpoint naming.
     pub session_id: String,
     /// Interval (in turns) between automatic checkpoint saves. 0 = disabled.
@@ -273,6 +277,11 @@ pub struct LoopConfig {
     pub approval_handler: Option<std::sync::Arc<dyn oz_safety::ApprovalHandler>>,
     /// Timeout in seconds for tool approval requests (default: 300).
     pub approval_timeout_secs: u64,
+    /// How long an `ask_user` question waits for a reply. 0 (the desktop
+    /// default) waits until the user answers or the run is stopped: users
+    /// are usually away from the machine, and a 5-minute timeout turned one
+    /// unanswered question into a 40-minute stall (2026-10-23 session).
+    pub ask_user_timeout_secs: u64,
     /// Project root directory for checkpoints (overrides working_dir derivation).
     /// When set, checkpoints are stored at {checkpoint_dir}/{session_id}/.
     pub checkpoint_dir: Option<String>,
@@ -365,6 +374,7 @@ impl Default for LoopConfig {
             context_win: 8000,
             enable_compression: true,
             resume_from: None,
+            resume_note: None,
             session_id: String::new(),
             checkpoint_interval: 0,
             sop_dir: None,
@@ -386,6 +396,7 @@ impl Default for LoopConfig {
             safety_guard: None,
             approval_handler: None,
             approval_timeout_secs: 300,
+            ask_user_timeout_secs: 0,
             checkpoint_dir: None,
             trust_path: None,
             summary_model_name: None,
@@ -434,6 +445,7 @@ impl Clone for LoopConfig {
             context_win: self.context_win,
             enable_compression: self.enable_compression,
             resume_from: self.resume_from.clone(),
+            resume_note: self.resume_note.clone(),
             session_id: self.session_id.clone(),
             checkpoint_interval: self.checkpoint_interval,
             sop_dir: self.sop_dir.clone(),
@@ -449,6 +461,7 @@ impl Clone for LoopConfig {
             safety_guard: self.safety_guard.clone(),
             approval_handler: self.approval_handler.clone(),
             approval_timeout_secs: self.approval_timeout_secs,
+            ask_user_timeout_secs: self.ask_user_timeout_secs,
             checkpoint_dir: self.checkpoint_dir.clone(),
             trust_path: self.trust_path.clone(),
             summary_model_name: self.summary_model_name.clone(),

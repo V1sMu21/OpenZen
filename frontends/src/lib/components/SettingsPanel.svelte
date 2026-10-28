@@ -1,6 +1,9 @@
 <script lang="ts">
   import { settings } from "../stores/settings.svelte";
   import { t } from "../i18n";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { isTauri } from "../api/tauri";
+  import { HIDDEN_MODELS_CHANGED } from "../api/hiddenModels";
   import { askConfirm } from "../stores/confirm";
   import { formatTokenCount, formatWhen } from "../stores/types";
   import type {
@@ -47,12 +50,34 @@
 
   type Tab = "models" | "skills" | "soul" | "tokens" | "quality";
 
+  // 显式映射：标题只取决于当前页签，不做字符串拼接。
+  const TAB_KEYS: Record<Tab, string> = {
+    models: "settings.tab.models",
+    skills: "settings.tab.skills",
+    soul: "settings.tab.soul",
+    tokens: "settings.tab.tokens",
+    quality: "settings.tab.quality",
+  };
+  const PANE_DESC_KEYS: Record<Tab, string> = {
+    models: "settings.pane.models",
+    skills: "settings.pane.skills",
+    soul: "settings.pane.soul",
+    tokens: "settings.pane.tokens",
+    quality: "settings.pane.quality",
+  };
+
   let tab = $state<Tab>("models");
+  let appVersion = $state("");
+  // 版本号在桌面端可读；webui 模式没有该命令，保持空串即可。
+  if (isTauri()) {
+    void getVersion().then((v) => (appVersion = v)).catch(() => {});
+  }
   let loading = $state(false);
   let error = $state("");
 
   // ── models tab ──
   let models = $state<ModelEntry[]>([]);
+  const defaultModel = $derived(models.find((m) => m.is_default)?.name ?? "");
   let providers = $state<ProviderEntry[]>([]);
   /** Collapsed provider cards (default: expanded). */
   let collapsedProviders = $state<Set<string>>(new Set());
@@ -118,6 +143,15 @@
   // Shared store: renaming here also updates the window title bar
   // instantly (they read the same signal).
   let soul = $derived(soulStore.status);
+  let soulLoading = $state(false);
+  async function loadSoul() {
+    soulLoading = true;
+    try {
+      await soulStore.load();
+    } finally {
+      soulLoading = false;
+    }
+  }
   let nameDraft = $state("");
   let renaming = $state(false);
   let savingName = $state(false);
@@ -331,6 +365,16 @@
   async function refreshModels() {
     [models, providers] = await Promise.all([fetchModels(), fetchProviders()]);
   }
+
+  // Deleting a model in /model must also drop it here, even when both views
+  // are open at the same time.
+  $effect(() => {
+    const onHidden = () => {
+      if (tab === "models") void run(refreshModels);
+    };
+    window.addEventListener(HIDDEN_MODELS_CHANGED, onHidden);
+    return () => window.removeEventListener(HIDDEN_MODELS_CHANGED, onHidden);
+  });
 
   function loadTab() {
     if (tab === "models") {
@@ -658,9 +702,6 @@
       <span class="model-meta">{m.model} · {$t(m.is_local ? "status.localDeploy" : "status.cloud")} · {m.context_win}</span>
     </div>
     <div class="model-actions">
-      {#if !m.is_default}
-        <button class="btn ghost" onclick={() => makeDefault(m.name)}>{$t("settings.model.setDefault")}</button>
-      {/if}
       <button class="btn ghost" onclick={() => startEdit(m)}>{$t("settings.edit")}</button>
       <button class="btn ghost danger" onclick={() => removeModel(m.name)}>{$t("settings.delete")}</button>
     </div>
@@ -683,12 +724,21 @@
           {$t(label)}
         </button>
       {/each}
+      <span class="settings-ver" title={appVersion ? `OpenZen ${appVersion}` : "OpenZen"}>
+        OpenZen{appVersion ? ` · ${appVersion}` : ""}
+      </span>
     </nav>
 
-    {#if error}<div class="settings-error">{error}</div>{/if}
-    {#if loading}<div class="settings-loading">{$t("settings.loading")}</div>{/if}
-
     <div class="settings-body">
+      {#key tab}
+        <header class="settings-pane-head">
+          <p class="pane-kicker">{tab.toUpperCase()}</p>
+          <h2 class="pane-title">{$t(TAB_KEYS[tab])}</h2>
+          <p class="pane-desc">{$t(PANE_DESC_KEYS[tab])}</p>
+        </header>
+      {/key}
+      {#if error}<div class="settings-error">{error}</div>{/if}
+      {#if loading}<div class="settings-loading">{$t("settings.loading")}</div>{/if}
       {#if tab === "models"}
         {#if editingProvider}
           <div class="form">
@@ -759,6 +809,24 @@
                 {/each}
               </div>
             </div>
+            {#if !editing.isNew}
+              {@const editName = editing.name}
+              <label class="field">
+                <span>{$t("settings.model.defaultLabel")}</span>
+                <div class="default-row">
+                  <span class="form-hint">{$t("settings.model.defaultHint")}</span>
+                  <button
+                    class="btn ghost"
+                    onclick={() => makeDefault(editName)}
+                    disabled={loading || editName === defaultModel}
+                  >
+                    {editName === defaultModel
+                      ? $t("settings.model.isDefault")
+                      : $t("settings.model.setDefault")}
+                  </button>
+                </div>
+              </label>
+            {/if}
             <div class="form-actions">
               <button class="btn primary" onclick={saveModel} disabled={loading}>{$t("settings.save")}</button>
               <button class="btn ghost" onclick={() => (editing = null)}>{$t("settings.cancel")}</button>
@@ -1007,7 +1075,15 @@
             </div>
           {/if}
         {:else}
-          <div class="settings-empty">{$t("settings.empty")}</div>
+          <div class="group">
+            <div class="group-head">{$t("soul.disabledTitle")}</div>
+            <p class="form-hint">{$t("soul.disabledHint")}</p>
+            <div class="soul-off-actions">
+              <button class="btn ghost" onclick={loadSoul} disabled={soulLoading}>
+                {$t("settings.retry")}
+              </button>
+            </div>
+          </div>
         {/if}
       {:else if tab === "quality"}
         <!-- ── R5-5 delivery-quality report ─────────────────────────── -->
@@ -1271,16 +1347,17 @@
     z-index: 90;
   }
 
+  /* ── 展柜: 468 宽, 左列竖排导航 + 右列内容 ── */
   .settings-panel {
     position: fixed;
     top: 0;
     right: 0;
     bottom: 0;
-    width: 380px;
-    max-width: 92vw;
-    background: var(--color-canvas);
-    border-left: 1px solid var(--color-hairline);
-    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
+    width: 640px;
+    max-width: 94vw;
+    background: var(--color-surface);
+    border-left: 1px solid var(--color-hairline-strong);
+    box-shadow: -34px 0 90px -34px rgba(0, 0, 0, 0.85);
     z-index: 91;
     display: flex;
     flex-direction: column;
@@ -1314,30 +1391,52 @@
     color: var(--color-ink);
   }
 
-  .settings-tabs {
-    display: flex;
-    gap: 2px;
-    padding: 8px 10px 0;
+  .settings-pane-head {
+    margin: 0 0 14px;
   }
-
-  .settings-tab {
-    flex: 1;
-    border: 1px solid transparent;
-    border-bottom: none;
-    background: none;
-    padding: 6px 0;
-    font-family: inherit;
-    font-size: 11.5px;
+  .pane-kicker {
+    margin: 0 0 6px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
     color: var(--color-muted);
-    cursor: pointer;
-    border-radius: 6px 6px 0 0;
+  }
+  .pane-title {
+    margin: 0 0 4px;
+    font-family: var(--font-serif);
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--color-ink);
+  }
+  .pane-desc {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--color-muted);
   }
 
-  .settings-tab.on {
-    color: var(--color-primary);
-    border-color: var(--color-hairline);
-    background: var(--color-surface-soft);
+  .soul-off-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 10px;
   }
+
+  .settings-ver {
+    margin-top: auto;
+    margin-top: auto;
+    padding: 8px 9px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--color-muted);
+    opacity: 0.7;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+
 
   .settings-error {
     margin: 8px 14px 0;
@@ -1353,15 +1452,6 @@
     padding: 6px 14px;
     font-size: 11px;
     color: var(--color-muted);
-  }
-
-  .settings-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
   }
 
   .section-row {
@@ -1388,7 +1478,7 @@
   .btn.primary {
     background: var(--color-primary);
     border-color: var(--color-primary);
-    color: #14120e;
+    color: var(--color-canvas);
   }
 
   .btn.primary:hover {

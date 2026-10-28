@@ -15,6 +15,9 @@
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import { askConfirm } from "./lib/stores/confirm";
   import ChatInput from "./lib/components/ChatInput.svelte";
+  import JobStrip from "./lib/components/JobStrip.svelte";
+  import { jobs } from "./lib/stores/jobs.svelte";
+  import SubagentStrip from "./lib/components/SubagentStrip.svelte";
   import AskUserDialog from "./lib/components/AskUserDialog.svelte";
   import ModelSwitcher from "./lib/components/ModelSwitcher.svelte";
   import AuthDialog from "./lib/components/AuthDialog.svelte";
@@ -28,6 +31,7 @@
   import { initLocale } from "./lib/i18n";
   import { t, locale } from "./lib/i18n";
   import { sidepanel } from "./lib/stores/sidepanel.svelte";
+  import { plans } from "./lib/stores/plans.svelte";
   import ThemeSwitcher from "./lib/components/ThemeSwitcher.svelte";
   import { soulDisplayName } from "./lib/api/settings";
   import { soulStore } from "./lib/stores/soul.svelte";
@@ -93,7 +97,7 @@ function installGlobalErrorHandlers() {
           emitTo("pet", "pet-walkout").catch(() => {});
           await new Promise((r) => setTimeout(r, 1150));
           await existing.hide();
-          showPetToast("🐱 阿青先去睡觉啦（再点印章唤醒）");
+          showPetToast("宠物已隐藏（再点印章唤醒）");
           console.log("[pet] hidden via seal toggle");
           return;
         }
@@ -104,7 +108,7 @@ function installGlobalErrorHandlers() {
         // mouseMoved，且失去 key 后页面整体转 hidden、一切输入失效。
         // 代价：收起需两次 seal 点击（第一次只是激活主窗）——这是 macOS
         // 多窗口应用的标准行为；猫身上双击/右键菜单随时可关闭。
-        showPetToast("🐱 阿青回来啦（点两次印章收起）");
+        showPetToast("宠物已显示（再点印章收起）");
         console.log("[pet] shown existing window");
         return;
       }
@@ -139,7 +143,7 @@ function installGlobalErrorHandlers() {
       try { await w.show(); } catch (_) {}
       try { await w.setAlwaysOnTop(true); } catch (_) {}
       try { await w.setFocus(); } catch (_) {}
-      showPetToast("🐱 阿青放到桌面啦");
+      showPetToast("宠物已放到桌面");
       console.log("[pet] created /pet/pet.html");
     } catch (e) {
       console.error("[pet] create failed", e);
@@ -699,6 +703,13 @@ function installGlobalErrorHandlers() {
     return value;
   });
 
+  // 标题栏会话名：让“我在哪个会话里”一眼可见（旧版标题只显示应用名）。
+  let currentSessionName = $derived.by(() => {
+    const id = $sessions.currentId;
+    if (!id) return "";
+    return $sessions.sessions.find((x) => x.id === id)?.name ?? "";
+  });
+
   // 标题栏运行状态指示: 待确认(ask_user 阻塞中) > 运行中 > 完成.
   // 信号全部来自现有 chat store, 无需后端改动.
   let runState = $derived.by((): { cls: "running" | "waiting" | "done"; key: string } => {
@@ -1198,7 +1209,7 @@ function installGlobalErrorHandlers() {
     }
 
     // 标题栏跟随用户给 agent 起的名字（soul.identity）；未命名时保持
-    // 器物底款默认"修砚"。失败静默（webui 模式无此命令）。
+    // 读取用户设定的 agent 名字。失败静默（webui 模式无此命令）。
     // 冷启动头几秒 IPC/erme 可能未就绪 — 有界重试直到拿到状态。
     if (isTauri()) {
       const loadSoul = (attempt: number) => {
@@ -1264,27 +1275,24 @@ function installGlobalErrorHandlers() {
     sidepanel.init();
     sidepanel.setupListeners();
 
+    // Plan review: mirror pending plans so the badge refreshes on
+    // `plan:changed` / `plan:decided` events from the Rust watcher.
+    plans.init();
+
   });
 </script>
 
 <svelte:window onkeydown={handleGlobalKeydown} />
 
 <div class="app-layout">
-  <!-- Celadon glaze atmosphere layers -->
-  <div class="glaze-atmosphere"></div>
-  <div class="glaze-noise"></div>
-  <div class="glaze-crackle"></div>
-  <div class="glaze-shimmer"></div>
-
   <Sidebar bind:sidebarOpen onNewChat={handleNewChat} onSelectSession={handleSelectSession} onSidebarEscape={handleSidebarEscape} />
 
-  <main class="main-area glaze-surface glaze-pool"
-  >
+  <main class="main-area">
     <!-- 器物底款标题栏 -->
     <div class="main-header">
-      <button class="header-btn header-btn-left" onclick={toggleSidebar} title="Toggle Sidebar (⌘⇧S)">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect width="18" height="18" x="3" y="3" rx="2"/>
+      <button class="icon-btn" onclick={toggleSidebar} title="Toggle Sidebar (⌘⇧S)" aria-label="Toggle Sidebar">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect width="18" height="18" x="3" y="3" rx="4"/>
           <path d="M9 3v18"/>
           {#if sidebarOpen}
             <!-- 打开中 → 点击将收起（向左） -->
@@ -1295,14 +1303,18 @@ function installGlobalErrorHandlers() {
           {/if}
         </svg>
       </button>
-      <span class="seal" title={$t("pet.toggleTitle")} onclick={() => handlePetClick()} style="cursor:pointer"><img class="seal-icon" src="/cat-icon.png" alt="OpenZen" /></span>
-      <span class="title-name">{agentName ?? "修砚"}</span>
-      <!-- 品牌印记 (brand seal): 丙午 = the 2026 sexagenary year. Decorative
-           calligraphy, deliberately NOT translated — documented in
-           frontends/DESIGN.md §"Brand inscriptions". -->
-      <!-- i18n-allow: brand seal (DESIGN.md §6.2, not translated) -->
-      <span class="inscription era" aria-hidden="true">丙午 制</span>
-      <!-- 运行状态指示: 活跃态(运行中/待确认)带墨滴涟漪动画, 完成态静态圆点 -->
+      <span class="seal" title={$t("pet.toggleTitle")} onclick={() => handlePetClick()} style="cursor:pointer"><img class="seal-icon" src="/cat-icon.webp" alt="OpenZen" width="28" height="28" decoding="async" /></span>
+      <div class="brand">
+        <span class="brand-name">OpenZen</span>
+      </div>
+
+      <span class="header-rule" aria-hidden="true"></span>
+
+      {#if currentSessionName}
+        <span class="session-title" title={currentSessionName}>{currentSessionName}</span>
+      {/if}
+
+      <!-- 运行状态指示: 活跃态带墨滴涟漪动画, 完成态静态圆点 -->
       <span class="run-state {runState.cls}" title={$t(runState.key)}>
         {#if runState.cls === "done"}
           <span class="state-dot"></span>
@@ -1326,40 +1338,36 @@ function installGlobalErrorHandlers() {
           {$t("status.askUserPending")}
         </button>
       {/if}
+      <span class="header-spacer"></span>
       {#if workingDir}
         <span class="title-path" title={workingDir}>{workingDir}</span>
       {/if}
-      <span class="header-spacer"></span>
-      <!-- 结晶 / 计时开关 (标题栏最右) -->
-      <label class="crystallization-switch" title={crystallizationOn ? $t("status.autoCrystallizeOn") : $t("status.autoCrystallizeOff")}>
-        <input type="checkbox" checked={crystallizationOn} onchange={toggleCrystallization} />
-        <span class="switch-track"></span>
-        <span class="switch-label">{$t("status.autoCrystallize")}</span>
-      </label>
-      <label class="crystallization-switch" title={showThinkingTimer ? $t("status.timer") + "：" + $t("status.on") : $t("status.timer") + "：" + $t("status.off")}>
-        <input type="checkbox" checked={showThinkingTimer} onchange={() => setShowTimers(!showThinkingTimer)} />
-        <span class="switch-track"></span>
-        <span class="switch-label">{$t("status.timer")}</span>
-      </label>
-      <!-- 免审批执行（危险）: 开启后 agent 执行任务不再请求权限 (免弹窗自动放行) -->
-      <label class="crystallization-switch" class:danger={fullAccessOn} title={$t("status.fullAccessDanger") + "：" + (fullAccessOn ? $t("status.on") : $t("status.off"))}>
-        <input type="checkbox" checked={fullAccessOn} onchange={toggleFullAccess} />
-        <span class="switch-track"></span>
-        <span class="switch-label">{$t("status.fullAccessDanger")}</span>
-      </label>
-      {#if fullAccessOn}
-        <!-- Persistent, non-dismissable reminder that the safety boundary is
-             currently off. -->
-        <span class="full-access-badge" role="status" title={$t("status.fullAccessDanger")}>
-          {$t("status.fullAccessBadge")}
-        </span>
-      {/if}
-      <!-- 自动更新入口: 平时隐藏, 检测到新版本时以绿色图标出现在标题栏右侧 -->
+      <!-- 运行选项: 结晶 / 计时 / 完全访问 -->
+      <div class="switch-group">
+        <label class="crystallization-switch" title={crystallizationOn ? $t("status.autoCrystallizeOn") : $t("status.autoCrystallizeOff")}>
+          <input type="checkbox" checked={crystallizationOn} onchange={toggleCrystallization} />
+          <span class="switch-track"></span>
+          <span class="switch-label">{$t("status.autoCrystallize")}</span>
+        </label>
+        <label class="crystallization-switch" title={showThinkingTimer ? $t("status.timer") + "：" + $t("status.on") : $t("status.timer") + "：" + $t("status.off")}>
+          <input type="checkbox" checked={showThinkingTimer} onchange={() => setShowTimers(!showThinkingTimer)} />
+          <span class="switch-track"></span>
+          <span class="switch-label">{$t("status.timer")}</span>
+        </label>
+        <!-- 完全访问: 开启后 agent 执行任务不再请求权限 (免弹窗自动放行)。
+             开关本身不换色、也不额外加标记 —— 状态已在 title 里说明。 -->
+        <label class="crystallization-switch" title={$t("status.fullAccessDanger") + "：" + (fullAccessOn ? $t("status.on") : $t("status.off"))}>
+          <input type="checkbox" checked={fullAccessOn} onchange={toggleFullAccess} />
+          <span class="switch-track"></span>
+          <span class="switch-label">{$t("status.fullAccessDanger")}</span>
+        </label>
+      </div>
+      <!-- 自动更新入口: 平时隐藏, 有新版本时出现在标题栏右侧 -->
       <UpdateButton />
       <ThemeSwitcher />
-      <button class="header-btn header-btn-right" onclick={() => sidepanel.toggle()} title="Toggle Panel (⌘⇧E)">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect width="18" height="18" x="3" y="3" rx="2"/>
+      <button class="icon-btn" onclick={() => sidepanel.toggle()} title="Toggle Panel (⌘⇧E)" aria-label="Toggle Panel">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect width="18" height="18" x="3" y="3" rx="4"/>
           <path d="M15 3v18"/>
           {#if sidepanel.visible}
             <!-- 已打开 → 点击将收起（向右） -->
@@ -1377,27 +1385,21 @@ function installGlobalErrorHandlers() {
       {#if $chat.messages.length === 0}
         <SoulCard />
         <div class="empty-chat">
-          <div class="empty-icon">
-            <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
-              <rect x="4" y="8" width="32" height="24" rx="4" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M4 18h32" stroke="currentColor" stroke-width="1.5"/>
-              <circle cx="10" cy="13" r="1.5" fill="currentColor"/>
-              <circle cx="14" cy="13" r="1.5" fill="currentColor"/>
-              <circle cx="18" cy="13" r="1.5" fill="currentColor"/>
-            </svg>
+          <div class="empty-disc" aria-hidden="true">
+            <img src="/cat-icon.webp" alt="" width="88" height="88" decoding="async" />
           </div>
           <h2 class="empty-title">OpenZen</h2>
           <p class="empty-subtitle">{$t("empty.subtitle")}</p>
           <div class="empty-hints">
-            <span class="hint">{@html $t("chat.placeholder.help", "Type /help for commands")}</span>
             <span class="hint">{@html $t("empty.hint")}</span>
+            <span class="hint-sep" aria-hidden="true"></span>
+            <span class="hint">{@html $t("chat.placeholder.help", "Type /help for commands")}</span>
           </div>
         </div>
       {:else}
         <div class="messages-scroll">
           <!-- 卷轴天头: 竖排款识 -->
           <!-- i18n-allow: brand seal (DESIGN.md §6.2, not translated) -->
-          <span class="vertical-rl qing head-rl">卷 一 · 修 砚 之 录</span>
           <div class="messages-list">
             {#if $chat.hasMoreMessages}
               <button
@@ -1417,7 +1419,6 @@ function installGlobalErrorHandlers() {
             {#each virtualWindow.slice as msg (msg.id)}
               <ChatMessage
                 message={msg}
-                showTimer={showThinkingTimer}
                 workingDir={workingDir}
                 isLive={liveMessageId === msg.id}
                 streamingParts={liveMessageId === msg.id ? $chat.streamingParts : NO_STREAMING_PARTS}
@@ -1474,7 +1475,11 @@ function installGlobalErrorHandlers() {
     </div>
 
       <!-- Input area -->
-      <ChatInput disabled={disableInput} />
+      <div class="composer-stack">
+        <JobStrip />
+        <SubagentStrip />
+        <ChatInput disabled={disableInput} />
+      </div>
 
       {#if $chat.pendingAskUser && !$chat.askUserMinimized}
         <AskUserDialog pending={$chat.pendingAskUser} />
@@ -1485,6 +1490,11 @@ function installGlobalErrorHandlers() {
       {/if}
 
       <div class="model-bar">
+        {#if jobs.active.length > 0}
+          <button class="m-tag m-tag-jobs" title={$t("jobs.background")} onclick={() => { if (isTauri()) void sidepanel.open({ type: "background", path: "background://panel", label: $t("jobs.panel") }); }}>
+            <span class="m-tag-num">● {$t("jobs.runningCount").replace("{n}", String(jobs.active.length))}</span>
+          </button>
+        {/if}
         {#if $chat.modelInfo}
           <span class="m-tag m-tag-model">
             <span class="m-tag-num">{$chat.modelInfo.model}</span>
@@ -1572,13 +1582,35 @@ function installGlobalErrorHandlers() {
 <ApprovalModal />
 <ShortcutsPanel bind:show={showShortcuts} />
 
-<TransientsBar parts={$chat.streamingParts.filter(p => p.type === 'data' && p.transient) as import("./lib/stores/parts").DataPart[]} />
+<TransientsBar parts={$chat.streamingParts} />
 
 <style>
   .app-layout {
     display: flex;
     height: 100vh;
     overflow: hidden;
+    position: relative;
+  }
+
+  /* 器物天光：一条 1px 釉光横线，从无色到天青到金，停在窗口顶端。
+     静态绘制一次，不参与动画。 */
+  .app-layout::before {
+    content: "";
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    z-index: 200;
+    pointer-events: none;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(111, 216, 196, 0.55) 22%,
+      rgba(226, 190, 122, 0.5) 58%,
+      transparent 100%
+    );
+    opacity: 0.7;
   }
 
   .main-area {
@@ -1613,19 +1645,80 @@ function installGlobalErrorHandlers() {
   .main-header {
     display: flex;
     align-items: center;
-    gap: 12px;
-    height: 38px;
-    padding: 0 8px 0 12px;
-    border-bottom: 1px solid var(--border-color, #333);
+    gap: 10px;
+    height: 56px;
+    padding: 0 12px 0 8px;
+    border-bottom: 1px solid var(--color-hairline);
+    background: var(--color-canvas);
     flex-shrink: 0;
+    min-width: 0;
+    line-height: 1;
   }
-  .title-name {
+
+  .main-header > * {
+    line-height: 1;
+  }
+
+  /* ── Brand block: seal + name + era inscription ── */
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    flex: none;
+    min-width: 0;
+  }
+  .brand-name {
     font-family: var(--font-serif);
-    font-size: 13px;
-    letter-spacing: 0.12em;
-    color: var(--color-muted);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--color-ink);
     user-select: none;
     white-space: nowrap;
+  }
+
+  .header-rule {
+    width: 1px;
+    height: 18px;
+    background: var(--color-hairline);
+    flex: none;
+    margin: 0 2px;
+  }
+
+  /* Current conversation — the one thing the old title bar never showed. */
+  .session-title {
+    font-family: var(--font-serif);
+    font-size: 13px;
+    color: var(--color-body);
+    letter-spacing: 0.02em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 260px;
+    min-width: 40px;
+    flex: 0 1 auto;
+    user-select: none;
+  }
+
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: none;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--color-dim);
+    cursor: pointer;
+    flex: none;
+    transition: background 0.18s var(--ease-soak), color 0.18s var(--ease-soak);
+  }
+  .icon-btn:hover {
+    background: var(--color-surface-soft);
+    color: var(--color-ink);
   }
   .header-btn {
     background: none;
@@ -1699,13 +1792,11 @@ function installGlobalErrorHandlers() {
     overflow-anchor: none;
     overscroll-behavior-y: contain;
   }
-  .head-rl {
-    font-size: 12px;
-    padding: 8px 4px 8px 8px;
-    border-left: 1px solid var(--color-hairline);
-    flex: none;
-    align-self: stretch;
-    margin-top: 4px;
+
+  .composer-stack {
+    width: 100%;
+    max-width: min(100%, 860px);
+    margin: 0 auto;
   }
 
   .chat-container {
@@ -1749,11 +1840,11 @@ function installGlobalErrorHandlers() {
   .messages-list {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 22px;
     flex: 1;
     /* 流式宽度: 跟随窗口伸展（含 todo-rail 让位后的剩余空间），
        1200px 只作为超宽屏的可读性上限 */
-    max-width: min(100%, 1200px);
+    max-width: min(100%, 860px);
     min-width: 0;
   }
 
@@ -1828,47 +1919,97 @@ function installGlobalErrorHandlers() {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 12px;
+    gap: 6px;
     padding: 40px;
+    text-align: center;
+    animation: empty-rise 0.5s var(--ease-soak) both;
   }
 
-  .empty-icon {
-    color: var(--color-dim);
-    margin-bottom: 8px;
+  /* 月轮：a moon disc rising behind the seal — one static gradient, no blur. */
+  .empty-disc {
+    position: relative;
+    width: 120px;
+    height: 120px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    margin-bottom: 22px;
+    background:
+      radial-gradient(circle at 32% 26%, rgba(111, 216, 196, 0.22), transparent 62%),
+      radial-gradient(circle at 72% 82%, rgba(226, 190, 122, 0.12), transparent 60%),
+      var(--color-surface);
+    box-shadow:
+      inset 0 0 0 1px var(--color-hairline),
+      0 0 70px -18px rgba(111, 216, 196, 0.55);
   }
+  .empty-disc::after {
+    content: "";
+    position: absolute;
+    inset: 9px;
+    border-radius: 50%;
+    border: 1px solid var(--color-hairline);
+  }
+  .empty-disc img {
+    width: 84px;
+    height: 84px;
+    border-radius: 28px;
+    object-fit: cover;
+  }
+
 
   .empty-title {
-    font-size: 24px;
+    font-family: var(--font-serif);
+    font-size: 42px;
     font-weight: 600;
-    color: var(--color-ink);
-    letter-spacing: -0.3px;
+    line-height: 1.1;
+    letter-spacing: 0.01em;
     margin: 0;
+    background: linear-gradient(170deg, var(--color-ink) 20%, var(--color-primary) 120%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
   .empty-subtitle {
-    font-size: 15px;
-    color: var(--color-muted);
-    margin: 0;
+    font-size: 14px;
+    color: var(--color-dim);
+    margin: 10px 0 0;
+    letter-spacing: 0.01em;
   }
 
   .empty-hints {
     display: flex;
-    gap: 16px;
-    margin-top: 16px;
+    align-items: center;
+    gap: 14px;
+    margin-top: 26px;
+  }
+
+  .hint-sep {
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: var(--color-hairline-strong);
   }
 
   .hint {
     font-size: 12px;
-    color: var(--color-dim);
+    color: var(--color-muted);
   }
 
   .hint kbd {
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-hairline);
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: var(--color-surface-soft);
+    border: 1px solid var(--color-hairline-plain);
+    border-bottom-width: 2px;
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 10.5px;
+    color: var(--color-body);
+  }
+
+  @keyframes empty-rise {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: none; }
   }
 
   .error-banner {
@@ -1915,31 +2056,48 @@ function installGlobalErrorHandlers() {
     to { opacity: 1; transform: translateY(0); }
   }
 
-  /* 标题栏工作目录 (原型 v2: 修砚 · 丙午制 之后, mono 小字) */
+  /* 标题栏工作目录 (路径 chip, 次要信息) */
   .title-path {
     font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--color-dim);
+    font-size: 10px;
+    color: var(--color-muted);
+    background: var(--color-surface-soft);
+    border: 1px solid var(--color-hairline);
+    border-radius: 7px;
+    padding: 4px 8px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 260px;
+    max-width: 220px;
     user-select: none;
     flex-shrink: 1;
     min-width: 0;
   }
 
+  /* 状态轨：30px 细带，只承载数据 */
   .model-bar {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 4px 16px;
+    gap: 6px;
+    height: 30px;
+    padding: 0 18px;
     border-top: 1px solid var(--color-hairline);
-    background: var(--color-canvas);
-    font-size: 11px;
-    color: var(--color-dim);
+    background: transparent;
+    font-size: 10.5px;
+    color: var(--color-muted);
     flex-shrink: 0;
     overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .model-bar::-webkit-scrollbar { display: none; }
+
+  .m-tag-jobs {
+    color: var(--color-primary);
+    border-color: var(--color-hairline-strong);
+    background: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
   }
 
   .m-tag {
@@ -1959,21 +2117,29 @@ function installGlobalErrorHandlers() {
   .run-state {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
+    padding: 4px 9px 4px 8px;
+    border-radius: 999px;
+    border: 1px solid transparent;
     flex: none;
     user-select: none;
+    font-size: 10.5px;
     --state-color: var(--color-dim);
   }
   .run-state.running {
     --state-color: var(--color-primary);
     color: var(--color-primary);
+    background: var(--color-primary-soft);
+    border-color: var(--color-hairline);
   }
   .run-state.waiting {
-    --state-color: #f59e0b;
-    color: var(--color-status-wait);
+    --state-color: var(--color-gold);
+    color: var(--color-gold);
+    background: var(--color-gold-soft);
+    border-color: var(--color-gold-line);
   }
   .run-state.done {
-    color: var(--color-dim);
+    color: var(--color-muted);
   }
   .askuser-pill {
     margin-left: 8px;
@@ -2113,27 +2279,34 @@ function installGlobalErrorHandlers() {
     box-shadow: 0 0 4px var(--color-primary);
   }
 
+  .switch-group {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    padding: 3px;
+    border-radius: 11px;
+    background: var(--color-surface-soft);
+    border: 1px solid var(--color-hairline);
+    flex: none;
+  }
+
   .crystallization-switch {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
+    padding: 4px 7px;
+    border-radius: 8px;
     cursor: pointer;
     user-select: none;
+    transition: background 0.16s;
   }
-  .crystallization-switch.danger .switch-label {
-    color: var(--color-status-danger);
+  .crystallization-switch:hover {
+    background: var(--color-surface-soft);
   }
-  .full-access-badge {
-    margin-left: 6px;
-    padding: 1px 8px;
-    border-radius: 999px;
-    border: 1px solid var(--color-status-danger);
-    background: color-mix(in srgb, var(--color-status-danger) 14%, transparent);
-    color: var(--color-status-danger);
-    font-size: 10px;
-    letter-spacing: 0.06em;
-    white-space: nowrap;
-  }
+  /* The full-access switch keeps the same colours as every other title-bar
+     switch (the .danger label colour and the extra red .full-access-badge were
+     removed on request, 2026-10-23): the on/off state is carried by the track
+     and the tooltip, not by a warning colour. */
   .crystallization-switch input {
     /* Visually hidden but FOCUSABLE: display:none removed the safety
        toggles (incl. full-access) from the tab order entirely. */
@@ -2153,17 +2326,18 @@ function installGlobalErrorHandlers() {
     border-radius: 4px;
   }
   .switch-label {
-    font-family: var(--font-serif);
-    font-size: 10px;
-    letter-spacing: 0.1em;
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    letter-spacing: 0;
     color: var(--color-dim);
+    white-space: nowrap;
   }
   .switch-track {
     position: relative;
-    width: 28px;
-    height: 14px;
-    background: var(--color-hairline);
-    border-radius: 2px;
+    width: 24px;
+    height: 13px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
     transition: background 0.3s var(--ease-soak, ease);
   }
   .switch-track::after {
@@ -2171,17 +2345,17 @@ function installGlobalErrorHandlers() {
     position: absolute;
     top: 2px;
     left: 2px;
-    width: 10px;
-    height: 10px;
+    width: 9px;
+    height: 9px;
     background: var(--color-muted);
-    border-radius: 1px;
+    border-radius: 50%;
     transition: transform 0.3s var(--ease-soak, ease), background 0.3s;
   }
   .crystallization-switch:has(input:checked) .switch-track {
-    background: var(--color-primary-muted);
+    background: rgba(111, 216, 196, 0.28);
   }
   .crystallization-switch:has(input:checked) .switch-track::after {
-    transform: translateX(14px);
+    transform: translateX(11px);
     background: var(--color-primary);
   }
 
@@ -2240,7 +2414,6 @@ function installGlobalErrorHandlers() {
     align-items: center;
     justify-content: center;
     background: rgba(0, 0, 0, 0.45);
-    backdrop-filter: blur(4px);
     pointer-events: all;
   }
 

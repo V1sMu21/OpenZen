@@ -354,6 +354,7 @@ async fn main() -> anyhow::Result<()> {
         } => run_reflect(goal.clone(), *budget, *autonomous, &cli.dir).await,
         Commands::Mcp { port } => {
             let ctx = ToolContext {
+                is_subagent: false,
                 working_dir: cli.dir.to_string_lossy().to_string(),
                 assets_dir: assets_dir.to_string_lossy().to_string(),
                 script_dir: assets_dir.to_string_lossy().to_string(),
@@ -659,6 +660,7 @@ async fn run_ask(
         "sys_prompt.txt"
     };
     let ctx = ToolContext {
+        is_subagent: false,
         working_dir: working_dir.to_string_lossy().to_string(),
         assets_dir: assets_dir.to_string_lossy().to_string(),
         script_dir: assets_dir.to_string_lossy().to_string(),

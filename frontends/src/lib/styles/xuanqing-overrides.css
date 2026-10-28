@@ -1,0 +1,316 @@
+/* ── 玄青 · 统一表面层 (Xuan Qing surface layer) ────────────────────────────
+ *
+ * 预览页 01–09 的几何规格落成一层全局覆盖：对话框、设置抽屉、命令面板、
+ * 模型选择器、待办/提醒卡都套同一套"浮面 + 16 圆角 + 发丝线 + 大投影"。
+ *
+ * 为什么用全局覆盖而不是逐组件改：这些组件各自有 scoped 样式，逐个改要
+ * 十几轮构建。这里用 !important 压过 scoped 规则，只动视觉属性，不动行为；
+ * 后续要精修某个组件时，把对应规则从本文件删掉再回组件里改即可。
+ */
+
+/* ── 遮罩 ─────────────────────────────────────────────────────────────── */
+.cf-backdrop,
+.ask-backdrop,
+.import-backdrop,
+.switcher-backdrop,
+.shortcuts-backdrop,
+.settings-backdrop {
+  background: rgba(0, 0, 0, 0.5) !important;
+}
+
+/* ── 浮面：对话框 / 抽屉 / 面板 ─────────────────────────────────────────── */
+.cf-box,
+.ask-dialog,
+.import-dialog,
+.switcher-dialog,
+.shortcuts-panel,
+.command-palette {
+  background: var(--color-surface-overlay) !important;
+  border: 1px solid var(--color-hairline-strong) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.85) !important;
+}
+
+.cf-box,
+.ask-dialog,
+.import-dialog {
+  padding: 22px 22px 18px !important;
+}
+
+/* 设置抽屉：右侧整幅，468 宽，左缘发丝线 + 深投影 */
+.settings-panel {
+  width: 640px !important;
+  max-width: 94vw !important;
+  background: var(--color-surface) !important;
+  border-left: 1px solid var(--color-hairline-strong) !important;
+  box-shadow: -34px 0 90px -34px rgba(0, 0, 0, 0.85) !important;
+}
+
+.settings-head {
+  min-height: 56px !important;
+  padding: 0 18px !important;
+  border-bottom: 1px solid var(--color-hairline) !important;
+}
+
+.settings-title {
+  font-family: var(--font-serif) !important;
+  font-size: 17px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  color: var(--color-ink) !important;
+}
+
+/* 面板内的小标题 / 分组头：无衬线小字 + 字距（预览 .sec / .field label） */
+.settings-panel h3,
+.settings-panel h4,
+.shortcuts-header,
+.switcher-title-block h3 {
+  font-family: var(--font-serif) !important;
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  color: var(--color-ink) !important;
+}
+
+.settings-panel .section-label,
+.settings-panel .group-label,
+.settings-panel label {
+  font-size: 10px !important;
+  letter-spacing: 0.12em !important;
+  color: var(--color-muted) !important;
+}
+
+/* ── 控件：38 高 / 10 圆角 / 软底 + 发丝线 ─────────────────────────────── */
+.settings-panel input[type="text"],
+.settings-panel input[type="number"],
+.settings-panel input[type="password"],
+.settings-panel select,
+.settings-panel textarea,
+.import-dialog input,
+.ask-dialog input,
+.ask-dialog textarea,
+.switcher-dialog input {
+  background: var(--color-surface-soft) !important;
+  border: 1px solid var(--color-hairline) !important;
+  border-radius: 10px !important;
+  font-size: 12px !important;
+  color: var(--color-ink) !important;
+}
+
+.settings-panel input[type="text"],
+.settings-panel select,
+.ask-dialog input,
+.import-dialog input {
+  min-height: 38px !important;
+}
+
+/* ── 按钮：32 高 / 9 圆角；主按钮天青渐变 ─────────────────────────────── */
+.cf-btn,
+.ask-btn,
+.mbtn,
+.switcher-dialog button,
+.settings-panel button {
+  border-radius: 9px !important;
+  font-size: 12px !important;
+}
+
+.settings-panel .btn.primary {
+  background: var(--color-primary-soft) !important;
+  border: 1px solid var(--color-hairline-strong) !important;
+  color: var(--color-primary) !important;
+  box-shadow: none !important;
+  font-weight: 600 !important;
+}
+
+.cf-btn.primary,
+.ask-btn-primary,
+.mbtn.primary,
+.sc-btn-primary {
+  background: linear-gradient(180deg, #43a996, #2b7f71) !important;
+  border: 1px solid rgba(102, 220, 203, 0.42) !important;
+  color: #f0fffb !important;
+  font-weight: 600 !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22) !important;
+}
+
+/* ── 列表行：32 高 / 10 圆角 / 悬停浮面（设置项、命令项、待办项） ────────── */
+.command-item,
+.settings-panel .skill-row,
+.settings-panel .row,
+.settings-panel .list-row,
+.todo-item,
+.todo-rail .todo-item {
+  border-radius: 10px !important;
+  transition: background 0.16s !important;
+}
+
+.command-item:hover,
+.settings-panel .skill-row:hover,
+.todo-item:hover {
+  background: var(--color-surface-soft) !important;
+}
+
+/* 命令面板：顶部贴着标题栏落下，一段留白 */
+.command-palette {
+  margin-top: 6px !important;
+}
+
+/* 待办 / 提醒卡：软底 + 发丝线，和工具行同构 */
+.todo-rail .todo-item,
+.todo-rail > div {
+  background: var(--color-surface-soft) !important;
+  border: 1px solid var(--color-hairline) !important;
+  border-radius: 10px !important;
+}
+
+/* 滚动条同步（玄青：天青发丝，不用系统灰） */
+::-webkit-scrollbar-thumb {
+  background: var(--color-hairline-strong) !important;
+}
+
+/* ── 设置面板：左侧导航轨 + 右侧内容区（预览 04「展柜」） ───────────────── */
+.settings-panel {
+  display: grid !important;
+  grid-template-columns: 148px minmax(0, 1fr) !important;
+  grid-template-rows: 56px minmax(0, 1fr) !important;
+}
+
+.settings-head {
+  grid-column: 1 / -1 !important;
+  grid-row: 1 !important;
+  height: 56px !important;
+  padding: 0 10px 0 18px !important;
+}
+
+.settings-title {
+  letter-spacing: 0.18em !important;
+  font-size: 15px !important;
+}
+
+/* 横向 tabs → 纵向导航轨 */
+.settings-tabs {
+  grid-column: 1 !important;
+  grid-row: 2 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  gap: 2px !important;
+  padding: 10px 8px !important;
+  border-right: 1px solid var(--color-hairline) !important;
+  border-bottom: 0 !important;
+  overflow: auto !important;
+}
+
+.settings-tab {
+  flex: 0 0 34px !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  padding: 0 9px !important;
+  border-radius: 9px !important;
+  font-size: 12.5px !important;
+  text-align: left !important;
+  justify-content: flex-start !important;
+  color: var(--color-dim) !important;
+  border: 0 !important;
+}
+
+.settings-tab.on {
+  position: relative !important;
+  background: color-mix(in srgb, var(--color-primary) 9%, transparent) !important;
+  color: var(--color-ink) !important;
+}
+
+.settings-tab.on::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--color-primary);
+}
+
+/* 内容区 */
+.settings-body {
+  grid-column: 2 !important;
+  grid-row: 2 !important;
+  padding: 16px 20px 18px !important;
+  background: var(--color-canvas) !important;
+  overflow: auto !important;
+}
+
+/* 错误/加载提示是内容流里的第一块，不再浮在内容上方遮住按钮 */
+.settings-error,
+.settings-loading {
+  margin: 0 0 12px !important;
+  padding: 8px 12px !important;
+  border-radius: 10px !important;
+  background: color-mix(in srgb, var(--color-error) 12%, var(--color-surface)) !important;
+  border: 1px solid color-mix(in srgb, var(--color-error) 30%, transparent) !important;
+  font-size: 11px !important;
+  line-height: 1.6 !important;
+}
+
+/* 内容区标题与说明 */
+.settings-body h4,
+.settings-body .form-title {
+  font-family: var(--font-serif) !important;
+  font-size: 17px !important;
+  font-weight: 600 !important;
+  color: var(--color-ink) !important;
+  margin: 0 0 4px !important;
+}
+
+.settings-body .form-hint,
+.settings-body p {
+  font-size: 11.5px !important;
+  color: var(--color-muted) !important;
+  line-height: 1.6 !important;
+}
+
+/* 分组标签：小字 + 字距 */
+.settings-body .field > span,
+.settings-body .form-label {
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.14em !important;
+  color: var(--color-muted) !important;
+  margin-bottom: 6px !important;
+}
+
+/* 卡片：14 圆角 / elevated / 发丝线 */
+.settings-body .form,
+.settings-body .model-card,
+.settings-body .provider-card,
+.settings-body .skill-group,
+.settings-body .quality-block {
+  border: 1px solid var(--color-hairline) !important;
+  border-radius: 14px !important;
+  background: var(--color-surface-elevated) !important;
+  padding: 12px 14px !important;
+  margin-bottom: 12px !important;
+}
+
+/* 行：9px 12px，行间发丝线 */
+.settings-body .skill-row,
+.settings-body .model-row,
+.settings-body .row {
+  padding: 9px 12px !important;
+  border-top: 1px solid var(--color-hairline) !important;
+  border-radius: 0 !important;
+}
+
+.settings-body .skill-row:first-child,
+.settings-body .model-row:first-child {
+  border-top: 0 !important;
+}
+
+/* 徽标 */
+.settings-body .badge,
+.settings-body .tag {
+  font-size: 9px !important;
+  padding: 1px 6px !important;
+  border-radius: 999px !important;
+  border: 1px solid var(--color-hairline) !important;
+  color: var(--color-muted) !important;
+}

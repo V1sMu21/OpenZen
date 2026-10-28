@@ -2190,7 +2190,7 @@ pub fn get_session(
                 }
             } else if store
                 .get(&id)
-                .map(|e| !has_assistant_message(e))
+                .map(|e| e.status != SessionStatus::Waiting && !has_assistant_message(e))
                 .unwrap_or(true)
             {
                 // Not running and no assistant message persisted: restore the
@@ -2483,6 +2483,13 @@ pub fn delete_session(
     if lock_poison_guard(&state.running_agents).contains_key(&id) {
         return Err("Session is running; stop the agent before deleting".to_string());
     }
+    // Deleting a conversation must not leave its background work running:
+    // the owner row is about to disappear, so no UI could ever kill it.
+    let cancelled_jobs = oz_core::jobs::global().cancel_owner(&id, Some("session deleted".into()));
+    let _ = stop_child_agents(&id, &state);
+    if cancelled_jobs > 0 {
+        tracing::info!("[sessions] delete {id}: cancelled {cancelled_jobs} background job(s)");
+    }
     let working_dir = lock_poison_guard(&state.sessions)
         .get(&id)
         .map(|e| e.working_dir.clone())
@@ -2555,9 +2562,26 @@ pub async fn stop_session(
     // also has to work as an "abort whatever is running under this id" verb.
     let was_running = lock_poison_guard(&state.running_agents).contains_key(&id)
         || lock_poison_guard(&state.detached_agents).contains_key(&id);
+    // An explicit Stop dismisses the question: a dialog must not survive
+    // the user's decision to abandon it. App shutdown never comes through
+    // this command, so its parked question stays resumable.
+    {
+        let mut store = lock_poison_guard(&state.sessions);
+        if let Some(entry) = store.get_mut(&id) {
+            entry.pending_ask_user = None;
+        }
+        store.save();
+    }
     stop_running_agent(&id, &state).await;
+    // Stop also means "stop the work I started": background jobs owned by
+    // this session would otherwise keep running with no UI able to kill them
+    // (their owner row can be gone after a restart).
+    let cancelled_jobs = oz_core::jobs::global().cancel_owner(&id, Some("session stopped".into()));
+    let cancelled_children = stop_child_agents(&id, &state);
     Ok(serde_json::json!({
         "status": if was_running { "ok" } else { "signalled" },
+        "cancelled_jobs": cancelled_jobs,
+        "cancelled_subagents": cancelled_children,
     }))
 }
 
@@ -2892,6 +2916,7 @@ pub(crate) fn start_reminder_run(state: &Arc<AppState>, app: &AppHandle, session
                 None,
                 false,
                 None,
+                None,
             )
             .await
         });
@@ -2928,8 +2953,14 @@ fn emit_agent_run_error(state: &Arc<AppState>, app: &AppHandle, session_id: &str
     {
         let mut store = lock_poison_guard(&state.sessions);
         if let Some(s) = store.get_mut(session_id) {
-            if s.status == SessionStatus::Running {
-                s.status = SessionStatus::Idle;
+            if s.status == SessionStatus::Running || s.status == SessionStatus::Waiting {
+                // A failed run that was parked on a question still owns a
+                // resumable state; keep it. A plain run failure goes Idle.
+                s.status = if s.pending_ask_user.is_some() {
+                    SessionStatus::Waiting
+                } else {
+                    SessionStatus::Idle
+                };
             }
         }
         store.save();
@@ -2945,6 +2976,24 @@ fn emit_agent_run_error(state: &Arc<AppState>, app: &AppHandle, session_id: &str
 /// Gracefully stop a running agent: signal → wait → detach if unresponsive.
 /// Never force-aborts — the stop signal causes the agent loop to exit cleanly,
 /// and `after_run` must execute to persist messages.
+/// Cascade a Stop into the child agents this conversation spawned. Children
+/// are separate sessions, so their loops have their own stop signals.
+fn stop_child_agents(parent: &str, state: &Arc<AppState>) -> usize {
+    let children = lock_poison_guard(&state.child_sessions)
+        .get(parent)
+        .cloned()
+        .unwrap_or_default();
+    let signals = lock_poison_guard(&state.stop_signals);
+    let mut stopped = 0;
+    for c in &children {
+        if let Some(sig) = signals.get(c) {
+            sig.store(true, std::sync::atomic::Ordering::SeqCst);
+            stopped += 1;
+        }
+    }
+    stopped
+}
+
 async fn stop_running_agent(session_id: &str, state: &Arc<AppState>) {
     {
         let map = lock_poison_guard(&state.stop_signals);
@@ -3128,6 +3177,7 @@ pub async fn send_message(
                 inner_model.as_deref(),
                 false,
                 inner_effort.as_deref(),
+                None,
             )
             .await
         });
@@ -3216,7 +3266,9 @@ pub async fn regenerate(
             let app = app_clone.clone();
             let state = state_clone.clone();
             let sid = sid.clone();
-            async move { runner::run_agent_for_session(&app, &state, &sid, None, false, None).await }
+            async move {
+                runner::run_agent_for_session(&app, &state, &sid, None, false, None, None).await
+            }
         });
         match inner.await {
             Ok(Ok(())) => {}
@@ -3291,10 +3343,12 @@ pub async fn resume_session(
         let mut store = lock_poison_guard(&state.sessions);
         if let Some(s) = store.get_mut(&session_id) {
             s.status = SessionStatus::Running;
+            s.pending_ask_user = None;
         }
         store.save();
     }
 
+    let resume_note = lock_poison_guard(&state.resume_notes).remove(&session_id);
     let session_id = session_id.clone();
     let state_clone: Arc<AppState> = state.clone();
     let app_clone = app_handle.clone();
@@ -3313,9 +3367,18 @@ pub async fn resume_session(
             let state = state_clone.clone();
             let sid = sid.clone();
             let model = model_name.clone();
+            let note = resume_note.clone();
             async move {
-                runner::run_agent_for_session(&app, &state, &sid, model.as_deref(), true, None)
-                    .await
+                runner::run_agent_for_session(
+                    &app,
+                    &state,
+                    &sid,
+                    model.as_deref(),
+                    true,
+                    None,
+                    note.as_deref(),
+                )
+                .await
             }
         });
         match inner.await {
@@ -3352,25 +3415,78 @@ pub fn ask_user_response(
     app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    {
+    let pending = {
         let store = lock_poison_guard(&state.sessions);
-        if !store.has_session(&session_id) {
+        let Some(entry) = store.get(&session_id) else {
             return Err(format!("Session {session_id} not found"));
-        }
-    }
-    let ask_rxs = lock_poison_guard(&state.ask_user_rxs);
-    let slot = match ask_rxs.get(&session_id) {
-        Some(s) => s.clone(),
-        None => {
+        };
+        entry.pending_ask_user.clone()
+    };
+    let slot_opt = lock_poison_guard(&state.ask_user_rxs)
+        .get(&session_id)
+        .cloned();
+    let Some(slot) = slot_opt else {
+        // The run that asked is gone (app restart / crash). Turn the reply
+        // into a one-shot resume note: the checkpoint restores the task and
+        // the note carries the question + answer the dead loop never saw.
+        let Some(pending) = pending else {
             return Err(format!(
-                "Session {session_id} has no pending ask_user (agent isn't waiting)"
+                "Session {session_id} has no live agent and no parked ask_user \
+                 question; send a new message to continue"
             ));
+        };
+        let lang = lock_poison_guard(&state.locale).clone();
+        let note = if lang == "zh" {
+            format!(
+                "[用户答复 · 应用重启后送达]\n你之前向用户提问：\n{}\n\n用户回答：\n{}\n\n\
+                 请基于这个回答继续原任务；不要重复提问。",
+                pending.question, response
+            )
+        } else {
+            format!(
+                "[USER REPLY · delivered after an app restart]\nYou previously asked:\n{}\n\n\
+                 The user answered:\n{}\n\nContinue the original task with this answer; \
+                 do not ask the same question again.",
+                pending.question, response
+            )
+        };
+        lock_poison_guard(&state.resume_notes).insert(session_id.clone(), note);
+        {
+            let mut store = lock_poison_guard(&state.sessions);
+            if let Some(entry) = store.get_mut(&session_id) {
+                entry.pending_ask_user = None;
+                entry.status = SessionStatus::Stopped;
+            }
+            store.save();
         }
+        let _ = app_handle.emit(
+            "sse_event",
+            serde_json::to_value(SseEvent::system(
+                &session_id,
+                "ask_user reply stored; resuming from checkpoint",
+            ))
+            .unwrap_or_default(),
+        );
+        return Ok(serde_json::json!({ "received": true, "resume": true }));
     };
     // P1-i: key by the question's tool_use_id when the caller has it;
-    // otherwise the legacy key keeps old clients working.
-    let key = tool_use_id.unwrap_or_else(|| "__last__".to_string());
+    // otherwise the persisted pending id (page reload) keeps the reply on
+    // the right question; the legacy key is the last resort.
+    let key = tool_use_id
+        .or_else(|| pending.map(|p| p.tool_use_id))
+        .unwrap_or_else(|| "__last__".to_string());
     lock_poison_guard(&slot).insert(key, response);
+    // Leave the waiting state immediately: the dialog is gone and the
+    // loop is about to stream again. The AskUserAnswered event will do the
+    // same for IM replies, which never reach this command.
+    {
+        let mut store = lock_poison_guard(&state.sessions);
+        if let Some(entry) = store.get_mut(&session_id) {
+            entry.status = SessionStatus::Running;
+            entry.pending_ask_user = None;
+        }
+        store.save();
+    }
     let _ = app_handle.emit(
         "sse_event",
         serde_json::to_value(SseEvent::system(
@@ -4327,4 +4443,79 @@ model = "m"
         remove_entry_by_dotted_name(&mut table, "nope.missing");
         assert!(table.contains_key("keep"));
     }
+}
+
+// ── Background jobs (UI surface) ──────────────────────────────────────────
+//
+// The model-facing tools live in `oz-tools`; these commands only read/kill
+// jobs for the chat UI. Ownership is still fenced by the session id.
+
+#[tauri::command]
+pub fn job_list(session_id: String) -> serde_json::Value {
+    let jobs = oz_core::jobs::global().list(&session_id);
+    serde_json::json!({ "jobs": jobs.iter().map(|j| j.to_json()).collect::<Vec<_>>() })
+}
+
+#[tauri::command]
+pub async fn job_output(
+    session_id: String,
+    job_id: String,
+    wait: Option<bool>,
+    timeout_ms: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let registry = oz_core::jobs::global();
+    let snap = registry
+        .get(&job_id)
+        .filter(|s| s.owner_session == session_id)
+        .ok_or_else(|| format!("job {job_id} not found"))?;
+    if wait.unwrap_or(false) && !snap.status.is_terminal() {
+        registry
+            .wait(
+                &job_id,
+                &session_id,
+                std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000).min(300_000)),
+            )
+            .await?;
+    }
+    let (text, snap) = registry.read(&job_id, &session_id)?;
+    if snap.status.is_terminal() {
+        registry.mark_reported(&job_id);
+    }
+    Ok(serde_json::json!({ "text": text, "job": snap.to_json() }))
+}
+
+#[tauri::command]
+pub async fn job_kill(session_id: String, job_id: String) -> Result<serde_json::Value, String> {
+    let registry = oz_core::jobs::global();
+    let requested = registry.cancel(&job_id, &session_id, None)?;
+    let snap = if requested.status.is_terminal() {
+        requested
+    } else {
+        registry
+            .wait(&job_id, &session_id, std::time::Duration::from_secs(15))
+            .await?
+    };
+    registry.mark_reported(&job_id);
+    Ok(serde_json::json!({ "job": snap.to_json() }))
+}
+
+// ── Subagent transcript surface (P3) ─────────────────────────────────────
+
+#[tauri::command]
+pub fn agent_list(parent_session: String) -> serde_json::Value {
+    serde_json::json!({ "agents": crate::subagents::list_children(&parent_session) })
+}
+
+#[tauri::command]
+pub fn agent_read(child_id: String) -> Result<String, String> {
+    crate::subagents::read_transcript(&child_id)
+}
+
+#[tauri::command]
+pub fn agent_cancel(child_id: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Cancellation is a stop-signal flip; the guard does the rest.
+    if let Some(sig) = lock_poison_guard(&state.stop_signals).get(&child_id) {
+        sig.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    Ok(())
 }

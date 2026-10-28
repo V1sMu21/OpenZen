@@ -9,6 +9,7 @@
 pub mod error;
 pub mod event;
 pub mod message;
+pub mod path_trust;
 pub mod reminder;
 pub mod skill_mcp;
 pub mod tool;

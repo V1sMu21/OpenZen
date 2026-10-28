@@ -6,6 +6,7 @@
 // otherwise instead of silently returning empty data.
 
 import { isTauri, tauriInvoke } from "./tauri";
+import { filterHidden, unhideModel } from "./hiddenModels";
 import type {
   McpServerItem,
   ModelEntry,
@@ -160,12 +161,16 @@ function unwrapError(res: MutationResult, cmd: string): MutationResult {
   return res;
 }
 
-export function fetchModels(): Promise<ModelEntry[]> {
-  return invoke<ModelEntry[]>("list_models");
+export async function fetchModels(): Promise<ModelEntry[]> {
+  const all = await invoke<ModelEntry[]>("list_models");
+  return filterHidden(all);
 }
 
 export async function upsertModel(args: ModelUpsertArgs): Promise<MutationResult> {
-  return unwrapError(await invoke<MutationResult>("upsert_model", { args }), "upsert_model");
+  const res = unwrapError(await invoke<MutationResult>("upsert_model", { args }), "upsert_model");
+  // Re-adding a hidden name from Settings makes it visible again.
+  unhideModel(args.name);
+  return res;
 }
 
 export async function deleteModel(name: string): Promise<MutationResult> {

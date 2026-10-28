@@ -1047,8 +1047,67 @@ const XML_OPEN: &str = "<parameter name=\"";
 const XML_OPEN_ESCAPED: &str = "<parameter name=\\\"";
 const HALF_OPEN: &str = "{\"";
 const PARAM_CLOSER: &str = "</parameter>";
+/// DeepSeek's full-width DSML token: `<｜DSML｜  parameter …>` and the
+/// nameless `<｜DSML｜: "…"` form.
+const DSML_TOKEN: &str = "\u{ff5c}DSML\u{ff5c}";
+
+/// Byte offset of the earliest DSML marker in `s`, in any spelling the
+/// gateway has been seen to produce: `<｜DSML｜`, `</｜DSML｜:`, `｜/DSML｜:`
+/// (2026-10-23 12:26: `verify_task.py｜/DSML｜:` — the closer form the
+/// earlier helpers missed), `/｜DSML｜`, and a bare `DSML｜`.
+fn dsml_marker_index(s: &str) -> Option<usize> {
+    [
+        "</\u{ff5c}DSML",
+        "<\u{ff5c}DSML",
+        "\u{ff5c}/DSML",
+        "/\u{ff5c}DSML",
+        DSML_TOKEN,
+        "DSML\u{ff5c}",
+    ]
+    .iter()
+    .filter_map(|needle| s.find(needle))
+    .min()
+}
+
 /// Heuristic cap so garbage input cannot drive an unbounded key scan.
 const MAX_PARAM_KEY_LEN: usize = 80;
+
+/// True when `tail` (the part of a value that follows a parameter/DSML
+/// boundary) continues with ANOTHER tool call's serialized arguments —
+/// `", "type">bash`, `", "code">…`, `", "timeout": 240`, `", "file_path">…`.
+///
+/// This is the merge signature seen on 2026-10-23 11:31: the gateway folded
+/// three following `code_run` calls into the `file_path` value of a `write`
+/// call. Cutting at the boundary yields a clean-looking path, but the
+/// surviving `content` belongs to a different call, so the call must be
+/// rejected rather than executed with the wrong payload.
+fn merged_calls_tail(tail: &str, tool: Option<&str>) -> bool {
+    // Only curated tools have a canonical parameter set to compare against.
+    // For MCP / dynamic tools, recovering what we can is safer than guessing
+    // that a foreign-looking field means a merge.
+    let Some(own) = tool.and_then(oz_core_types::canonical_param_names) else {
+        return false;
+    };
+    const KEYS: [&str; 6] = [
+        "type",
+        "code",
+        "file_path",
+        "content",
+        "timeout",
+        "question",
+    ];
+    KEYS.iter().any(|k| {
+        // A key the call legitimately owns is a recoverable leak (that is the
+        // ask_user / write shapes above); a key from ANOTHER tool's schema is
+        // the merge signature (`type`/`timeout` inside a write call).
+        if own.contains(k) {
+            return false;
+        }
+        tail.contains(&format!("\", \"{k}\">"))
+            || tail.contains(&format!(",\"{k}\">"))
+            || tail.contains(&format!("\", \"{k}\":"))
+    })
+}
 
 /// Earliest leaked-parameter opener in `rest`, of any dialect. Returns
 /// `(start, key, value_start)` with offsets relative to `rest`, or `None`.
@@ -1119,12 +1178,33 @@ fn next_parameter_opener(rest: &str) -> Option<(usize, String, usize)> {
 /// existing fallback. Heuristic by design: it only ever sees strings that
 /// already failed strict JSON parsing.
 pub fn repair_parameter_style_args(raw: &str, tool: Option<&str>) -> Option<serde_json::Value> {
-    let s = raw.trim();
+    // The gateway may hand us the real arguments object as a JSON *string*
+    // (double-encoded). Unwrap before scanning so escaped quotes are real
+    // quotes again; without this the scanners below see `\"key\"` and every
+    // repair path misses.
+    let mut owned = raw.trim().to_string();
+    for _ in 0..2 {
+        if !owned.starts_with('"') {
+            break;
+        }
+        match serde_json::from_str::<String>(&owned) {
+            Ok(inner) if inner.contains('{') || inner.contains("<parameter") => owned = inner,
+            _ => break,
+        }
+    }
+    let s = owned.trim();
     if s.is_empty() {
         return None;
     }
+    let salvaged = salvage_leaked_fields(s, tool);
     // Cheap rejection before scanning: one of the dialects must appear.
-    if !s.contains(XML_OPEN) && !s.contains(XML_OPEN_ESCAPED) && !s.contains("\">") {
+    let has_marker = s.contains(XML_OPEN)
+        || s.contains(XML_OPEN_ESCAPED)
+        || s.contains("\">")
+        || s.contains("\"\u{ff5c}>")
+        || s.contains("\"|>")
+        || s.contains("<parameter:");
+    if !has_marker && salvaged.is_empty() {
         return None;
     }
     // Tier 1 — JSON reconstruction. The gateway sometimes splices junk
@@ -1152,8 +1232,13 @@ pub fn repair_parameter_style_args(raw: &str, tool: Option<&str>) -> Option<serd
                 if serde_json::from_str::<serde_json::Value>(&candidate).is_err() {
                     candidate.push('}');
                 }
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&candidate) {
+                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&candidate) {
                     if v.is_object() {
+                        if let Some(obj) = v.as_object_mut() {
+                            for (k, val) in salvaged.clone() {
+                                obj.entry(k).or_insert(val);
+                            }
+                        }
                         return Some(v);
                     }
                 }
@@ -1204,6 +1289,11 @@ pub fn repair_parameter_style_args(raw: &str, tool: Option<&str>) -> Option<serd
         }
         i += advance;
     }
+    // Merge last-resort field salvage (covers separator corruption that the
+    // opener scanner cannot see, e.g. `"question">Go: "…"`).
+    for (k, value) in salvaged {
+        out.entry(k).or_insert(value);
+    }
     // Nameless DSML values (`<｜DSML｜: "…"`): the gateway dropped the
     // parameter name entirely. The value almost always belongs to the
     // tool's primary parameter — map it there when the tool is known and
@@ -1225,9 +1315,32 @@ pub fn repair_parameter_style_args(raw: &str, tool: Option<&str>) -> Option<serd
     Some(serde_json::Value::Object(out))
 }
 
-/// Extract the value of a NAMELESS DSML fragment (`<｜DSML｜: "…"` — the
-/// gateway lost the parameter name, but the quoted JSON-escaped value is
-/// intact). Named forms are handled by the pair scanner; this skips them.
+/// Decode one JSON string literal at the start of `text`.
+fn extract_json_string(text: &str) -> Option<String> {
+    let quoted = text.trim_start().strip_prefix('"')?;
+    let bytes = quoted.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => {
+                let mut body = String::with_capacity(i + 2);
+                body.push('"');
+                body.push_str(&quoted[..i]);
+                body.push('"');
+                return serde_json::from_str::<String>(&body).ok();
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Extract the value of a NAMELESS fragment — the gateway lost the
+/// parameter name, but the quoted JSON-escaped value is intact. Two
+/// dialects appear in practice: `<｜DSML｜: "…"` (DeepSeek DSML) and
+/// `<parameter: "…"` / `<parameter > "…"` (the converter dropped `name=`).
+/// Named forms are handled by the pair scanner; this skips them.
 fn extract_nameless_dsml_value(s: &str) -> Option<String> {
     const DSML: &str = "\u{ff5c}DSML\u{ff5c}";
     let mut from = 0usize;
@@ -1238,26 +1351,21 @@ fn extract_nameless_dsml_value(s: &str) -> Option<String> {
             continue;
         }
         let rest = after.trim_start().strip_prefix(':')?.trim_start();
-        let quoted = rest.strip_prefix('"')?;
-        let bytes = quoted.as_bytes();
-        let mut i = 0usize;
-        let mut end = None;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'\\' => i += 2,
-                b'"' => {
-                    end = Some(i);
-                    break;
-                }
-                _ => i += 1,
+        return extract_json_string(rest);
+    }
+    // `<parameter:` / `<parameter >` with no `name=` before the value.
+    for opener in ["<parameter:", "<parameter :", "<parameter >"] {
+        if let Some(p) = s.find(opener) {
+            let after = s[p + opener.len()..].trim_start();
+            let after = after
+                .strip_prefix('>')
+                .or_else(|| after.strip_prefix(':'))
+                .unwrap_or(after)
+                .trim_start();
+            if let Some(value) = extract_json_string(after) {
+                return Some(value);
             }
         }
-        let end = end?;
-        let mut body = String::with_capacity(end + 2);
-        body.push('"');
-        body.push_str(&quoted[..end]);
-        body.push('"');
-        return serde_json::from_str::<String>(&body).ok();
     }
     None
 }
@@ -1317,6 +1425,186 @@ fn extract_dsml_params(text: &str) -> Vec<(String, String)> {
     out
 }
 
+/// Parse the JSON value that starts at the beginning of `text` (after
+/// leading whitespace), returning the value and the number of bytes it
+/// consumed. Used by the salvage scanner to read a quoted string or an
+/// array without requiring the rest of the blob to be valid JSON.
+fn parse_json_value_prefix(text: &str) -> Option<(serde_json::Value, usize)> {
+    let trimmed = text.trim_start();
+    let first = trimmed.chars().next()?;
+    if !matches!(first, '"' | '[' | '{' | '-' | '0'..='9' | 't' | 'f' | 'n') {
+        return None;
+    }
+    let mut values = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+    let value = values.next()?.ok()?;
+    Some((value, values.byte_offset()))
+}
+
+/// Keys a leaked call may legitimately carry. Curated tools expose their
+/// canonical parameter list; `respond` (which has no alias table) still
+/// needs its one field when a call is truncated mid-value.
+fn salvage_keys(tool: Option<&str>) -> Vec<&'static str> {
+    match tool {
+        Some("respond") => vec!["response"],
+        _ => tool
+            .and_then(oz_core_types::canonical_param_names)
+            .unwrap_or_default(),
+    }
+}
+
+/// Collect every value following `"key"` in a corrupted arguments blob.
+///
+/// The gateway can splice arbitrary junk between the closing quote of a key
+/// and its value — `"question">Go: "…"` (see the 2026-10-23 session),
+/// `"file_path"｜>work/x.py</parameter><parameter: "…"`. Normal JSON has
+/// `":"`; here the separator itself is damaged, so the scanner accepts a
+/// `:` plus a JSON value (the duplicate half of a leaked call often keeps
+/// one valid field), a `>` / `｜>` plus a short junk prefix and a JSON value,
+/// or a `>` / `｜>` plus an unquoted value terminated by a parameter
+/// boundary. Values are only ever read, never synthesized. Several occurrences of the
+/// same key are common (the gateway repeats the call); the caller picks the
+/// best one.
+fn field_values(raw: &str, key: &str) -> Vec<serde_json::Value> {
+    let needle = format!("\"{key}\"");
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = raw[from..].find(&needle) {
+        let pos = from + rel;
+        from = pos + needle.len();
+        // Only a key position counts: `{`, `,`, whitespace, or the end of a
+        // parameter closer. A mention of `"question"` inside prose does not.
+        let before_ok = raw[..pos]
+            .chars()
+            .next_back()
+            .is_none_or(|c| c.is_whitespace() || matches!(c, '{' | ',' | ';' | '>' | ']'));
+        if !before_ok {
+            continue;
+        }
+        let mut after = raw[from..].trim_start();
+        // The separator may be damaged in more than one way; consume all
+        // leading separator glyphs.
+        let mut stripped = true;
+        while stripped {
+            stripped = false;
+            for sep in [':', '>', '\u{ff5c}', '|', '='] {
+                if let Some(rest) = after.strip_prefix(sep) {
+                    after = rest.trim_start();
+                    stripped = true;
+                }
+            }
+        }
+        if after.is_empty() {
+            continue;
+        }
+        // Intact `:` form (the duplicate half of a leaked call usually
+        // keeps one valid field).
+        if let Some((value, _)) = parse_json_value_prefix(after) {
+            out.push(value);
+            continue;
+        }
+        // Corrupted separator with a short prose gap: `Go: "…"`, `K=…\n…`.
+        // A newline, a closer, or another parameter opener means the quoted
+        // text belongs to a different field, so never cross it.
+        let boundary = [
+            after.find("</parameter>"),
+            after.find("<parameter"),
+            dsml_marker_index(after),
+            after.find('\n'),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(after.len());
+        let quote = after.find('"');
+        if let Some(q) = quote {
+            if q < boundary && q <= 64 {
+                if let Some((value, _)) = parse_json_value_prefix(&after[q..]) {
+                    out.push(value);
+                    continue;
+                }
+            }
+        }
+        // Unquoted value (`"file_path"｜>work/extract.py</parameter>`).
+        let end = boundary;
+        let value = after[..end]
+            .trim()
+            .trim_matches(|c| c == ',' || c == '}')
+            .trim();
+        if !value.is_empty() && value.len() <= 16 * 1024 {
+            out.push(serde_json::Value::String(value.to_string()));
+        }
+    }
+    out
+}
+
+/// Pick one value from repeated/torn occurrences. The longest non-empty
+/// string wins: the gateway often repeats a field, and the truncated copy
+/// is usually the short one. Arrays/objects keep the first non-empty
+/// occurrence.
+fn pick_field_value(values: Vec<serde_json::Value>) -> Option<serde_json::Value> {
+    let mut best_string: Option<String> = None;
+    let mut best_container: Option<serde_json::Value> = None;
+    for value in values {
+        match value {
+            serde_json::Value::String(s) if !s.trim().is_empty() => {
+                if best_string.as_ref().is_none_or(|b| s.len() > b.len()) {
+                    best_string = Some(s);
+                }
+            }
+            serde_json::Value::Array(a) if !a.is_empty() => {
+                best_container.get_or_insert(serde_json::Value::Array(a));
+            }
+            other if !other.is_null() => {
+                best_container.get_or_insert(other);
+            }
+            _ => {}
+        }
+    }
+    best_string
+        .map(serde_json::Value::String)
+        .or(best_container)
+}
+
+/// Last-resort reconstruction for calls whose JSON never parses. Scans the
+/// tool's canonical fields by name; this is what recovers
+/// `{"candidates": […], "question">Go: "…"}` (the corruption seen on
+/// 2026-10-23) and `{"file_path"｜>…</parameter><parameter: "…"}`.
+fn salvage_leaked_fields(
+    raw: &str,
+    tool: Option<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let keys = salvage_keys(tool);
+    if keys.is_empty() {
+        return out;
+    }
+    // Merged-call corruption cannot be split back into the original calls:
+    // the gateway folded several calls' fields into one value. Return the
+    // rejection marker instead of a plausible-looking but wrong payload.
+    if merged_calls_tail(raw, tool) {
+        return oz_core_types::corrupt_call_marker(
+            "the gateway merged several tool calls into one arguments blob; \
+             its fields cannot be attributed to this call",
+        )
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    }
+    for key in &keys {
+        if let Some(value) = pick_field_value(field_values(raw, key)) {
+            out.insert((*key).to_string(), value);
+        }
+    }
+    // A nameless DSML/parameter value belongs to the first field the call
+    // did not otherwise provide (write → content, code_run → code).
+    if let Some(value) = extract_nameless_dsml_value(raw) {
+        if let Some(key) = keys.iter().find(|k| !out.contains_key(**k)) {
+            out.insert((*key).to_string(), serde_json::Value::String(value));
+        }
+    }
+    out
+}
+
 /// Cut DSML pollution out of parsed string values and lift the swallowed
 /// parameters back into the object.
 ///
@@ -1329,32 +1617,60 @@ fn extract_dsml_params(text: &str) -> Vec<(String, String)> {
 /// buried inside `file_path` and the tool fails `missing content`. When the
 /// value contains `</parameter>` followed by DSML/parameter junk, cut it at
 /// the boundary and promote the embedded named parameters.
-fn sanitize_dsml_pollution(v: &mut serde_json::Value) {
-    const DSML: &str = "\u{ff5c}DSML\u{ff5c}";
+fn sanitize_dsml_pollution(v: &mut serde_json::Value, tool: Option<&str>) {
     let serde_json::Value::Object(map) = v else {
         return;
     };
     let mut lifted: Vec<(String, String)> = Vec::new();
+    // Set when a polluted tail carries another call's serialized arguments:
+    // the call is unrecoverable and must be rejected, never executed.
+    let mut merged: Option<String> = None;
     for (_, val) in map.iter_mut() {
         let serde_json::Value::String(s) = val else {
             continue;
         };
-        // Fast reject before scanning for the boundary.
-        let Some(boundary) = s.find("</parameter>") else {
+        // The boundary may be a named closer, a nameless opener, or the
+        // DSML bracket itself. The 2026-10-23 run produced the last form:
+        // `"file_path": "work/x.py</｜DSML｜:"` — valid JSON with the
+        // dangling token swallowed into the path.
+        let boundary = [
+            s.find("</parameter>"),
+            s.find("<parameter"),
+            dsml_marker_index(s),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let Some(boundary) = boundary else {
             continue;
         };
         let rest = &s[boundary..];
         // The value has already been JSON-parsed, so escaped unicode is
         // decoded — checking the literal fullwidth token is enough.
-        let followed_by_junk = rest.contains(DSML) || rest.contains("<parameter");
+        // A DSML marker or a parameter opener after the boundary is junk; a
+        // bare `</parameter>` that only mentions the tag is legitimate text.
+        let followed_by_junk = rest.contains("<parameter") || dsml_marker_index(rest).is_some();
         if !followed_by_junk {
             continue;
+        }
+        if merged_calls_tail(rest, tool) {
+            merged = Some(
+                "the gateway merged several tool calls into one arguments blob; \
+                 its fields cannot be attributed to this call"
+                    .to_string(),
+            );
         }
         lifted.extend(extract_dsml_params(rest));
         *s = s[..boundary].trim_end().to_string();
     }
     for (k, val) in lifted {
         map.entry(k).or_insert(serde_json::Value::String(val));
+    }
+    if let Some(reason) = merged {
+        map.insert(
+            oz_core_types::CORRUPT_CALL_KEY.to_string(),
+            serde_json::Value::String(reason),
+        );
     }
 }
 
@@ -1371,12 +1687,21 @@ fn sanitize_dsml_pollution(v: &mut serde_json::Value) {
 /// Applied repeatedly so multi-level wrappers collapse fully. Unrecognized
 /// shapes pass through unchanged.
 pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
-    let mut current = v;
+    normalize_tool_args_inner(v, None)
+}
+
+/// Shared body of [`normalize_tool_args`] / [`normalize_tool_args_for`].
+/// `tool` is threaded through so the DSML sanitizer can tell a recoverable
+/// leak from a gateway-merged foreign field.
+fn normalize_tool_args_inner(
+    mut current: serde_json::Value,
+    tool: Option<&str>,
+) -> serde_json::Value {
     // DSML pollution can ride inside otherwise-valid JSON (see
     // sanitize_dsml_pollution) — clean parsed objects before the unwrap
     // loop so degenerate-shape checks see the intended payload.
     if current.is_object() {
-        sanitize_dsml_pollution(&mut current);
+        sanitize_dsml_pollution(&mut current, tool);
     }
     for _ in 0..4 {
         let next = match &current {
@@ -1384,7 +1709,7 @@ pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
                 .map(|parsed| {
                     if parsed.is_object() {
                         let mut inner = parsed;
-                        sanitize_dsml_pollution(&mut inner);
+                        sanitize_dsml_pollution(&mut inner, tool);
                         inner
                     } else {
                         parsed
@@ -1441,17 +1766,27 @@ pub fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
 /// shape. Execution is guarded a second time in `ToolRegistry::dispatch`.
 pub fn normalize_tool_args_for(tool: &str, v: serde_json::Value) -> serde_json::Value {
     // Nameless-DSML repair needs the tool's primary key, which only this
-    // function knows — run it first on strings strict JSON rejects (the
-    // unwrap pipeline below only ever fires on parseable strings, so the
-    // two paths stay mutually exclusive).
+    // function knows. Two string shapes reach here: strict JSON rejects the
+    // blob (the usual leaked-call case), or it parses to another *string*
+    // (the gateway double-encoded it). Both are repaired against the tool.
+    // The repaired value then goes through the ordinary pipeline ON PURPOSE:
+    // `normalize_tool_args` runs the DSML sanitizer, which is what strips a
+    // polluted `file_path` (the 2026-10-23 11:31 run returned the repaired
+    // object early and the polluted path reached the write tool).
+    let mut v = v;
     if let serde_json::Value::String(s) = &v {
-        if serde_json::from_str::<serde_json::Value>(s).is_err() {
-            if let Some(repaired) = repair_parameter_style_args(s, Some(tool)) {
-                return oz_core_types::canonicalize_tool_args(tool, repaired);
+        let repair_source = match serde_json::from_str::<serde_json::Value>(s) {
+            Ok(serde_json::Value::String(inner)) => Some(inner),
+            Ok(_) => None,
+            Err(_) => Some(s.clone()),
+        };
+        if let Some(source) = repair_source {
+            if let Some(repaired) = repair_parameter_style_args(&source, Some(tool)) {
+                v = repaired;
             }
         }
     }
-    let normalized = normalize_tool_args(v);
+    let normalized = normalize_tool_args_inner(v, Some(tool));
     let canonical = oz_core_types::canonicalize_tool_args(tool, normalized.clone());
     if canonical != normalized {
         tracing::warn!(
@@ -1756,5 +2091,183 @@ mod tests {
         let v = serde_json::Value::String(r#""{"response">最终回复正文""#.into());
         let got = normalize_tool_args_for("respond", v);
         assert_eq!(got["response"], "最终回复正文");
+    }
+
+    // ── 2026-10-23 desktop session: separator corruption + double encoding ──
+
+    #[test]
+    fn repair_recovers_question_after_go_separator_leak() {
+        // Real bytes from session 4596ac63: the gateway replaced the JSON
+        // `": "` separator with `">Go: "` and repeated the question dozens
+        // of times. The candidates array stayed valid. The tool previously
+        // received an empty question and the loop waited 5 minutes for it.
+        let raw = concat!(
+            r##"{"candidates": ["只接 haiku-5-5（Go），sonnet 先跳过", "sonnet 走 Zen 按量侧"], "##,
+            r##""question">Go: "探测完成。核心结论：haiku 可用，sonnet 不可用。", "##,
+            r##""question">Go: "探测完成。核心结论：haiku 可用，sonnet 不可用。"}"##
+        );
+        let got = repair_parameter_style_args(raw, Some("ask_user")).expect("repair");
+        assert_eq!(
+            got["question"],
+            "探测完成。核心结论：haiku 可用，sonnet 不可用。"
+        );
+        assert_eq!(got["candidates"][0], "只接 haiku-5-5（Go），sonnet 先跳过");
+        assert_eq!(got["candidates"][1], "sonnet 走 Zen 按量侧");
+    }
+
+    #[test]
+    fn normalize_recovers_double_encoded_ask_user_with_go_leak() {
+        // The same call as it arrives from the stream: a JSON *string* whose
+        // body is the corrupted arguments object.
+        let inner = concat!(
+            r##"{"candidates": ["a", "b"], "##,
+            r##""question">Go: "第一行"}"##
+        );
+        let wrapped = serde_json::Value::String(serde_json::to_string(inner).unwrap());
+        let got = normalize_tool_args_for("ask_user", wrapped);
+        assert_eq!(got["question"], "第一行");
+        assert_eq!(got["candidates"][0], "a");
+    }
+
+    #[test]
+    fn repair_recovers_fullwidth_separator_and_nameless_content() {
+        // Real bytes: `{"file_path"｜>work/dsh/extract_all.py</parameter>
+        // <parameter: "…content…", "file_path": "…"}`. The opening quote is
+        // missing and the content parameter lost its name.
+        let raw = concat!(
+            r##"{"file_path"｜>work/dsh/extract_all.py</parameter>"##,
+            "\n",
+            r##"<parameter: "import json\nprint(1)\n", "file_path": "work/dsh/extract_all.py"}"##
+        );
+        let got = normalize_tool_args_for("write", serde_json::Value::String(raw.into()));
+        assert_eq!(got["file_path"], "work/dsh/extract_all.py");
+        assert_eq!(got["content"], "import json\nprint(1)\n");
+    }
+
+    #[test]
+    fn repair_keeps_the_intact_duplicate_of_a_torn_field() {
+        // Real bytes: a valid `code` followed by a second `"code">K=…`
+        // fragment. The valid one must win; the junk must not become code.
+        let raw = concat!(
+            r##"{"code": "cd /tmp && ls", "type": "bash", "##,
+            r##""code">K=secret\necho: "cd /tmp && ls", "type": "bash"}"##
+        );
+        let got = normalize_tool_args_for("code_run", serde_json::Value::String(raw.into()));
+        assert_eq!(got["code"], "cd /tmp && ls");
+        assert_eq!(got["type"], "bash");
+    }
+
+    #[test]
+    fn real_20261023_ask_user_leak_is_repaired() {
+        // Exact accumulated arguments from desktop session 4596ac63
+        // (09:37 local). The gateway replaced `": "` with `">Go: "` and
+        // repeated the same question; without repair the tool saw an empty
+        // question and the loop parked on it eight times.
+        let raw = include_str!("../tests/fixtures/ask_user_go_leak_20261023.txt").trim();
+        let got = normalize_tool_args_for("ask_user", serde_json::Value::String(raw.to_string()));
+        let question = got["question"].as_str().unwrap_or("");
+        assert!(!question.trim().is_empty(), "question must be recovered");
+        assert!(question.contains("探测"), "got: {question:?}");
+        assert_eq!(got["candidates"].as_array().map(|a| a.len()), Some(4));
+    }
+
+    #[test]
+    fn real_20261023_ask_user_question_survives_every_go_leak_variant() {
+        // The same question reached the tool in three different leaked shapes
+        // within one run (session 4596ac63, 10:33 local). In two of them the
+        // gateway had also repeated the `candidates` array *in front of* the
+        // question, so a repair that stopped at the first `>Go: ` boundary
+        // returned the candidates text as the question — or an empty one,
+        // which is what produced 16 blank dialogs in the UI.
+        for (label, raw) in [
+            (
+                "repeated",
+                include_str!("../tests/fixtures/ask_user_repeated_go_leak_20261023.txt"),
+            ),
+            (
+                "short",
+                include_str!("../tests/fixtures/ask_user_go_leak_short_20261023.txt"),
+            ),
+            (
+                "mid",
+                include_str!("../tests/fixtures/ask_user_go_leak_mid_20261023.txt"),
+            ),
+        ] {
+            let raw = raw.trim();
+            let got =
+                normalize_tool_args_for("ask_user", serde_json::Value::String(raw.to_string()));
+            let question = got["question"].as_str().unwrap_or("");
+            assert!(
+                !question.trim().is_empty(),
+                "{label}: question must never come back empty"
+            );
+            assert!(
+                question.contains("探测"),
+                "{label}: question lost its text: {question:?}"
+            );
+            assert!(
+                !question.contains("\"candidates\""),
+                "{label}: candidates leaked into the question: {question:?}"
+            );
+            assert_eq!(
+                got["candidates"].as_array().map(|a| a.len()),
+                Some(4),
+                "{label}: candidates must survive too"
+            );
+        }
+    }
+
+    #[test]
+    fn real_20261023_merged_calls_do_not_pollute_the_path() {
+        // Real bytes from the 11:31 run on the installed build: the gateway
+        // merged THREE following code_run calls into the `file_path` VALUE of
+        // a write call. The path is cleaned at the DSML boundary, but the
+        // surviving `content` belongs to a code_run — so the call must carry
+        // the corruption marker and never be executed.
+        let raw = include_str!("../tests/fixtures/write_merged_calls_20261023.txt").trim();
+        let v: serde_json::Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+        let got = normalize_tool_args_for("write", v);
+        assert_eq!(
+            got["file_path"], "/home/user/.openzen/workspace/work/dsh/probe2.mjs",
+            "path must be cut at the DSML boundary; got {}",
+            got["file_path"]
+        );
+        assert!(
+            !got["file_path"].as_str().unwrap_or("").contains("DSML"),
+            "no DSML marker may survive in the path"
+        );
+        assert!(
+            oz_core_types::corrupt_call_reason(&got).is_some(),
+            "merged calls must be marked corrupted; got {got}"
+        );
+    }
+
+    #[test]
+    fn real_20261023_write_leak_is_repaired() {
+        // Exact accumulated arguments: `"file_path"｜>path</parameter>
+        // <parameter: "<content>"` — no opening quote, no parameter name.
+        let raw = include_str!("../tests/fixtures/write_fullwidth_leak_20261023.txt").trim();
+        let got = normalize_tool_args_for("write", serde_json::Value::String(raw.to_string()));
+        assert_eq!(got["file_path"], "work/dsh/extract_all.py");
+        let content = got["content"].as_str().unwrap_or("");
+        assert!(content.contains("import json"), "content: {content:?}");
+    }
+
+    #[test]
+    fn sanitize_cuts_dangling_dsml_marker_from_path() {
+        // Real bytes: valid JSON whose file_path swallowed `</｜DSML｜:`.
+        let raw = r#"{"file_path": "work/dsh/extract.py</｜DSML｜:"}"#;
+        let got = normalize_tool_args_for("write", serde_json::Value::String(raw.into()));
+        assert_eq!(got["file_path"], "work/dsh/extract.py");
+    }
+
+    #[test]
+    fn closer_dsml_spelling_is_cut_from_path() {
+        // Real bytes from the 2026-10-23 12:26 run: the closer form
+        // `｜/DSML｜:` (not `</｜DSML｜`) trailed the path.
+        let raw = "{\"file_path\": \"/Users/w/work/dsh/verify_task.py\u{ff5c}/DSML\u{ff5c}:\"}";
+        let got = normalize_tool_args_for("write", serde_json::Value::String(raw.into()));
+        assert_eq!(got["file_path"], "/Users/w/work/dsh/verify_task.py");
+        assert!(oz_core_types::corrupt_call_reason(&got).is_none());
     }
 }

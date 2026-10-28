@@ -1,4 +1,5 @@
 import { isTauri, tauriInvoke } from "./tauri";
+import { filterHidden } from "./hiddenModels";
 import { requestAuthToken } from "../stores/auth";
 
 export interface ChatResponse {
@@ -171,10 +172,12 @@ export async function fetchJson(path: string, init?: RequestInit): Promise<Respo
   return res;
 }
 
+export { hideModel, hiddenModelNames, restoreHiddenModels } from "./hiddenModels";
 export async function listModels(): Promise<ModelEntry[]> {
   if (isTauri()) {
     try {
-      return (await tauriInvoke("list_models")) as ModelEntry[];
+      const all = (await tauriInvoke("list_models")) as ModelEntry[];
+      return filterHidden(all);
     } catch (e) {
       console.error("[listModels] Tauri invoke failed:", e);
       return [];
@@ -183,7 +186,7 @@ export async function listModels(): Promise<ModelEntry[]> {
   try {
     const res = await fetchJson("/api/models");
     if (!res.ok) return [];
-    return await res.json();
+    return filterHidden((await res.json()) as ModelEntry[]);
   } catch (e) {
     console.error("[listModels] HTTP fetch failed:", e);
     return [];

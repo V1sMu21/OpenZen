@@ -1,11 +1,18 @@
 <script lang="ts">
   import { chat } from "../stores/chat";
-  import { listModels, type ModelEntry } from "../api/chat";
+  import {
+    hideModel,
+    hiddenModelNames,
+    listModels,
+    restoreHiddenModels,
+    type ModelEntry,
+  } from "../api/chat";
   import { t } from "../i18n";
 
   let models: ModelEntry[] = $state([]);
   let loading = $state(true);
   let switching = $state<string | null>(null);
+  let hiddenCount = $state(hiddenModelNames().length);
   let dialogEl: HTMLDivElement | undefined = $state();
 
   // Focus management, same shape as ApprovalModal: a modal that opens
@@ -40,7 +47,25 @@
     const list = await listModels();
     models = list;
     chat.setModelList(list);
+    hiddenCount = hiddenModelNames().length;
     loading = false;
+  }
+
+  async function removeModel(name: string) {
+    hideModel(name);
+    models = models.filter((m) => m.name !== name);
+    chat.setModelList(models);
+    hiddenCount = hiddenModelNames().length;
+    // Hiding the active model would leave the composer pointing at a name
+    // that the picker no longer lists.
+    if ($chat.selectedModel === name && models.length > 0) {
+      chat.setSelectedModel(models[0].name);
+    }
+  }
+
+  function restoreModels() {
+    restoreHiddenModels();
+    void loadModels();
   }
 
   function isActive(m: ModelEntry): boolean {
@@ -49,6 +74,15 @@
 
   async function switchTo(m: ModelEntry) {
     switching = m.name;
+    // If the current run is stuck in an LLM outage retry loop, switching the
+    // model is the user saying "stop this one and use that". Cancel first so
+    // the stale retry banner and the doomed run end immediately.
+    const retrying = $chat.streamingParts.some(
+      (p) => p.type === "data" && p.dataType === "llm_retry",
+    );
+    if (retrying && $chat.isProcessing) {
+      await chat.cancelCurrent();
+    }
     chat.setSelectedModel(m.name);
     // Give user a brief visual confirmation before closing
     await new Promise((r) => setTimeout(r, 300));
@@ -114,6 +148,7 @@
               <div class="switcher-group-head">{g.id !== "" ? g.id : $t("settings.provider.standaloneGroup")}</div>
             {/if}
             {#each g.list as m (m.name)}
+              <div class="switcher-row">
               <button
                 type="button"
                 class="switcher-item"
@@ -147,8 +182,28 @@
                   {/if}
                 </div>
               </button>
+              <button
+                type="button"
+                class="switcher-delete"
+                title={$t("model.deleteTitle")}
+                aria-label={$t("model.deleteTitle")}
+                onclick={(e) => { e.stopPropagation(); void removeModel(m.name); }}
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <path d="M2.5 3.5h7M5 3.5V2.5h2v1M3.5 3.5l.5 6h4l.5-6" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              </div>
             {/each}
           {/each}
+        </div>
+      {/if}
+      {#if hiddenCount > 0}
+        <div class="switcher-hidden-foot">
+          <span>{$t("model.hiddenCount").replace("{n}", String(hiddenCount))}</span>
+          <button type="button" class="switcher-restore" onclick={restoreModels}>
+            {$t("model.restore")}
+          </button>
         </div>
       {/if}
     </div>
@@ -162,12 +217,56 @@
 </div>
 
 <style>
+  .switcher-row {
+    position: relative;
+  }
+  .switcher-row .switcher-item {
+    padding-right: 38px;
+  }
+  .switcher-delete {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-muted);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+  }
+  .switcher-row:hover .switcher-delete,
+  .switcher-delete:focus-visible {
+    opacity: 1;
+  }
+  .switcher-delete:hover {
+    color: var(--color-error);
+    background: var(--color-surface-soft);
+  }
+  .switcher-hidden-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 4px 0;
+    font-size: 11px;
+    color: var(--color-muted);
+  }
+  .switcher-restore {
+    border: none;
+    background: none;
+    color: var(--color-primary);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 4px;
+  }
   .switcher-backdrop {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.45);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
     display: flex;
     align-items: center;
     justify-content: center;

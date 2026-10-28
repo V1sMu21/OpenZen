@@ -56,6 +56,29 @@ impl ToolHandler for SkillMcpStoreTool {
         ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let category = args["category"].as_str().unwrap_or("fact");
+        // The schema marks name/content required, but the old defaults
+        // ("unnamed" / "") silently stored junk: the 2026-10-23 run sent
+        // `{"category":"sop"}` four times (the gateway had dropped the rest of
+        // the arguments) and each call reported `stored`, writing
+        // `.skill_mcp/sops/unnamed.md`. A missing payload must be an error the
+        // model can see and correct, never a silent empty artifact.
+        let mut missing: Vec<&str> = Vec::new();
+        for key in ["name", "content"] {
+            let present = args
+                .get(key)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.trim().is_empty());
+            if !present {
+                missing.push(key);
+            }
+        }
+        if !missing.is_empty() {
+            return Err(ToolError::Custom(oz_core_types::missing_arg_error(
+                "skill_mcp_store",
+                &missing,
+                &args,
+            )));
+        }
         let name = args["name"].as_str().unwrap_or("unnamed");
         let content = args["content"].as_str().unwrap_or("");
         let description = args["description"].as_str().unwrap_or("");
@@ -249,6 +272,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dir_path = dir.keep().to_string_lossy().to_string();
         ToolContext {
+            is_subagent: false,
             working_dir: dir_path.clone(),
             assets_dir: String::new(),
             script_dir: String::new(),
@@ -258,6 +282,37 @@ mod tests {
             session_id: String::new(),
             tool_budget_secs: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn store_without_a_payload_is_an_error_not_a_junk_artifact() {
+        // Exact arguments the gateway delivered four times in the 2026-10-23
+        // run (session 4596ac63): only `category` survived. Each call used to
+        // answer `stored` and write `.skill_mcp/sops/unnamed.md`.
+        let c = ctx();
+        let err = SkillMcpStoreTool
+            .execute(serde_json::json!({"category": "sop"}), &c)
+            .await
+            .expect_err("a missing name/content must not be stored");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("name"),
+            "error must name the missing keys: {msg}"
+        );
+        assert!(
+            msg.contains("content"),
+            "error must name the missing keys: {msg}"
+        );
+
+        // A whitespace-only payload is just as empty.
+        let err = SkillMcpStoreTool
+            .execute(
+                serde_json::json!({"category": "sop", "name": "  ", "content": "\n"}),
+                &c,
+            )
+            .await
+            .expect_err("blank payload must not be stored");
+        assert!(err.to_string().contains("name"));
     }
 
     #[tokio::test]

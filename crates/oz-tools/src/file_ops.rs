@@ -105,6 +105,35 @@ pub(crate) fn is_in_working_dir_for_write(path: &str, working_dir: &str) -> bool
     is_in_working_dir_inner(path, working_dir, true)
 }
 
+/// May this mutating call write `path`?
+///
+/// Inside the workspace the fence decides. Outside it the user's own approval
+/// does: the agent loop asks before dispatching an out-of-workspace
+/// `write`/`edit`/`patch` (see `oz_core_types::path_trust`) and records a
+/// positive answer for that session, which is the only way the registry ever
+/// gets an entry. A denial records nothing, so the boundary still holds.
+pub(crate) fn write_path_permitted(path: &str, ctx: &oz_core_types::ToolContext) -> bool {
+    is_in_working_dir_for_write(path, &ctx.working_dir)
+        || oz_core_types::path_trust::is_path_approved(&ctx.session_id, Path::new(path))
+}
+
+/// Shared rejection text for the mutating tools: state what happened, that
+/// retrying is pointless, and how the call can legitimately succeed.
+fn outside_write_message(tool: &str, path: &str, working_dir: &str) -> String {
+    let hint = if !Path::new(path).is_absolute() {
+        let suggested = Path::new(working_dir).join(path);
+        format!(" Try `{}` instead.", suggested.display())
+    } else {
+        String::new()
+    };
+    format!(
+        "{tool}: path `{path}` is outside the workspace `{working_dir}` (or in a protected \
+         location). This is a permission boundary, not an argument error — retrying `{tool}` on \
+         the SAME path fails the same way. The user is asked to approve out-of-workspace writes \
+         automatically; this one was not approved, so either work inside the workspace.{hint}"
+    )
+}
+
 fn is_in_working_dir_inner(path: &str, working_dir: &str, for_write: bool) -> bool {
     let wd = Path::new(working_dir);
     let p = Path::new(path);
@@ -125,17 +154,44 @@ fn is_in_working_dir_inner(path: &str, working_dir: &str, for_write: bool) -> bo
     // `/tmp/../etc/passwd`, `/tmp/x/../../Users/<u>/.ssh/id_rsa` and
     // symlinks living under /tmp all passed the fence. Canonicalization
     // resolves `..` and symlinks, so every later check sees the real
-    // target. New files fall back to canonicalizing the nearest existing
-    // ancestor and re-attaching the file name.
-    let real_p = std::fs::canonicalize(&resolved).ok().or_else(|| {
-        resolved
-            .parent()
-            .and_then(|parent| std::fs::canonicalize(parent).ok())
-            .map(|parent| match resolved.file_name() {
-                Some(name) => parent.join(name),
-                None => parent,
-            })
-    });
+    // target. New files resolve the deepest EXISTING ancestor and re-attach
+    // the missing tail (a non-existent component cannot be a symlink, so
+    // this adds no traversal surface).
+    //
+    // One level of parent lookup was not enough: for
+    // `work/e2e/hello.py`, where `work/e2e/` does not exist yet, nothing
+    // canonicalized and the caller reported "outside the workspace or in a
+    // protected location" — a permission story for a missing directory. The
+    // agent retried the same write three times in the 2026-10-23 isolated run
+    // before falling back to `mkdir -p`. Now the path is allowed and the
+    // write tool's own actionable ENOENT message ("parent directory does not
+    // exist — mkdir -p") is what the model sees.
+    let real_p = match std::fs::canonicalize(&resolved) {
+        Ok(p) => Some(p),
+        Err(_) => {
+            let mut missing: Vec<std::ffi::OsString> = Vec::new();
+            if let Some(name) = resolved.file_name() {
+                missing.push(name.to_os_string());
+            }
+            let mut found = None;
+            let mut cursor = resolved.parent();
+            while let Some(dir) = cursor {
+                if let Ok(real_dir) = std::fs::canonicalize(dir) {
+                    let mut rebuilt = real_dir;
+                    for part in missing.iter().rev() {
+                        rebuilt.push(part);
+                    }
+                    found = Some(rebuilt);
+                    break;
+                }
+                if let Some(name) = dir.file_name() {
+                    missing.push(name.to_os_string());
+                }
+                cursor = dir.parent();
+            }
+            found
+        }
+    };
 
     // Sensitive-name check runs on the canonical path so traversal cannot
     // smuggle sensitive targets past the substring match. The
@@ -351,16 +407,12 @@ impl ToolHandler for FileWriteTool {
                 &args,
             )));
         }
-        if !is_in_working_dir_for_write(path, &ctx.working_dir) {
-            let hint = if !Path::new(path).is_absolute() {
-                let suggested = Path::new(&ctx.working_dir).join(path);
-                format!(" Try the absolute path `{}` instead.", suggested.display())
-            } else {
-                String::new()
-            };
-            return Ok(ToolOutput::bad_json(
-                format!("write: path `{path}` is outside working directory `{}` or in a protected location.{}", ctx.working_dir, hint)
-            ));
+        if !write_path_permitted(path, ctx) {
+            return Ok(ToolOutput::bad_json(outside_write_message(
+                "write",
+                path,
+                &ctx.working_dir,
+            )));
         }
         if let Some(parent) = Path::new(path).parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
@@ -418,16 +470,11 @@ impl ToolHandler for FilePatchTool {
                 "patch", &missing, &args,
             )));
         }
-        if !is_in_working_dir_for_write(path, &ctx.working_dir) {
-            let hint = if !Path::new(path).is_absolute() {
-                let suggested = Path::new(&ctx.working_dir).join(path);
-                format!(" Try the absolute path `{}` instead.", suggested.display())
-            } else {
-                String::new()
-            };
-            return Ok(ToolOutput::bad_json(format!(
-                "patch: path `{path}` is outside working directory or in a protected location.{}",
-                hint
+        if !write_path_permitted(path, ctx) {
+            return Ok(ToolOutput::bad_json(outside_write_message(
+                "patch",
+                path,
+                &ctx.working_dir,
             )));
         }
 
@@ -501,16 +548,11 @@ impl ToolHandler for FileEditTool {
                 "edit", &missing, &args,
             )));
         }
-        if !is_in_working_dir_for_write(path, &ctx.working_dir) {
-            let hint = if !Path::new(path).is_absolute() {
-                let suggested = Path::new(&ctx.working_dir).join(path);
-                format!(" Try the absolute path `{}` instead.", suggested.display())
-            } else {
-                String::new()
-            };
-            return Ok(ToolOutput::bad_json(format!(
-                "edit: path `{path}` is outside working directory or in a protected location.{}",
-                hint
+        if !write_path_permitted(path, ctx) {
+            return Ok(ToolOutput::bad_json(outside_write_message(
+                "edit",
+                path,
+                &ctx.working_dir,
             )));
         }
 
@@ -875,6 +917,7 @@ mod tests {
 
     fn ctx() -> TC {
         TC {
+            is_subagent: false,
             working_dir: "/tmp".into(),
             assets_dir: "/tmp".into(),
             script_dir: "/tmp".into(),
@@ -886,6 +929,80 @@ mod tests {
         }
     }
 
+    /// Regression (2026-10-23): the workspace boundary is now approvable. An
+    /// out-of-workspace write must stay blocked until the user approves that
+    /// exact path for the session, and must go through once they have.
+    #[tokio::test]
+    async fn outside_write_needs_an_approval_and_then_succeeds() {
+        // A non-temp location (temp roots are allow-listed by the fence itself).
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/oz-fence-test")
+            .join(format!("outside-{}", std::process::id()));
+        let ws = base.join("ws");
+        let outside = base.join("outside/keep.txt");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, "old\n").unwrap();
+
+        let ctx = TC {
+            is_subagent: false,
+            working_dir: ws.to_string_lossy().to_string(),
+            assets_dir: String::new(),
+            script_dir: String::new(),
+            lang: "en".into(),
+            skill_mcp_dir: None,
+            harness_dir: None,
+            session_id: "sess-outside".into(),
+            tool_budget_secs: 0,
+        };
+        let args = serde_json::json!({
+            "file_path": outside.to_string_lossy(),
+            "content": "new\n",
+        });
+
+        // 1. Not approved → the boundary still holds.
+        let blocked = FileWriteTool.execute(args.clone(), &ctx).await.unwrap();
+        assert_eq!(
+            blocked.data["status"], "error",
+            "unapproved outside write must be rejected: {:?}",
+            blocked.data
+        );
+        let msg = blocked.data["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("outside the workspace"),
+            "the message must name the boundary: {msg}"
+        );
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "old\n");
+
+        // 2. The user approves exactly this path → the write lands.
+        oz_core_types::path_trust::approve_path("sess-outside", &outside);
+        let allowed = FileWriteTool.execute(args, &ctx).await.unwrap();
+        assert_eq!(allowed.data["status"], "written", "{:?}", allowed.data);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "new\n");
+
+        // 3. A different session does not inherit it.
+        oz_core_types::path_trust::forget_session("sess-outside");
+        let other = TC {
+            session_id: "sess-other".into(),
+            ..ctx
+        };
+        let blocked_again = FileWriteTool
+            .execute(
+                serde_json::json!({
+                    "file_path": outside.to_string_lossy(),
+                    "content": "third\n",
+                }),
+                &other,
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked_again.data["status"], "error");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "new\n");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[tokio::test]
     async fn test_read_missing_path() {
         let r = FileReadTool
@@ -893,6 +1010,46 @@ mod tests {
             .await
             .unwrap();
         assert!(r.next_prompt.unwrap().contains("missing"));
+    }
+
+    /// Regression (2026-10-23 isolated run): a write whose parent directory
+    /// does not exist yet was rejected as if it were a permission boundary —
+    /// "cannot canonicalize path, rejecting: …/work/e2e/hello.py" — and the
+    /// agent retried the same write three times before using `mkdir -p`.
+    /// The path check must resolve the deepest existing ancestor instead, so
+    /// the write proceeds and the tool reports the actionable ENOENT.
+    #[tokio::test]
+    async fn write_into_a_missing_directory_is_not_a_permission_error() {
+        let base = std::env::temp_dir().join(format!("oz-missing-parent-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&base);
+        let target = base.join("deeper/not/created/hello.py");
+        assert!(!target.parent().unwrap().exists(), "precondition");
+
+        let ctx = TC {
+            working_dir: base.to_string_lossy().to_string(),
+            assets_dir: String::new(),
+            script_dir: String::new(),
+            lang: "en".into(),
+            skill_mcp_dir: None,
+            harness_dir: None,
+            session_id: String::new(),
+            tool_budget_secs: 0,
+            is_subagent: false,
+        };
+        let out = FileWriteTool
+            .execute(
+                serde_json::json!({"file_path": target.to_string_lossy(), "content": "print('x')\n"}),
+                &ctx,
+            )
+            .await
+            .expect("a write into a non-existent subdirectory must be allowed");
+        assert_eq!(out.data["status"], "written");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "print('x')\n",
+            "write creates the parent directory itself"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

@@ -113,7 +113,9 @@
   tabindex="0"
 >
   <div class="project-row" onclick={toggleExpand} oncontextmenu={handleContextMenu}>
-    <span class="project-chevron">{isExpanded ? "▾" : "▸"}</span>
+    <svg class="project-chevron" width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+      <path d={isExpanded ? "M1.5 3.5L5 7l3.5-3.5" : "M3.5 1.5L7 5l-3.5 3.5"} stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
     {#if project.broken}
       <span class="project-icon">⚠️</span>
     {/if}
@@ -165,8 +167,8 @@
 
 <style>
   .project-item {
-    margin: 0 8px;
-    border-radius: 8px;
+    margin: 0 4px;
+    border-radius: 10px;
     transition: opacity 0.15s;
   }
 
@@ -186,18 +188,18 @@
   .project-row {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 12px;
-    border-radius: 8px;
+    gap: 7px;
+    min-height: 32px;
+    padding: 6px 9px;
+    border-radius: 9px;
     cursor: pointer;
     user-select: none;
+    transition: background 0.16s, color 0.16s;
   }
 
   .project-chevron {
-    font-size: 10px;
-    color: var(--color-body);
-    width: 12px;
-    text-align: center;
+    flex: none;
+    color: var(--color-muted);
   }
 
   .project-icon {
@@ -206,12 +208,16 @@
 
   .project-name {
     flex: 1;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--color-ink);
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--color-body);
+    letter-spacing: 0.01em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .project-item.expanded .project-name {
+    color: var(--color-ink);
   }
 
   .project-name.hidden {

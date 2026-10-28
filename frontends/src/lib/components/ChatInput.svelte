@@ -2,6 +2,8 @@
 import { chat } from "../stores/chat";
 import { sessions } from "../stores/sessions";
 import { compressSession, injectMessage } from "../api/sessions";
+import { listModels } from "../api/chat";
+import { onMount } from "svelte";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import CommandPalette from "./CommandPalette.svelte";
@@ -14,6 +16,14 @@ let {
 } = $props();
 
 let inputText = $state("");
+
+// 模型 chip 要显示“模型本身”的名字，就需要这份列表在会话打开时就到手，
+// 而不是等用户点开一次模型选择器。
+onMount(() => {
+  listModels()
+    .then((list) => chat.setModelList(list))
+    .catch(() => {});
+});
 let showCommands = $state(false);
 let attachMenuOpen = $state(false);
 let thinkingMenuOpen = $state(false);
@@ -28,6 +38,14 @@ const THINKING_LEVELS: { value: ThinkingLevel; labelKey: string }[] = [
 ];
 
 const currentModel = $derived($chat.selectedModel ?? "");
+// 标题只显示“模型本身”（如 deepseek-flash），不显示本地别名
+// （如 opencode-go-dsflash）——别名是给配置看的，不是给用户看的。
+const currentModelLabel = $derived.by(() => {
+  const name = currentModel;
+  if (!name) return "";
+  const entry = $chat.modelList.find((m) => m.name === name);
+  return entry?.model || name;
+});
 // Display key must match the write key (pickLevel) and the send key
 // (chat.sendMessage): `selectedModel ?? modelInfo.model`.
 const dialKey = $derived($chat.selectedModel ?? $chat.modelInfo?.model ?? "");
@@ -405,7 +423,11 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
           onclick={() => attachMenuOpen = !attachMenuOpen}
           aria-label={$t("chat.attachFile")}
           title={$t("chat.attachFile")}
-        >{$t("chat.attach")}</button>
+        >
+          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M7 2v10M2 7h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
         {#if attachMenuOpen}
           <div class="attach-menu">
             <button class="attach-menu-item" onclick={() => { attachMenuOpen = false; pickFile(); }}>
@@ -433,7 +455,7 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
           aria-label={$t("model.title")}
           aria-haspopup="dialog"
           title={$t("model.title")}
-        >{currentModel || $t("input.model")}</button>
+        >{currentModelLabel || $t("input.model")}</button>
       </div>
       <div class="attach-wrap">
         <button
@@ -501,8 +523,8 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
 <style>
   .input-wrapper {
     position: relative;
-    /* 与 App.svelte 的 .messages-list 同步: 跟随窗口伸展, 1200px 封顶 */
-    max-width: min(100%, 1200px);
+    /* 预览规格：与消息列同宽 860，居中 */
+    max-width: min(100%, 860px);
     margin: 0 auto;
     width: 100%;
     padding: 8px 24px 16px;
@@ -562,13 +584,33 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
   }
 
   /* ── Composer: 题字落款 (对齐原型 v2) ── */
+  /* ── 案台 (composer): 一块浮起来的釉面 ── */
   .composer-box {
     position: relative;
     border: 1px solid var(--color-hairline);
-    border-radius: 4px;
-    background: var(--color-surface-soft);
+    border-radius: 18px;
+    background: linear-gradient(180deg, var(--color-surface-elevated), var(--color-surface-soft));
     box-shadow: var(--glaze-shadow, none);
-    transition: border-color 0.4s var(--ease-soak, ease), box-shadow 0.4s var(--ease-soak, ease);
+    transition: border-color 0.24s var(--ease-soak), box-shadow 0.24s var(--ease-soak);
+  }
+
+  /* 顶部一道极细的釉光 —— 让平面有一点点体积 */
+  .composer-box::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 18px;
+    right: 18px;
+    height: 1px;
+    border-radius: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.08) 30%,
+      rgba(255, 255, 255, 0.08) 70%,
+      transparent
+    );
+    pointer-events: none;
   }
   .stop-hint {
     padding: 4px 12px 0;
@@ -577,26 +619,26 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
     color: var(--color-status-warn);
   }
   .composer-box:focus-within {
-    border-color: var(--color-primary);
-    box-shadow: var(--glaze-shadow, none), 0 0 0 3px var(--color-primary-muted, rgba(147, 195, 214, 0.07));
+    border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
+    box-shadow: var(--glaze-shadow, none), var(--focus-ring);
   }
 
   textarea {
-    flex: 1;
+    display: block;
     width: 100%;
     background: none;
     border: none;
-    border-radius: 4px;
-    padding: 12px 14px 4px;
+    padding: 15px 18px 6px;
     color: var(--color-ink);
     font-family: var(--font-sans);
-    font-size: 14px;
-    line-height: 1.5;
+    font-size: 14.5px;
+    line-height: 1.6;
     resize: none;
-    min-height: 42px;
-    max-height: 160px;
+    min-height: 48px;
+    max-height: 180px;
     outline: none;
     min-width: 0;
+    caret-color: var(--color-primary);
   }
 
   textarea::placeholder {
@@ -611,8 +653,8 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
   .composer-row {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 4px 10px 10px;
+    gap: 8px;
+    padding: 4px 10px 10px 12px;
   }
   .composer-spacer {
     flex: 1;
@@ -625,40 +667,31 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
     display: flex;
     align-items: center;
   }
+  /* ── 工具 chips: 附件 / 模型 / 思考强度 ── */
   .attach-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 2px 10px;
-    border-radius: 3px;
-    border: 1px solid var(--color-hairline);
-    background: none;
-    color: var(--color-primary);
-    font-family: var(--font-serif);
-    font-size: 12px;
-    letter-spacing: 0.2em;
+    gap: 5px;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 9px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--color-dim);
+    font-family: var(--font-sans);
+    font-size: 11.5px;
+    letter-spacing: 0.01em;
     cursor: pointer;
-    transition: background 0.3s var(--ease-soak, ease), color 0.3s var(--ease-soak, ease), border-color 0.3s var(--ease-soak, ease);
+    transition: background 0.16s var(--ease-soak), color 0.16s, border-color 0.16s;
     white-space: nowrap;
     position: relative;
-    overflow: hidden;
-  }
-  .attach-btn::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    transform: translateX(-110%);
-    background: linear-gradient(100deg, transparent, rgba(147, 195, 214, 0.18), transparent);
-    transition: transform 0.7s var(--ease-soak, ease);
-  }
-  .attach-btn:hover::after {
-    transform: translateX(110%);
   }
   .attach-btn:hover,
   .attach-btn.open {
-    background: var(--color-primary-muted);
-    border-color: var(--color-primary);
-    color: var(--color-primary-hover);
+    background: var(--color-surface-overlay);
+    border-color: var(--color-hairline);
+    color: var(--color-ink);
   }
   .attach-menu {
     position: absolute;
@@ -751,10 +784,15 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
 
   /* 钤印发送钮: 天青方印「言」 */
   .seal-btn {
-    width: 34px;
-    height: 34px;
+    width: 40px;
+    height: 40px;
+    border-radius: 13px;
     font-size: 15px;
+    background: linear-gradient(160deg, #f2d59d, #e2be7a);
+    color: #241a08;
     flex-shrink: 0;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45),
+      0 6px 16px -8px rgba(226, 190, 122, 0.8);
   }
   /* English labels ("Send"/"Stop") need a wider seal than the single
      Chinese glyphs — auto width with padding keeps the square for zh. */

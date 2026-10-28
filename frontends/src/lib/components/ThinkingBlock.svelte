@@ -221,7 +221,7 @@
 {#if thinking}
   <div class="thinking-block">
     <button class="thinking-header" onclick={toggle} aria-expanded={!collapsed} aria-label={$t("thinking.label")}>
-      <span class="tglyph">⚘</span>
+      <span class="tglyph" aria-hidden="true"></span>
       <span class="thinking-label">{$t("thinking.label")}</span>
       {#if headerDurationLabel && showTimer}
         <span class="thinking-duration">{headerDurationLabel}</span>
@@ -252,49 +252,53 @@
   .thinking-block {
     /* 楷体手迹: 无卡片, 静思行 */
     margin: 2px 0 2px;
-    border-bottom: 1px solid var(--color-hairline);
-    border-radius: 0;
+    border-radius: 10px;
     padding-left: 0;
   }
 
   .thinking-header {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 9px;
     width: 100%;
-    padding: 4px 10px;
+    min-height: 32px;
+    padding: 6px 10px;
     background: none;
     border: none;
-    color: var(--color-body);
+    color: var(--color-dim);
     cursor: pointer;
-    font-family: var(--font-kai);
-    font-size: 13px;
-    letter-spacing: 0.06em;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    letter-spacing: 0.01em;
     text-align: left;
-    transition: background 0.35s var(--ease-soak, ease);
-    border-radius: 3px;
+    transition: background 0.16s var(--ease-soak), color 0.16s;
+    border-radius: 10px;
   }
 
   .thinking-header:hover {
-    background: var(--color-primary-muted, rgba(147,195,214,0.07));
+    background: var(--color-surface-soft);
+    color: var(--color-ink);
   }
 
+  /* 空心小环: 与工具行的实心点区分开 */
   .tglyph {
     flex-shrink: 0;
-    color: var(--color-primary);
-    font-size: 11px;
-    opacity: 0.8;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    border: 1px solid var(--color-primary);
+    opacity: 0.6;
   }
 
   .thinking-label {
     font-weight: 500;
-    color: var(--color-primary);
-    font-size: 13px;
-    letter-spacing: 0.15em;
+    color: var(--color-body);
+    font-size: 12px;
+    letter-spacing: 0.01em;
   }
 
   .thinking-duration {
-    color: var(--color-dim);
+    color: var(--color-muted);
     font-family: var(--font-mono);
     font-size: 10px;
     font-weight: 500;
@@ -341,12 +345,14 @@
 
   .thinking-content {
     font-family: var(--font-kai);
-    font-size: 13.5px;
+    font-size: 13px;
     line-height: 2;
     white-space: pre-wrap;
     word-break: break-word;
-    color: var(--color-body);
-    padding: 6px 8px 10px;
+    color: var(--color-dim);
+    margin: 2px 0 8px 24px;
+    padding: 6px 14px;
+    border-left: 1px solid var(--color-hairline-strong);
   }
 
   .wave {

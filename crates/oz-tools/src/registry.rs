@@ -60,6 +60,19 @@ impl ToolRegistry {
     ) -> Result<ToolOutput, oz_core_types::ToolError> {
         match self.handlers.get(name) {
             Some(tool) => {
+                // A gateway-merged call cannot be attributed back to the
+                // original tool calls. Cutting the polluted value yields a
+                // plausible path, but the surviving content belongs to
+                // another call — executing it would silently write/run the
+                // wrong payload. Refuse and let the model re-issue.
+                if let Some(reason) = oz_core_types::corrupt_call_reason(&args) {
+                    tracing::warn!("[tools] refusing corrupted {name} call: {reason}");
+                    return Err(oz_core_types::ToolError::Custom(format!(
+                        "{name}: corrupted tool call — {reason}. The call was NOT executed; \
+                         re-issue it (and any sibling calls the gateway merged) with their own \
+                         parameters."
+                    )));
+                }
                 // Last line of defence for weakly schema-adhering models: a
                 // call whose payload is correct but whose *keys* are aliases
                 // (`cmd`/`command` instead of `code`, `path`/`file` instead of
@@ -142,7 +155,13 @@ impl ToolRegistry {
         reg.register(crate::no_tool::NoTool);
         reg.register(crate::working_mem::WorkingMemTool);
         reg.register(crate::harness_refine::HarnessRefineTool);
+        reg.register(crate::jobs_tool::JobOutputTool);
+        reg.register(crate::jobs_tool::JobListTool);
+        reg.register(crate::jobs_tool::JobKillTool);
         reg.register(crate::ask_user::AskUserTool);
+        reg.register(crate::spawn_agent::SpawnAgentTool);
+        reg.register(crate::send_message::SendMessageTool);
+        reg.register(crate::submit_result::SubmitResultTool);
         reg.register(crate::web_fetch::WebFetchTool);
         reg.register(crate::web_scan::WebScanTool::new());
         reg.register(crate::web_js::WebJsTool::new());
@@ -230,6 +249,7 @@ mod tests {
 
     fn ctx() -> ToolContext {
         ToolContext {
+            is_subagent: false,
             working_dir: "/tmp".into(),
             assets_dir: "/tmp".into(),
             script_dir: "/tmp".into(),
@@ -446,6 +466,7 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register(CtxCheckTool);
         let tc = ToolContext {
+            is_subagent: false,
             working_dir: "/my/proj".into(),
             assets_dir: "/assets".into(),
             script_dir: "/scripts".into(),
@@ -551,6 +572,23 @@ mod tests {
             "stdout: {:?}",
             out.data["stdout"]
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_refuses_gateway_merged_call() {
+        // Regression for the 2026-10-23 11:31 run: three code_run calls were
+        // folded into a write call's file_path. The dispatcher must refuse the
+        // marked call instead of writing the wrong payload into the file.
+        let mut reg = ToolRegistry::new();
+        reg.register(crate::code_run::CodeRunTool);
+        let args = oz_core_types::corrupt_call_marker("the gateway merged several calls");
+        let err = reg
+            .dispatch("code_run", args, &ctx())
+            .await
+            .expect_err("a marked call must not execute");
+        let msg = err.to_string();
+        assert!(msg.contains("corrupted"), "error must say corrupted: {msg}");
+        assert!(msg.contains("re-issue"), "error must say re-issue: {msg}");
     }
 
     #[tokio::test]

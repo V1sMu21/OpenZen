@@ -794,6 +794,7 @@ async fn run_agent_for_session(
     };
 
     let ctx = ToolContext {
+        is_subagent: false,
         working_dir: working_dir.to_string(),
         assets_dir: assets_dir.to_string(),
         script_dir: assets_dir.to_string(),
@@ -2135,14 +2136,16 @@ async fn handle_ask_user_response(
         }
     }
 
-    let ask_rxs = state.ask_user_rxs.lock().unwrap();
-    let slot = match ask_rxs.get(&id) {
-        Some(s) => s.clone(),
-        None => {
-            return Err((
-                StatusCode::CONFLICT,
-                format!("Session {id} has no pending ask_user (agent isn't waiting)"),
-            ));
+    let slot = {
+        let ask_rxs = state.ask_user_rxs.lock().unwrap();
+        match ask_rxs.get(&id) {
+            Some(s) => s.clone(),
+            None => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("Session {id} has no pending ask_user (agent isn't waiting)"),
+                ));
+            }
         }
     };
     // Legacy key when the client cannot supply the question id (P1-i).
@@ -2151,6 +2154,15 @@ async fn handle_ask_user_response(
         .clone()
         .unwrap_or_else(|| "__last__".to_string());
     slot.lock().unwrap().insert(key, req.response.clone());
+
+    {
+        let mut sessions = state.sessions.write().await;
+        if let Some(entry) = sessions.get_mut(&id) {
+            entry.status = crate::webui::sessions::SessionStatus::Running;
+            entry.pending_ask_user = None;
+        }
+        sessions.save();
+    }
 
     let _ = state.sse_bus.send(SseEvent::system(
         &id,

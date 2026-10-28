@@ -95,6 +95,14 @@ pub enum StreamEvent {
         data: String,
     },
 
+    /// Emitted when the user's reply reached the loop and the run is leaving
+    /// the waiting state. Runners use it to flip the session status from
+    /// `waiting` back to `running` (including IM replies, which never pass
+    /// through the desktop `ask_user_response` command).
+    AskUserAnswered {
+        tool_use_id: String,
+    },
+
     /// Emitted when context compression runs. Carries before/after token
     /// estimates so the frontend can show a transient notification.
     DataCompressingContext {

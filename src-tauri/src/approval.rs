@@ -116,6 +116,9 @@ impl ApprovalHandler for TauriApprovalHandler {
             request_id: request_id.clone(),
         };
 
+        // A child session has a label; surface it so the dialog explains why
+        // an approval appeared for a conversation the user is not looking at.
+        let origin = oz_core::subagent::label_of(&request.session_id);
         let payload = serde_json::json!({
             "session_id": request.session_id,
             "event_type": "approval_needed",
@@ -126,6 +129,7 @@ impl ApprovalHandler for TauriApprovalHandler {
                 "arguments": request.arguments,
                 "approved_count": request.info.approved_count,
                 "current_level": format!("{:?}", request.info.current_level),
+                "origin": origin,
             })).unwrap_or_default(),
         });
 

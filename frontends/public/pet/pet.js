@@ -133,26 +133,36 @@
     started = true;
     drawImage(displayCtx, first);
     lastTs = performance.now();
-    raf = requestAnimationFrame(loop);
+    raf = window.setTimeout(loop, 1000 / FPS);
     updateText();
     startMemStatusPolling();
   }
   // 兜底：极个别帧迟迟不回时 2.5s 后强行起播（未就绪帧由 drawImage 跳过）
   setTimeout(function () { tryStart(); }, 2500);
 
+  // 帧率只有 10 FPS，内容却按 rAF（60 Hz）节奏重绘：每帧 5 次多余的
+  // clearRect + drawImage，加一次 dataset 写入。改成 10 Hz 定时器，并且只在
+  // 帧号真的变了才落笔 —— 静止时零重绘，被切到后台时暂停。
+  let drawnTag = "";
   function loop(ts) {
-    const dt = Math.min(100, ts - lastTs); lastTs = ts;
-    // 累计小数步进，按 FPS 精确走帧（Math.round 逐帧取整在 60Hz 下恒为 0，动画会冻结）
+    const now = typeof ts === "number" ? ts : performance.now();
+    const dt = Math.min(200, now - lastTs); lastTs = now;
     acc += dt / 1000 * FPS;
+    let changed = false;
     if (acc >= 1) {
       const step = Math.floor(acc);
       acc -= step;
       frameIdx = (frameIdx + step) % FRAMES;
+      changed = true;
     }
-    const img = frames[active][frameIdx];
-    drawImage(displayCtx, img);   // drawImage 内部已判空/判未就绪
-    document.body.dataset.petFrame = active + ":" + frameIdx;  // 每帧标志，供外部观测/调试
-    raf = requestAnimationFrame(loop);
+    const tag = active + ":" + frameIdx;
+    if (changed || tag !== drawnTag) {
+      const img = frames[active][frameIdx];
+      drawImage(displayCtx, img);   // drawImage 内部已判空/判未就绪
+      document.body.dataset.petFrame = tag;  // 供外部观测/调试
+      drawnTag = tag;
+    }
+    raf = window.setTimeout(loop, 1000 / FPS);
   }
 
   // ---------- 切换（交叉淡化 + 相位对齐） ----------

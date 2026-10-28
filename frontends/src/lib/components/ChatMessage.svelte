@@ -1,6 +1,10 @@
   <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { qualityContract, type ToolCallInfo } from "../stores/types";
+  import { qualityContract } from "../stores/types";
+  import ToolCallCard from "./ToolCallCard.svelte";
+  import ThinkingBlock from "./ThinkingBlock.svelte";
+  import EditCard from "./EditCard.svelte";
+  import SkillMcpCard from "./SkillMcpCard.svelte";
   import { submitMessageFeedback } from "../api/chat";
   import { sessions } from "../stores/sessions";
   import type { UIMessagePart, ToolInvocationPart } from "../stores/parts";
@@ -8,23 +12,12 @@
   import { chat } from "../stores/chat";
   import { mathReady, renderMarkdown } from "../utils/markdown";
   import { tickerState, useTicker } from "../utils/ticker.svelte";
-  import StreamingText from "./StreamingText.svelte";
-  import ToolCallCard from "./ToolCallCard.svelte";
-  import ThinkingBlock from "./ThinkingBlock.svelte";
-  import EditCard from "./EditCard.svelte";
-import SkillMcpCard from "./SkillMcpCard.svelte";
 import ChangedFilesCard from "./ChangedFilesCard.svelte";
 import { collectTurnFiles, isFileEditTool, parseEditArgs, type TurnFile } from "../utils/fileChanges";
 import { t, locale, tSync } from "../i18n";
   let lang = $state("zh");
   $effect(() => { lang = $locale; });
 
-
-  function isSkillOrMcpInvocation(name: string): boolean {
-    if (name.startsWith("mcp__")) return true;
-    if (name === "skill_mcp_search" || name === "skill_mcp_list") return true;
-    return false;
-  }
 
   // Stable empty array for non-live messages: historical bubbles never
   // receive a new array reference when streaming parts change.
@@ -36,7 +29,6 @@ import { t, locale, tSync } from "../i18n";
 
   let {
     message,
-    showTimer = false,
     workingDir = "",
     // Computed in App.svelte, which is the only component that needs the
     // global chat-store state. Previously every ChatMessage subscribed to
@@ -89,33 +81,10 @@ import { t, locale, tSync } from "../i18n";
   /** Show the "Running" pill in the header while the backend is
    *  actively working on this turn.  Delegates entirely to `isLive`
    *  which guarantees "latest assistant turn only". */
-  let isRunning = $derived(isLive);
-
   /** The footer status pill + live timer driver.  This is the
    *  SINGLE source of truth for "is the backend still working on
    *  THIS turn?".  Delegates entirely to `isLive`. */
   let isBackendStillWorking = $derived(isLive);
-
-  /** Stable `{name, arguments, result}` view of a tool part.
-   *
-   *  The parts array is rebuilt on every streaming flush while the part
-   *  OBJECTS inside are mutated in place, so building the literal inline made
-   *  ToolCallCard/SkillMcpCard see a brand-new prop on every frame and re-run
-   *  their parse work. This returns the same object while the three fields it
-   *  renders are unchanged, and a fresh one the moment any of them moves. */
-  const toolCallInfoCache = new WeakMap<
-    Extract<UIMessagePart, { type: "tool-invocation" }>,
-    { info: { name: string; arguments: string; result?: string }; args: string; result?: string }
-  >();
-  function toolCallInfoFor(
-    p: Extract<UIMessagePart, { type: "tool-invocation" }>,
-  ): { name: string; arguments: string; result?: string } {
-    const hit = toolCallInfoCache.get(p);
-    if (hit && hit.args === p.args && hit.result === p.result) return hit.info;
-    const info = { name: p.name, arguments: p.args, result: p.result };
-    toolCallInfoCache.set(p, { info, args: p.args, result: p.result });
-    return info;
-  }
 
   /** Normal endings don't deserve a warning tone in the footer label. */
   // Normal endings must not be tinted as warnings. The backend's most
@@ -333,78 +302,116 @@ import { t, locale, tSync } from "../i18n";
     return groups;
   });
 
-  // ── Timeline folding (activity timeline collapse) ──
-  const FOLD_THRESHOLD = 5;
+  // ── Single-line run status (DSH-style) ──
+  //
+  // While a turn is live the bubble shows ONE line: what the agent is doing
+  // right now. Tool/thinking cards are no longer kept on screen (the old
+  // "last 5 cards" fold), and the finished bubble shows "已完成，用时 …"
+  // followed by the final reply only.
 
-  let timelineExpanded = $state(false);
+  let detailsOpen = $state(false);
 
-  let totalDisplayItems = $derived(displayGroups.length);
-  /** Fold whenever the visible card count exceeds the threshold —
-   *  INCLUDING while the backend is still working. A long-running
-   *  turn accumulates many tool cards; the oldest ones must collapse
-   *  into the activity-timeline header as the turn grows, not only
-   *  after it completes. Cards that are still running are kept
-   *  visible (see `visibleGroups`) so their live "运行中" state is
-   *  never hidden away mid-turn. */
-  let hasOverflow = $derived(totalDisplayItems > FOLD_THRESHOLD);
+  // Only the LAST text segment is the final reply. Earlier text is the
+  // model talking between tools ("let me check…") and must fold into the
+  // details timeline with the tool cards, in chronological order — joining
+  // every text part made the intermediate chatter repeat inside the answer.
+  let finalTextIndex = $derived.by(() => {
+    for (let i = displayGroups.length - 1; i >= 0; i--) {
+      const p = displayGroups[i];
+      if (p.type === "text" && p.text.trim()) return i;
+    }
+    return -1;
+  });
 
-  let foldedGroups = $derived(
-    hasOverflow && !timelineExpanded
-      ? displayGroups.filter((p) => !visibleGroups.includes(p))
-      : []
+  let detailGroups = $derived(
+    displayGroups.filter((_, i) => i !== finalTextIndex),
   );
 
-  let visibleGroups = $derived.by<UIMessagePart[]>(() => {
-    if (!hasOverflow || timelineExpanded) return displayGroups;
-    // Keep the newest FOLD_THRESHOLD cards...
-    const tail = displayGroups.slice(-FOLD_THRESHOLD);
-    const keepKeys = new Set(
-      tail.map((p) => (p.type === 'tool-invocation' ? (p as ToolInvocationPart).toolCallId : p.id))
-    );
-    // ...plus any tool card still executing, so its live state stays
-    // on screen even when the turn is long and running.
-    const merged = displayGroups.filter((p) => {
-      const key = p.type === 'tool-invocation' ? (p as ToolInvocationPart).toolCallId : p.id;
-      if (keepKeys.has(key)) return true;
-      if (p.type === 'tool-invocation') {
-        const t = p as ToolInvocationPart;
-        const st = t.state as string;
-        const stillRunning = t.result == null && st !== "output-available" && st !== "output-error" && st !== "done";
-        if (stillRunning) return true;
+  let detailKeys = $derived.by(() => {
+    const seen = new Set<string>();
+    return detailGroups.map((p, i) => {
+      const base = p.type === "tool-invocation" ? (p as ToolInvocationPart).toolCallId : p.id;
+      let key = base || `part_${i}`;
+      if (seen.has(key)) {
+        let n = 2;
+        while (seen.has(`${key}#${n}`)) n += 1;
+        key = `${key}#${n}`;
       }
-      return false;
+      seen.add(key);
+      return key;
     });
-    return merged;
   });
 
-  let foldedStats = $derived.by(() => {
-    const folded = foldedGroups;
-    let totalMs = 0;
-    let toolCount = 0;
-    let hasError = false;
-    for (const p of folded) {
-      if (p.type === "tool-invocation") {
-        toolCount++;
-        if ("durationMs" in p && typeof p.durationMs === "number") totalMs += p.durationMs;
-        if (p.state === "output-error") hasError = true;
-      }
-    }
-    return { count: folded.length, totalMs, toolCount, hasError };
-  });
-
-  function toggleTimeline() {
-    timelineExpanded = !timelineExpanded;
+  function isSkillOrMcpInvocation(name: string): boolean {
+    return name.startsWith("mcp__") || name === "skill_mcp_search" || name === "skill_mcp_list";
   }
 
-  function formatDurationCompact(ms: number): string {
-    if (ms < 1000) return `${Math.round(ms)}${tSync(lang, "message.duration.ms")}`;
-    const sec = ms / 1000;
-    if (sec < 60) return tSync(lang, "message.duration.formatSec").replace("{s}", sec.toFixed(1));
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return tSync(lang, "message.duration.formatShort")
-      .replace("{m}", String(m))
-      .replace("{s}", s.toFixed(0));
+  let finalText = $derived.by(() => {
+    if (finalTextIndex >= 0) {
+      const p = displayGroups[finalTextIndex];
+      if (p.type === "text" && p.text) return p.text;
+    }
+    return message.role === "assistant" ? message.content ?? "" : "";
+  });
+
+  let completedLine = $derived(
+    message.duration != null && message.duration > 0
+      ? tSync(lang, "message.completedIn").replace("{d}", formatLongDuration(message.duration))
+      : tSync(lang, "message.completed"),
+  );
+
+  // Parallel tool calls: show the NEWEST still-running tool only. Do not
+  // stop at a newer text/reasoning part — with concurrent calls the newest
+  // part is often streamed text while an earlier tool is still executing,
+  // and the bubble must name that tool, not fall back to "thinking".
+  let activityLabel = $derived.by(() => {
+    for (let i = displayGroups.length - 1; i >= 0; i--) {
+      const p = displayGroups[i];
+      if (p.type === "tool-invocation" && !isToolPartDone(p)) {
+        return toolActivity(p as ToolInvocationPart);
+      }
+    }
+    return tSync(lang, "message.thinking");
+  });
+
+  function toolActivity(p: ToolInvocationPart): string {
+    const key = `toolname.${p.name}`;
+    const translated = tSync(lang, key);
+    const label = translated === key ? p.name : translated;
+    let args: Record<string, unknown> = {};
+    try {
+      args = (typeof p.args === "string" ? JSON.parse(p.args) : p.args) as Record<string, unknown>;
+    } catch {
+      args = {};
+    }
+    const path = args.file_path ?? args.path ?? args.filename;
+    if (typeof path === "string" && path) {
+      return `${label} ${path.split("/").pop()}`;
+    }
+    const detail = args.pattern ?? args.query ?? args.description;
+    if (typeof detail === "string" && detail.trim()) {
+      return `${label} ${detail.trim().slice(0, 42)}`;
+    }
+    return label;
+  }
+
+  function formatLongDuration(ms: number): string {
+    const total = Math.max(0, Math.round(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const sec = total % 60;
+    if (h > 0) {
+      return tSync(lang, "message.duration.hourSec")
+        .replace("{h}", String(h))
+        .replace("{m}", String(m))
+        .replace("{s}", String(sec));
+    }
+    if (m > 0) {
+      return tSync(lang, "message.duration.minSec")
+        .replace("{m}", String(m))
+        .replace("{s}", String(sec));
+    }
+    return tSync(lang, "message.duration.secs").replace("{s}", String(sec));
   }
 
   /** True when a tool part is finished: has a result, reached an output
@@ -425,11 +432,6 @@ import { t, locale, tSync } from "../i18n";
   <div class="message-row" data-message-id={message.id} class:user={message.role === "user"} class:assistant={message.role === "assistant"} class:live={isLive}>
     <div class="bubble">
       <div class="bubble-header">
-        {#if message.role === "user"}
-          <span class="role-badge" class:user={message.role === "user"}>{roleLabel(message.role)}</span>
-        {/if}
-        {#if isRunning}
-        {/if}
         <button class="copy-btn" onclick={copyContent} title={$t("chat.copy")} aria-label={$t("chat.copy")}>
           {#if copied}
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -455,87 +457,103 @@ import { t, locale, tSync } from "../i18n";
       </div>
 
       {#if message.role === "assistant"}
-        {#if hasOverflow}
-          <button class="timeline-header" onclick={toggleTimeline} type="button" aria-expanded={timelineExpanded} aria-label={$t("message.timeline")}>
-            <span class="timeline-label">
-              {$t("message.timeline")} · {$t("message.folded", "…").replace("{count}", String(foldedStats.count)).replace("{tools}", String(foldedStats.toolCount))}
-              {#if !timelineExpanded && foldedStats.totalMs > 0} · {formatDurationCompact(foldedStats.totalMs)}{/if}
-            </span>
-            {#if foldedStats.hasError && !timelineExpanded}
-              <span class="timeline-err">⚠ 1</span>
+        <div class="a-head">{roleLabel(message.role)}</div>
+        {#snippet detailsPanel()}
+          <div class="run-details">
+            {#each detailGroups as p, partIdx (detailKeys[partIdx])}
+              <div class="event-item">
+                {#if p.type === "reasoning"}
+                  <ThinkingBlock
+                    thinking={p.text}
+                    duration={message.duration ?? 0}
+                    durationMs={("durationMs" in p) ? p.durationMs : undefined}
+                    streaming={isLive && p.state === "streaming"}
+                    showTimer={false}
+                    showPausedWarning={!isLive}
+                  />
+                {:else if p.type === "tool-invocation" && isFileEditTool(p.name)}
+                  {@const editArgs = parseEditArgs(p.args, p.name)}
+                  <EditCard
+                    filePath={editArgs?.filePath ?? ""}
+                    oldString={editArgs?.oldString ?? ""}
+                    newString={editArgs?.newString ?? ""}
+                    durationMs={p.durationMs}
+                    result={p.result}
+                    completed={isToolPartDone(p)}
+                    showTimer={false}
+                    workingDir={workingDir}
+                  />
+                {:else if p.type === "tool-invocation" && isSkillOrMcpInvocation(p.name)}
+                  <SkillMcpCard
+                    toolCall={{ name: p.name, arguments: p.args, result: p.result }}
+                    durationMs={p.durationMs}
+                    completed={isToolPartDone(p)}
+                    showTimer={false}
+                  />
+                {:else if p.type === "tool-invocation"}
+                  <ToolCallCard
+                    toolCall={{ name: p.name, arguments: p.args, result: p.result }}
+                    durationMs={p.durationMs}
+                    liveElapsedSecs={p.liveElapsedSecs}
+                    completed={isToolPartDone(p)}
+                    showTimer={false}
+                    hasError={p.state === "output-error"}
+                    workingDir={workingDir}
+                  />
+                {:else if p.type === "text"}
+                  <div class="intermediate-text markdown-content">{@html renderMarkdown(p.text, { mathVersion: $mathReady })}</div>
+                {:else if p.type === "data" && p.dataType === "user_intervention"}
+                  <div class="intervention-card">
+                    <div class="intervention-label">{$t("thinking.intervention")}</div>
+                    <div class="intervention-content">{p.content}</div>
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/snippet}
+
+        {#if isLive}
+          <button
+            type="button"
+            class="run-line"
+            class:static={detailGroups.length === 0}
+            aria-expanded={detailGroups.length > 0 ? detailsOpen : undefined}
+            aria-live="polite"
+            onclick={() => { if (detailGroups.length > 0) detailsOpen = !detailsOpen; }}
+          >
+            <span class="run-prompt" aria-hidden="true">&gt;_</span>
+            <span class="run-state">{$t("message.executing")}</span>
+            <span class="run-activity">{activityLabel}</span>
+            <span class="run-cursor" aria-hidden="true"></span>
+            {#if detailGroups.length > 0}
+              <span class="run-chevron" aria-hidden="true">{detailsOpen ? "▴" : "▾"}</span>
             {/if}
           </button>
-        {/if}
-        {#each visibleGroups as p (p.type === 'tool-invocation' ? p.toolCallId : p.id)}
-          <div class="event-item">
-            {#if p.type === "reasoning"}
-              <ThinkingBlock
-                thinking={p.text}
-                duration={message.duration ?? 0}
-                durationMs={("durationMs" in p) ? p.durationMs : undefined}
-                streaming={isLive && p.state === "streaming"}
-                showTimer={showTimer}
-                showPausedWarning={!isLive}
-              />
-            {:else if p.type === "tool-invocation" && isFileEditTool(p.name)}
-              {@const editArgs = parseEditArgs(p.args, p.name)}
-              <EditCard
-                filePath={editArgs?.filePath ?? ""}
-                oldString={editArgs?.oldString ?? ""}
-                newString={editArgs?.newString ?? ""}
-                durationMs={p.durationMs}
-                result={p.result}
-                completed={isToolPartDone(p)}
-                showTimer={showTimer}
-                workingDir={workingDir}
-              />
-            {:else if p.type === "tool-invocation" && isSkillOrMcpInvocation(p.name)}
-              <SkillMcpCard
-                toolCall={toolCallInfoFor(p)}
-                durationMs={p.durationMs}
-                completed={isToolPartDone(p)}
-                showTimer={showTimer}
-              />
-            {:else if p.type === "tool-invocation"}
-              <ToolCallCard
-                toolCall={toolCallInfoFor(p)}
-                durationMs={p.durationMs}
-                liveElapsedSecs={p.liveElapsedSecs}
-                completed={isToolPartDone(p)}
-                showTimer={showTimer}
-                hasError={p.state === "output-error"}
-                workingDir={workingDir}
-              />
-            {:else if p.type === "data" && p.dataType === "user_intervention"}
-              <div class="intervention-card">
-                <div class="intervention-label">{$t("thinking.intervention")}</div>
-                <div class="intervention-content">{p.content}</div>
-              </div>
-            {:else if p.type === "text" && p.text}
-              {#if isLive}
-                <!-- Live text renders via the incremental StreamingText at
-                     its OWN array position for its whole lifetime — the
-                     keyed-each entry (key = part id) never moves, so tool
-                     cards queued after it append BELOW without remounting
-                     the text. The old trailing streaming-zone dissolved
-                     the moment a card arrived and teleported the text to
-                     its inline slot, shrinking the row 22-43px per cycle
-                     and bouncing the bottom-pinned viewport (the
-                     "思考阶段高频震荡"). The full markdown render takes
-                     over once, at finalize. -->
-                <div class="content-block"><StreamingText text={p.text} /></div>
-              {:else}
-                <div class="markdown-content content-block">{@html renderMarkdown(p.text, { mathVersion: $mathReady })}</div>
-              {/if}
+          {#if detailsOpen}
+            {@render detailsPanel()}
+          {/if}
+        {:else}
+          <button
+            type="button"
+            class="run-line done"
+            class:static={detailGroups.length === 0}
+            aria-expanded={detailGroups.length > 0 ? detailsOpen : undefined}
+            onclick={() => { if (detailGroups.length > 0) detailsOpen = !detailsOpen; }}
+          >
+            <span class="run-check" aria-hidden="true">✓</span>
+            <span>{completedLine}</span>
+            {#if detailGroups.length > 0}
+              <span class="run-chevron" aria-hidden="true">{detailsOpen ? "▴" : "▾"}</span>
             {/if}
-          </div>
-        {/each}
-        {#if !isLive && message.content && !parts.some((p) => p.type === "text" && p.text)}
-          <div class="bubble-content">
-            <div class="markdown-content">{@html renderMarkdown(message.content, { mathVersion: $mathReady })}</div>
-          </div>
+          </button>
+          {#if detailsOpen}
+            {@render detailsPanel()}
+          {/if}
+          {#if finalText}
+            <div class="markdown-content content-block">{@html renderMarkdown(finalText, { mathVersion: $mathReady })}</div>
+          {/if}
         {/if}
-
         {#if message.exitReason && message.exitReason !== "end_turn" && message.exitReason !== "EXITED" && !isLive}
           <div class="exit-reason-banner">
             {$t("message.agentStopped")}: {$t(`exit.${message.exitReason}`, message.exitReason)}
@@ -552,7 +570,6 @@ import { t, locale, tSync } from "../i18n";
         {#if !isBackendStillWorking}
           <div class="bubble-footer" class:running={isBackendStillWorking}>
             <span class="footer-time-group" title="System time when this turn finished">
-              <span class="footer-inscription">{roleLabel(message.role)}{$t("message.sig", "识")}</span>
               <span class="footer-time-text">
                 {#if completedAt}
                   {formatTime(completedAt)}
@@ -661,7 +678,6 @@ import { t, locale, tSync } from "../i18n";
         {#if message.timestamp}
           <div class="bubble-footer user-footer">
             <span class="footer-time-group" title="System time">
-              <span class="footer-inscription">{roleLabel(message.role)}{$t("message.sig", "识")}</span>
               <span class="footer-time-text">{formatTime(message.timestamp)}</span>
             </span>
           </div>
@@ -674,7 +690,7 @@ import { t, locale, tSync } from "../i18n";
 <style>
   .message-row {
     display: flex;
-    padding: 4px 16px;
+    padding: 0;
     max-width: 100%;
     min-width: 0;
     position: relative;
@@ -709,10 +725,11 @@ import { t, locale, tSync } from "../i18n";
   .bubble {
     width: auto;
     min-width: 0;
-    border-radius: 3px;
-    padding: 8px 14px;
-    border: 1px solid transparent;
-    font-size: 14px;
+    border-radius: 0;
+    padding: 0;
+    border: none;
+    font-size: 14.5px;
+    line-height: 1.78;
     box-sizing: border-box;
   }
   .message-row.assistant .bubble {
@@ -724,15 +741,22 @@ import { t, locale, tSync } from "../i18n";
     border-radius: 0;
     max-width: 100%;
   }
+  /* 用户话: 右侧一块釉面玉牌 —— 圆角收右下角, 天青薄釉, 1px 高光边 */
+  .message-row.user {
+    justify-content: flex-end;
+    padding: 2px 0 2px 15%;
+  }
   .message-row.user .bubble {
-    /* 釉色条: 整行淡青底 + 左缘青线 (器物刻痕)
-       宽度上限与 agent 气泡一致（消息列 100%, ≤1200px）: 短消息仍按
-       内容收缩（flex 项 shrink-to-fit），长消息铺满消息列而不是顶在
-       旧 68% 上限上堆行高；百分比上限随窗口拉伸自动适应。 */
-    background: var(--color-primary-muted, rgba(147,195,214,0.07));
-    border-left: 2px solid var(--color-primary);
-    border-radius: 2px;
-    max-width: 100%;
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--color-primary) 13%, var(--color-surface-elevated)),
+      color-mix(in srgb, var(--color-primary) 7%, var(--color-surface-soft))
+    );
+    border: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
+    border-radius: 16px 16px 5px 16px;
+    padding: 10px 16px 8px;
+    max-width: min(100%, 680px);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
   }
 
   @media (max-width: 720px) {
@@ -742,45 +766,58 @@ import { t, locale, tSync } from "../i18n";
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-bottom: 6px;
+    margin-bottom: 2px;
     flex-wrap: wrap;
+    min-height: 16px;
+  }
+  /* 用户气泡: 操作图标浮在右上角, 不占正文空间 */
+  .message-row.user .bubble {
+    position: relative;
+  }
+  .message-row.user .bubble-header {
+    position: absolute;
+    top: 4px;
+    right: 6px;
+    margin: 0;
+    min-height: 0;
+    z-index: 1;
+  }
+  .message-row.user .copy-btn {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-hairline);
+  }
+
+  /* 助手标识: 一小行小字 + 圆点 (预览 .ahead) */
+  .a-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    color: var(--color-muted);
+    margin-bottom: 4px;
+  }
+  .a-head::before {
+    content: "";
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.8;
   }
   .role-badge {
-    /* 铭文: 宋体小标 */
-    font-family: var(--font-serif);
-    font-size: 11px;
-    letter-spacing: 0.25em;
+    font-family: var(--font-sans);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
     padding: 0;
     background: none;
-    color: var(--text-secondary);
+    color: var(--color-muted);
   }
-  .role-badge.user {
-    color: var(--color-primary);
-  }
-  .role-badge.assistant {
-    color: var(--color-accent);
-  }
-  .status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    padding: 2px 7px;
-    border-radius: 999px;
-    background: var(--bg-tertiary);
-    color: var(--text-tertiary);
-  }
-  .status-pill.running {
-    color: #f59e0b;
-    background: rgba(245, 158, 11, 0.10);
-  }
-  .status-pill.done {
-    color: #22c55e;
-    background: rgba(34, 197, 94, 0.10);
-  }
+  /* The .status-pill / .status-pill.running / .status-pill.done rules that
+     lived here were dead — no markup or class directive ever applied
+     .status-pill (the build warned "Unused CSS selector"). Removed 2026-10-23. */
   .status-dot {
     width: 6px;
     height: 6px;
@@ -800,16 +837,21 @@ import { t, locale, tSync } from "../i18n";
     justify-content: center;
     background: none;
     border: none;
-    color: var(--text-tertiary);
+    color: var(--color-muted);
     cursor: pointer;
-    padding: 2px;
-    border-radius: 4px;
+    padding: 4px;
+    border-radius: 7px;
     margin-left: auto;
-    opacity: 0.4;
-    transition: opacity 0.15s;
+    opacity: 0;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+  }
+  .bubble:hover .copy-btn,
+  .copy-btn:focus-visible {
+    opacity: 1;
   }
   .copy-btn:hover {
-    opacity: 1;
+    background: var(--color-surface-soft);
+    color: var(--color-ink);
   }
   .regenerate-btn {
     display: flex;
@@ -820,7 +862,7 @@ import { t, locale, tSync } from "../i18n";
     color: var(--color-primary);
     cursor: pointer;
     padding: 2px;
-    border-radius: 4px;
+    border-radius: 8px;
     opacity: 0.3;
     transition: opacity 0.15s, transform 0.3s;
   }
@@ -902,7 +944,7 @@ import { t, locale, tSync } from "../i18n";
     font-family: var(--font-mono, "JetBrains Mono", "CMU Serif", monospace);
     background: var(--color-surface-soft);
     padding: 1px 6px;
-    border-radius: 4px;
+    border-radius: 8px;
     font-size: 0.95em;
   }
   .markdown-content :global(.md-link) {
@@ -927,71 +969,123 @@ import { t, locale, tSync } from "../i18n";
     font-size: 0.95em;
     text-align: center;
   }
-  .event-item {
-    margin: 4px 0;
-  }
-  .timeline-header {
+  /* DSH-style single status line: one row while running, one "done" row
+     with the total duration once finished. Tool cards are intentionally not
+     rendered in the bubble anymore. */
+  .run-line {
     display: flex;
     align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 6px 12px;
-    margin: 6px 0 2px;
-    border: 1px dashed var(--color-primary);
-    background: var(--color-primary-muted);
-    color: var(--color-primary);
-    cursor: pointer;
-    font-family: var(--font-serif);
-    font-size: 12px;
-    letter-spacing: 0.08em;
-    text-align: left;
-    border-radius: 3px;
-    transition: color 0.35s var(--ease-soak, ease), background 0.35s var(--ease-soak, ease);
+    gap: 7px;
+    padding: 3px 0 9px;
+    font-size: 12.5px;
+    color: var(--color-muted);
+    min-height: 20px;
   }
-  .timeline-header:hover {
-    color: var(--color-primary-hover);
-    background: var(--color-primary-muted);
-    border-color: var(--color-primary-hover);
-  }
-  .timeline-label {
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-  }
-  .timeline-err {
-    margin-left: auto;
-    color: var(--color-error);
-    font-size: 10.5px;
+  .run-prompt {
     font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--color-primary);
+    letter-spacing: -0.5px;
   }
+  .run-state { color: var(--color-muted); }
+  .run-activity {
+    color: var(--color-ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 70%;
+  }
+  .run-cursor {
+    width: 6px;
+    height: 13px;
+    border-radius: 1px;
+    background: var(--color-primary);
+    animation: run-blink 1.1s steps(2, end) infinite;
+  }
+  @keyframes run-blink { 50% { opacity: 0; } }
+  button.run-line {
+    width: 100%;
+    border: none;
+    background: none;
+    text-align: left;
+    cursor: pointer;
+    font-family: inherit;
+    border-radius: 8px;
+    padding-left: 4px;
+    padding-right: 4px;
+  }
+  button.run-line:hover { background: var(--color-surface-soft); }
+  button.run-line.static { cursor: default; }
+  button.run-line.static:hover { background: none; }
+  .run-chevron {
+    margin-left: 2px;
+    font-size: 9px;
+    color: var(--color-muted);
+    flex: none;
+  }
+  .run-details {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 2px 0 10px;
+    padding: 8px 10px;
+    border-left: 1px solid var(--color-hairline);
+    max-height: 42vh;
+    overflow-y: auto;
+  }
+  .run-details .event-item { margin: 0; }
+  .intermediate-text {
+    font-size: 11.5px;
+    line-height: 1.65;
+    color: var(--color-dim);
+    padding: 2px 2px 2px 10px;
+    border-left: 1px dashed var(--color-hairline-strong);
+  }
+  .intermediate-text :global(p) { margin: 2px 0; }
+  .run-line.done { color: var(--color-muted); font-size: 11.5px; }
+  .run-check { color: var(--color-primary); font-size: 11px; }
+
   .exit-reason-banner {
-    margin-top: 8px;
-    padding: 6px 10px;
-    border-radius: 6px;
-    font-size: 12px;
-    background: var(--color-surface-soft);
-    color: var(--color-status-warn);
-    border: 1px solid var(--color-hairline-strong, rgba(147, 195, 214, 0.22));
-    line-height: 1.4;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 0;
+    border: none;
+    background: none;
+    font-size: 11px;
+    color: var(--color-gold);
+    opacity: 0.85;
+    line-height: 1.5;
+  }
+  .exit-reason-banner::before {
+    content: "";
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
   }
   .bubble-footer {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-top: 8px;
-    padding-top: 6px;
-    border-top: 1px dashed var(--color-hairline);
-    font-size: 11px;
-    color: var(--text-tertiary);
+    margin-top: 10px;
+    padding-top: 0;
+    border-top: none;
+    font-size: 10.5px;
+    color: var(--color-muted);
     flex-wrap: wrap;
   }
   .bubble-footer.user-footer {
     border-top: none;
     justify-content: flex-end;
-    margin-top: 4px;
+    margin-top: 6px;
     padding-top: 0;
+    opacity: 0.75;
   }
   .bubble-footer.running {
-    border-top-color: rgba(245, 158, 11, 0.25);
+    border-top-color: var(--color-gold-line);
   }
   .footer-sep {
     width: 1px;
@@ -1020,7 +1114,7 @@ import { t, locale, tSync } from "../i18n";
   .footer-time-text {
     font-variant-numeric: tabular-nums;
     line-height: 1;
-    color: var(--text-bright);
+    color: var(--color-dim);
   }
   .footer-exit {
     font-family: var(--font-mono);
@@ -1041,7 +1135,7 @@ import { t, locale, tSync } from "../i18n";
     font-size: 9px;
     line-height: 1;
     padding: 2px 4px;
-    border-radius: 3px;
+    border-radius: 8px;
   }
   .fb-btn:hover:not(:disabled) {
     color: var(--color-body);

@@ -148,14 +148,14 @@ fn focus_or_push(
 /// Register a resolved path in the artifact whitelist (and the ozfile html
 /// root when needed), push the artifact tab and emit the open event.
 /// Shared by the agent-facing `open_artifact` and the user-dialog path.
-fn register_and_show(
+pub(crate) fn register_and_show(
     app: &AppHandle,
     state: &Arc<AppState>,
     artifact_type: String,
     resolved_path: String,
     label: String,
 ) -> Result<serde_json::Value, String> {
-    if artifact_type != "terminal" {
+    if artifact_type != "terminal" && artifact_type != "background" {
         // Register the file (and, for html artifacts, its parent dir for
         // relative resources) in the artifact whitelist so the read_file_*
         // commands can serve it.
@@ -216,7 +216,7 @@ pub fn open_artifact(
         artifact_label
     );
 
-    let resolved_path = if artifact_type != "terminal" {
+    let resolved_path = if artifact_type != "terminal" && artifact_type != "background" {
         let p =
             std::fs::canonicalize(&artifact_path).map_err(|e| format!("Cannot open file: {e}"))?;
         if !is_within_allowed_roots(&state, &p) {
@@ -350,8 +350,17 @@ pub fn close_artifact_tab(
         sp.remove_tab(idx);
     }
     sync_html_root(&state, &sp);
+    // 最后一张页签关掉后，右栏没有存在的理由：收起，让会话拿回整幅宽度。
+    let closed_empty = sp.artifacts.is_empty();
+    if closed_empty {
+        sp.visible = false;
+    }
     app.emit("sidepanel:artifacts-changed", tabs_payload(&sp))
         .map_err(|e| e.to_string())?;
+    if closed_empty {
+        app.emit("sidepanel:toggle", false)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

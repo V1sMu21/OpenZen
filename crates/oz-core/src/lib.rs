@@ -9,6 +9,7 @@ pub mod goal;
 pub mod handler;
 pub mod harness;
 pub mod hooks;
+pub mod jobs;
 pub mod memory_job;
 pub mod meter;
 pub mod quality;
@@ -17,6 +18,7 @@ pub mod rollout;
 pub mod safety;
 pub mod sanitize;
 pub mod sop;
+pub mod subagent;
 pub mod verifier;
 
 pub use agent_loop::*;

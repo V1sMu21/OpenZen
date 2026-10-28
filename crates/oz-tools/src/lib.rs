@@ -10,6 +10,8 @@ pub mod doc_reader;
 pub mod file_ops;
 pub mod handler;
 pub mod harness_refine;
+pub mod job_bg;
+pub mod jobs_tool;
 pub mod long_term;
 pub mod mcp_bridge;
 pub mod no_tool;
@@ -17,8 +19,11 @@ pub mod open_side_panel;
 pub mod plan;
 pub mod registry;
 pub mod schedule_reminder;
+pub mod send_message;
 pub mod skill_mcp_search;
 pub mod skill_mcp_write;
+pub mod spawn_agent;
+pub mod submit_result;
 pub mod todoupdate;
 pub mod todowrite;
 pub mod web_execute_js;
@@ -133,6 +138,7 @@ mod tests {
 
     fn make_ctx() -> ToolContext {
         ToolContext {
+            is_subagent: false,
             working_dir: "/tmp".into(),
             assets_dir: "/tmp".into(),
             script_dir: "/tmp".into(),
@@ -315,6 +321,7 @@ mod legacy_bridge_tests {
 
     fn ctx() -> oz_core_types::ToolContext {
         oz_core_types::ToolContext {
+            is_subagent: false,
             working_dir: "/tmp".into(),
             assets_dir: "/tmp".into(),
             script_dir: "/tmp".into(),
@@ -362,6 +369,7 @@ mod integration {
 
     fn ctx() -> ToolContext {
         ToolContext {
+            is_subagent: false,
             working_dir: "/tmp".into(),
             assets_dir: "/tmp".into(),
             script_dir: "/tmp".into(),

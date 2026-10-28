@@ -1,64 +1,46 @@
 <script lang="ts">
-  import type { DataPart } from "../stores/parts";
+  import type { DataPart, UIMessagePart } from "../stores/parts";
 
-  let { parts = [] as DataPart[] } = $props();
+  // Only the newest in-progress notice is shown. The old implementation
+  // queued every notice (including one per LLM retry: 8 × 60s = 8 minutes of
+  // stale "模型暂无响应" after the run had already stopped or recovered).
+  // A notice is also dropped the moment anything newer streams in — the model
+  // answered, so the retry banner must not linger.
+  let { parts = [] as UIMessagePart[] } = $props();
 
-  let visible = $derived(parts.filter((p) => p.transient));
-  let queued = $state<DataPart[]>([]);
-  let current = $state<DataPart | null>(null);
-  let shownIds = new Set<string>();
-
-  // Enqueue new transient parts. This effect re-runs whenever `parts`
-  // changes (the parent passes a freshly-filtered array), so it must stay
-  // cheap and side-effect-light: it only appends to the queue.
-  $effect(() => {
-    const v = visible;
-    for (const p of v) {
-      if (shownIds.has(p.id)) continue;
-      if (!queued.some((q) => q.id === p.id) && current?.id !== p.id) {
-        queued = [...queued, p];
+  let latest = $derived.by<DataPart | null>(() => {
+    let idx = -1;
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const p = parts[i];
+      if (p.type === "data" && p.transient) {
+        idx = i;
+        break;
       }
     }
-    if (!current && queued.length > 0) {
-      current = queued[0];
-      queued = queued.slice(1);
-      shownIds.add(current.id);
-      // Bound memory: transient ids are per-session and short-lived.
-      if (shownIds.size > 500) {
-        const oldest = shownIds.values().next();
-        if (oldest.value !== undefined) shownIds.delete(oldest.value);
-      }
-    }
+    if (idx < 0) return null;
+    // Anything after the notice means the run moved on.
+    if (idx < parts.length - 1) return null;
+    return parts[idx] as DataPart;
   });
 
-  // How long the current notice stays. Quality-gate notices describe work
-  // that runs for many seconds (assertion commands, a review inference) — a
-  // 4s flash would vanish mid-wait and leave the user staring at an
-  // apparently frozen bubble again. An LLM-retry notice is the only sign of
-  // life during a gateway outage, whose backoff steps reach 60s, so it must
-  // outlive them.
-  //
-  // Derived, because the progress bar below must run for exactly as long as
-  // the notice lives: it was hard-coded to 4s, so a 15s/60s notice showed a
-  // bar that finished and sat full for the remaining 11–56s — which reads as
-  // "stuck", the opposite of what the bar is for (P2-10).
+  // Dismissal is per-id: when a newer notice replaces the current one the
+  // timer is re-armed, and a late timer from an older id is ignored.
+  let dismissedId = $state<string | null>(null);
+  let current = $derived(latest && latest.id !== dismissedId ? latest : null);
+
   let ttl = $derived(
     current?.dataType === "data_quality_gate"
       ? 15000
       : current?.dataType === "llm_retry"
-        ? 60000
+        ? 20000
         : 4000,
   );
 
-  // Auto-dismiss. The timeout lives in its own effect keyed only on the
-  // current part's id — the enqueue effect re-runs on every parts change
-  // and used to clear this very timeout in its cleanup, so the bar got
-  // stuck on the first notification forever.
   $effect(() => {
     const id = current?.id;
     if (!id) return;
     const t = setTimeout(() => {
-      if (current?.id === id) current = null;
+      if (latest?.id === id) dismissedId = id;
     }, ttl);
     return () => clearTimeout(t);
   });

@@ -185,34 +185,38 @@
   }
 
   .empty-projects {
-    padding: 24px 16px;
-    text-align: center;
+    margin: 2px 4px;
+    padding: 12px;
+    border-radius: 10px;
+    background: var(--color-surface-soft);
+    text-align: left;
   }
 
   .empty-projects p {
-    font-size: 13px;
+    font-size: 11.5px;
     color: var(--color-muted);
     margin: 0;
-    line-height: 1.5;
+    line-height: 1.6;
   }
 
   .dialog-overlay {
     position: fixed;
     inset: 0;
     z-index: 200;
-    background: rgba(0, 0, 0, 0.4);
+    background: rgba(0, 0, 0, 0.5);
     display: flex;
     align-items: center;
     justify-content: center;
   }
 
   .dialog {
-    background: var(--color-canvas);
-    border-radius: 12px;
-    padding: 24px;
-    width: 400px;
-    max-width: 90vw;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    background: var(--color-surface-overlay);
+    border: 1px solid var(--color-hairline-strong);
+    border-radius: 16px;
+    padding: 22px;
+    width: 480px;
+    max-width: calc(100vw - 48px);
+    box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.85);
   }
 
   .dialog h3 {

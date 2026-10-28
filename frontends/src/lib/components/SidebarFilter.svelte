@@ -43,18 +43,19 @@
   .filter-wrap {
     display: flex;
     align-items: center;
-    gap: 6px;
-    margin: 6px 12px;
-    padding: 6px 10px;
-    border-radius: 8px;
+    gap: 7px;
+    margin: 8px 12px 0;
+    height: 34px;
+    padding: 0 10px;
+    border-radius: 10px;
     background: var(--color-surface-soft);
     border: 1px solid var(--color-hairline);
-    transition: border-color 0.15s;
+    transition: border-color 0.18s, box-shadow 0.18s;
   }
 
   .filter-wrap:focus-within {
-    border-color: var(--color-primary);
-    background: var(--color-surface-elevated);
+    border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
+    box-shadow: 0 0 0 3px rgba(111, 216, 196, 0.14);
   }
 
   .filter-icon {
@@ -67,7 +68,7 @@
     border: none;
     background: none;
     outline: none;
-    font-size: 13px;
+    font-size: 12px;
     color: var(--color-ink);
     min-width: 0;
   }

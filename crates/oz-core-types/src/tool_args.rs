@@ -246,6 +246,18 @@ const G_EDIT: &[Group] = &[FILE, OLD, NEW];
 const G_GLOB: &[Group] = &[PATTERN, DIR];
 const G_GREP: &[Group] = &[PATTERN, DIR, INCLUDE];
 const G_LS: &[Group] = &[DIR, FILE];
+/// `ask_user` has no filesystem payload, but the same leak repair needs its
+/// canonical keys: a gateway-torn call arrives as `question` plus a prose
+/// prefix, and the nameless-value fallback must know which field is primary.
+const QUESTION: Group = (
+    "question",
+    &["q", "prompt", "query", "text", "message", "ask"],
+);
+const CANDIDATES: Group = (
+    "candidates",
+    &["options", "choices", "suggestions", "answers"],
+);
+const G_ASK_USER: &[Group] = &[QUESTION, CANDIDATES];
 
 /// Curated alias table. Returns `None` for unknown tools (MCP / dynamic), which
 /// are handled by [`repair_args_against_schema`] instead.
@@ -262,6 +274,7 @@ fn groups_for(tool: &str) -> Option<&'static [Group]> {
         "glob" | "listfiles" | "find" => Some(G_GLOB),
         "grep" | "search" | "rg" | "searchfiles" => Some(G_GREP),
         "ls" | "list" | "listdir" | "dir" => Some(G_LS),
+        "askuser" => Some(G_ASK_USER),
         _ => None,
     }
 }
@@ -292,6 +305,13 @@ pub fn canonicalize_tool_args(tool: &str, args: Value) -> Value {
     let Value::Object(map) = args else {
         return args;
     };
+    // A corrupted-call sentinel must reach the dispatcher untouched. Without
+    // this guard the lone-unknown-string-key fallback below moved the reason
+    // text into `file_path` (seen 2026-10-23 12:26): the marker vanished and
+    // the write ran with a sentence as its path.
+    if map.contains_key(CORRUPT_CALL_KEY) {
+        return Value::Object(map);
+    }
     let Some(groups) = groups_for(tool) else {
         // Not a curated tool (MCP / dynamic): the schema-aware repair in
         // `ToolRegistry::dispatch` handles it — inventing a key name here would
@@ -560,6 +580,27 @@ pub fn missing_arg_error(tool: &str, missing: &[&str], args: &Value) -> String {
     )
 }
 
+/// Sentinel key carrying a reason when the gateway merged several tool calls
+/// into one arguments blob and the pieces cannot be split back apart.
+///
+/// Cutting the polluted value is not enough in that case: the surviving
+/// content belongs to a *different* call, so executing it would write or run
+/// the wrong payload (the 2026-10-23 11:31 run: three `code_run` calls were
+/// folded into a `write` call's `file_path`, and the shell command from the
+/// first one sat in `content`). `ToolRegistry::dispatch` reads this marker and
+/// refuses to execute, returning an actionable error instead.
+pub const CORRUPT_CALL_KEY: &str = "__oz_corrupted_call";
+
+/// The corruption reason recorded by [`corrupt_call_marker`], if any.
+pub fn corrupt_call_reason(args: &Value) -> Option<&str> {
+    args.get(CORRUPT_CALL_KEY).and_then(|v| v.as_str())
+}
+
+/// Arguments object that tells the dispatcher "this call is unrecoverable".
+pub fn corrupt_call_marker(reason: &str) -> Value {
+    serde_json::json!({ CORRUPT_CALL_KEY: reason })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,6 +752,19 @@ mod tests {
             json!({"code_run": "SP=/Applications/oMLX-bonsai.app; find $SP -name '*.log'", "type": "bash"}),
         );
         assert!(got["code"].as_str().unwrap().contains("oMLX-bonsai"));
+    }
+
+    #[test]
+    fn corrupt_call_sentinel_survives_canonicalization() {
+        // Regression (2026-10-23 12:26): the lone-unknown-string-key fallback
+        // moved the sentinel's reason text into `file_path`, dropping the marker.
+        let args = corrupt_call_marker("the gateway merged several tool calls");
+        let got = canonicalize_tool_args("write", args);
+        assert!(corrupt_call_reason(&got).is_some(), "marker lost: {got}");
+        assert!(
+            got.get("file_path").is_none(),
+            "reason leaked into file_path: {got}"
+        );
     }
 
     #[test]

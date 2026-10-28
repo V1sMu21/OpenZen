@@ -553,7 +553,7 @@
 {#if toolCall}
   <div class="tcc" class:error={hasError}>
     <button class="tcc-header" onclick={toggle}>
-      <span class="tcc-sym">◈</span>
+      <span class="tcc-sym" aria-hidden="true"></span>
       <span class="tcc-name">{toolLabel(toolCall.name)}</span>
       {#if repeatCount != null && repeatCount > 1}
         <span class="tcc-count">&times;{repeatCount}</span>
@@ -657,12 +657,17 @@
 {/if}
 
 <style>
+  /* 活动行: 折叠时是一行安静的状态, 展开时是釉下显形 */
   .tcc {
-    /* 釉下暗纹: 折叠=一行青线, 展开=釉下显形 */
-    margin: 2px 0;
-    border-bottom: 1px solid var(--color-hairline);
-    border-radius: 0;
+    margin: 1px 0;
+    border: 1px solid transparent;
+    border-radius: 10px;
     background: none;
+    transition: background 0.16s, border-color 0.16s;
+  }
+  .tcc:hover {
+    background: var(--color-surface-soft);
+    border-color: var(--color-hairline);
   }
   .tcc.error .tcc-header {
     color: var(--color-error);
@@ -671,32 +676,46 @@
   .tcc-header {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 9px;
     width: 100%;
-    padding: 7px 10px;
+    min-height: 32px;
+    padding: 6px 10px;
     background: none;
     border: none;
     color: var(--color-body);
     cursor: pointer;
-    font-family: var(--font-serif);
-    font-size: 12.5px;
-    letter-spacing: 0.06em;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    letter-spacing: 0.01em;
     text-align: left;
-    transition: background 0.35s var(--ease-soak, ease);
-    border-radius: 3px;
+    transition: background 0.16s var(--ease-soak), color 0.16s;
+    border-radius: 10px;
   }
 
   .tcc-header:hover {
-    background: var(--color-primary-muted, rgba(147, 195, 214, 0.07));
+    background: var(--color-surface-soft);
+    color: var(--color-ink);
   }
 
+  /* 左侧状态点: 完成=青, 运行=呼吸, 错误=朱砂 */
   .tcc-sym {
     flex-shrink: 0;
-    font-size: 12px;
-    line-height: 1;
-    color: var(--color-primary);
-    width: 14px;
-    text-align: center;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    opacity: 0.55;
+  }
+  .tcc.error .tcc-sym {
+    background: var(--color-error);
+    opacity: 1;
+  }
+  .tcc:has(.tcc-status.running) .tcc-sym {
+    opacity: 1;
+    animation: tcc-breathe 1.8s ease-in-out infinite;
+  }
+  @keyframes tcc-breathe {
+    50% { opacity: 0.25; transform: scale(0.8); }
   }
 
   .tcc-name {
@@ -709,36 +728,38 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--color-primary);
+    color: var(--color-muted);
     font-family: var(--font-mono);
-    font-size: 11px;
-    opacity: 0.85;
+    font-size: 10.5px;
+    opacity: 1;
     min-width: 0;
     flex: 1;
   }
   .tcc-count {
-    font-size: 10px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
     padding: 1px 5px;
-    border-radius: 2px;
-    background: var(--color-hairline);
-    color: var(--text-tertiary);
+    border-radius: 999px;
+    background: var(--color-surface-soft);
+    color: var(--color-muted);
     font-weight: 600;
     flex-shrink: 0;
   }
 
   .tcc-status {
     flex-shrink: 0;
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 500;
     margin-left: auto;
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-family: var(--font-mono);
+    font-family: var(--font-sans);
+    letter-spacing: 0.02em;
   }
 
   .tcc-status.done {
-    color: var(--color-dim);
+    color: var(--color-muted);
   }
 
   .tcc-status.running {
@@ -752,24 +773,23 @@
   .tcc-duration {
     flex-shrink: 0;
     font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--color-dim);
+    font-size: 9.5px;
+    color: var(--color-muted);
     font-weight: 500;
     font-variant-numeric: tabular-nums;
   }
 
   /* 展开: 釉下暗纹显形 (条件渲染, 折叠时零 DOM) */
   .tcc-body {
-    margin: 4px 10px 10px;
-    padding: 10px 14px;
-    background: var(--color-primary-muted, rgba(147, 195, 214, 0.07));
+    margin: 2px 6px 10px 24px;
+    padding: 11px 14px;
+    background: var(--color-surface-soft);
     border: 1px solid var(--color-hairline);
-    border-radius: 3px;
-    box-shadow: var(--glaze-shadow, none);
+    border-radius: 12px;
     font-family: var(--font-mono);
     font-size: 11.5px;
     line-height: 1.7;
-    color: var(--color-muted);
+    color: var(--color-dim);
   }
 
   /* 第一行: path key + 值 (原型 k/v) */

@@ -91,6 +91,10 @@ impl ToolHandler for CodeRunTool {
                     "type": "string",
                     "description": "'inline' or 'rpc'",
                     "enum": ["inline", "rpc"]
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run detached and return a job id immediately (bash only). Read it later with job_output; stop it with job_kill."
                 }
             },
             "required": ["code"]
@@ -118,6 +122,34 @@ impl ToolHandler for CodeRunTool {
         }
 
         let code_type = args.get("type").and_then(|v| v.as_str()).unwrap_or("bash");
+
+        // Background: hand the command to the job registry and return at once.
+        // The parent turn keeps going; the job is owned by this session.
+        if args
+            .get("background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            if !matches!(code_type, "bash" | "sh" | "shell") {
+                return Ok(ToolOutput::bad_json(
+                    "code_run: background execution currently supports bash only",
+                ));
+            }
+            return match crate::job_bg::start_bash(code, &ctx.working_dir, &ctx.session_id) {
+                Ok(job_id) => Ok(ToolOutput::success_with_prompt(
+                    serde_json::json!({
+                        "status": "running",
+                        "job_id": job_id,
+                        "label": code.lines().next().unwrap_or("").trim(),
+                    }),
+                    format!(
+                        "[background] started {job_id}: {}\nRead output with job_output(\"{job_id}\"), stop with job_kill(\"{job_id}\").",
+                        code.lines().next().unwrap_or("").trim()
+                    ),
+                )),
+                Err(e) => Ok(ToolOutput::bad_json(format!("code_run: {e}"))),
+            };
+        }
         // Inner timeout. The agent loop hands us its OUTER budget in
         // `ctx.tool_budget_secs`; clamp strictly below it so THIS timeout
         // always fires first — it returns a structured timeout result and
@@ -533,6 +565,7 @@ mod tests {
 
     fn make_ctx() -> ToolContext {
         ToolContext {
+            is_subagent: false,
             working_dir: "/tmp".into(),
             assets_dir: "/tmp".into(),
             script_dir: "/tmp".into(),

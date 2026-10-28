@@ -223,6 +223,10 @@ pub struct ToolContext {
     /// in which case the tool uses its own default.
     #[serde(default)]
     pub tool_budget_secs: u64,
+    /// True inside a subagent run. Tools that would block on the user
+    /// (ask_user) refuse instead of parking a slot no dialog is watching.
+    #[serde(default)]
+    pub is_subagent: bool,
 }
 
 impl ToolContext {
@@ -237,6 +241,7 @@ impl ToolContext {
             harness_dir: None,
             session_id: String::new(),
             tool_budget_secs: 0,
+            is_subagent: false,
         }
     }
 
@@ -442,6 +447,7 @@ mod tests {
             harness_dir: None,
             session_id: String::new(),
             tool_budget_secs: 0,
+            is_subagent: false,
         };
         assert_eq!(ctx.resolve_path("/etc/passwd"), "/etc/passwd");
     }
@@ -457,6 +463,7 @@ mod tests {
             harness_dir: None,
             session_id: String::new(),
             tool_budget_secs: 0,
+            is_subagent: false,
         };
         assert_eq!(ctx.resolve_path("~/config"), "~/config");
     }
@@ -472,6 +479,7 @@ mod tests {
             harness_dir: None,
             session_id: String::new(),
             tool_budget_secs: 0,
+            is_subagent: false,
         };
         assert_eq!(
             ctx.resolve_path("src/main.rs"),
@@ -490,6 +498,7 @@ mod tests {
             harness_dir: None,
             session_id: String::new(),
             tool_budget_secs: 0,
+            is_subagent: false,
         };
         assert_eq!(ctx.resolve_path("a/b/c.txt"), "/workspace/a/b/c.txt");
     }
@@ -505,6 +514,7 @@ mod tests {
             harness_dir: None,
             session_id: String::new(),
             tool_budget_secs: 0,
+            is_subagent: false,
         };
         assert_eq!(ctx.resolve_path("foo.txt"), "/home/user/project/foo.txt");
     }
@@ -520,6 +530,7 @@ mod tests {
             harness_dir: None,
             session_id: String::new(),
             tool_budget_secs: 0,
+            is_subagent: false,
         };
         assert!(!ctx.resolve_path("foo.txt").contains("//"));
     }
@@ -535,6 +546,7 @@ mod tests {
             harness_dir: None,
             session_id: String::new(),
             tool_budget_secs: 0,
+            is_subagent: false,
         };
         assert_eq!(ctx.resolve_path(""), "/home/user/project/");
     }
@@ -616,6 +628,7 @@ mod tests {
             harness_dir: None,
             session_id: String::new(),
             tool_budget_secs: 0,
+            is_subagent: false,
         };
         let cloned = ctx.clone();
         assert_eq!(cloned.working_dir, ctx.working_dir);

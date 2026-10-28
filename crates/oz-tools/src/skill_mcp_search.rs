@@ -372,6 +372,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dir_path = dir.keep().to_string_lossy().to_string();
         ToolContext {
+            is_subagent: false,
             working_dir: dir_path.clone(),
             assets_dir: String::new(),
             script_dir: String::new(),

@@ -63,6 +63,7 @@ mod tests {
 
     fn ctx() -> TC {
         TC {
+            is_subagent: false,
             working_dir: "/tmp".into(),
             assets_dir: "/tmp".into(),
             script_dir: "/tmp".into(),

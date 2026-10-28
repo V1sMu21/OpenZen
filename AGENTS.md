@@ -8,6 +8,13 @@
 - 分析报告、调研结论、验收/审计报告、状态汇总、对比表、交付说明、复盘文档
 - 多个 Markdown 段落 + 表格 + 代码块组成的"文档型"产出
 
+**边界（2026-10-23 补充）**：判据是「这是不是一次**调研**」，不是「我做了多少工作」。
+
+- ✅ **出报告**：调研 / 分析 / 审计 / 验收 / 复盘 / 方案对比 —— 结论本身就是要交付的成品。
+- ❌ **不出报告**：改代码、改配置、接模型、装依赖、跑构建、修 bug 等**实施类任务** ——
+  做完直接在对话里说清「改了什么、怎么生效、怎么回滚」即可，不要额外生成 `.html`。
+  用户原话：「你不需要出报告的，这不是调研」。
+
 写法要求：
 
 - 单文件、**离线可打开**：图片 base64 内嵌，不要外链 CSS/JS/字体（`src="data:..."`）。
@@ -19,6 +26,7 @@
 
 例外（仍可用 Markdown）：
 
+- **实施/配置类任务的交付**（见上文「边界」）：修 bug、改配置、接入模型、安装依赖、构建产物等，做完在对话里说明结果即可，不产出报告文件。
 - 对话中的即时回答、简短说明、步骤解释 —— 这些不是"报告"。
 - 代码注释、commit message、`README`/`CHANGELOG` 等项目内既有 Markdown 文档。
 
@@ -122,6 +130,209 @@ Known limitation: when the gateway truncated the leaked `respond` args
 mid-value, the recovered reply is the truncated text — upstream loss that no
 client-side repair can undo. Watch for `[oz-llm] normalized degenerate tool
 args` / `[agent_loop] recovered respond arguments` in logs to spot recurrences.
+
+**Fourth pass (2026-10-23 morning desktop session `4596ac63`)** — two new
+gateway shapes, both reproduced from the real bytes (fixtures under
+`crates/oz-llm/tests/fixtures/`):
+1. **Separator corruption**: `{"candidates": […], "question">Go: "…"}` — the
+   `": "` separator became `">Go: "` and the whole question was repeated
+   dozens of times. `repair_parameter_style_args` saw no `{"key">` opener and
+   returned `None`, so `ask_user` received `question: ""`; the loop then
+   parked on it. Eight such questions burned **40 minutes** (8 × the old 300s
+   timeout) while the user was away.
+2. **Fullwidth separator + nameless parameter**:
+   `{"file_path"｜>work/x.py</parameter>\n<parameter: "…content…", …}` — no
+   opening quote on the first value, and the second parameter lost `name=`.
+   The valid-JSON variant `{"file_path": "work/x.py</｜DSML｜:"}` parses
+   cleanly but swallows the dangling marker into the path;
+   `sanitize_dsml_pollution` now cuts at `</｜DSML` too.
+
+**Fix (2026-10-23)**:
+- `crates/oz-llm/src/stream.rs` -> new field-level salvage scanner
+  (`salvage_leaked_fields` / `field_values` / `pick_field_value`) merged into
+  `repair_parameter_style_args`: it reads a field value across arbitrary
+  separator junk (a short prose gap before the quoted value, or an unquoted
+  value terminated by `</parameter>`), prefers the longest of repeated
+  occurrences, unwraps doubly-encoded argument strings first, and maps nameless
+  `<parameter: "..."` values onto the tool first missing canonical field.
+  `ask_user` gained a canonical alias table so the nameless fallback knows its
+  primary key.
+- `ask_user` hardening: an empty question is a tool error (never a park); the
+  same question twice in one turn is rejected with a tool result; at most 4
+  questions per turn; `ask_user` / `submit_plan` bypass the tool semaphore (the
+  12 `Tool queue busy (>15s): skipping ask_user` drops came from control tools
+  queueing behind long `code_run` calls).
+- **Waiting mode**: `LoopConfig.ask_user_timeout_secs` defaults to 0 = wait
+  until the user answers or the run is stopped (a non-zero bound is still
+  honoured). The session persists `SessionStatus::Waiting` plus a
+  `pending_ask_user` record, so the sidebar shows an amber waiting dot, the
+  title bar shows the waiting label, the frontend watchdog is suspended while
+  waiting, and a page reload restores the dialog. A reply that arrives after an
+  app restart is stored as a one-shot `resume_note` and the frontend resumes
+  from the checkpoint with the question + answer injected.
+- Notifications no longer trust window focus alone: `notify_if_unfocused` also
+  probes HID idle time (`ioreg`), so leaving OpenZen focused while walking away
+  still delivers a "needs your answer" notification (the 10:28 skip in this
+  session).
+
+**Tests**: `real_20261023_ask_user_leak_is_repaired` /
+`real_20261023_write_leak_is_repaired` replay the exact 7.5 KB ask_user blob and
+the write blob from the session (fixtures in `crates/oz-llm/tests/fixtures/`);
+`ask_user_rejects_empty_and_dedupes_identical_questions` covers the park guards;
+`waiting_status_and_pending_question_roundtrip` covers the persisted waiting
+state.
+
+**Fifth pass (2026-10-23 evening, same session `4596ac63` replayed from
+`sessions.json`)** — the 12:58 report of "tool calls still error, acceptance
+loops, label wrong" traced to five independent causes, each fixed at the root:
+
+1. **Post-completion verification loop (the "验收自我循环")**. A reviewer that
+   answered `insufficient_evidence` was treated as `must_fix` (`!v.pass`), so
+   the run re-entered the loop, re-ran verification the assertion gate itself
+   blocked ("needs approval"), and got reviewed again with the same evidence —
+   twice per run, every run. Now only a *named defect* earns another round
+   (`quality::review_requires_fix`: `Failed` status or a high-severity issue);
+   an inconclusive review ends the run with an honest "unverified" note. A single
+   run-wide budget, `MAX_GATE_CONTINUATIONS = 4`, now bounds EVERY gate that can
+   send the agent back to work (assertions, review, quick checks, diff
+   self-check, unresolved suspicion) — before, each had its own bound and they
+   stacked.
+2. **`long_term` failed on every call, permanently.** Two real tool bugs found
+   in the session data: (a) `category=sop` passed the whole payload as the SOP
+   *name*, which became a ~1000-character filename →
+   `File name too long (os error 63)`; (b) `category=fact` read
+   `~/.openzen/.skill_mcp/facts/global_mem.txt`, which held one invalid byte
+   (position 5705) → `stream did not contain valid UTF-8` forever, because
+   `read_to_string` fails the whole read on a single bad byte. Fixed with
+   `long_term::sop_title` (bounded first-line title) + `sop::bounded_title`
+   (80-char cap, hash suffix when truncating, so two long names cannot collide)
+   and `memory::read_text_lossy` (lossy read; the next append rewrites the file
+   as valid UTF-8 and heals it).
+3. **Blank `ask_user` dialogs.** The gateway leaked the same question in three
+   shapes; in two of them it repeated the whole `candidates` array *in front of*
+   the question, so the old repair could hand back an empty question — the UI
+   showed 16 empty dialogs at 10:33 and the user was told nothing
+   ("你没有把问题发给我"). The salvage now recovers the real question from all
+   three shapes (fixtures + test below), and an empty question is a tool error,
+   never a park. The 12 `tool queue busy` drops for `ask_user` came from control
+   tools queueing behind six concurrent probes; both semaphores are now skipped
+   for `ask_user`/`submit_plan`.
+4. **`each_key_duplicate` crashed the message list** (5× at 12:46:33,
+   `frontend-errors.log`). Two keyed `{#each}` blocks could receive duplicate
+   keys and Svelte 5 aborts the whole render on that. Message ids come from the
+   server `idx`, which is only unique *within a page* (paging counts from the
+   END of the vector, so a page fetched before a run appended messages can reuse
+   a live `idx`); tool rows are keyed by call id, which the gateway reuses when
+   it merges calls. Both lists now derive collision-proof keys
+   (`uniqueMessageIds` in `stores/chat.ts`, `partKeys` in `ChatMessage.svelte`).
+5. **Labels/defaults**: the title-bar switch is back to **完全访问** /
+   "Full access" (the 2026-10-22 pass had renamed it 免审批执行（危险）), and
+   auto-crystallization now defaults to **off** in `AppState`
+   (`AtomicBool::new(false)`).
+
+**Tests**: `real_20261023_ask_user_question_survives_every_go_leak_variant`
+replays the three real leak fixtures extracted verbatim from `sessions.json`
+(`ask_user_repeated_go_leak_20261023.txt` 8 KB, `…_short_…`, `…_mid_…`);
+`only_a_named_defect_earns_another_fix_round` (oz-core) pins the loop rule;
+`corrupt_fact_file_does_not_block_memory_forever` (oz-skill-mcp) writes a lone
+continuation byte into the fact file and asserts the read degrades and the next
+append heals it; `test_long_term_sop_with_a_whole_document_payload` +
+`sop_title_is_one_bounded_line` (oz-tools) cover the ENAMETOOLONG path.
+
+Known gap (unchanged): the gateway still truncates values on its side
+(`{"code":"cd:"}`, `{"content":"import:"}`, `{"response":"做完了。你之前自己用:"}`
+are the raw accumulated bytes). Nothing client-side can restore lost text; the
+calls fail loudly and the model re-issues them. Merged-call blobs are refused
+with the `__oz_corrupted_call` sentinel rather than executed with wrong fields.
+
+**Sixth pass (2026-10-23 14:20–14:35) — found by an isolated end-to-end run,
+not by unit tests.** The harness (worth reusing) is: fresh data root under
+`/private/tmp`, `./target/debug/openzen --config <root>/mykey.toml --dir <root>
+--assets assets serve --port 18610`, the random auth token is printed to the log
+and every `/api/*` call needs `Authorization: Bearer <token>`, and
+`POST /api/sessions/<id>/approve {"request_id","decision":"allow"}` answers the
+approval gate — a small python loop tailing the log for
+`approval_needed sent: … id=<uuid>` makes the run fully autonomous. Use
+`POST /api/chat {"message","session_id","model_name"}` to start a task.
+Do **not** use plain `/tmp` as the data root: it is a symlink to `/private/tmp`,
+so the safety layer's canonicalize check rejects every write inside the
+workspace ("cannot canonicalize path, rejecting"). Use `/private/tmp/...`.
+
+1. **Policy-refused `[verify]` assertions were counted as failures.** The three
+   synthesized assertions for a one-file task included
+   `python3 …/hello.py | grep -q "e2e-ok"`; policy refuses pipes. The gate put
+   that command into `outcome.failures` *as well as* `blocked`, so the run
+   burned its assertion budget, re-entered the loop, and closed with
+   "验收断言未通过（1 条），修复预算已耗尽" for work that was **never executed** —
+   and the run record was self-contradictory (`assertion_status=needs_approval`,
+   `assertions_failed=1`, `assertions_blocked=0`). Fixed: refused assertions are
+   only ever `blocked`/`needs_approval`; the agent instead gets one bounded
+   `format_assertion_policy_feedback` round that names the refused commands and
+   the executable rewrite rules (`test -f`, `python3 -m py_compile`,
+   `node --check`, `cargo check --quiet`; no pipes/`&&`/`;`/backticks, relative
+   paths only). `build_spec_synthesis_prompt` now states that grammar, so
+   synthesized specs are executable in the first place.
+2. **The gate reported `not_run` instead of `synthesis_failed`** when no summary
+   model is configured: the first finishing turn recorded nothing (the
+   `is_configured()` branch had no `else`), while a later turn hit the
+   `else if` branch and recorded `synthesis_failed` — the same run answered
+   differently depending on how many finishing turns it took. Now recorded on
+   the first turn.
+3. **A workspace-wide compile break my per-crate runs missed**:
+   `StreamEvent::AskUserAnswered` was not handled in `crates/oz-tui/src/event.rs`,
+   so `cargo build --bin openzen` and the release gate failed while the Tauri
+   app still built. Always finish with `cargo check --workspace --all-targets`
+   (or the gate's `cargo test --workspace`), not with `-p <crate>` alone.
+
+**Tests**: `blocked_assertions_are_visible_and_not_executed` now also pins that a
+refused assertion is not a failure, and
+`synthesis_prompt_constrains_the_assertion_grammar` pins the executable-grammar
+instructions.
+
+**Seventh pass (2026-10-23 evening) — out-of-workspace writes are now
+APPROVABLE instead of a hard failure.** User decision: "改成审批".
+
+`write` / `edit` / `patch` are on `SafetyGuard`'s safe list, so the approval
+pipeline never saw them and their workspace boundary lived entirely inside the
+tool. An out-of-workspace edit was therefore a flat failure the model could only
+answer with a prose `ask_user` — the user could not *approve* it.
+
+- `crates/oz-core-types/src/path_trust.rs` (new) — the two halves:
+  `write_target_path` / `outside_workspace_target` (what the loop consults, with
+  the deepest-existing-ancestor resolution) and the session-scoped registry
+  `approve_path` / `deny_path` / `is_path_approved` / `is_path_denied` /
+  `forget_session` (bounded: 64 paths × 32 sessions). Only an approval decision
+  writes to it — the model cannot reach it, and a denial records nothing that
+  could be mistaken for consent.
+- `crates/oz-core/src/agent_loop.rs` — before dispatch, a mutating call whose
+  resolved target is outside the workspace goes through the SAME approval
+  channel as `code_run` (`approve_outside_write`: audit line, stop-signal race,
+  `完全访问` auto-allow inside the handler). Allow → the path is recorded and the
+  tool lets it through. Deny → the call fails with "the user denied…, do not
+  retry"; the denial is recorded so a retrying model gets a deterministic answer
+  instead of re-opening the dialog. Approvals are cleared at run start
+  (`forget_session`), so an answer from an earlier run never authorizes this one.
+- `crates/oz-tools/src/file_ops.rs` — the three mutating tools consult the
+  registry (`write_path_permitted`) and share one boundary message.
+
+**Verified end-to-end** (isolated harness, `scripts/e2e/isolated-agent-run.sh`,
+cloud model, task = "write this line to a path outside the workspace"):
+allow run → `requesting approval for write/outside workspace: …` → approved →
+file written, and a second write to the same path did NOT ask again; deny run
+(`E2E_DENY=write`) → the `write` tool did not execute. Caveat worth knowing:
+with `write` denied the model simply used `code_run` (`echo … > path`), which
+has its own approval gate — denying `write,code_run` together is what keeps the
+file from existing at all. The harness now also answers `ask_user` (the app
+waits forever for an answer, which made a denied run look like a stall) and
+denies `computer_*` unconditionally.
+
+**Tests**: `only_mutating_tools_name_a_write_target`,
+`inside_the_workspace_needs_no_approval`,
+`approvals_are_per_session_and_only_for_the_named_path`,
+`denials_are_recorded_so_the_question_is_not_re_asked`,
+`missing_parent_directories_still_resolve` (oz-core-types) and
+`outside_write_needs_an_approval_and_then_succeeds` (oz-tools: unapproved →
+blocked and file untouched, approved → written, other session → still blocked).
 
 ---
 
@@ -407,3 +618,19 @@ Do **not** "fix" this by rewriting persisted history at request time — history
 is only canonicalized as it is parsed/stored, so an old failing call keeps its
 old error text next to it (rewriting it would show a canonical call paired with
 a "missing argument" error, which teaches the wrong lesson).
+
+---
+
+## 方案审查（plan review）— 大动作先交方案
+
+凡是**会花时间或不可轻易回退**的动作（出片、批量替换、重构、跑长测试），先投一份方案到
+`.openzen/plans/inbox/`，等用户在右侧栏批准后再动手。批准前不要开工。
+
+```bash
+python3 scripts/plan-submit.py --title "…" --file plan.md --est "约 20 分钟" \
+  --option "稳=…" --option "快=…"
+```
+
+OpenZen 每 2 秒扫一次收件箱，方案会出现在右侧栏；用户的选择写在
+`.openzen/plans/<id>.decision.json`，`comment` 是他的原话，据此改方案，不要猜。
+完整契约见 `docs/plan-review.md`。

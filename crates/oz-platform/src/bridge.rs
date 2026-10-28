@@ -116,6 +116,7 @@ impl AgentBridge {
         let sess_type = cfg.session_type(session_name);
 
         let ctx = oz_core_types::ToolContext {
+            is_subagent: false,
             working_dir: self.working_dir.clone(),
             assets_dir: self.assets_dir.clone(),
             script_dir: self.script_dir.clone(),

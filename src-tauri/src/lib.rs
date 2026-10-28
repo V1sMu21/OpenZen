@@ -17,8 +17,10 @@ use tokio::task::JoinHandle;
 mod approval;
 #[cfg(test)]
 mod import_write_path_tests;
+mod plans;
 pub mod projects;
 mod sidepanel;
+mod subagents;
 
 const SESSION_STATE_FILE: &str = "openzen/sessions.json";
 
@@ -680,6 +682,7 @@ pub(crate) fn tauri_ctx() -> ToolContext {
         harness_dir: Some(ledger_dir.to_string_lossy().to_string()),
         session_id: String::new(),
         tool_budget_secs: 0,
+        is_subagent: false,
     }
 }
 
@@ -766,12 +769,22 @@ pub struct AppState {
     /// Unix-seconds timestamp of the last user message; the ERME idle
     /// cycle skips itself while the user is actively conversing.
     pub last_user_activity: Arc<AtomicU64>,
+    /// Completion notices for background jobs that finished while no run was
+    /// live. Drained into the next run's user turn; otherwise a long job that
+    /// outlives its turn would be invisible to the model forever.
+    pub pending_job_notices: Mutex<HashMap<String, Vec<String>>>,
+    /// parent session → live child agent sessions (for stop cascade).
+    pub child_sessions: Mutex<HashMap<String, Vec<String>>>,
     pub intervention_queues: Mutex<
         HashMap<
             String,
             Arc<Mutex<std::collections::VecDeque<oz_core::checkpoint::InterventionEvent>>>,
         >,
     >,
+    /// One-shot context injected when a session is resumed from a checkpoint
+    /// (an ask_user reply that arrived after the app restarted). Consumed by
+    /// `resume_session`; never rendered as a user bubble.
+    pub resume_notes: Arc<Mutex<HashMap<String, String>>>,
     /// session_id → webview window label for dedicated session windows
     /// (`session-{id}`), used to route session-scoped events (approvals)
     /// to the owning window instead of broadcasting to all windows.
@@ -912,17 +925,20 @@ impl AppState {
                 .map(|p| p.to_string_lossy().to_string()),
             shared_skill_store: std::sync::Mutex::new(None),
             projects: Mutex::new(projects::store::load_projects()),
-            // Crystallization (skill/SOP/fact distillation) on by default:
-            // with it off, the three-layer memory design only ever ran the
-            // ERME semantic layer and user facts never accumulated.
-            crystallization_enabled: AtomicBool::new(true),
+            // Auto-crystallization (skill/SOP distillation after each run) is
+            // opt-in: it writes new skills from finished runs, so it starts
+            // off and the user turns it on from the title bar.
+            crystallization_enabled: AtomicBool::new(false),
             full_access: Arc::new(AtomicBool::new(false)),
             memory_enabled: Arc::new(AtomicBool::new(memory_backend_is_erme)),
             erme_store,
             platform_registry: std::sync::Mutex::new(None),
             scheduler_shutdown: std::sync::Mutex::new(None),
             last_user_activity,
+            pending_job_notices: Mutex::new(HashMap::new()),
+            child_sessions: Mutex::new(HashMap::new()),
             intervention_queues: Mutex::new(HashMap::new()),
+            resume_notes: Arc::new(Mutex::new(HashMap::new())),
             session_windows: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -1028,10 +1044,38 @@ pub(crate) fn get_or_init_skill_store(
 }
 
 // ── Desktop notification helper ──
-/// Fire a system notification WITH sound, but only when the main window is
-/// not focused — when the user is looking at the app, the UI itself is the
-/// notification. Used for task completion, pending questions and
-/// compression alerts so background work is always noticeable.
+/// Seconds since the last hardware input event on macOS. `None` when the
+/// probe is unavailable (other platforms, ioreg failure).
+#[cfg(target_os = "macos")]
+fn user_idle_seconds() -> Option<u64> {
+    let out = std::process::Command::new("ioreg")
+        .args(["-c", "IOHIDSystem"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let Some(idx) = line.find("HIDIdleTime") else {
+            continue;
+        };
+        let rest = line[idx..].split('=').nth(1)?;
+        let digits: String = rest.chars().filter(|c| c.is_ascii_digit()).collect();
+        let nanos: u64 = digits.parse().ok()?;
+        return Some(nanos / 1_000_000_000);
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn user_idle_seconds() -> Option<u64> {
+    None
+}
+
+/// Fire a system notification WITH sound, but only when the user is not
+/// actively at the machine. Window focus alone is not presence: leaving
+/// OpenZen focused while walking away is common, and the old focus check
+/// silently swallowed the "needs your answer" notification at 10:28 in the
+/// 2026-10-23 session. Treat focus + recent input as "looking at it", and
+/// focused + idle > 2 minutes as "away".
 /// Every outcome is logged to `~/.openzen/logs/openzen.log` with a
 /// `[notify]` prefix so notification issues are diagnosable remotely.
 pub(crate) fn notify_if_unfocused(app: &AppHandle, title: &str, body: &str) {
@@ -1040,9 +1084,18 @@ pub(crate) fn notify_if_unfocused(app: &AppHandle, title: &str, body: &str) {
         .get_webview_window("main")
         .map(|w| w.is_focused().unwrap_or(false))
         .unwrap_or(false);
-    if focused {
-        debug_log(&format!("[notify] skipped (main window focused): {title}"));
+    let idle = user_idle_seconds();
+    if focused && idle.is_some_and(|secs| secs < 120) {
+        debug_log(&format!(
+            "[notify] skipped (window focused, user active): {title}"
+        ));
         return;
+    }
+    if focused {
+        debug_log(&format!(
+            "[notify] focused but user idle {:?}s — notifying: {title}",
+            idle
+        ));
     }
     match app
         .notification()
@@ -1073,6 +1126,23 @@ static SHUTDOWN_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
 fn graceful_shutdown(state: &AppState) {
     use std::time::Duration;
     tracing::info!("[openzen] graceful shutdown: stopping agents…");
+    {
+        let children: Vec<String> = lock_poison_guard(&state.child_sessions)
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let signals = lock_poison_guard(&state.stop_signals);
+        for c in &children {
+            if let Some(sig) = signals.get(c) {
+                sig.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+    let cancelled = oz_core::jobs::global().cancel_all(Some("application quit".into()));
+    if cancelled > 0 {
+        tracing::info!("[openzen] graceful shutdown: cancelled {cancelled} background job(s)");
+    }
     {
         let signals = lock_poison_guard(&state.stop_signals);
         for sig in signals.values() {
@@ -1429,6 +1499,109 @@ pub fn run() {
     builder
         .setup(|app| {
             let app_handle = app.handle().clone();
+
+            // ── Background jobs: one process-wide listener ──
+            // Started/finished snapshots go to the UI; a finished job also
+            // pushes one line into the owner's intervention queue so the
+            // agent learns about it on its next step (no polling, no new
+            // turn when the session is idle).
+            {
+                let job_app = app.handle().clone();
+                let job_state = app.state::<std::sync::Arc<AppState>>().inner().clone();
+                oz_core::jobs::global().set_listener(std::sync::Arc::new(move |ev| {
+                    use oz_core::jobs::JobEvent;
+                    let (kind, snap) = match &ev {
+                        JobEvent::Started(s) => ("started", s),
+                        JobEvent::Finished(s) => ("finished", s),
+                    };
+                    let _ = job_app.emit(
+                        "job://update",
+                        serde_json::json!({ "event": kind, "job": snap.to_json() }),
+                    );
+                    if let JobEvent::Finished(s) = &ev {
+                        if oz_core::jobs::global().is_reported(&s.id) {
+                            return;
+                        }
+                        let detail = match &s.detail {
+                            Some(d) if !d.is_empty() => {
+                                format!("{}, {}", s.status.as_str(), d)
+                            }
+                            _ => s.status.as_str().to_string(),
+                        };
+                        let notice = format!(
+                            "[background] {} ({}) finished: {detail}. Read with job_output(\"{}\").",
+                            s.id, s.label, s.id
+                        );
+                        let queue = job_state
+                            .intervention_queues
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get(&s.owner_session).cloned());
+                        if let Some(queue) = queue {
+                            let mut q = match queue.lock() {
+                                Ok(q) => q,
+                                Err(_) => return,
+                            };
+                            q.push_back(oz_core::checkpoint::InterventionEvent {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                timestamp: chrono::Utc::now().timestamp() as f64,
+                                kind: oz_core::checkpoint::InterventionKind::InjectInfo,
+                                content: notice,
+                            });
+                        } else {
+                            // No live run: keep the notice until the next turn.
+                            if let Ok(mut pending) = job_state.pending_job_notices.lock() {
+                                pending
+                                    .entry(s.owner_session.clone())
+                                    .or_default()
+                                    .push(notice);
+                            }
+                            tracing::info!(
+                                "[jobs] {} finished while session {} was idle; notice queued",
+                                s.id, s.owner_session
+                            );
+                        }
+                    }
+                }));
+            }
+
+            // Children left `running` by a crash/quit are dead: rewrite their
+            // sidecar meta so the UI never shows a ghost.
+            crate::subagents::mark_interrupted_children(&app.state::<std::sync::Arc<AppState>>().inner().clone());
+
+            // ── Subagents: in-process host ──
+            {
+                let sub_app = app.handle().clone();
+                let sub_state = app.state::<std::sync::Arc<AppState>>().inner().clone();
+                oz_core::subagent::set_host(std::sync::Arc::new(
+                    crate::subagents::TauriSubagentHost {
+                        app: sub_app,
+                        state: sub_state,
+                        cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+                    },
+                ));
+            }
+
+            // ── Plan review inbox watcher ──
+            // An out-of-process agent drops `*.json` into
+            // <working_dir>/.openzen/plans/inbox/; this thread turns them into
+            // plans and opens a side-panel tab. Cheap (2 s poll, one readdir)
+            // and independent of the UI, so a plan submitted while the window
+            // is in the background still shows up.
+            {
+                let watcher_handle = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let Some(state) = watcher_handle.try_state::<std::sync::Arc<AppState>>() else {
+                        continue;
+                    };
+                    let state = state.inner().clone();
+                    if let Err(e) = crate::plans::import_inbox(&watcher_handle, &state) {
+                        tracing::warn!("[plans] inbox scan failed: {e}");
+                    }
+                });
+            }
+
             let show = MenuItemBuilder::with_id("show", "Open").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
@@ -1794,6 +1967,12 @@ commands::get_working_dir_for_session,
             commands::rename_session,
             commands::stop_session,
             commands::inject_message,
+            commands::job_list,
+            commands::job_output,
+            commands::job_kill,
+            commands::agent_list,
+            commands::agent_read,
+            commands::agent_cancel,
             commands::send_message,
             commands::regenerate,
             commands::resume_session,
@@ -1818,6 +1997,12 @@ commands::get_working_dir_for_session,
             crate::sidepanel::commands::open_artifact,
             crate::sidepanel::commands::open_artifact_dialog,
             crate::sidepanel::commands::close_sidepanel,
+            crate::plans::plan_list,
+            crate::plans::plan_get,
+            crate::plans::plan_open,
+            crate::plans::plan_submit,
+            crate::plans::plan_decide,
+            crate::plans::plan_scan_inbox,
             crate::sidepanel::commands::get_sidepanel_state,
             crate::sidepanel::commands::close_artifact_tab,
             crate::sidepanel::commands::switch_artifact_tab,

@@ -43,9 +43,27 @@ pub enum LlmError {
 }
 
 impl LlmError {
+    /// A failure that will not heal by waiting: the model was retired, the
+    /// key is wrong, or the request itself is invalid. 410 Gone (a gateway
+    /// retiring a model, e.g. "Model deepseek-flash has been deprecated")
+    /// used to be classified retryable, so the whole 8-attempt backoff ran
+    /// before the user saw anything — minutes of a "stuck" agent.
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            LlmError::HttpError { status, body } => {
+                matches!(*status, 400 | 401 | 403 | 404 | 410 | 422)
+                    || body.contains("deprecated")
+                    || body.contains("ModelDeprecated")
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_retryable(&self) -> bool {
         match self {
-            LlmError::HttpError { status, .. } => *status > 400 && *status != 401 && *status != 403,
+            LlmError::HttpError { status, .. } => {
+                *status > 400 && *status != 401 && *status != 403 && !self.is_permanent()
+            }
             LlmError::RequestFailed(_) => true,
             // Mid-stream failures may have already emitted output; the
             // provider layer must not silently re-send the full context.
@@ -367,4 +385,37 @@ mod tests {
         let msg = agent_err.to_string();
         assert!(msg.contains("Tool error"));
     }
+
+    #[test]
+    fn retired_models_are_not_retried() {
+        let gone = LlmError::HttpError {
+            status: 410,
+            body: r#"{"error":{"message":"Model deepseek-flash has been deprecated. Use deepseek-v4.1-flash instead."}}"#.into(),
+        };
+        assert!(gone.is_permanent());
+        assert!(!gone.is_retryable());
+
+        // Some gateways report a retired model as 400/404 with the same body.
+        let as_400 = LlmError::HttpError {
+            status: 400,
+            body: "ModelDeprecated: deepseek-flash".into(),
+        };
+        assert!(as_400.is_permanent());
+
+        let rate_limited = LlmError::HttpError {
+            status: 429,
+            body: "slow down".into(),
+        };
+        assert!(!rate_limited.is_permanent());
+        assert!(rate_limited.is_retryable());
+
+        let caused_by_deprecation = LlmError::HttpError {
+            status: 502,
+            body: "upstream says model has been deprecated".into(),
+        };
+        assert!(caused_by_deprecation.is_permanent());
+    }
+
 }
+
+

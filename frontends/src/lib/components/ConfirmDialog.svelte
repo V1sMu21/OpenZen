@@ -84,17 +84,20 @@
 
 <style>
   .cf-backdrop {
+    background: rgba(0, 0, 0, 0.5);
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.55);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 9000;
   }
   .cf-box {
+    border-radius: 16px;
+    border: 1px solid var(--color-hairline-strong);
+    box-shadow: 0 30px 80px -20px rgba(0,0,0,.85);
+    padding: 22px 22px 18px;
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-hairline-strong);
     border-radius: 10px;

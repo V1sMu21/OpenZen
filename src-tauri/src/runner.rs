@@ -388,6 +388,7 @@ pub async fn run_agent_for_session(
     model_name: Option<&str>,
     resume: bool,
     reasoning_effort: Option<&str>,
+    resume_note: Option<&str>,
 ) -> anyhow::Result<()> {
     // Mark user activity so the ERME idle soul cycle yields while the
     // user is actively conversing (it would otherwise compete for
@@ -432,6 +433,8 @@ pub async fn run_agent_for_session(
     let mut ctx = tauri_ctx();
     ctx.lang = lock_poison_guard(&state.locale).clone();
     ctx.session_id = session_id.to_string();
+    // Children created by spawn_agent are depth > 0; ask_user refuses there.
+    ctx.is_subagent = oz_core::subagent::depth_of(session_id) > 0;
 
     // Broadcast model info
     let provider = match sess_type {
@@ -819,6 +822,22 @@ pub async fn run_agent_for_session(
             .unwrap_or_default();
         (user_msg, hist)
     };
+    // Background jobs that finished while this session was idle: fold their
+    // notices into the next user turn so the model can read them with
+    // job_output. Without this, a long job outliving its turn was invisible.
+    let user_message = {
+        let notices: Vec<String> = lock_poison_guard(&state.pending_job_notices)
+            .remove(session_id)
+            .unwrap_or_default();
+        if notices.is_empty() {
+            user_message
+        } else {
+            format!(
+                "<system-reminder>\n{}\n</system-reminder>\n\n{user_message}",
+                notices.join("\n")
+            )
+        }
+    };
     if user_message.is_empty() {
         anyhow::bail!("No user message to process");
     }
@@ -889,6 +908,10 @@ pub async fn run_agent_for_session(
     }
 
     let mut loop_config = LoopConfig::default();
+    // Subagent turn budget (set by spawn_agent before the child starts).
+    if let Some(turns) = oz_core::subagent::take_max_turns(session_id) {
+        loop_config.max_turns = turns;
+    }
     loop_config.session_id = session_id.to_string();
     loop_config.lang = ctx.lang.clone();
     loop_config.verbose = true; // Enable SOP/skill loading logs for debugging
@@ -998,6 +1021,11 @@ pub async fn run_agent_for_session(
     loop_config.checkpoint_interval = 3; // save every 3 turns
     if resume {
         loop_config.resume_from = loop_config.checkpoint_dir.clone();
+    }
+    if let Some(note) = resume_note {
+        if !note.trim().is_empty() {
+            loop_config.resume_note = Some(note.to_string());
+        }
     }
     loop_config.trust_path = Some(
         project_ga_dir
@@ -1213,6 +1241,7 @@ pub async fn run_agent_for_session(
     let collector_handle: tokio::task::JoinHandle<()> = {
         let sid = session_id.to_string();
         let app_for_collector = app.clone();
+        let state_for_collector = Arc::clone(state);
         let events_for_collector = collected_events.clone();
         let arrivals_for_collector = event_arrival_ms.clone();
         let start_for_collector = start_ms.clone();
@@ -1291,28 +1320,81 @@ pub async fn run_agent_for_session(
                     lock_poison_guard(&arrivals_for_collector).push(arr);
                 }
 
-                // ask_user pending → system notification so the user knows
-                // the agent is waiting even when the app is in the background.
+                // ask_user pending → a first-class waiting state + a system
+                // notification. The dialog may be behind other windows (or
+                // the user may have walked away with the app focused), so
+                // the status is persisted and the notification is what
+                // actually reaches them.
                 if let oz_core_types::StreamEvent::AskUserPending { data } = &event {
-                    let question = serde_json::from_str::<serde_json::Value>(data)
-                        .ok()
+                    let parsed = serde_json::from_str::<serde_json::Value>(data).ok();
+                    let question = parsed
+                        .as_ref()
                         .and_then(|v| {
                             v.pointer("/payload/question")
                                 .or_else(|| v.get("question"))
                                 .and_then(|q| q.as_str())
-                                .map(|s| s.to_string())
                         })
-                        .unwrap_or_default();
-                    let question = truncate_chars(&question, 80);
-                    let (title, body) = if lang_for_collector == "zh" {
-                        ("OpenZen 需要你的回答", format!("等待你的回答：{question}"))
-                    } else {
-                        (
-                            "OpenZen needs you",
-                            format!("Waiting for your reply: {question}"),
-                        )
-                    };
-                    crate::notify_if_unfocused(&app_for_collector, title, &body);
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if !question.is_empty() {
+                        let candidates = parsed
+                            .as_ref()
+                            .and_then(|v| v.pointer("/payload/data/candidates"))
+                            .and_then(|c| c.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let tool_use_id = parsed
+                            .as_ref()
+                            .and_then(|v| v.get("tool_use_id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        {
+                            let mut store = lock_poison_guard(&state_for_collector.sessions);
+                            if let Some(entry) = store.get_mut(&sid) {
+                                entry.status = SessionStatus::Waiting;
+                                entry.pending_ask_user =
+                                    Some(oz_server::webui::sessions::PendingAskUserRecord {
+                                        tool_call_id: tool_use_id.clone(),
+                                        tool_use_id,
+                                        question: question.clone(),
+                                        candidates,
+                                        asked_at: chrono::Utc::now().to_rfc3339(),
+                                    });
+                            }
+                            store.save();
+                        }
+                        let question = truncate_chars(&question, 80);
+                        let (title, body) = if lang_for_collector == "zh" {
+                            ("OpenZen 需要你的回答", format!("等待你的回答：{question}"))
+                        } else {
+                            (
+                                "OpenZen needs you",
+                                format!("Waiting for your reply: {question}"),
+                            )
+                        };
+                        crate::notify_if_unfocused(&app_for_collector, title, &body);
+                    }
+                }
+                if let oz_core_types::StreamEvent::AskUserAnswered { tool_use_id } = &event {
+                    let mut store = lock_poison_guard(&state_for_collector.sessions);
+                    if let Some(entry) = store.get_mut(&sid) {
+                        let matches = entry
+                            .pending_ask_user
+                            .as_ref()
+                            .map(|p| p.tool_use_id == *tool_use_id)
+                            .unwrap_or(true);
+                        if matches {
+                            entry.pending_ask_user = None;
+                            entry.status = SessionStatus::Running;
+                        }
+                    }
+                    store.save();
                 }
 
                 if !matches!(event, oz_core_types::StreamEvent::ToolCallReady { .. }) {
@@ -1333,12 +1415,14 @@ pub async fn run_agent_for_session(
     let event_tx_for_after = event_tx.clone();
     loop_config.event_tx = Some(event_tx);
 
-    // Stop signal
-    let stop_signal = Arc::new(AtomicBool::new(false));
-    {
+    // Stop signal. A subagent host pre-registers one so a kill arriving
+    // before the loop starts is not lost; reuse it instead of replacing it.
+    let stop_signal = {
         let mut map = lock_poison_guard(&state.stop_signals);
-        map.insert(session_id.to_string(), stop_signal.clone());
-    }
+        map.entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    };
 
     let run_start = std::time::Instant::now();
 
@@ -1676,7 +1760,16 @@ pub async fn run_agent_for_session(
     {
         let mut store = lock_poison_guard(&state.sessions);
         if let Some(s) = store.get_mut(session_id) {
-            s.status = SessionStatus::Idle;
+            // A pending question means the run ended while the user was
+            // still deciding (app shutdown, crash). Keep the question AND
+            // the waiting status so the next launch can restore the dialog
+            // and accept a late answer. An answered question was already
+            // cleared by ask_user_response / AskUserAnswered.
+            s.status = if s.pending_ask_user.is_some() {
+                SessionStatus::Waiting
+            } else {
+                SessionStatus::Idle
+            };
             if let Some(msg) = assistant_msg {
                 s.messages.push(msg);
             }

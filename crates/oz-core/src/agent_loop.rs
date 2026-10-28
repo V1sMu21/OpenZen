@@ -226,7 +226,7 @@ fn process_tool_outcome(
     next_prompts: &mut Vec<String>,
     _full_response: &mut String,
     exit_reason: &mut Option<String>,
-    _config: &LoopConfig,
+    config: &LoopConfig,
     pending_ask_user: &mut Vec<PendingAskUser>,
     // Run-level (tool_name, success, message) log. Feeds the review
     // evidence (P0-6 ①) and the usage telemetry (T6).
@@ -240,6 +240,77 @@ fn process_tool_outcome(
             if oc.data.get("status").and_then(|v| v.as_str()) == Some("INTERRUPT")
                 && oc.data.get("intent").and_then(|v| v.as_str()) == Some("HUMAN_INTERVENTION")
             {
+                // Never park the run on an unaskable question. The tool
+                // rejects empty questions itself, but a checkpoint-resumed
+                // or imported call can still carry `question: ""`; waiting
+                // on it only burns wall-clock (8 × 300s in the 2026-10-23
+                // desktop session) with nothing for the user to answer.
+                let question = oc
+                    .data
+                    .pointer("/data/question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let reject = |reason: &str, tool_results: &mut Vec<ToolResultItem>| {
+                    tool_results.push(ToolResultItem {
+                        tool_use_id: tid.to_string(),
+                        content: serde_json::json!({
+                            "status": "REJECTED",
+                            "error": reason,
+                        })
+                        .to_string(),
+                        images: vec![],
+                    });
+                };
+                if question.is_empty() {
+                    let reason = "ask_user: empty question — no question was received. \
+                                  Re-issue the call with a non-empty `question`.";
+                    reject(reason, tool_results);
+                    next_prompts.push(if config.lang == "zh" {
+                        format!("[系统] {reason} 不要重试空提问；请重新构造问题。")
+                    } else {
+                        format!("[SYSTEM] {reason} Do not retry an empty question.")
+                    });
+                    run_outcomes.push((tool_name.to_string(), false, reason.to_string()));
+                    return;
+                }
+                // A model loop can emit the same question dozens of times in
+                // one turn. Asking it once is enough; duplicates become a
+                // tool result so the model sees why it is not being asked.
+                let duplicate = pending_ask_user.iter().any(|p| {
+                    p.payload
+                        .pointer("/data/question")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        == Some(question)
+                });
+                if duplicate {
+                    let reason = "ask_user: this exact question is already pending; \
+                                  it was not asked again.";
+                    reject(reason, tool_results);
+                    next_prompts.push(if config.lang == "zh" {
+                        format!("[系统] {reason} 等待用户回答即可，不要重复提问。")
+                    } else {
+                        format!("[SYSTEM] {reason} Wait for the answer instead of asking again.")
+                    });
+                    run_outcomes.push((tool_name.to_string(), true, reason.to_string()));
+                    return;
+                }
+                const MAX_ASK_USER_PER_TURN: usize = 4;
+                if pending_ask_user.len() >= MAX_ASK_USER_PER_TURN {
+                    let reason = format!(
+                        "ask_user: at most {MAX_ASK_USER_PER_TURN} questions can be asked in \
+                         one turn; this call was not asked."
+                    );
+                    reject(&reason, tool_results);
+                    next_prompts.push(if config.lang == "zh" {
+                        format!("[系统] {reason} 把剩余问题合并成一个问题。")
+                    } else {
+                        format!("[SYSTEM] {reason} Merge the remaining questions into one.")
+                    });
+                    run_outcomes.push((tool_name.to_string(), false, reason));
+                    return;
+                }
                 pending_ask_user.push(PendingAskUser {
                     tool_use_id: tid.to_string(),
                     tool_call_id: tc_id.to_string(),
@@ -495,6 +566,13 @@ async fn build_system_reminder(working_dir: &str, session_id: &str) -> String {
 }
 
 /// Cap on the accumulated `full_thinking` of one run (chars, ≈16k tokens).
+/// Maximum number of times the delivery gates may send one run back to work
+/// (see `gate_continuations` in the run loop). Four covers the realistic
+/// "one real defect, one fix, one re-check" sequences with headroom, and
+/// bounds the pathological case where verification keeps failing for reasons
+/// the agent cannot change (blocked commands, unreachable reviewer, …).
+const MAX_GATE_CONTINUATIONS: u32 = 4;
+
 const MAX_FULL_THINKING_CHARS: usize = 64 * 1024;
 
 /// How many screenshots may stay inline in the live history. Everything
@@ -570,6 +648,77 @@ async fn wait_for_summary(
     }
 }
 
+/// Ask the user to approve a mutating call whose target is outside the
+/// workspace.
+///
+/// `write` / `edit` / `patch` sit on the safety guard's safe list, so their
+/// workspace boundary is enforced inside the tool — which made an
+/// out-of-workspace edit a hard failure the model could only answer with a
+/// prose `ask_user`. Now the same approval channel as `code_run` decides, and
+/// a positive answer is recorded for this run so the tool lets the write
+/// through. `完全访问` (full access) auto-approves inside the handler, exactly
+/// like every other approval.
+///
+/// Returns `Ok(true)` = proceed, `Ok(false)` = the user declined,
+/// `Err` = the run was stopped or the approval channel failed.
+#[allow(clippy::too_many_arguments)]
+async fn approve_outside_write(
+    approval: &std::sync::Arc<dyn oz_safety::ApprovalHandler>,
+    session_id: &str,
+    tool_name: &str,
+    args: &serde_json::Value,
+    target: &std::path::Path,
+    timeout_secs: u64,
+    stop_signal: &AtomicBool,
+) -> Result<bool, ToolError> {
+    let pattern = format!("outside workspace: {}", target.display());
+    tracing::info!("[safety] requesting approval for {tool_name}/{pattern}");
+    let req = oz_safety::ApprovalRequest {
+        session_id: session_id.to_string(),
+        tool_name: tool_name.to_string(),
+        pattern: pattern.clone(),
+        arguments: args.clone(),
+        info: oz_safety::trust::ApprovalInfo {
+            tool_name: tool_name.to_string(),
+            pattern,
+            arguments_summary: format!("{tool_name} -> {}", target.display()),
+            approved_count: 0,
+            current_level: oz_safety::TrustLevel::AlwaysAsk,
+        },
+    };
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let fut = approval.request_approval(req, timeout);
+    tokio::pin!(fut);
+    let stop_wait = async {
+        loop {
+            if stop_signal.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    tokio::pin!(stop_wait);
+    let outcome = tokio::select! {
+        d = &mut fut => d,
+        _ = &mut stop_wait => {
+            tracing::info!("[safety] stop signal during path approval for {tool_name}");
+            return Err(ToolError::Custom("stopped".into()));
+        }
+    };
+    match outcome {
+        Ok(oz_safety::ApprovalDecision::Deny) => Ok(false),
+        // `BlockForever` for a path means "never write there": treat it as a
+        // denial for this call (the guard-level blocklist is a separate,
+        // tool-scoped mechanism and is not overloaded here).
+        Ok(oz_safety::ApprovalDecision::BlockForever) => Ok(false),
+        Ok(_) => {
+            oz_core_types::path_trust::approve_path(session_id, target);
+            Ok(true)
+        }
+        Err(e) => Err(ToolError::Custom(format!("approval error: {e}"))),
+    }
+}
+
 /// The main agent loop — matches Python agent_runner_loop() behavior.
 ///
 /// ```python
@@ -599,6 +748,9 @@ where
     let mut messages = Vec::with_capacity(2 + additional_messages.len());
     messages.push(Message::system(&system_prompt));
     messages.extend(additional_messages);
+    // Path approvals are per run: an answer the user gave in an earlier run
+    // must not silently authorize writes in this one.
+    oz_core_types::path_trust::forget_session(&config.session_id);
     // Dynamic context (date/cwd/git) goes in a `<system-reminder>` prefix on
     // the first user message — never in the system prompt — so the system
     // block stays byte-stable for prefix caching.
@@ -643,8 +795,18 @@ where
     let mut plan_hint_sent = false;
     let mut assertion_rounds: u32 = 0;
     let mut assertions_exhausted_checked = false;
+    // One-shot chance to rewrite a spec whose [verify] lines the policy refuses
+    // to execute (see the assertion gate below).
+    let mut assertion_policy_feedback_sent = false;
     let mut review_rounds: u32 = 0;
     let mut quality_note: Option<String> = None;
+    // Run-wide budget for every gate that sends the agent back to work
+    // (assertion failures, review defects, diff self-check, quick checks).
+    // Each gate has its own bound, but together they could still stack into a
+    // long "verify → fix → verify" cycle after the work was already done.
+    // Once this budget is spent, gates record their findings as the run's
+    // note and let the run finish.
+    let mut gate_continuations: u32 = 0;
     // P2: unresolved-suspicion closure — one-shot confirmation prompt.
     let mut suspicion_checked = false;
     // DQ1 one-shots + QA-4 contract captures.
@@ -855,6 +1017,14 @@ where
             }
             // Clear exit_reason — the user chose to resume, so don't
             // let the previous stop reason cause an immediate exit.
+        }
+    }
+    // A reply that arrived while the app was restarting cannot be a
+    // tool_result (the loop that owned the tool_use is gone). Carry it into
+    // the restored context as a plain user note so the model can continue.
+    if let Some(note) = config.resume_note.as_deref() {
+        if !note.trim().is_empty() {
+            messages.push(Message::user(note));
         }
     }
 
@@ -1399,6 +1569,33 @@ where
                                 &e,
                                 oz_core_types::LlmError::StreamError(m) if m.contains("timed out")
                             );
+                            // Retired model / bad key / bad request: waiting
+                            // and retrying cannot help (a 410 used to burn the
+                            // full 8-attempt backoff before surfacing).
+                            if e.is_permanent() {
+                                transition_state(
+                                    handler,
+                                    AgentState::Done("llm_error".into()),
+                                    "permanent LLM error",
+                                );
+                                crate::quality::log_gate_skipped(
+                                    &config.working_dir,
+                                    "llm_error",
+                                    crate::quality::deliverable_probe(&tool_sequence)
+                                        .all_files()
+                                        .len(),
+                                );
+                                agent_log(&format!("LLM error is permanent, not retrying: {e}"));
+                                return LoopOutcome {
+                                    turn,
+                                    exit_reason: "llm_error".into(),
+                                    data: Some(serde_json::json!({
+                                        "error": format!(
+                                            "模型不可用（不会重试）：{e}。请在 /model 切换到其他模型。"
+                                        ),
+                                    })),
+                                };
+                            }
                             if consecutive_llm_errors > max_llm_error_retries {
                                 let exit_reason = if is_timeout {
                                     "llm_timeout"
@@ -1567,6 +1764,30 @@ where
                         Err(e) => {
                             tracing::error!("LLM chat error: {e}");
                             consecutive_llm_errors += 1;
+                            if e.is_permanent() {
+                                transition_state(
+                                    handler,
+                                    AgentState::Done("llm_error".into()),
+                                    "permanent LLM error",
+                                );
+                                crate::quality::log_gate_skipped(
+                                    &config.working_dir,
+                                    "llm_error",
+                                    crate::quality::deliverable_probe(&tool_sequence)
+                                        .all_files()
+                                        .len(),
+                                );
+                                agent_log(&format!("LLM error is permanent, not retrying: {e}"));
+                                return LoopOutcome {
+                                    turn,
+                                    exit_reason: "llm_error".into(),
+                                    data: Some(serde_json::json!({
+                                        "error": format!(
+                                            "模型不可用（不会重试）：{e}。请在 /model 切换到其他模型。"
+                                        ),
+                                    })),
+                                };
+                            }
                             if consecutive_llm_errors > max_llm_error_retries {
                                 transition_state(
                                     handler,
@@ -2054,67 +2275,90 @@ where
                             // "Processing timed out" while the backend was
                             // alive (round5 P1-16).
                             const PERMIT_WAIT: Duration = Duration::from_secs(15);
-                            let _global_permit =
-                                match tokio::time::timeout(PERMIT_WAIT, global_sem.acquire()).await {
-                                    Ok(Ok(p)) => p,
-                                    Ok(Err(_)) => {
-                                        tracing::warn!(
-                                            "Global tool semaphore closed, skipping {}",
-                                            tool_name
-                                        );
-                                        return (
-                                            ii,
-                                            tool_name.clone(),
-                                            Err(ToolError::Custom("semaphore closed".into())),
-                                        );
-                                    }
-                                    Err(_) => {
-                                        tracing::warn!(
-                                            "Tool queue busy (>{}s): skipping {}",
-                                            PERMIT_WAIT.as_secs(),
-                                            tool_name
-                                        );
-                                        return (
-                                            ii,
-                                            tool_name.clone(),
-                                            Err(ToolError::Custom(
-                                                "tool queue busy: the process-wide tool slots are all \
-                                                 taken by other sessions; retry in a moment"
-                                                    .into(),
-                                            )),
-                                        );
-                                    }
-                                };
-                            let _permit = match &sem {
-                                Some(s) => {
-                                    match tokio::time::timeout(PERMIT_WAIT, s.acquire()).await {
-                                        Ok(Ok(p)) => Some(p),
+                            // Control-flow tools do no I/O and must never
+                            // queue behind 30-minute code_run calls. In the
+                            // 2026-10-23 session, six concurrent probes held
+                            // every tool slot and twelve ask_user calls were
+                            // dropped with "tool queue busy" after 15s; the
+                            // user was then waiting on questions the model
+                            // never got to ask.
+                            let control_tool =
+                                matches!(tool_name.as_str(), "ask_user" | "submit_plan");
+                            let _global_permit = if control_tool {
+                                None
+                            } else {
+                                Some(
+                                    match tokio::time::timeout(
+                                        PERMIT_WAIT,
+                                        global_sem.acquire(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(p)) => p,
                                         Ok(Err(_)) => {
                                             tracing::warn!(
-                                                "Semaphore closed, skipping {}",
+                                                "Global tool semaphore closed, skipping {}",
+                                                tool_name
+                                            );
+                                            return (
+                                                ii,
+                                                tool_name.clone(),
+                                                Err(ToolError::Custom("semaphore closed".into())),
+                                            );
+                                        }
+                                        Err(_) => {
+                                            tracing::warn!(
+                                                "Tool queue busy (>{}s): skipping {}",
+                                                PERMIT_WAIT.as_secs(),
                                                 tool_name
                                             );
                                             return (
                                                 ii,
                                                 tool_name.clone(),
                                                 Err(ToolError::Custom(
-                                                    "semaphore closed".into(),
+                                                    "tool queue busy: the process-wide tool slots are all \
+                                                     taken by other sessions; retry in a moment"
+                                                        .into(),
                                                 )),
                                             );
                                         }
-                                        Err(_) => {
-                                            return (
-                                                ii,
-                                                tool_name.clone(),
-                                                Err(ToolError::Custom(format!(
-                                                    "tool queue busy: this session already has {}                                                      concurrent tool call(s) running",
-                                                    cfg.max_concurrent_tools
-                                                ))),
-                                            );
+                                    },
+                                )
+                            };
+                            let _permit = if control_tool {
+                                None
+                            } else {
+                                match &sem {
+                                    Some(s) => {
+                                        match tokio::time::timeout(PERMIT_WAIT, s.acquire()).await {
+                                            Ok(Ok(p)) => Some(p),
+                                            Ok(Err(_)) => {
+                                                tracing::warn!(
+                                                    "Semaphore closed, skipping {}",
+                                                    tool_name
+                                                );
+                                                return (
+                                                    ii,
+                                                    tool_name.clone(),
+                                                    Err(ToolError::Custom(
+                                                        "semaphore closed".into(),
+                                                    )),
+                                                );
+                                            }
+                                            Err(_) => {
+                                                return (
+                                                    ii,
+                                                    tool_name.clone(),
+                                                    Err(ToolError::Custom(format!(
+                                                        "tool queue busy: this session already has {}                                                      concurrent tool call(s) running",
+                                                        cfg.max_concurrent_tools
+                                                    ))),
+                                                );
+                                            }
                                         }
                                     }
+                                    None => None,
                                 }
-                                None => None,
                             };
 
                             // Check cancellation again after acquiring permit
@@ -2139,6 +2383,95 @@ where
                                     "full_access",
                                 );
                             }
+                            // Out-of-workspace writes ask the user (2026-10-23):
+                            // a mutating call targeting a path outside the
+                            // workspace is approval-gated here, and the file
+                            // tool consults the recorded approval. A denial
+                            // keeps the hard boundary; `完全访问` auto-approves
+                            // inside the handler.
+                            if let Some(ref approval) = cfg.approval_handler {
+                                if let Some(target) = oz_core_types::path_trust::outside_workspace_target(
+                                    &tool_name,
+                                    &args,
+                                    &cfg.working_dir,
+                                ) {
+                                    if !oz_core_types::path_trust::is_path_approved(
+                                        &cfg.session_id,
+                                        &target,
+                                    ) {
+                                        // Already refused in this run: answer
+                                        // deterministically instead of opening
+                                        // the dialog again (the model retried
+                                        // after a denial in the 2026-10-23
+                                        // deny-path run, which would ping the
+                                        // user once per attempt).
+                                        if oz_core_types::path_trust::is_path_denied(
+                                            &cfg.session_id,
+                                            &target,
+                                        ) {
+                                            return (
+                                                ii,
+                                                tool_name.clone(),
+                                                Err(ToolError::Custom(format!(
+                                                    "{tool_name}: the user already denied writing \
+                                                     to `{}` in this task. Do not retry it — work \
+                                                     inside the workspace, or ask the user where \
+                                                     to put the file.",
+                                                    target.display()
+                                                ))),
+                                            );
+                                        }
+                                        let digest =
+                                            crate::audit::digest_args(&tool_name, &args);
+                                        match approve_outside_write(
+                                            approval,
+                                            &cfg.session_id,
+                                            &tool_name,
+                                            &args,
+                                            &target,
+                                            cfg.approval_timeout_secs,
+                                            stop_signal,
+                                        )
+                                        .await
+                                        {
+                                            Ok(true) => {
+                                                crate::audit::log_tool_call(
+                                                    &cfg.session_id,
+                                                    &tool_name,
+                                                    &digest,
+                                                    "approved(outside-workspace)",
+                                                );
+                                            }
+                                            Ok(false) => {
+                                                oz_core_types::path_trust::deny_path(
+                                                    &cfg.session_id,
+                                                    &target,
+                                                );
+                                                crate::audit::log_tool_call(
+                                                    &cfg.session_id,
+                                                    &tool_name,
+                                                    &digest,
+                                                    "denied(outside-workspace)",
+                                                );
+                                                return (
+                                                    ii,
+                                                    tool_name.clone(),
+                                                    Err(ToolError::Custom(format!(
+                                                        "{tool_name}: the user denied writing to \
+                                                         `{}` (outside the workspace). Do not \
+                                                         retry the same path — continue inside \
+                                                         the workspace, or ask the user where to \
+                                                         put the file.",
+                                                        target.display()
+                                                    ))),
+                                                );
+                                            }
+                                            Err(e) => return (ii, tool_name.clone(), Err(e)),
+                                        }
+                                    }
+                                }
+                            }
+
                             if let (Some(ref guard), Some(ref approval)) =
                                 (&cfg.safety_guard, &cfg.approval_handler)
                             {
@@ -2980,7 +3313,10 @@ where
         // After a write/edit turn, run a fast per-project check (cargo/tsc/
         // py_compile/go vet) and feed failures back immediately —
         // environment as ground truth, not just exit-time acceptance.
-        if config.quality_gates && next_prompts.is_empty() {
+        if config.quality_gates
+            && next_prompts.is_empty()
+            && gate_continuations < MAX_GATE_CONTINUATIONS
+        {
             let tool_names: Vec<String> = tool_meta.iter().map(|m| m.tool_name.clone()).collect();
             let written_files = crate::quality::collect_deliverables(&tool_sequence);
             if let Some(check_fb) = crate::quality::quick_verify_after_write(
@@ -2991,6 +3327,7 @@ where
             )
             .await
             {
+                gate_continuations += 1;
                 next_prompts.push(check_fb);
                 if exit_reason.is_some() {
                     exit_reason = None;
@@ -3027,10 +3364,19 @@ where
             // Wait for the user's reply. When ask_user_rx isn't wired
             // (TUI / CLI) we fall back to reading from stdin so the
             // existing TUI ask_user flow still works.
-            // Timeout (5 min) prevents infinite blocking if the frontend
-            // disconnects without responding — the agent loop continues
-            // with an empty reply rather than wedging the session.
-            const ASK_USER_TIMEOUT_SECS: u64 = 300;
+            //
+            // Desktop default: wait until the user answers (or the run is
+            // stopped). The old fixed 300s timeout assumed someone was
+            // watching the dialog; in practice the user is away, and each
+            // unanswered question stalled the run for five minutes — eight
+            // of them cost 40 minutes in the 2026-10-23 session. A
+            // non-zero `ask_user_timeout_secs` is still honoured for
+            // environments that need a bound.
+            enum AskUserWait {
+                Reply(Option<String>),
+                TimedOut,
+            }
+            let ask_timeout = config.ask_user_timeout_secs;
             let user_reply: String = if let Some(rx_arc) = &config.ask_user_rx {
                 // P1-i: replies are keyed by tool_use_id. Discard a stale
                 // reply for THIS question, then wait on exactly this key —
@@ -3060,15 +3406,21 @@ where
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 };
-                match tokio::time::timeout(Duration::from_secs(ASK_USER_TIMEOUT_SECS), wait_fut)
-                    .await
-                {
-                    Ok(Some(reply)) => reply,
-                    Ok(None) => {
+                let wait_result = if ask_timeout == 0 {
+                    AskUserWait::Reply(wait_fut.await)
+                } else {
+                    match tokio::time::timeout(Duration::from_secs(ask_timeout), wait_fut).await {
+                        Ok(reply) => AskUserWait::Reply(reply),
+                        Err(_elapsed) => AskUserWait::TimedOut,
+                    }
+                };
+                match wait_result {
+                    AskUserWait::Reply(Some(reply)) => reply,
+                    AskUserWait::Reply(None) => {
                         exit_reason.replace("stopped_by_user".to_string());
                         String::new()
                     }
-                    Err(_elapsed) => {
+                    AskUserWait::TimedOut => {
                         // P0-6 ③ / T9.3: an unanswered question is a STATE, not
                         // an empty reply. Persist a resume point, tell the UI
                         // the question is still open, and let the model
@@ -3077,7 +3429,7 @@ where
                         tracing::warn!(
                             "ask_user timed out after {}s — saving checkpoint and marking the \
                              question as unanswered",
-                            ASK_USER_TIMEOUT_SECS
+                            ask_timeout
                         );
                         save_stop_checkpoint_async(
                             config,
@@ -3114,14 +3466,14 @@ where
                             format!(
                                 "[系统] 上一条提问在 {}s 内没有得到回答（问题已保留，用户回来后仍可回答）。\
                                  请基于最合理的假设继续，并在最终交付说明里写明这一处假设。",
-                                ASK_USER_TIMEOUT_SECS
+                                ask_timeout
                             )
                         } else {
                             format!(
                                 "[SYSTEM] The previous question was not answered within {}s (it \
                                  stays open and can still be answered later). Continue from your \
                                  best assumption and state that assumption in the delivery notes.",
-                                ASK_USER_TIMEOUT_SECS
+                                ask_timeout
                             )
                         }
                     }
@@ -3141,6 +3493,17 @@ where
                 stdin.lock().read_line(&mut line).unwrap_or_default();
                 line.trim().to_string()
             };
+
+            // The reply is in hand: the run is no longer waiting, even if
+            // the next question is about to be asked. Runners use this to
+            // clear the session's `waiting` status.
+            if exit_reason.is_none() {
+                if let Some(ref tx) = config.event_tx {
+                    let _ = tx.send(StreamEvent::AskUserAnswered {
+                        tool_use_id: pending.tool_use_id.clone(),
+                    });
+                }
+            }
 
             if exit_reason.is_some() {
                 save_stop_checkpoint_async(
@@ -3471,13 +3834,18 @@ where
             // Surface recent uncertainty ("飞船可能朝左" / "seems off") before
             // exit so the agent confirms or fixes it instead of carrying an
             // open suspicion into delivery. One-shot per run.
-            if exit_reason.is_some() && config.quality_gates && !suspicion_checked {
+            if exit_reason.is_some()
+                && config.quality_gates
+                && !suspicion_checked
+                && gate_continuations < MAX_GATE_CONTINUATIONS
+            {
                 suspicion_checked = true;
                 if let Some(hint) = crate::quality::find_unresolved_suspicion(
                     &messages,
                     &tool_sequence,
                     &config.lang,
                 ) {
+                    gate_continuations += 1;
                     next_prompts.push(hint);
                     exit_reason = None;
                     transition_state(
@@ -3563,6 +3931,22 @@ where
                     .is_none()
                 {
                     auto_spec_attempted = true;
+                    if !compression_service.is_configured() {
+                        // No summary model → no assertions can be derived. On the
+                        // FIRST finishing turn this used to record nothing at
+                        // all, so the run reported `assertion_status=not_run`
+                        // (looking like "the gate never applied") instead of the
+                        // honest `synthesis_failed` the else-branch below sets on
+                        // a later turn. Same run, different answer depending on
+                        // how many finishing turns it happened to take
+                        // (2026-10-23 14:31 isolated E2E run).
+                        quality_outcome.assertion_status =
+                            crate::quality::AssertionStatus::SynthesisFailed;
+                        tracing::warn!(
+                            "[quality] no summary model configured — cannot derive task_spec.md \
+                             assertions (assertion_status=synthesis_failed)"
+                        );
+                    }
                     if compression_service.is_configured() {
                         if let Some(ref tx) = config.event_tx {
                             let _ = tx.send(StreamEvent::DataQualityGate {
@@ -3635,7 +4019,9 @@ where
                 // Failures feed back with real output; fix rounds are bounded
                 // by assertion_max_rounds, then we exit with a note.
                 if let Some(spec) = &spec_text {
-                    if assertion_rounds < config.assertion_max_rounds {
+                    if assertion_rounds < config.assertion_max_rounds
+                        && gate_continuations < MAX_GATE_CONTINUATIONS
+                    {
                         if let Some(ref tx) = config.event_tx {
                             let _ = tx.send(StreamEvent::DataQualityGate {
                                 stage: "assertions".to_string(),
@@ -3655,11 +4041,36 @@ where
                                 outcome.needs_approval.len()
                             );
                         }
+                        // A policy-rejected [verify] line never ran: the fix is
+                        // to rewrite the spec, not to re-run the command. One
+                        // bounded rewrite round keeps an auto-synthesized spec
+                        // from leaving the delivery permanently unverified
+                        // (2026-10-23 14:23 E2E: a piped assertion was counted
+                        // as a failure and burned the fix budget).
+                        if !assertion_policy_feedback_sent
+                            && gate_continuations < MAX_GATE_CONTINUATIONS
+                        {
+                            if let Some(fb) = crate::quality::format_assertion_policy_feedback(
+                                &outcome,
+                                &config.lang,
+                            ) {
+                                assertion_policy_feedback_sent = true;
+                                gate_continuations += 1;
+                                next_prompts.push(fb);
+                                exit_reason = None;
+                                transition_state(
+                                    handler,
+                                    AgentState::Thinking,
+                                    "quality gate: assertion not executable",
+                                );
+                            }
+                        }
                         let failures = outcome.failures;
                         contract_assertions =
                             Some((crate::quality::load_assertions(spec).len(), failures.len()));
                         if !failures.is_empty() {
                             assertion_rounds += 1;
+                            gate_continuations += 1;
                             next_prompts.push(crate::quality::format_assertion_feedback(
                                 &failures,
                                 &config.lang,
@@ -3859,10 +4270,19 @@ where
                     }
                     if let Some(ref v) = verdict_opt {
                         let high_count = v.issues.iter().filter(|i| i.severity == "high").count();
-                        // A reviewer that returned pass=true while listing
-                        // high-severity problems is still a must-fix signal
-                        // (P0-6 ③: high issues must trigger at least one redo).
-                        let must_fix = !v.pass || high_count > 0;
+                        // Only a review that names a DEFECT buys another round:
+                        // a failed verdict, or high-severity issues even when
+                        // the reviewer said pass (P0-6 ③). "I could not judge
+                        // from the evidence" (insufficient_evidence) is NOT a
+                        // defect the agent can fix — sending it back to work
+                        // made it re-run verification the gate itself blocks,
+                        // then get reviewed again with the same evidence: the
+                        // post-completion loop the desktop session showed on
+                        // 2026-10-23. Such a review ends the run as unverified.
+                        let review_found_defect = crate::quality::review_requires_fix(v);
+                        let must_fix = review_found_defect
+                            && gate_continuations < MAX_GATE_CONTINUATIONS
+                            && review_rounds < 2;
                         if v.pass && high_count == 0 {
                             // QC-1: success-side evidence.
                             crate::quality::log_quality_event(
@@ -3870,7 +4290,8 @@ where
                                 "review_passed",
                                 &format!("high={high_count}"),
                             );
-                        } else if must_fix && review_rounds < 2 {
+                        } else if must_fix {
+                            gate_continuations += 1;
                             crate::quality::log_reflection(
                                 &config.working_dir,
                                 "review_failed",
@@ -3886,7 +4307,7 @@ where
                                 AgentState::Thinking,
                                 "quality gate: review issues found",
                             );
-                        } else {
+                        } else if review_found_defect {
                             quality_note = Some(if config.lang == "zh" {
                                 format!("独立评审未通过（high 问题 ×{high_count}），修复预算已耗尽")
                             } else {
@@ -3894,6 +4315,17 @@ where
                                     "independent review failed ({high_count} high issue(s)), \
                                      fix budget exhausted"
                                 )
+                            });
+                        } else {
+                            // No defect named — almost always
+                            // `insufficient_evidence`. Say so honestly instead
+                            // of reporting a failure that was never found.
+                            quality_note = Some(if config.lang == "zh" {
+                                "独立评审未给出结论（证据不足），本次交付未经验证".to_string()
+                            } else {
+                                "independent review reached no verdict \
+                                 (insufficient evidence) — this delivery is unverified"
+                                    .to_string()
                             });
                         }
                     }
@@ -3905,6 +4337,7 @@ where
             if exit_reason.is_some()
                 && config.quality_gates
                 && !diff_selfcheck_done
+                && gate_continuations < MAX_GATE_CONTINUATIONS
                 && crate::quality::has_write_operations(&tool_sequence)
             {
                 diff_selfcheck_done = true;
@@ -3917,6 +4350,7 @@ where
                             ds.files_changed,
                             ds.churn
                         );
+                        gate_continuations += 1;
                         next_prompts.push(crate::quality::build_diff_selfcheck_prompt(
                             &ds.excerpt,
                             &config.lang,
@@ -5161,6 +5595,7 @@ mod tests {
 
     fn default_ctx() -> ToolContext {
         ToolContext {
+            is_subagent: false,
             working_dir: "/tmp".into(),
             assets_dir: "/tmp".into(),
             script_dir: "/tmp".into(),
@@ -5713,6 +6148,99 @@ mod tests {
         // Tool error should be captured but loop should continue to next turn
         assert_eq!(outcome.exit_reason, "EXITED");
         assert_eq!(outcome.turn, 2);
+    }
+
+    #[test]
+    fn ask_user_rejects_empty_and_dedupes_identical_questions() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let config = LoopConfig::default();
+        assert_eq!(
+            config.ask_user_timeout_secs, 0,
+            "desktop default must wait indefinitely for the user"
+        );
+        let failure_counts = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut results = Vec::new();
+        let mut prompts = Vec::new();
+        let mut full_response = String::new();
+        let mut exit_reason = None;
+        let mut pending = Vec::new();
+        let mut outcomes = Vec::new();
+        let args = serde_json::json!({});
+
+        let ask = |question: &str| StepOutcome {
+            data: serde_json::json!({
+                "status": "INTERRUPT",
+                "intent": "HUMAN_INTERVENTION",
+                "data": {"question": question, "candidates": []}
+            }),
+            next_prompt: None,
+            should_exit: false,
+            images: vec![],
+        };
+
+        process_tool_outcome(
+            Ok(ask("选 A 还是 B？")),
+            "ask_user",
+            "tid-1",
+            "tc-1",
+            0,
+            &mut results,
+            &mut prompts,
+            &mut full_response,
+            &mut exit_reason,
+            &config,
+            &mut pending,
+            &mut outcomes,
+            &failure_counts,
+            &args,
+        );
+        // The same question repeated in one turn must not create a second
+        // 5-minute (now indefinite) wait.
+        process_tool_outcome(
+            Ok(ask("选 A 还是 B？")),
+            "ask_user",
+            "tid-2",
+            "tc-2",
+            1,
+            &mut results,
+            &mut prompts,
+            &mut full_response,
+            &mut exit_reason,
+            &config,
+            &mut pending,
+            &mut outcomes,
+            &failure_counts,
+            &args,
+        );
+        assert_eq!(pending.len(), 1, "duplicate question must not park twice");
+        assert!(
+            results
+                .iter()
+                .any(|r| r.content.contains("already pending")),
+            "the duplicate call needs a tool result so the model can pair it"
+        );
+
+        // A checkpoint-resumed/imported empty question is never askable.
+        process_tool_outcome(
+            Ok(ask("")),
+            "ask_user",
+            "tid-3",
+            "tc-3",
+            2,
+            &mut results,
+            &mut prompts,
+            &mut full_response,
+            &mut exit_reason,
+            &config,
+            &mut pending,
+            &mut outcomes,
+            &failure_counts,
+            &args,
+        );
+        assert_eq!(pending.len(), 1, "empty question must not park the run");
+        assert!(results.iter().any(|r| r.content.contains("empty question")));
     }
 
     #[tokio::test]

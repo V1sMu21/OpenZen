@@ -73,6 +73,7 @@ pub fn spawn_agent_loop(
         harness_dir: None,
         session_id: String::new(),
         tool_budget_secs: 0,
+        is_subagent: false,
     };
 
     let backend: Box<dyn oz_llm::Session> = match sess_type {
@@ -303,6 +304,12 @@ pub fn handle_stream_event(app: &mut App, evt: StreamEvent) {
                     app.add_system(&format!("[ask_user] {}", q));
                 }
             }
+        }
+        StreamEvent::AskUserAnswered { tool_use_id } => {
+            // The run left the waiting state; the TUI has no status badge, so
+            // just note it in the transcript (the desktop runner uses this
+            // event to flip waiting → running).
+            app.add_system(&format!("[ask_user] answered ({tool_use_id})"));
         }
         StreamEvent::DataCompressingContext { .. } => {
             // Transient frontend notification; not rendered in TUI.

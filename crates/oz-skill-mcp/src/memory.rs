@@ -64,7 +64,7 @@ impl SkillMcpMemory {
         if !self.insight_path.exists() {
             return Ok(String::new());
         }
-        Ok(tokio::fs::read_to_string(&self.insight_path).await?)
+        read_text_lossy(&self.insight_path).await
     }
 
     /// Write/replace the insight file.
@@ -180,7 +180,7 @@ impl SkillMcpMemory {
         if !self.fact_path.exists() {
             return Ok(String::new());
         }
-        Ok(tokio::fs::read_to_string(&self.fact_path).await?)
+        read_text_lossy(&self.fact_path).await
     }
 
     /// Write/replace the fact file.
@@ -278,6 +278,33 @@ impl SkillMcpMemory {
     }
 }
 
+/// Read a memory file as text, tolerating invalid UTF-8.
+///
+/// `read_to_string` fails the whole operation on a single bad byte, and the
+/// fact file is append-only across versions — one mangled byte (a torn write
+/// in `~/.openzen/.skill_mcp/facts/global_mem.txt`, byte 5705) made every
+/// `long_term` call fail with "stream did not contain valid UTF-8" forever.
+/// Lossy decoding keeps the memory usable, and the next append rewrites the
+/// file as valid UTF-8, healing it.
+async fn read_text_lossy(path: &Path) -> Result<String, SkillMcpError> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => Ok(text),
+            Err(e) => {
+                let lossy = String::from_utf8_lossy(e.as_bytes()).into_owned();
+                tracing::warn!(
+                    "[memory] {} is not valid UTF-8 ({} byte(s) replaced) — reading lossily",
+                    path.display(),
+                    lossy.matches('\u{fffd}').count()
+                );
+                Ok(lossy)
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(SkillMcpError::Io(e)),
+    }
+}
+
 /// Monday of ISO week `Www` in `year`, from a `"2026-W32"`-style stem.
 /// ISO 8601: week 1 contains Jan 4; its Monday is Jan 4 minus its weekday offset.
 fn iso_week_monday(stem: &str) -> Option<chrono::NaiveDate> {
@@ -344,6 +371,39 @@ mod tests {
         // Count occurrences of "fact one"
         let count = facts.matches("fact one").count();
         assert_eq!(count, 1, "duplicate should be skipped");
+    }
+
+    #[tokio::test]
+    async fn corrupt_fact_file_does_not_block_memory_forever() {
+        // Regression: `~/.openzen/.skill_mcp/facts/global_mem.txt` held one
+        // invalid byte (position 5705), so `read_to_string` failed and EVERY
+        // `long_term(category="fact")` call returned
+        // "IO error: stream did not contain valid UTF-8" — permanently.
+        let dir = tmp_dir();
+        let mem = SkillMcpMemory::new(dir.path());
+        mem.append_fact("first fact").await.unwrap();
+
+        // Corrupt the file the way a torn write would: a lone continuation byte.
+        let path = dir.path().join("facts").join("global_mem.txt");
+        let mut bytes = tokio::fs::read(&path).await.unwrap();
+        bytes.extend_from_slice(&[0xbc, 0x89]);
+        bytes.extend_from_slice(b"- second fact\n");
+        tokio::fs::write(&path, &bytes).await.unwrap();
+
+        // Reading must degrade to lossy text instead of failing...
+        let facts = mem.read_facts().await.unwrap();
+        assert!(facts.contains("first fact"));
+        assert!(facts.contains("second fact"));
+
+        // ...and the next append must heal the file back to valid UTF-8.
+        mem.append_fact("third fact").await.unwrap();
+        let healed = tokio::fs::read(&path).await.unwrap();
+        assert!(
+            String::from_utf8(healed).is_ok(),
+            "append must rewrite the fact file as valid UTF-8"
+        );
+        let facts = mem.read_facts().await.unwrap();
+        assert!(facts.contains("first fact") && facts.contains("third fact"));
     }
 
     #[tokio::test]
