@@ -4057,10 +4057,7 @@ mod tests {
             return;
         }
         let session_id = "fe54c2c0-4150-4db3-bdf4-086543a1ab1d";
-        let working_dir = repo
-            .join("tests/longtask/2")
-            .to_string_lossy()
-            .to_string();
+        let working_dir = repo.join("tests/longtask/2").to_string_lossy().to_string();
 
         // load_best must pick the LATEST turn (033, turn 33), not an older
         // one with more messages.

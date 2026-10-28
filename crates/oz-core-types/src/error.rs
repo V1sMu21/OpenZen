@@ -415,7 +415,4 @@ mod tests {
         };
         assert!(caused_by_deprecation.is_permanent());
     }
-
 }
-
-
