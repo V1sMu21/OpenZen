@@ -1,6 +1,23 @@
 
 ## Unreleased
 
+### 🎨 Styling
+
+- Cargo fmt --all
+
+### 🐛 Bug Fixes
+
+- **ci:** Size-check the artifacts this job actually builds
+- **test:** Derive checkpoint fixture path from the crate dir
+- **ui:** Scope job strips to the current session and separate subagents
+- **llm:** Treat a missing endpoint (404) as permanent
+- **ui:** Expand job and subagent lists vertically
+
+### 🚀 Features
+
+- Background jobs, subagents and DSH-style chat bubble
+## v0.2.3 (2026-10-22)
+
 ### ⚙️ Miscellaneous Tasks
 
 - **release:** Publish only the tagged version's notes
@@ -53,6 +70,8 @@
 - **ci:** Brace variables followed by multibyte text in release.sh
 - **ci:** Brace the variable followed by multibyte text in the smoke script
 - **ci:** Skip Finder automation when bundling the dmg
+- **memory:** Drop an unused binding that broke the CI test build
+- **ci:** Declare the docs skip in the release test gate too
 
 ### 📚 Documentation
 
