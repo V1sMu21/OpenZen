@@ -164,12 +164,15 @@ mod tests {
     }
 
     #[test]
-    fn is_retryable_404_is_retryable() {
+    fn missing_endpoint_404_is_not_retried() {
+        // A 404 means the route/model does not exist; retrying the same
+        // request 8 times only delays the error the user needs to see.
         let err = LlmError::HttpError {
             status: 404,
             body: "not found".into(),
         };
-        assert!(err.is_retryable());
+        assert!(err.is_permanent());
+        assert!(!err.is_retryable());
     }
 
     #[test]
