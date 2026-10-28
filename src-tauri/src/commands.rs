@@ -4044,19 +4044,28 @@ mod tests {
     /// latest turn and the store is populated with renderable messages.
     #[test]
     fn recover_from_real_checkpoint_populates_store() {
-        // Real checkpoint dir for the long-task session.
-        let cp_dir = "/Users/macstu/Documents/apps/openzen/tests/longtask/2/openzen/checkpoints";
-        if !std::path::Path::new(cp_dir).exists() {
+        // Real checkpoint dir for the long-task session. Built from the
+        // crate dir so the test tree carries no machine-specific absolute
+        // path; the existence guard below still skips on CI.
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let cp_dir = repo
+            .join("tests/longtask/2/openzen/checkpoints")
+            .to_string_lossy()
+            .to_string();
+        if !std::path::Path::new(&cp_dir).exists() {
             tracing::info!("skipping: real checkpoint dir not present");
             return;
         }
         let session_id = "fe54c2c0-4150-4db3-bdf4-086543a1ab1d";
-        let working_dir = "/Users/macstu/Documents/apps/openzen/tests/longtask/2";
+        let working_dir = repo
+            .join("tests/longtask/2")
+            .to_string_lossy()
+            .to_string();
 
         // load_best must pick the LATEST turn (033, turn 33), not an older
         // one with more messages.
         let loaded = oz_core::checkpoint::load_best_loop_checkpoint(
-            std::path::Path::new(cp_dir),
+            std::path::Path::new(&cp_dir),
             session_id,
         );
         assert!(loaded.is_some(), "checkpoint must load");
@@ -4071,7 +4080,7 @@ mod tests {
             e.messages
                 .push(serde_json::json!({"role": "user", "content": "[FILE:trigger]" }));
         }
-        recover_session_from_checkpoints(&mut store, session_id, working_dir);
+        recover_session_from_checkpoints(&mut store, session_id, &working_dir);
 
         let entry = store.get(session_id).expect("session exists");
         // The trigger user message is preserved; checkpoint messages follow.
