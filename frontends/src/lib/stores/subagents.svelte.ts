@@ -22,7 +22,7 @@ function createSubagents() {
   let started = false;
 
   function upsert(s: SubagentView) {
-    if (currentSession && s.parent !== currentSession) return;
+    if (!currentSession || s.parent !== currentSession) return;
     const i = items.findIndex((x) => x.id === s.id);
     if (i >= 0) items[i] = { ...items[i], ...s };
     else items.push(s);
@@ -47,6 +47,7 @@ function createSubagents() {
       items = [];
       return;
     }
+    items = [];
     try {
       const res = (await tauriInvoke("agent_list", { parentSession: sessionId })) as {
         agents?: SubagentView[];
@@ -68,7 +69,7 @@ function createSubagents() {
 
   return {
     get items() {
-      return items;
+      return currentSession ? items.filter((s) => s.parent === currentSession) : [];
     },
     get active() {
       return items.filter((s) => s.status === "running");

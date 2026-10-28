@@ -25,8 +25,9 @@ function createJobs() {
   let started = false;
 
   function upsert(job: JobView) {
-    // Never mix owners, even if an event raced the session switch.
-    if (currentSession && job.owner_session !== currentSession) return;
+    // Never mix owners, even if an event raced the session switch. With no
+    // session selected there is nothing to show, so drop the event too.
+    if (!currentSession || job.owner_session !== currentSession) return;
     const i = items.findIndex((j) => j.id === job.id);
     if (i >= 0) items[i] = job;
     else items.push(job);
@@ -42,7 +43,6 @@ function createJobs() {
       await listen<{ event: "started" | "finished"; job: JobView }>("job://update", (e) => {
         // Another conversation's job must not leak into this strip: its ✕
         // would call job_kill with the wrong owner and fail silently.
-        if (currentSession && e.payload.job.owner_session !== currentSession) return;
         upsert(e.payload.job);
       });
     } catch {
@@ -56,9 +56,14 @@ function createJobs() {
       items = [];
       return;
     }
+    // Clear immediately: during the await the previous session's chips
+    // would otherwise stay on screen under the new conversation.
+    items = [];
     try {
       const res = (await tauriInvoke("job_list", { sessionId })) as { jobs?: JobView[] };
-      items = res?.jobs ?? [];
+      // Belt and braces: only this owner's jobs, even if a backend query
+      // ever widens its scope.
+      items = (res?.jobs ?? []).filter((j) => j.owner_session === sessionId);
     } catch {
       items = [];
     }
@@ -76,10 +81,20 @@ function createJobs() {
 
   return {
     get items() {
-      return items;
+      // Render-side fence: a stale event or a race must never show another
+      // conversation's jobs in this one.
+      return currentSession ? items.filter((j) => j.owner_session === currentSession) : [];
+    },
+    /** Background subagents are jobs too, but they are represented by the
+     *  subagent strip — counting them here made 2 jobs + 2 subagents read
+     *  as "4 个后台任务". */
+    get backgroundItems() {
+      return this.items.filter((j) => j.kind !== "subagent");
     },
     get active() {
-      return items.filter((j) => j.status === "running" || j.status === "stopping");
+      return this.backgroundItems.filter(
+        (j) => j.status === "running" || j.status === "stopping",
+      );
     },
     init,
     load,

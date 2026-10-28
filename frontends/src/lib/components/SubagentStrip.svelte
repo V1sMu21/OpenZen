@@ -34,32 +34,37 @@
 
 {#if shown.length > 0}
   <div class="sub-strip" role="status">
-    {#if collapsed}
-      <button class="ss-summary" class:live={anyRunning} title={$t("subagent.expand")} onclick={() => (expanded = true)}>
+    {#if shown.length > 1}
+      <button
+        class="ss-summary"
+        class:live={anyRunning}
+        aria-expanded={expanded}
+        title={expanded ? $t("subagent.collapse") : $t("subagent.expand")}
+        onclick={() => (expanded = !expanded)}
+      >
         <i class="ss-dot" class:run={anyRunning}></i>
         {$t("subagent.count").replace("{n}", String(shown.length))}
-        <span class="ss-chevron">▾</span>
+        <span class="ss-chevron">{expanded ? "▴" : "▾"}</span>
       </button>
     {:else}
-    <span class="ss-title">{$t("subagent.title")}</span>
-    {#each shown as s (s.id)}
-      <button
-        class="ss-chip"
-        class:needs={s.needs_input}
-        class:running={s.status === "running"}
-        onclick={() => openTranscript(s.id)}
-        title={s.label}
-      >
-        <i class="ss-dot"></i>
-        <span class="ss-label">{s.label}</span>
-        <span class="ss-state">
-          {s.needs_input ? $t("subagent.needsInput") : $t("subagent.running")}
-        </span>
-      </button>
-    {/each}
-    {#if shown.length > 1}
-      <button class="ss-collapse" title={$t("subagent.collapse")} onclick={() => (expanded = false)}>▴</button>
+      <span class="ss-title">{$t("subagent.title")}</span>
     {/if}
+    {#if expanded || shown.length === 1}
+      {#each shown as s (s.id)}
+        <button
+          class="ss-chip"
+          class:needs={s.needs_input}
+          class:running={s.status === "running"}
+          onclick={() => openTranscript(s.id)}
+          title={s.label}
+        >
+          <i class="ss-dot"></i>
+          <span class="ss-label">{s.label}</span>
+          <span class="ss-state">
+            {s.needs_input ? $t("subagent.needsInput") : $t("subagent.running")}
+          </span>
+        </button>
+      {/each}
     {/if}
   </div>
 {/if}
@@ -92,18 +97,6 @@
   .ss-summary:hover { border-color: var(--color-hairline-strong); color: var(--color-ink); }
   .ss-summary.live { border-color: var(--color-hairline-strong); }
   .ss-chevron { font-size: 9px; color: var(--color-muted); }
-  .ss-collapse {
-    flex: none;
-    width: 22px;
-    height: 22px;
-    border: none;
-    background: none;
-    color: var(--color-muted);
-    cursor: pointer;
-    font-size: 10px;
-  }
-  .ss-collapse:hover { color: var(--color-ink); }
-
   .ss-title {
     flex: none;
     font-size: 9.5px;

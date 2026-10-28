@@ -22,42 +22,42 @@
   // only appears after the user clicks it. A single job keeps its chip so
   // the common case needs no extra click.
   let expanded = $state(false);
-  const shown = $derived(jobs.items);
+  const shown = $derived(jobs.backgroundItems);
   const collapsed = $derived(shown.length > 1 && !expanded);
   const runningCount = $derived(shown.filter((j) => j.status === "running" || j.status === "stopping").length);
 </script>
 
 {#if shown.length > 0}
   <div class="job-strip" role="status" aria-label={$t("jobs.background")}>
-    {#if collapsed}
+    {#if shown.length > 1}
       <button
         class="js-summary"
         class:live={runningCount > 0}
-        title={$t("jobs.expand")}
-        onclick={() => (expanded = true)}
+        aria-expanded={expanded}
+        title={expanded ? $t("jobs.collapse") : $t("jobs.expand")}
+        onclick={() => (expanded = !expanded)}
       >
         <i class="js-dot" class:run={runningCount > 0}></i>
         {$t("jobs.count").replace("{n}", String(shown.length))}
-        <span class="js-chevron">▾</span>
+        <span class="js-chevron">{expanded ? "▴" : "▾"}</span>
       </button>
     {:else}
-    <span class="js-title">{$t("jobs.background")}</span>
-    {#each shown as job (job.id)}
-      <span class="js-chip" class:done={job.status !== "running" && job.status !== "stopping"}>
-        <i class="js-dot" class:run={job.status === "running" || job.status === "stopping"} class:bad={job.status === "failed"}></i>
-        <span class="js-id">{job.id}</span>
-        <span class="js-label" title={job.label}>{job.label}</span>
-        <span class="js-time">{elapsed(job)}</span>
-        {#if job.status === "running" || job.status === "stopping"}
-          <button class="js-kill" onclick={() => jobs.kill(job.id)} title={$t("jobs.stop")} aria-label={$t("jobs.stop")}>✕</button>
-        {:else}
-          <span class="js-state">{job.status === "completed" ? "✓" : job.status === "killed" ? "■" : "!"}</span>
-        {/if}
-      </span>
-    {/each}
-    {#if shown.length > 1}
-      <button class="js-collapse" title={$t("jobs.collapse")} onclick={() => (expanded = false)}>▴</button>
+      <span class="js-title">{$t("jobs.background")}</span>
     {/if}
+    {#if expanded || shown.length === 1}
+      {#each shown as job (job.id)}
+        <span class="js-chip" class:done={job.status !== "running" && job.status !== "stopping"}>
+          <i class="js-dot" class:run={job.status === "running" || job.status === "stopping"} class:bad={job.status === "failed"}></i>
+          <span class="js-id">{job.id}</span>
+          <span class="js-label" title={job.label}>{job.label}</span>
+          <span class="js-time">{elapsed(job)}</span>
+          {#if job.status === "running" || job.status === "stopping"}
+            <button class="js-kill" onclick={() => jobs.kill(job.id)} title={$t("jobs.stop")} aria-label={$t("jobs.stop")}>✕</button>
+          {:else}
+            <span class="js-state">{job.status === "completed" ? "✓" : job.status === "killed" ? "■" : "!"}</span>
+          {/if}
+        </span>
+      {/each}
     {/if}
   </div>
 {/if}
@@ -90,18 +90,6 @@
   .js-summary:hover { border-color: var(--color-hairline-strong); color: var(--color-ink); }
   .js-summary.live { border-color: var(--color-hairline-strong); }
   .js-chevron { font-size: 9px; color: var(--color-muted); }
-  .js-collapse {
-    flex: none;
-    width: 22px;
-    height: 22px;
-    border: none;
-    background: none;
-    color: var(--color-muted);
-    cursor: pointer;
-    font-size: 10px;
-  }
-  .js-collapse:hover { color: var(--color-ink); }
-
   .js-title {
     flex: none;
     font-size: 9.5px;

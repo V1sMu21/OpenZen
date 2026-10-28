@@ -38,13 +38,22 @@
     if (!isTauri()) return;
     try {
       const res = (await tauriInvoke("job_output", {
-        sessionId: jobs.items.find((j) => j.id === id)?.owner_session ?? "",
+        sessionId: jobs.backgroundItems.find((j) => j.id === id)?.owner_session ?? "",
         jobId: id,
       })) as { text?: string };
       jobText = res?.text || "";
       if (!jobText) jobText = $t("jobs.noOutput");
     } catch (e) {
       jobError = String(e);
+    }
+  }
+
+  async function cancelSubagent(id: string) {
+    if (!isTauri()) return;
+    try {
+      await tauriInvoke("agent_cancel", { childId: id });
+    } catch {
+      /* it may have just finished */
     }
   }
 
@@ -63,7 +72,7 @@
 <div class="bp">
   <div class="bp-tabs">
     <button class="bp-tab" class:on={tab === "jobs"} onclick={() => (tab = "jobs")}>
-      {$t("jobs.background")} <span class="bp-count">{jobs.items.length}</span>
+      {$t("jobs.background")} <span class="bp-count">{jobs.backgroundItems.length}</span>
     </button>
     <button class="bp-tab" class:on={tab === "subagents"} onclick={() => (tab = "subagents")}>
       {$t("subagent.title")} <span class="bp-count">{subagents.items.length}</span>
@@ -71,11 +80,11 @@
   </div>
 
   {#if tab === "jobs"}
-    {#if jobs.items.length === 0}
+    {#if jobs.backgroundItems.length === 0}
       <p class="bp-empty">{$t("jobs.empty")}</p>
     {:else}
       <ul class="bp-list">
-        {#each jobs.items as job (job.id)}
+        {#each jobs.backgroundItems as job (job.id)}
           <li class="bp-row" class:active={expandedJob === job.id}>
             <button class="bp-row-main" onclick={() => readJob(job.id)}>
               <span class="bp-state {job.status}"></span>
@@ -106,6 +115,9 @@
               {#if s.needs_input}<span class="bp-needs">{$t("subagent.needsInput")}</span>{/if}
               <span class="bp-status">{s.status}</span>
             </button>
+            {#if s.status === "running"}
+              <button class="bp-kill" onclick={() => cancelSubagent(s.id)} title={$t("jobs.stop")}>✕</button>
+            {/if}
           </li>
         {/each}
       </ul>
