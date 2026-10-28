@@ -32,6 +32,22 @@
   }
 </script>
 
+{#snippet agentRow(s: (typeof shown)[number])}
+  <button
+    class="ss-chip"
+    class:needs={s.needs_input}
+    class:running={s.status === "running"}
+    onclick={() => openTranscript(s.id)}
+    title={s.label}
+  >
+    <i class="ss-dot"></i>
+    <span class="ss-label">{s.label}</span>
+    <span class="ss-state">
+      {s.needs_input ? $t("subagent.needsInput") : $t("subagent.running")}
+    </span>
+  </button>
+{/snippet}
+
 {#if shown.length > 0}
   <div class="sub-strip" role="status">
     {#if shown.length > 1}
@@ -49,22 +65,14 @@
     {:else}
       <span class="ss-title">{$t("subagent.title")}</span>
     {/if}
-    {#if expanded || shown.length === 1}
-      {#each shown as s (s.id)}
-        <button
-          class="ss-chip"
-          class:needs={s.needs_input}
-          class:running={s.status === "running"}
-          onclick={() => openTranscript(s.id)}
-          title={s.label}
-        >
-          <i class="ss-dot"></i>
-          <span class="ss-label">{s.label}</span>
-          <span class="ss-state">
-            {s.needs_input ? $t("subagent.needsInput") : $t("subagent.running")}
-          </span>
-        </button>
-      {/each}
+    {#if expanded}
+      <div class="ss-list">
+        {#each shown as s (s.id)}
+          {@render agentRow(s)}
+        {/each}
+      </div>
+    {:else if shown.length === 1}
+      {@render agentRow(shown[0])}
     {/if}
   </div>
 {/if}
@@ -72,7 +80,8 @@
 <style>
   .sub-strip {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 8px;
     padding: 8px 24px 0;
     overflow-x: auto;
@@ -104,6 +113,18 @@
     text-transform: uppercase;
     color: var(--color-muted);
   }
+
+  .ss-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+    max-width: 620px;
+    max-height: 168px;
+    overflow-y: auto;
+  }
+  .ss-list .ss-chip { width: 100%; max-width: none; }
+  .ss-list .ss-label { flex: 1; max-width: none; }
 
   .ss-chip {
     display: inline-flex;

@@ -27,6 +27,20 @@
   const runningCount = $derived(shown.filter((j) => j.status === "running" || j.status === "stopping").length);
 </script>
 
+{#snippet jobRow(job: (typeof shown)[number])}
+  <span class="js-chip" class:done={job.status !== "running" && job.status !== "stopping"}>
+    <i class="js-dot" class:run={job.status === "running" || job.status === "stopping"} class:bad={job.status === "failed"}></i>
+    <span class="js-id">{job.id}</span>
+    <span class="js-label" title={job.label}>{job.label}</span>
+    <span class="js-time">{elapsed(job)}</span>
+    {#if job.status === "running" || job.status === "stopping"}
+      <button class="js-kill" onclick={() => jobs.kill(job.id)} title={$t("jobs.stop")} aria-label={$t("jobs.stop")}>✕</button>
+    {:else}
+      <span class="js-state">{job.status === "completed" ? "✓" : job.status === "killed" ? "■" : "!"}</span>
+    {/if}
+  </span>
+{/snippet}
+
 {#if shown.length > 0}
   <div class="job-strip" role="status" aria-label={$t("jobs.background")}>
     {#if shown.length > 1}
@@ -44,20 +58,16 @@
     {:else}
       <span class="js-title">{$t("jobs.background")}</span>
     {/if}
-    {#if expanded || shown.length === 1}
-      {#each shown as job (job.id)}
-        <span class="js-chip" class:done={job.status !== "running" && job.status !== "stopping"}>
-          <i class="js-dot" class:run={job.status === "running" || job.status === "stopping"} class:bad={job.status === "failed"}></i>
-          <span class="js-id">{job.id}</span>
-          <span class="js-label" title={job.label}>{job.label}</span>
-          <span class="js-time">{elapsed(job)}</span>
-          {#if job.status === "running" || job.status === "stopping"}
-            <button class="js-kill" onclick={() => jobs.kill(job.id)} title={$t("jobs.stop")} aria-label={$t("jobs.stop")}>✕</button>
-          {:else}
-            <span class="js-state">{job.status === "completed" ? "✓" : job.status === "killed" ? "■" : "!"}</span>
-          {/if}
-        </span>
-      {/each}
+    {#if expanded}
+      <!-- Vertical list: with many jobs a horizontal row pushed the collapse
+           control off-screen. -->
+      <div class="js-list">
+        {#each shown as job (job.id)}
+          {@render jobRow(job)}
+        {/each}
+      </div>
+    {:else if shown.length === 1}
+      {@render jobRow(shown[0])}
     {/if}
   </div>
 {/if}
@@ -65,7 +75,8 @@
 <style>
   .job-strip {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 8px;
     padding: 8px 24px 0;
     overflow-x: auto;
@@ -97,6 +108,18 @@
     color: var(--color-muted);
     text-transform: uppercase;
   }
+
+  .js-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+    max-width: 620px;
+    max-height: 168px;
+    overflow-y: auto;
+  }
+  .js-list .js-chip { width: 100%; max-width: none; }
+  .js-list .js-label { flex: 1; max-width: none; }
 
   .js-chip {
     display: inline-flex;
