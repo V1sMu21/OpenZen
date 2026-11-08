@@ -4,6 +4,11 @@
   import { isTauri } from "../api/tauri";
   import { t } from "../i18n";
 
+  /** Where the trigger lives. The sidebar variant pins the popover to the
+   *  viewport (the sidebar clips overflow, and its footer is at the bottom
+   *  edge, so an absolutely-positioned card would be cut off). */
+  let { variant = "titlebar" }: { variant?: "titlebar" | "sidebar" } = $props();
+
   /** 更新提示（预览 §08）：
    *
    *  不点即装。图标只打开一张卡：版本 / 体积 / 摘要 / 三个动作。
@@ -118,6 +123,7 @@
       class:available={phase === "available"}
       class:downloading={phase === "downloading"}
       class:ready={phase === "ready"}
+      class:sidebar={variant === "sidebar"}
       onclick={() => (open = !open)}
       title={titleText}
       aria-label={titleText}
@@ -141,7 +147,7 @@
     </button>
 
     {#if open}
-      <div class="update-card" role="dialog" aria-label={$t("update.title")}>
+      <div class="update-card" class:sidebar={variant === "sidebar"} role="dialog" aria-label={$t("update.title")}>
         <div class="uc-head">
           <span class="uc-badge" class:ready={phase === "ready"}>
             {#if phase === "ready"}✓{:else if phase === "downloading"}↓{:else}↑{/if}
@@ -254,6 +260,24 @@
     box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.85);
     padding: 16px;
     animation: soak-in 0.18s var(--ease-soak) both;
+  }
+
+  /* Sidebar trigger: the sidebar is 276px wide with overflow hidden and the
+     trigger sits on the bottom edge, so anchor the card to the viewport. It
+     opens upward, aligned with the sidebar's left padding. */
+  .update-btn.sidebar {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+  }
+  .update-card.sidebar {
+    position: fixed;
+    top: auto;
+    right: auto;
+    left: 12px;
+    bottom: 54px;
+    width: min(320px, calc(100vw - 24px));
+    z-index: 80;
   }
 
   .uc-head {

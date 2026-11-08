@@ -83,9 +83,9 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
-    padding: 8px 24px 0;
-    overflow-x: auto;
-    scrollbar-width: none;
+    width: 100%;
+    min-width: 0;
+    padding: 0;
   }
   .sub-strip::-webkit-scrollbar { display: none; }
 
@@ -119,7 +119,6 @@
     flex-direction: column;
     gap: 4px;
     width: 100%;
-    max-width: 620px;
     max-height: 168px;
     overflow-y: auto;
   }
