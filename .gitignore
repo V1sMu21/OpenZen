@@ -137,3 +137,6 @@ design/
 # NOTE: anchored — an unanchored `tests/` also swallowed crates/*/tests/ (real
 # Rust integration tests that must stay tracked).
 /tests/
+
+# Local screenshot/scratch workspace (dev-only PNGs, never tracked)
+/work/
