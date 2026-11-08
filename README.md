@@ -12,7 +12,7 @@
 
 <img src="assets/bench/runtime-demo.gif" width="100%">
 
-*Real runtime capture — a local model, a ~2.5-minute task compressed into a 7-second loop: Kai-style handwriting **thinking blocks**, **tool calls** as underglaze patterns (one write fails, auto-relocates and succeeds), tokens **streaming into the glaze**, a 2/2 checklist closing out, the 📋 **delivery contract**, and Ah-Qing settling back into its "done" pose.*
+*Real runtime capture on v0.2.6 (~1.5 minutes compressed into a 15-second loop): one prompt → the agent writes a celadon card and opens it in the **artifact preview panel**, which renders the finished page live; Ah-Qing sits by the session list with its "done" pose.*
 
 **⬇️ [Download the latest dmg](https://github.com/V1sMu21/OpenZen/releases/latest)** — drag into Applications, point OpenZen at a local model server, and go. No account, no telemetry, works offline.
 
