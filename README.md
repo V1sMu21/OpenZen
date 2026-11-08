@@ -20,6 +20,7 @@
 - 🧠 **Memory that compounds** — a 7×24 resident companion: checkpoint resume, a lessons ledger, reflection loops; your history is an asset, not a scrollback buffer;
 - ✅ **Quality-gated delivery** — acceptance assertions, independent review and a mandatory delivery contract before a task may call itself done;
 - 🏺 **A desktop you can live in** — Song-celadon "artifact grammar" UI, a streaming timeline that folds itself, and a desktop kitten; the same agent also answers on WeChat / Feishu / Telegram.
+- 🎯 **Long work that stays accounted for** — background jobs, parallel subagents and goal mode (acceptance command + budget), plus an opt-in steward that records every step, detects drift before any model does, and can roll a step back.
 
 ---
 
@@ -35,14 +36,14 @@ OpenZen is designed for that machine: a **fully local** autonomous agent harness
 
 It's also a **7×24 resident companion**: interrupted sessions resume from checkpoints, and every delivery — success or failure — is remembered and turned into experience for the next task. That's the compounding a session-based harness cannot do.
 
-> Current form: macOS Apple Silicon desktop app (Tauri). TUI and WebUI have been removed from the product surface; the desktop experience is the focus.
+> Current form: a macOS Apple Silicon desktop app (Tauri). The same `openzen` binary also ships a CLI/TUI and a local WebUI server (`openzen serve`) for headless machines and remote use.
 
 ---
 
 ## Quick Start
 
 1. **Download** the latest [dmg](https://github.com/V1sMu21/OpenZen/releases/latest) (CI builds one for every release) and drag it into Applications;
-2. **Bring a model** — start any OpenAI-compatible local server: oMLX on Apple Silicon (MLX, up to 256K context), LM Studio, Ollama or `llama.cpp-server`; a cloud API works too (25 model slots, local-first);
+2. **Bring a model** — start any OpenAI-compatible local server: oMLX on Apple Silicon (MLX, up to 256K context), LM Studio, Ollama or `llama.cpp-server`; a cloud API works too (any number of named model entries, local-first);
 3. **Point OpenZen at it** — settings → models (defaults to `http://127.0.0.1:8000/v1`);
 4. **Talk** — the agent plans, runs tools, verifies its own delivery, and remembers.
 
@@ -56,7 +57,7 @@ It's also a **7×24 resident companion**: interrupted sessions resume from check
 
 ### 1. Fully local: zero-cloud inference & memory
 
-oMLX inference + ERME memory + all data (`workspace/`, `memory_erme/`, `harness/`, `logs/`) live on your machine. 25 configurable model slots (local oMLX primary, cloud APIs optional). Works offline.
+oMLX inference + ERME memory + all data (`workspace/`, `memory_erme/`, `harness/`, `logs/`) live on your machine. Any number of named model entries in `mykey.toml` (local oMLX primary, cloud APIs optional; entries can share one provider credential). Works offline.
 
 ### 2. ERME — entropy-reduced memory engine (in-house)
 
@@ -69,7 +70,7 @@ A layered engine for long-term personal memory, built on the philosophy of **ent
 | **L2 Vector index** | microsecond (resident in memory) | HNSW (384-dim) + MLX embeddings (pure-Rust fallback without MLX) |
 | **L3 Persistence** | millisecond | Budget control (daily token cap + importance-scored per-item eviction) |
 
-Deeply optimized for the Mac Studio M3 Ultra's 256GB unified memory: L0/L1/L2 live fully resident in RAM, recalling at nanosecond / nanosecond / microsecond levels. With 256K tokens of new memory per day, a year of memory occupies only ~**100MB** locally — the budget controller guarantees it never grows unbounded. Plus conflict resolution (supplement / sublimate / overturn), a quarantine zone (bad conjectures never pollute memory) and reality anchoring. 221 tests.
+Deeply optimized for the Mac Studio M3 Ultra's 256GB unified memory: L0/L1/L2 live fully resident in RAM, recalling at nanosecond / nanosecond / microsecond levels. With 256K tokens of new memory per day, a year of memory occupies only ~**100MB** locally — the budget controller guarantees it never grows unbounded. Plus conflict resolution (supplement / sublimate / overturn), a quarantine zone (bad conjectures never pollute memory) and reality anchoring. 301 tests.
 
 ### 3. Memory compounding — what session-based harnesses can't do
 
@@ -77,55 +78,68 @@ Deeply optimized for the Mac Studio M3 Ultra's 256GB unified memory: L0/L1/L2 li
 - **Harness refine** (mechanism borrowed from Prime Agent): the model **proactively writes reusable lessons into an audited ledger** (`harness_state.json`) — writes require verifiable evidence, with snapshot rollback; each session injects `## Persistent Harness Lessons` ranked by Jaccard relevance;
 - **Reflection loop**: successes and failures settle into `reflections.jsonl`, readable by future sessions.
 
-### 4. Delivery quality gates (QA–QE)
+### 4. Background jobs, subagents and goals
+
+Long work no longer blocks the conversation:
+
+- **Background jobs** — long commands run as tracked jobs; the composer shows a live strip (`5 background jobs`) that expands into a vertical list and is scoped to the session that started it;
+- **Subagents** — a turn can fan out into parallel subagents (slot-capped per parent), shown in their own strip next to the jobs;
+- **Goal mode** — declare a goal plus a contract (acceptance command, risk level, budget: attempts / wall time / tokens / turns / no-progress rounds). A gate executes the acceptance command for real, a guardian turns goal state + gate evidence into a verdict, and the runtime stops on budget exhaustion instead of looping forever. Goals persist in a dedicated SQLite store and are driven through the same chat path, so Stop, approvals and SSE keep working unchanged.
+
+### 5. Delivery quality gates (QA–QE)
 
 Turning "delivery quality" from an intention into a measurable, regression-tested engineering system:
 
 - **Acceptance assertions**: tasks first create a `task_spec.md` with real executable `[verify]` commands, enforced before exit (minimal assertions auto-synthesized when no spec exists);
 - **Independent review**: a clean-context review (spec + deliverables + reply), preferably with a different model / temperature=0 to escape self-review blind spots;
 - **Diff self-check**: a final pass of the whole diff against the spec, file by file;
-- **Delivery contract**: a mandatory three-part report — what was done / how it was verified / what was left;
+- **Delivery contract**: a mandatory report — how it was verified / what was left open. The desktop folds the note out of the reply body, so copying the answer copies only the answer;
 - **Post-write verification chains**: auto-runs the lightweight check for the project type (`cargo check` / `tsc` / `py_compile` / `go vet` …);
 - **Ledger feedback**: quality failures become ledger entries that future sessions automatically avoid.
 
-### 5. Artifact-grammar UI: a piece of Ru-ware celadon
+### 6. Steward: flight recorder and supervision layer (opt-in)
+
+Off by default (`OPENZEN_STEWARD=1`, or the steward panel). When on, every step is written to a local **SQLite flight recorder**, and **deterministic detectors** run before any model: a stalled ticket, a repeated tool call, a write outside the contract's scope, a budget overrun, or a self-declared completion without evidence. A local **StartLux** decision model answers the remaining ambiguous questions as typed verdicts (never free text), the correction engine can nudge the worker or roll back the files a step touched (file-scoped journal — unrelated edits survive), and the report composer writes the post-mortem. No hosted decision API: supervision stays as local as inference.
+
+### 7. Artifact-grammar UI: a piece of Ru-ware celadon
 
 The desktop is not a "software panel" — it's a **Ru-ware porcelain**: the "sky-clearing-after-rain" celadon aesthetic translated into an interface language.
 
 - **Three-color restraint**: glaze-white (surface), celadon (the only functional color), ink (text); the sole exception is cinnabar (seals and errors);
 - **Glaze as interface**: messages are carvings on the glaze, tool calls are underglaze patterns — no cards, no glassmorphism;
 - **Cultural anchors**: Song-serif epigraphy + Kai-style handwriting (thinking blocks), "Zen"/"Speak" seals, stems-and-branches dating ("Bingwu year, made"), colophon signing ("Xiuyan, inscribed");
+- **Artifact preview panel**: the right panel renders html / markdown / image / pdf / office / spreadsheet / code / diff / terminal artifacts; it sits side by side when the window is wide enough and floats over the conversation when it isn't;
 - **Complexity contract**: everything beautiful is O(1) — tiled textures decoded once on GPU, timeline folding that never mounts DOM, animations that only touch the compositor (10h soak target: RSS ≤ 350MB).
 
-### 6. Efficiency discipline
+### 8. Efficiency discipline
 
 - System prompt ~4.4KB (~1.1k tokens) vs Claude Code's 20k–43k tokens;
 - Local prompt cache ~96% typical, 98% on long tasks (see Bench);
 - Session distillation **fully async** (job queue + leases + crash takeover), never blocking the agent loop;
-- Parallel tool execution; linkme distributed slices for zero-copy tool registration (20+ built-in tools + MCP bridge);
+- Parallel tool execution; linkme distributed slices for zero-copy tool registration (30 built-in tools + MCP bridge);
 - Frontend streaming rendering is O(1) (timeline folding + virtual scrolling + compositor-only animations; the DOM stays constant across long sessions) — which is why peak RSS stays low (180–240MB) and responses stay snappy, a real fit for locally deployed models.
 
-### 7. Lightweight
+### 9. Lightweight
 
 | Metric | Value |
 |---|---|
-| Single binary | 29MB |
-| Installer (dmg, arm64) | 18.1MB |
+| Single binary | 30.6MB |
+| Installer (dmg, arm64) | 19.1MB |
 | Idle memory | ~180MB (desktop main process, measured) |
 | Peak memory in bench | 180–240MB RSS |
-| Tests | 600+ workspace + 221 ERME |
+| Tests | 1563 workspace + 301 ERME |
 
-### 8. Desktop experience
+### 10. Desktop experience
 
-Tauri (Rust + Svelte 5): SSE streaming, `ask_user` confirmation dialogs, sidebar + right panel, settings panel (models / skills / MCP / **soul status** / token stats), auto-update. Long tasks don't cause progress anxiety — the timeline folds itself into a scroll.
+Tauri (Rust + Svelte 5): SSE streaming; `ask_user` dialogs that really wait (amber *waiting* state, restored after a restart, notification if you stepped away); a per-session working-directory picker; job and subagent strips; todo/reminder chips above the composer instead of a permanent side rail; a collapsible delivery note; the artifact preview panel; a settings panel (models / skills / MCP / **soul status** / token stats); and an in-app updater. Long tasks don't cause progress anxiety — the timeline folds itself into a scroll.
 
-### 9. Ah-Qing: the soul made visible
+### 11. Ah-Qing: the soul made visible
 
 OpenZen's agent is named **Ah-Qing by default** (users may rename it anytime). There's also a desktop kitten of the same name — a six-state animation prototype (`idle / working / thinking / waiting / error / done`), with the animation assets produced by a **locally deployed ComfyUI + MiniMax H3 (MLX build)**. Its "mood" comes from the ERME soul layer (`get_memory_status`) — "unity of knowing and doing" made visible.
 
 > Current stage: six-state animation prototype and a soul-visibility experiment; full desktop interactions are still being polished.
 
-### 10. Messaging platform access: WeChat / Feishu / Telegram
+### 12. Messaging platform access: WeChat / Feishu / Telegram
 
 The same agent kernel also connects to **WeChat, Feishu (Lark) and Telegram** via the `oz-platform-*` bridge crates — the companion on your desktop also keeps watch in the places you chat every day; 7×24 residency goes beyond the desktop.
 
@@ -184,7 +198,7 @@ In one line: ZCode and Hermes also support local models and both have memory —
 
 ## Comparison with Existing Memory Engines
 
-**ERME (in-house)** — three layers plus a soul, deeply optimized for M3 Ultra unified memory: L1 working cache (nanosecond; WAL crash recovery) → L2 vector index (microsecond; HNSW semantic recall, MLX-accelerated embeddings / pure-Rust fallback) → L3 persistence (millisecond; budget control: daily token cap + importance-scored per-item forgetting); L0 soul layer (portrait / life narrative / reflection / idle rambling / quarantine evolution), also memory-resident at the nanosecond level. At 256K tokens of new memory per day, a year occupies only ~100MB. Three-state conflict resolution (supplement / sublimate / overturn), a quarantine zone ensuring bad conjectures never pollute memory. 221 tests, pure Rust, no external services.
+**ERME (in-house)** — three layers plus a soul, deeply optimized for M3 Ultra unified memory: L1 working cache (nanosecond; WAL crash recovery) → L2 vector index (microsecond; HNSW semantic recall, MLX-accelerated embeddings / pure-Rust fallback) → L3 persistence (millisecond; budget control: daily token cap + importance-scored per-item forgetting); L0 soul layer (portrait / life narrative / reflection / idle rambling / quarantine evolution), also memory-resident at the nanosecond level. At 256K tokens of new memory per day, a year occupies only ~100MB. Three-state conflict resolution (supplement / sublimate / overturn), a quarantine zone ensuring bad conjectures never pollute memory. 301 tests, pure Rust, no external services.
 
 | Alternative | Mechanism | Difference |
 |---|---|---|
@@ -280,10 +294,14 @@ OpenZen follows the excellent experience of preceding harnesses, with explicit c
 │ OpenZen.app (Tauri desktop · Rust + Svelte 5 · Artifact UI) │
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐ │
 │  │ oz-core      │  │ oz-tools     │  │ oz-memory + ERME  │ │
-│  │ agent_loop   │  │ 20+ built-in │  │ L0 soul layer     │ │
+│  │ agent_loop   │  │ 30 built-in  │  │ L0 soul layer     │ │
 │  │ checkpoints  │  │ oz-mcp bridge│  │ L1/L2/L3 memory   │ │
 │  │ quality gates│  │ oz-skill-mcp │  │ harness ledger    │ │
 │  └──────────────┘  └──────────────┘  └───────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ oz-steward (opt-in) · flight recorder · detectors      │ │
+│  │ StartLux decisions · rollback journal · goal runtime   │ │
+│  └────────────────────────────────────────────────────────┘ │
 └──────────────────────────┬─────────────────────────────────┘
                            │ http://127.0.0.1:8000/v1 (OpenAI-compatible)
 ┌──────────────────────────▼─────────────────────────────────┐
@@ -291,23 +309,23 @@ OpenZen follows the excellent experience of preceding harnesses, with explicit c
 └────────────────────────────────────────────────────────────┘
 ```
 
-`oz-core` is the kernel (agent loop / checkpoints / compression / quality gates / reflection); `oz-tools` registers tools automatically via linkme distributed slices; `oz-memory` integrates the vendored in-house ERME engine; `oz-mcp` / `oz-skill-mcp` bridge external tools and skill stores; `oz-platform-feishu / oz-platform-telegram / oz-platform-wechat` provide messaging platform access; `src-tauri + frontends` is the artifact-grammar shell. 21 `oz-*` crates form one Rust workspace ([Cargo.toml](Cargo.toml)).
+`oz-core` is the kernel (agent loop / checkpoints / compression / quality gates / reflection / subagents); `oz-core-types` holds the shared wire types; `oz-tools` registers tools automatically via linkme distributed slices; `oz-memory` integrates the vendored in-house ERME engine; `oz-mcp` / `oz-skill-mcp` bridge external tools and skill stores; `oz-steward` is the optional supervision and goal layer; `oz-platform-feishu / oz-platform-telegram / oz-platform-wechat` provide messaging platform access; `src-tauri + frontends` is the artifact-grammar shell. 23 `oz-*` crates form one Rust workspace ([Cargo.toml](Cargo.toml)).
 
 ---
 
 ## Roadmap & Status
 
-**v0.1.0 released 2026-08**, followed by: full ERME integration (M1–M4 + P0–P4), QA–QE quality gates (five groups, twelve items), artifact-grammar UI migration, settings panel, and the harness ledger loop.
+**v0.1.0 released 2026-08; v0.2.6 is the current release (2026-11).** Between them: full ERME integration (M1–M4 + P0–P4), QA–QE quality gates, the artifact-grammar UI migration, background jobs and subagents, the artifact preview panel, goal mode, the opt-in steward, and a round of gateway-leak hardening in the streaming parser.
 
-- ✅ Done: streaming protocol, desktop app, Codex-style harness upgrades (U1–U6), ERME integration, quality gates, artifact-grammar migration
-- 🚧 In progress: artifact-grammar complexity audit (10h soak RSS ≤ 350MB), long-task bench validation, Ah-Qing animation
+- ✅ Done: streaming protocol, desktop app, ERME integration, quality gates, artifact-grammar migration, background jobs / subagents, artifact preview panel, goal mode, steward (opt-in)
+- 🚧 In progress: steward default-on hardening, artifact-grammar complexity audit (10h soak RSS ≤ 350MB), Ah-Qing interactions
 
 ---
 
 ## Testing & Verification
 
-- **Four-stage verification pipeline**: `cargo check` → `cargo test` (600+ workspace tests) → `cargo clippy` → Tauri E2E (CGEvent-driven real desktop interaction + screenshot verification);
-- **ERME ships 221 tests**;
+- **Four-stage verification pipeline**: `cargo check` → `cargo test` (1563 workspace tests) → `cargo clippy` → Tauri E2E (CGEvent-driven real desktop interaction + screenshot verification);
+- **ERME ships 301 tests** (it is a vendored crate, tested separately from the workspace);
 - **Release flow**: versions derived from Conventional Commits via git-cliff; the release script gates on the test suite before tagging; GitHub Actions builds the dmg and attaches it to the Release.
 
 ---
