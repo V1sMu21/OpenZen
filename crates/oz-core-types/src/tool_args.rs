@@ -258,6 +258,35 @@ const CANDIDATES: Group = (
     &["options", "choices", "suggestions", "answers"],
 );
 const G_ASK_USER: &[Group] = &[QUESTION, CANDIDATES];
+/// `open_side_panel` — the right-sidebar preview call.
+///
+/// It had no curated table, so both repair layers were blind to it: the
+/// alias / nameless-DSML fallback had no canonical key to map onto, and
+/// `merged_calls_tail` could not tell a recoverable leak from a merged call.
+/// That is why the 2026-11-02 run surfaced a raw gateway leak as
+/// `open_side_panel: missing artifact_type or artifact_path` — the value was
+/// there, 12 KB of transcript long, under the wrong field.
+///
+/// `artifact_path` is primary (like `file_path` for the file tools): a
+/// nameless leaked value is a path far more often than a type keyword.
+const ARTIFACT_PATH: Group = (
+    "artifact_path",
+    &[
+        "path",
+        "file",
+        "filepath",
+        "filename",
+        "artifactpath",
+        "artifact",
+        "target",
+    ],
+);
+const ARTIFACT_TYPE: Group = (
+    "artifact_type",
+    &["type", "kind", "filetype", "format", "artifacttype"],
+);
+const ARTIFACT_LABEL: Group = ("artifact_label", &["label", "title", "name", "tab"]);
+const G_OPEN_SIDE_PANEL: &[Group] = &[ARTIFACT_PATH, ARTIFACT_TYPE, ARTIFACT_LABEL];
 
 /// Curated alias table. Returns `None` for unknown tools (MCP / dynamic), which
 /// are handled by [`repair_args_against_schema`] instead.
@@ -275,6 +304,7 @@ fn groups_for(tool: &str) -> Option<&'static [Group]> {
         "grep" | "search" | "rg" | "searchfiles" => Some(G_GREP),
         "ls" | "list" | "listdir" | "dir" => Some(G_LS),
         "askuser" => Some(G_ASK_USER),
+        "opensidepanel" => Some(G_OPEN_SIDE_PANEL),
         _ => None,
     }
 }
@@ -786,6 +816,38 @@ mod tests {
             let twice = canonicalize_tool_args(tool, once.clone());
             assert_eq!(once, twice, "{tool} not idempotent for {args}");
         }
+    }
+
+    #[test]
+    fn side_panel_accepts_aliases_and_keeps_canonical_calls() {
+        // Before 2026-11-02 `open_side_panel` had no curated table: the leak
+        // repair had no canonical key to map onto, so a gateway-torn panel call
+        // could only fail. Aliases now land on the schema's names.
+        let got = canonicalize_tool_args(
+            "open_side_panel",
+            json!({"path": "/w/a.png", "type": "image"}),
+        );
+        assert_eq!(got["artifact_path"], "/w/a.png");
+        assert_eq!(got["artifact_type"], "image");
+        assert!(got.get("path").is_none(), "alias must be dropped: {got}");
+        assert!(got.get("type").is_none(), "alias must be dropped: {got}");
+
+        let canonical = json!({
+            "artifact_type": "image",
+            "artifact_path": "/w/a.png",
+            "artifact_label": "A",
+        });
+        assert_eq!(
+            canonicalize_tool_args("open_side_panel", canonical.clone()),
+            canonical
+        );
+        assert_eq!(canonicalize_tool_args("open_side_panel", got.clone()), got);
+
+        assert_eq!(
+            canonical_param_names("open_side_panel").unwrap(),
+            vec!["artifact_path", "artifact_type", "artifact_label"],
+            "path first: a nameless leaked value is a path far more often"
+        );
     }
 
     #[test]

@@ -153,12 +153,31 @@ fn find_any_close_tag(text: &str) -> Option<(usize, String)> {
 /// Max seconds to wait between consecutive SSE chunks before declaring
 /// the stream stalled. Local quantized models (omlx/ollama) can prefill
 /// for minutes without emitting a chunk, so they get a much larger
-/// ceiling than the 60s used for cloud APIs.
+/// ceiling than cloud APIs.
+///
+/// The cloud ceiling was 60 s, which a tool-call-extracting gateway blows
+/// through routinely: it buffers a whole `arguments` payload and emits no SSE
+/// frame while the model writes it. On 2026-11-02 (`deepseek-v4.1-flash`,
+/// reasoning=high) that fired **30 times in one session** — 30 minutes of pure
+/// stall — and every timeout costs a full turn retry, because the partial
+/// answer is thrown away and the request is re-sent. The retried stream is
+/// where the corruption came from: the model re-generated from scratch and
+/// degenerated into replaying its own transcript (`<function_results>` it never
+/// received) or looping on `</invoke>\n</function_calls>` for 420 KB.
+///
+/// Override with `OPENZEN_SSE_IDLE_SECS` for gateways that stall longer.
 fn chunk_timeout_secs(apibase: &str) -> u64 {
+    if let Some(secs) = std::env::var("OPENZEN_SSE_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+    {
+        return secs;
+    }
     if crate::is_local_apibase(apibase) {
         300
     } else {
-        60
+        180
     }
 }
 
@@ -1069,8 +1088,99 @@ fn dsml_marker_index(s: &str) -> Option<usize> {
     .min()
 }
 
+/// Byte offset of the earliest **DSML closer** in `s`, including the truncated
+/// spellings the gateway leaves behind when it drops half of `</parameter>`.
+///
+/// 2026-11-02 (`deepseek-v4.1-flash`, reasoning=high, session `269ba4e4`):
+/// after a 60 s SSE idle timeout the retried stream handed back the model's
+/// transcript verbatim, so parameter values ended at a bare `</` followed by
+/// a newline and the next `＜｜DSML｜  parameter …` block — the `parameter>` half
+/// of the closer was gone, and no earlier matcher recognised it:
+///   `"artifact_path": "…/diag_f30.png</\n＜｜DSML｜  parameter name="…`
+/// Because that is *valid JSON*, `sanitize_dsml_pollution` was the only layer
+/// that could have caught it, and it did not: `open_side_panel` then failed
+/// `missing artifact_type or artifact_path` with the value 12 KB long.
+///
+/// `</` only counts as a closer when what follows continues a DSML/parameter
+/// tag — or when nothing follows it at all *and* the value is a single line, the
+/// shape of a torn scalar (`"artifact_label": "原片 vs 渲染 f30</"`). Multi-line
+/// values are exempt so a file whose content legitimately ends with `</` keeps
+/// its last bytes.
+fn dsml_closer_index(s: &str) -> Option<usize> {
+    let mut from = 0usize;
+    while let Some(rel) = s[from..].find("</") {
+        let at = from + rel;
+        let rest = s[at + 2..].trim_start_matches([' ', '\t', '\r', '\n']);
+        if rest.is_empty() {
+            if !s[..at].contains('\n') {
+                return Some(at);
+            }
+            from = at + 2;
+            continue;
+        }
+        if rest.starts_with("parameter")
+            || rest.starts_with("DSML")
+            || rest.starts_with('\u{ff5c}')
+            || rest.starts_with("<\u{ff5c}")
+            || rest.starts_with("invoke")
+            || rest.starts_with("function_calls")
+        {
+            return Some(at);
+        }
+        from = at + 2;
+    }
+    None
+}
+
 /// Heuristic cap so garbage input cannot drive an unbounded key scan.
 const MAX_PARAM_KEY_LEN: usize = 80;
+
+/// Byte offset of a trailing call-scaffolding tag (`</parameter>`,
+/// `</個parameter>`, `</｜parameter>`, `</description>`, `</function_calls>`).
+///
+/// 2026-11-02: a `code_run` arrived as
+/// `… && echo "FILES OK"</個parameter>` and its `timeout` as
+/// `120</｜parameter>\n＜｜DSML｜  parameter name="type"…>bash</｜parameter>`.
+/// The shell saw a `</個parameter>` redirect and died with
+/// `syntax error near unexpected token 'newline'` — a *basic*, embarrassing
+/// failure. Tag names arrive mangled (`個`/`｜` subbed for the DSML bar), so the
+/// match strips everything but ASCII letters.
+fn trailing_call_tag_len(s: &str) -> Option<usize> {
+    let s = s.trim_end();
+    let open = s.strip_suffix('>').and_then(|_| s.rfind("</"))?;
+    let inner = &s[open + 2..s.len() - 1];
+    if inner.is_empty() || inner.chars().count() > 40 || inner.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let name: String = inner
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    const TAGS: [&str; 8] = [
+        "parameter",
+        "description",
+        "functioncalls",
+        "functionresults",
+        "invoke",
+        "toolcall",
+        "antmlparameter",
+        "arguments",
+    ];
+    TAGS.contains(&name.as_str()).then_some(open)
+}
+
+/// Drop trailing call tags from a command-like value (see
+/// [`trailing_call_tag_len`]). Repeated so `</parameter></invoke>` goes too.
+fn strip_trailing_call_tag(mut s: String) -> String {
+    for _ in 0..3 {
+        match trailing_call_tag_len(&s) {
+            Some(at) => s.truncate(at),
+            None => break,
+        }
+    }
+    s
+}
 
 /// True when `tail` (the part of a value that follows a parameter/DSML
 /// boundary) continues with ANOTHER tool call's serialized arguments —
@@ -1410,12 +1520,22 @@ fn extract_dsml_params(text: &str) -> Vec<(String, String)> {
             continue;
         };
         let value_start = kpos + "parameter name=".len() + key_end + vrel + 1;
-        let value = match seg[value_start..].find("</parameter>") {
-            Some(e) => seg[value_start..value_start + e].to_string(),
-            // No closer: the segment ends where the JSON value ended —
-            // take it verbatim (trailing newlines are content).
-            None => seg[value_start..].to_string(),
-        };
+        // The value ends at the first closer/opener of any dialect. Bounding at
+        // `</parameter>` alone let a truncated closer (`</\n＜｜DSML｜ parameter …`)
+        // run the value through the rest of the model's transcript, so a lifted
+        // `artifact_type` became 12 KB of following calls (2026-11-02).
+        let body = &seg[value_start..];
+        let end = [
+            body.find(PARAM_CLOSER),
+            dsml_closer_index(body),
+            body.find("<parameter"),
+            body.find(DSML),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(body.len());
+        let value = body[..end].to_string();
         let consumed = value.len().max(1);
         if !key.is_empty() {
             out.push((key, value));
@@ -1625,10 +1745,20 @@ fn sanitize_dsml_pollution(v: &mut serde_json::Value, tool: Option<&str>) {
     // Set when a polluted tail carries another call's serialized arguments:
     // the call is unrecoverable and must be rejected, never executed.
     let mut merged: Option<String> = None;
-    for (_, val) in map.iter_mut() {
+    for (key, val) in map.iter_mut() {
         let serde_json::Value::String(s) = val else {
             continue;
         };
+        // A trailing call tag is only ever junk for a field that carries a
+        // command, never for a field that carries a file body — an `.svg`
+        // written through `content` legitimately ends with `</description>`.
+        let command_field = matches!(
+            key.as_str(),
+            "code" | "command" | "cmd" | "script" | "question" | "response"
+        );
+        if command_field {
+            *s = strip_trailing_call_tag(s.trim_end().to_string());
+        }
         // The boundary may be a named closer, a nameless opener, or the
         // DSML bracket itself. The 2026-10-23 run produced the last form:
         // `"file_path": "work/x.py</｜DSML｜:"` — valid JSON with the
@@ -1636,6 +1766,7 @@ fn sanitize_dsml_pollution(v: &mut serde_json::Value, tool: Option<&str>) {
         let boundary = [
             s.find("</parameter>"),
             s.find("<parameter"),
+            dsml_closer_index(s),
             dsml_marker_index(s),
         ]
         .into_iter()
@@ -1645,11 +1776,15 @@ fn sanitize_dsml_pollution(v: &mut serde_json::Value, tool: Option<&str>) {
             continue;
         };
         let rest = &s[boundary..];
-        // The value has already been JSON-parsed, so escaped unicode is
-        // decoded — checking the literal fullwidth token is enough.
-        // A DSML marker or a parameter opener after the boundary is junk; a
-        // bare `</parameter>` that only mentions the tag is legitimate text.
-        let followed_by_junk = rest.contains("<parameter") || dsml_marker_index(rest).is_some();
+        // A DSML marker or a parameter opener after the boundary is junk; so is
+        // a closer with nothing left after it (`"…/x.py</"`). A bare
+        // `</parameter>` that only mentions the tag is legitimate text.
+        let followed_by_junk = rest.contains("<parameter")
+            || dsml_marker_index(rest).is_some()
+            // `</｜parameter>` — the closer whose tag name was mangled.
+            || rest.starts_with("</\u{ff5c}")
+            // Torn scalar: `"label": "…</"` — the closer lost its tag half.
+            || rest == "</";
         if !followed_by_junk {
             continue;
         }
@@ -2269,5 +2404,126 @@ mod tests {
         let got = normalize_tool_args_for("write", serde_json::Value::String(raw.into()));
         assert_eq!(got["file_path"], "/Users/w/work/dsh/verify_task.py");
         assert!(oz_core_types::corrupt_call_reason(&got).is_none());
+    }
+
+    /// 2026-11-02, session `269ba4e4`, `deepseek-v4.1-flash` @ reasoning=high.
+    /// The stream was retried after a 60 s SSE idle timeout and the model came
+    /// back replaying its own transcript: it wrote `<function_results>` it never
+    /// received, then the next call — all of it inside the `artifact_path`
+    /// value. The closer was truncated to a bare `</`, so every matcher missed
+    /// and `open_side_panel` failed `missing artifact_type or artifact_path`.
+    #[test]
+    fn real_20261102_panel_survives_the_truncated_closer() {
+        let raw = include_str!("../tests/fixtures/panel_transcript_replay_20261102.txt").trim();
+        let v: serde_json::Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+        let got = normalize_tool_args_for("open_side_panel", v);
+
+        assert_eq!(
+            got["artifact_path"],
+            "/Users/devacc/Documents/apps/ad-reverse/work/research/diag_f30.png",
+            "path must be cut at the truncated closer; got {}",
+            got["artifact_path"]
+        );
+        assert_eq!(
+            got["artifact_type"], "image",
+            "the swallowed artifact_type must be lifted back; got {got}"
+        );
+        assert_eq!(got["artifact_label"], "原片 vs 渲染 f30");
+        assert!(
+            !got["artifact_path"]
+                .as_str()
+                .unwrap_or("")
+                .contains("function_results"),
+            "the replayed transcript must not survive in the path"
+        );
+    }
+
+    /// Same run, the write that followed: a 420 KB blob where `content` sat
+    /// inside `file_path` after a bare `</`. No named closer ever appeared, so
+    /// the older `</parameter>` matcher could not cut it.
+    #[test]
+    fn real_20261102_write_survives_the_truncated_closer() {
+        let raw = include_str!("../tests/fixtures/write_truncated_closer_20261102.txt").trim();
+        let v: serde_json::Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+        let got = normalize_tool_args_for("write", v);
+
+        assert_eq!(
+            got["file_path"],
+            "/Users/devacc/Documents/apps/ad-reverse/analysis/verify_track_vs_pixels.py",
+            "path must stop at the truncated closer"
+        );
+        let content = got["content"].as_str().unwrap_or("");
+        assert!(
+            content.starts_with("#!/usr/bin/env python3"),
+            "content must be lifted, got {:?}",
+            &content[..content.len().min(120)]
+        );
+        assert!(
+            content.contains("轨迹校验器"),
+            "content must carry the real script"
+        );
+        // The fabricated result the model replayed must not become code.
+        assert!(
+            !content.contains("<function_results>"),
+            "replayed transcript must be cut off"
+        );
+        // It must still EXECUTE: the corruption sentinel would make the
+        // registry refuse a call whose fields are in fact complete.
+        assert!(
+            oz_core_types::corrupt_call_reason(&got).is_none(),
+            "a fully recovered write must not be marked corrupted: {got}"
+        );
+    }
+
+    /// A command-like value must not keep the call scaffolding the gateway
+    /// appends: `… && echo "FILES OK"</個parameter>` made the shell die with
+    /// `syntax error near unexpected token 'newline'`.
+    #[test]
+    fn real_20261102_code_run_drops_trailing_call_tags() {
+        let raw = include_str!("../tests/fixtures/code_run_trailing_call_tag_20261102.txt").trim();
+        let v: serde_json::Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+        let got = normalize_tool_args_for("code_run", v);
+
+        let code = got["code"].as_str().unwrap_or("");
+        assert!(
+            code.ends_with(r#"&& echo "FILES OK""#),
+            "trailing call tag must be cut, got {:?}",
+            &code[code.len().saturating_sub(60)..]
+        );
+        assert!(!code.contains('\u{500b}'), "no mangled tag may survive");
+        assert_eq!(got["timeout"], "120", "timeout must not keep its closer");
+        assert_eq!(got["type"], "bash", "the swallowed type must be lifted");
+    }
+
+    /// A file body is never stripped: an `.svg` written through `content`
+    /// legitimately ends with `</description>`.
+    #[test]
+    fn trailing_call_tag_is_kept_inside_a_file_body() {
+        let svg = "<svg><description>a</description></svg>";
+        let v = serde_json::json!({ "file_path": "/w/a.svg", "content": svg });
+        assert_eq!(normalize_tool_args(v.clone()), v);
+        // …while the same tag on a command field is scaffolding.
+        let cmd = serde_json::json!({ "code": "echo hi</description>" });
+        assert_eq!(normalize_tool_args(cmd)["code"], "echo hi");
+    }
+
+    /// A value that legitimately ends with a bare `</` inside prose must not be
+    /// truncated: the closer only counts when a DSML tag follows it (or nothing
+    /// does).
+    #[test]
+    fn truncated_closer_leaves_ordinary_code_alone() {
+        for content in ["<div>a</div>\n<p>b</p>", "x = a</b + c", "print('</p>')"] {
+            let v = serde_json::json!({ "file_path": "/w/a.py", "content": content });
+            assert_eq!(
+                normalize_tool_args(v.clone()),
+                v,
+                "content {content:?} must survive byte-for-byte"
+            );
+        }
+        // Multi-line bodies ending with a bare `</` keep their bytes: only a
+        // single-line scalar (`"…f30</"`) is read as a torn closer.
+        let tail =
+            serde_json::json!({ "file_path": "/w/a.html", "content": "<div>\n<p>x</p>\n</" });
+        assert_eq!(normalize_tool_args(tail.clone()), tail);
     }
 }

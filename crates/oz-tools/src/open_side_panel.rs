@@ -56,9 +56,22 @@ impl ToolHandler for OpenSidePanelTool {
         let artifact_label = args["artifact_label"].as_str();
 
         if artifact_type.is_empty() || artifact_path.is_empty() {
-            return Ok(ToolOutput::bad_json(
-                "open_side_panel: missing artifact_type or artifact_path",
-            ));
+            // Name only what is actually missing, and name the keys the call
+            // did send. The old message said "missing artifact_type or
+            // artifact_path" even when the path was present but polluted, which
+            // sent the model looking in the wrong place (2026-11-02).
+            let missing: Vec<&str> = [
+                ("artifact_type", artifact_type),
+                ("artifact_path", artifact_path),
+            ]
+            .into_iter()
+            .filter_map(|(key, value)| value.is_empty().then_some(key))
+            .collect();
+            return Ok(ToolOutput::bad_json(oz_core_types::missing_arg_error(
+                "open_side_panel",
+                &missing,
+                &args,
+            )));
         }
 
         let valid_types = [
@@ -117,5 +130,48 @@ impl ToolHandler for OpenSidePanelTool {
             should_exit: false,
             images: vec![],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oz_core_types::ToolContext as TC;
+
+    fn ctx() -> TC {
+        TC {
+            is_subagent: false,
+            working_dir: "/tmp".into(),
+            assets_dir: "/tmp".into(),
+            script_dir: "/tmp".into(),
+            lang: "en".into(),
+            skill_mcp_dir: None,
+            harness_dir: None,
+            session_id: String::new(),
+            tool_budget_secs: 0,
+        }
+    }
+
+    /// 2026-11-02: the old message said "missing artifact_type or
+    /// artifact_path" even when only one was missing, so a model whose path had
+    /// been polluted by the gateway re-sent the same call. Name what is
+    /// actually missing and what the call did send.
+    #[tokio::test]
+    async fn missing_argument_error_names_only_the_missing_key() {
+        let out = OpenSidePanelTool
+            .execute(serde_json::json!({"artifact_path": "/tmp/a.png"}), &ctx())
+            .await
+            .expect("tool returns a result object");
+        let text = serde_json::to_string(&out.data).unwrap_or_default();
+        assert!(text.contains("artifact_type"), "{text}");
+        assert!(
+            !text.contains("`artifact_path`"),
+            "the path was present and must not be named as missing: {text}"
+        );
+        assert!(
+            text.contains("artifact_path"),
+            "sent keys must be named: {text}"
+        );
+        assert!(oz_core_types::corrupt_call_reason(&out.data).is_none());
     }
 }
