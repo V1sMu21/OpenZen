@@ -1260,6 +1260,7 @@ pub async fn run_agent_for_session(
             let mut pending: Vec<serde_json::Value> = Vec::new();
             let mut flush_at =
                 tokio::time::Instant::now() + std::time::Duration::from_millis(BATCH_MS);
+            let mut last_steward_tick = 0u64;
             macro_rules! emit_pending {
                 () => {
                     if !pending.is_empty() {
@@ -1291,10 +1292,33 @@ pub async fn run_agent_for_session(
                     _ = tokio::time::sleep_until(flush_at) => {
                         emit_pending!();
                         reset_deadline!();
+                        let tick_now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        if tick_now.saturating_sub(last_steward_tick) >= 30_000 {
+                            last_steward_tick = tick_now;
+                            crate::steward::heartbeat(&sid);
+                            crate::goal_runtime::heartbeat_for_session(&sid);
+                            if let Some(nudge) = crate::steward::evaluate_and_nudge(&sid) {
+                                let queues = lock_poison_guard(&state_for_collector.intervention_queues);
+                                if let Some(q) = queues.get(&sid) {
+                                    if let Ok(mut q) = q.lock() {
+                                        q.push_back(oz_core::checkpoint::InterventionEvent {
+                                            id: uuid::Uuid::new_v4().to_string(),
+                                            timestamp: tick_now as f64 / 1000.0,
+                                            kind: oz_core::checkpoint::InterventionKind::InjectInfo,
+                                            content: format!("[Steward L1] {nudge}"),
+                                        });
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
                 };
                 let event = truncate_stream_event(event);
+                crate::steward::record_event(&sid, &event);
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
@@ -1423,6 +1447,8 @@ pub async fn run_agent_for_session(
             .or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .clone()
     };
+
+    crate::steward::register_stop_signal(session_id, stop_signal.clone());
 
     let run_start = std::time::Instant::now();
 
@@ -1834,6 +1860,19 @@ pub async fn run_agent_for_session(
         })
         .unwrap_or_else(|| "Task completed".to_string());
     crate::notify_if_unfocused(app, "OpenZen", &summary);
+
+    // Goal Mode is a Steward ticket that outlives one run. This hook records
+    // the attempt, runs gates in the runtime, and may schedule the next
+    // bounded attempt. It is a no-op for ordinary sessions.
+    crate::goal_runtime::on_run_finished(
+        app,
+        state,
+        session_id,
+        &outcome.exit_reason,
+        (tokens_in + tokens_out) as u64,
+        &summary,
+    )
+    .await;
 
     Ok(())
 }

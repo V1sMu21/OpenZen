@@ -1112,7 +1112,9 @@ pub(crate) fn notify_if_unfocused(app: &AppHandle, title: &str, body: &str) {
 
 // ── Sub-modules ──
 pub(crate) mod commands;
+pub(crate) mod goal_runtime;
 pub(crate) mod runner;
+pub(crate) mod steward;
 
 /// Guards against re-entering the graceful-shutdown path: the cleanup calls
 /// `app.exit()` again when done, which re-fires ExitRequested.
@@ -1498,6 +1500,8 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            crate::steward::start_watchdog();
+    crate::goal_runtime::init();
             let app_handle = app.handle().clone();
 
             // ── Background jobs: one process-wide listener ──
@@ -1921,6 +1925,39 @@ pub fn run() {
         })
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
+            steward::steward_status,
+            steward::steward_set_enabled,
+            steward::steward_snapshot,
+            steward::steward_inbox,
+            steward::steward_steps,
+            steward::steward_sweep,
+            steward::steward_evaluate,
+            steward::steward_start_ticket,
+            steward::steward_save_contract,
+            steward::steward_latest_contract,
+            steward::steward_startlux_health,
+            steward::steward_startlux_license_status,
+            steward::steward_ack_startlux_license,
+            steward::steward_llm_judge,
+            steward::steward_compose_report,
+            steward::steward_latest_report,
+            steward::steward_propose_correction,
+            steward::steward_snapshot_files,
+            steward::steward_rollback_files,
+            goal_runtime::goal_create,
+            goal_runtime::goal_list,
+            goal_runtime::goal_get,
+            goal_runtime::goal_attempts,
+            goal_runtime::goal_guard,
+            goal_runtime::goal_report,
+            goal_runtime::goal_start,
+            goal_runtime::goal_resume,
+            goal_runtime::goal_pause,
+            goal_runtime::goal_stop,
+            goal_runtime::goal_accept,
+            goal_runtime::goal_takeover,
+            steward::steward_semantic_evaluate,
+            steward::steward_license_check,
             commands::clear_session_messages,
             commands::scan_import_sources,
             commands::import_list_sessions,

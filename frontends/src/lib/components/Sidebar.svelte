@@ -8,6 +8,7 @@
   import { settings } from "../stores/settings.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import ImportSessionsDialog from "./ImportSessionsDialog.svelte";
+  import UpdateButton from "./UpdateButton.svelte";
 
   let {
     sidebarOpen = $bindable(true),
@@ -15,6 +16,8 @@
     onSelectSession = $bindable<(id: string) => void>((_id: string) => {}),
     onSidebarEscape = $bindable<(() => void) | null>(null),
     onAddProject = $bindable<() => void>(() => {}),
+    onOpenSteward = $bindable<() => void>(() => {}),
+    onOpenGoals = $bindable<() => void>(() => {}),
   } = $props();
 
   let filterText = $state("");
@@ -108,6 +111,17 @@
     <div class="side-foot">
       <button class="foot-btn" onclick={() => switchLocale($locale === "zh" ? "en" : "zh")} title={$locale === "zh" ? "Switch to English" : "切换到中文"}>{$locale === "zh" ? "EN" : "中文"}</button>
       <span class="foot-spacer"></span>
+      <button class="foot-btn" onclick={() => onOpenGoals()} title={$t("goal.open")} aria-label={$t("goal.open")}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/>
+        </svg>
+      </button>
+      <button class="foot-btn" onclick={() => onOpenSteward()} title={$t("steward.open")} aria-label={$t("steward.open")}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3 4.5 6v5.5c0 4.5 3.2 7.7 7.5 9.5 4.3-1.8 7.5-5 7.5-9.5V6z"/>
+          <path d="m9 12 2 2 4-4"/>
+        </svg>
+      </button>
       <!-- 设置入口: 打开右侧设置抽屉 (模型/技能MCP/灵魂/Token) -->
       <button class="foot-btn gear" class:on={settings.open} onclick={() => settings.toggle()} title={$t("settings.title")} aria-label={$t("settings.title")}>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -115,6 +129,10 @@
           <circle cx="12" cy="12" r="3"/>
         </svg>
       </button>
+      <!-- 更新入口：放到侧栏右下角，标题栏不再被更新图标挤占。 -->
+      {#if sidebarOpen}
+        <UpdateButton variant="sidebar" />
+      {/if}
     </div>
   </div>
 </aside>

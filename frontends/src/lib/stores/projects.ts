@@ -61,6 +61,7 @@ function createProjectStore() {
         ...s,
         projects: [...s.projects, { ...record, sessions }],
       }));
+      return record;
     },
 
     async remove(id: string) {
@@ -111,25 +112,26 @@ function createProjectStore() {
 
     async moveSession(sessionId: string, toProjectId: string) {
       await moveSessionApi(sessionId, toProjectId);
-      const currentState = get(store);
-      const fromProject = currentState.projects.find(
-        (p) => p.sessions.some((s) => s.id === sessionId)
-      );
-      const fromId = fromProject?.id;
-      if (fromId) {
-        const fromSessions = fromId === toProjectId
-          ? currentState.projects.find(p => p.id === fromId)?.sessions ?? []
-          : await loadSessionsForProject(fromId);
-        const toSessions = await loadSessionsForProject(toProjectId);
-        update((s) => ({
-          ...s,
-          projects: s.projects.map((p) => {
-            if (p.id === toProjectId) return { ...p, sessions: toSessions };
-            if (p.id === fromId) return { ...p, sessions: fromSessions };
-            return p;
-          }),
-        }));
-      }
+      // The session may be ungrouped (no project) — the old code only
+      // refreshed the lists when a source project existed, so the sidebar
+      // still showed it as ungrouped after a successful move.
+      const fromId = get(store).projects.find(
+        (p) => p.sessions.some((s) => s.id === sessionId),
+      )?.id;
+      const toSessions = await loadSessionsForProject(toProjectId);
+      update((s) => ({
+        ...s,
+        projects: s.projects.map((p) => {
+          if (p.id === toProjectId) return { ...p, sessions: toSessions };
+          if (p.id === fromId) {
+            return {
+              ...p,
+              sessions: p.sessions.filter((ss) => ss.id !== sessionId),
+            };
+          }
+          return p;
+        }),
+      }));
     },
 
     removeSessionFromProject(sessionId: string, projectId: string) {

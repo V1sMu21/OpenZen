@@ -25,9 +25,10 @@
   import TransientsBar from "./lib/components/TransientsBar.svelte";
   import ShortcutsPanel from "./lib/components/ShortcutsPanel.svelte";
   import SidePanel from "./lib/components/SidePanel.svelte";
-  import TodoProgress from "./lib/components/TodoProgress.svelte";
-  import ReminderCard from "./lib/components/ReminderCard.svelte";
-  import UpdateButton from "./lib/components/UpdateButton.svelte";
+  import TaskChips from "./lib/components/TaskChips.svelte";
+  import StewardPanel from "./lib/components/StewardPanel.svelte";
+  import GoalPanel from "./lib/components/GoalPanel.svelte";
+  import GoalBanner from "./lib/components/GoalBanner.svelte";
   import { initLocale } from "./lib/i18n";
   import { t, locale } from "./lib/i18n";
   import { sidepanel } from "./lib/stores/sidepanel.svelte";
@@ -68,6 +69,14 @@ function installGlobalErrorHandlers() {
   // 顶栏标题：用户给 agent 起的名字（null = 未命名，保持器物底款默认）。
   // 读共享 soul store：设置面板/灵魂卡里改名后这里即时更新。
   let agentName = $derived(soulDisplayName(soulStore.status));
+  let stewardOpen = $state(false);
+  let goalOpen = $state(false);
+
+  onMount(() => {
+    const openGoals = () => { goalOpen = true; };
+    window.addEventListener("openzen:open-goals", openGoals);
+    return () => window.removeEventListener("openzen:open-goals", openGoals);
+  });
 
   // 宠物小猫咪：seal 点击切换显隐（再点一次即可关掉，不必右键菜单）。
   // 宠物窗本体是 tauri.conf.json 里声明的静态窗口（启动即建、隐藏）。
@@ -155,6 +164,21 @@ function installGlobalErrorHandlers() {
 
 
   let sidebarOpen = $state(true);
+
+  // C: when the preview panel would leave the conversation narrower than
+  // this, the panel floats over the chat instead of shrinking it.
+  const CHAT_MIN_WIDTH = 640;
+  const SIDEBAR_WIDTH = 276;
+  let viewportWidth = $state(typeof window !== "undefined" ? window.innerWidth : 1440);
+  $effect(() => {
+    const onResize = () => (viewportWidth = window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  });
+  let panelOverlay = $derived(
+    sidepanel.visible
+      && viewportWidth - (sidebarOpen ? SIDEBAR_WIDTH : 0) - sidepanel.width < CHAT_MIN_WIDTH,
+  );
   let disableInput = $state(false);
   let showShortcuts = $state(false);
   let sidebarFocused = $state(false);
@@ -1004,11 +1028,17 @@ function installGlobalErrorHandlers() {
   });
 
   async function handleNewChat(projectId?: string) {
-    const result = await sessions.create();
-    if (result) {
-      handleSelectSession(result.session_id);
-    } else {
-      chat.clearMessages();
+    try {
+      const result = projectId
+        ? await projects.createSessionIn(projectId)
+        : await sessions.create();
+      if (result) {
+        handleSelectSession(result.session_id);
+      } else {
+        chat.clearMessages();
+      }
+    } catch (e) {
+      chat.setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -1034,6 +1064,23 @@ function installGlobalErrorHandlers() {
     invoke<string>("get_working_dir_for_session", { sessionId: id })
       .then(d => workingDir = d)
       .catch(() => {});
+  }
+
+  /** Composer project picker. An empty conversation is moved to the chosen
+   *  project; a conversation that already has messages starts a new session
+   *  there instead (changing cwd mid-thread would strand the history). */
+  async function handlePickProject(projectId: string) {
+    const sid = $sessions.currentId;
+    if (sid && $chat.messages.length === 0) {
+      await projects.moveSession(sid, projectId);
+      await sessions.load();
+      workingDir = await invoke<string>("get_working_dir_for_session", {
+        sessionId: sid,
+      });
+      return;
+    }
+    const created = await projects.createSessionIn(projectId);
+    if (created?.session_id) handleSelectSession(created.session_id);
   }
 
   function toggleSidebar() {
@@ -1285,7 +1332,7 @@ function installGlobalErrorHandlers() {
 <svelte:window onkeydown={handleGlobalKeydown} />
 
 <div class="app-layout">
-  <Sidebar bind:sidebarOpen onNewChat={handleNewChat} onSelectSession={handleSelectSession} onSidebarEscape={handleSidebarEscape} />
+  <Sidebar bind:sidebarOpen onNewChat={handleNewChat} onSelectSession={handleSelectSession} onSidebarEscape={handleSidebarEscape} onOpenSteward={() => (stewardOpen = true)} onOpenGoals={() => (goalOpen = true)} />
 
   <main class="main-area">
     <!-- 器物底款标题栏 -->
@@ -1339,9 +1386,8 @@ function installGlobalErrorHandlers() {
         </button>
       {/if}
       <span class="header-spacer"></span>
-      {#if workingDir}
-        <span class="title-path" title={workingDir}>{workingDir}</span>
-      {/if}
+      <!-- 工作目录改由输入框里的项目选择器承载：标题栏的路径 chip
+           只能截断显示，长路径根本看不全（2026-11-02）。 -->
       <!-- 运行选项: 结晶 / 计时 / 完全访问 -->
       <div class="switch-group">
         <label class="crystallization-switch" title={crystallizationOn ? $t("status.autoCrystallizeOn") : $t("status.autoCrystallizeOff")}>
@@ -1362,8 +1408,6 @@ function installGlobalErrorHandlers() {
           <span class="switch-label">{$t("status.fullAccessDanger")}</span>
         </label>
       </div>
-      <!-- 自动更新入口: 平时隐藏, 有新版本时出现在标题栏右侧 -->
-      <UpdateButton />
       <ThemeSwitcher />
       <button class="icon-btn" onclick={() => sidepanel.toggle()} title="Toggle Panel (⌘⇧E)" aria-label="Toggle Panel">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1382,6 +1426,7 @@ function installGlobalErrorHandlers() {
 
     <!-- Chat messages -->
     <div class="chat-container" class:session-loading={$chat.loadingSession === true}>
+      <GoalBanner />
       {#if $chat.messages.length === 0}
         <SoulCard />
         <div class="empty-chat">
@@ -1431,20 +1476,6 @@ function installGlobalErrorHandlers() {
 
             <div bind:this={messagesEnd}></div>
           </div>
-
-          <!-- 右侧状态栏：待办 / 定时提醒垂直堆叠于同一栏。
-               两张卡片共享同一流式布局（互斥于构造层面，不可能重叠），
-               随滚动区 sticky 置顶。栏内无可见卡片时 :has() 整栏隐藏，
-               归还消息列宽度。灵魂状态只在设置面板呈现（此处不再重复）。 -->
-          <div class="todo-rail">
-            {#if $chat.todos.length > 0}
-              <TodoProgress items={$chat.todos} />
-            {/if}
-            {#if $chat.reminders.length > 0}
-              <!-- 定时/心跳任务卡片：位于待办事项卡片下方 -->
-              <ReminderCard items={$chat.reminders} />
-            {/if}
-          </div>
         </div>
       {/if}
 
@@ -1476,9 +1507,19 @@ function installGlobalErrorHandlers() {
 
       <!-- Input area -->
       <div class="composer-stack">
-        <JobStrip />
-        <SubagentStrip />
-        <ChatInput disabled={disableInput} />
+        <TaskChips />
+        <!-- Both strips share one row: jobs left, subagents right. Expanded
+             lists grow downward inside their own column, so the two never
+             overlap or push each other around. -->
+        <div class="strip-row">
+          <JobStrip />
+          <SubagentStrip />
+        </div>
+        <ChatInput
+          disabled={disableInput}
+          {workingDir}
+          onPickProject={handlePickProject}
+        />
       </div>
 
       {#if $chat.pendingAskUser && !$chat.askUserMinimized}
@@ -1494,16 +1535,6 @@ function installGlobalErrorHandlers() {
           <button class="m-tag m-tag-jobs" title={$t("jobs.background")} onclick={() => { if (isTauri()) void sidepanel.open({ type: "background", path: "background://panel", label: $t("jobs.panel") }); }}>
             <span class="m-tag-num">● {$t("jobs.runningCount").replace("{n}", String(jobs.active.length))}</span>
           </button>
-        {/if}
-        {#if $chat.modelInfo}
-          <span class="m-tag m-tag-model">
-            <span class="m-tag-num">{$chat.modelInfo.model}</span>
-            <span class="m-tag-provider-tag">{!$chat.modelInfo.isLocal ? $t("status.cloud") : $t("status.localDeploy")}</span>
-          </span>
-        {:else}
-          <span class="m-tag m-tag-model">
-            <span class="m-tag-num">—</span>
-          </span>
         {/if}
 
         {#if $chat.messages.length > 0}
@@ -1568,7 +1599,9 @@ function installGlobalErrorHandlers() {
     {/if}
   </main>
 
-  <SidePanel />
+  <div class="sidepanel-slot" class:overlay={panelOverlay}>
+    <SidePanel />
+  </div>
 
   {#if petToast}
     <div class="pet-toast">{petToast}</div>
@@ -1579,6 +1612,8 @@ function installGlobalErrorHandlers() {
 </div>
 
 <AuthDialog />
+<StewardPanel bind:open={stewardOpen} />
+<GoalPanel bind:open={goalOpen} />
 <ApprovalModal />
 <ShortcutsPanel bind:show={showShortcuts} />
 
@@ -1611,6 +1646,19 @@ function installGlobalErrorHandlers() {
       transparent 100%
     );
     opacity: 0.7;
+  }
+
+  .sidepanel-slot {
+    display: flex;
+    height: 100%;
+    min-height: 0;
+  }
+  .sidepanel-slot.overlay {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 80;
   }
 
   .main-area {
@@ -1795,8 +1843,24 @@ function installGlobalErrorHandlers() {
 
   .composer-stack {
     width: 100%;
-    max-width: min(100%, 860px);
+    /* Follow the conversation pane; the old 860px cap kept the composer
+       narrow when the user widened the window (2026-11-02). */
+    max-width: 100%;
     margin: 0 auto;
+  }
+
+  .strip-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 24px 0;
+  }
+  .strip-row > :global(*) {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  @media (max-width: 760px) {
+    .strip-row { flex-direction: column; }
   }
 
   .chat-container {
@@ -1842,9 +1906,9 @@ function installGlobalErrorHandlers() {
     flex-direction: column;
     gap: 22px;
     flex: 1;
-    /* 流式宽度: 跟随窗口伸展（含 todo-rail 让位后的剩余空间），
-       1200px 只作为超宽屏的可读性上限 */
-    max-width: min(100%, 860px);
+    /* 流式宽度: 跟随会话区伸展。旧的 860px 上限会让拉宽窗口后消息列
+       停在 860，气泡看起来没有跟着变宽（2026-11-02）。 */
+    max-width: 100%;
     min-width: 0;
   }
 
@@ -1894,25 +1958,6 @@ function installGlobalErrorHandlers() {
      剩余 flex 空间若无 auto margin 会滞留在行尾。卡片全部隐藏时
      :has() 整栏 display:none, 把宽度还给消息列。
      ≤1100px 时整栏转为悬浮模式(见下方媒体查询), 不再占用会话宽度。 */
-  .todo-rail {
-    flex: none;
-    width: 320px;
-    margin-left: auto;
-    position: sticky;
-    top: 0;
-    align-self: flex-start;
-    margin-top: 4px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .todo-rail:not(:has(> :not(style))) {
-    display: none;
-  }
-  .todo-rail .todo-progress {
-    margin: 0;
-  }
-
   .empty-chat {
     flex: 1;
     display: flex;
@@ -2056,24 +2101,6 @@ function installGlobalErrorHandlers() {
     to { opacity: 1; transform: translateY(0); }
   }
 
-  /* 标题栏工作目录 (路径 chip, 次要信息) */
-  .title-path {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--color-muted);
-    background: var(--color-surface-soft);
-    border: 1px solid var(--color-hairline);
-    border-radius: 7px;
-    padding: 4px 8px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 220px;
-    user-select: none;
-    flex-shrink: 1;
-    min-width: 0;
-  }
-
   /* 状态轨：30px 细带，只承载数据 */
   .model-bar {
     display: flex;
@@ -2213,22 +2240,6 @@ function installGlobalErrorHandlers() {
     opacity: 0.65;
   }
 
-  .m-tag-model {
-    color: var(--color-primary);
-    border-color: var(--color-primary);
-    font-family: var(--font-serif);
-    letter-spacing: 0.06em;
-    background: var(--color-primary-muted);
-  }
-
-  .m-tag-provider-tag {
-    font-family: var(--font-mono);
-    font-size: 9.5px;
-    color: var(--color-dim);
-    border-left: 1px solid var(--color-hairline);
-    padding-left: 6px;
-  }
-
   .m-tag-muted {
     color: var(--color-muted);
   }
@@ -2357,47 +2368,6 @@ function installGlobalErrorHandlers() {
   .crystallization-switch:has(input:checked) .switch-track::after {
     transform: translateX(11px);
     background: var(--color-primary);
-  }
-
-  /* 窄窗口悬浮模式 (≤1100px): 状态栏不再占用会话宽度 —— 折叠为聊天区
-     右上角的紧凑药丸(只留 图标+标题+进度, 隐藏次要明细文字), 点击仍可
-     展开查看待办进度 / 定时任务详情; 展开详情以固定宽度浮层面板呈现,
-     不会把整栏撑宽遮住消息。
-     定位锚点是 .chat-container(position: relative)而非滚动容器
-     .messages-scroll, 因此悬浮药丸不随消息滚动走, 始终钉在原位。 */
-  @media (max-width: 1100px) {
-    .todo-rail {
-      position: absolute;
-      top: 4px;
-      right: 16px;
-      width: auto;
-      margin: 0;
-      align-items: flex-end;
-      gap: 6px;
-      z-index: 40;
-    }
-    .todo-rail :global(.todo-detail),
-    .todo-rail :global(.reminder-detail) {
-      display: none;
-    }
-    /* 悬浮在消息之上需要实底表面 + 发丝边框
-       (设计规范: 深度来自表面阶梯与边框, 不加阴影) */
-    .todo-rail :global(.todo-toggle),
-    .todo-rail :global(.reminder-toggle) {
-      width: auto;
-      background: var(--color-surface-overlay);
-      border: 1px solid var(--color-hairline-strong);
-    }
-    /* 展开详情为固定宽度浮层面板; 提醒条目数不定, 限高内滚 */
-    .todo-rail :global(.todo-bubble),
-    .todo-rail :global(.reminder-list) {
-      width: 300px;
-      max-width: calc(100vw - 40px);
-    }
-    .todo-rail :global(.reminder-list) {
-      max-height: 320px;
-      overflow-y: auto;
-    }
   }
 
   @media (max-width: 900px) {

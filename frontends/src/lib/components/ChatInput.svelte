@@ -1,9 +1,13 @@
 <script lang="ts">
 import { chat } from "../stores/chat";
 import { sessions } from "../stores/sessions";
+import { projects } from "../stores/projects";
 import { compressSession, injectMessage } from "../api/sessions";
 import { listModels } from "../api/chat";
+import { isTauri } from "../api/tauri";
+import { basename } from "../utils/paths";
 import { onMount } from "svelte";
+import { get } from "svelte/store";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import CommandPalette from "./CommandPalette.svelte";
@@ -13,6 +17,8 @@ import { clickOutside } from "../actions/clickOutside";
 
 let {
   disabled = $bindable(false),
+  workingDir = "",
+  onPickProject = (_projectId: string) => {},
 } = $props();
 
 let inputText = $state("");
@@ -52,6 +58,81 @@ const dialKey = $derived($chat.selectedModel ?? $chat.modelInfo?.model ?? "");
 const currentLevel = $derived(
   (dialKey ? $chat.thinkingLevels[dialKey] : undefined) ?? "default"
 );
+
+// ── Project / working-directory picker ──
+// A new conversation starts in a project (or the default workspace). Once the
+// first message is sent the working directory is fixed, so the picker lives in
+// the empty-conversation composer instead of the title bar's truncated path.
+const currentSession = $derived(
+  $sessions.sessions.find((s) => s.id === $sessions.currentId),
+);
+const currentProject = $derived(
+  $projects.projects.find((p) => p.id === currentSession?.project_id),
+);
+const projectLabel = $derived(
+  currentProject?.name ||
+    basename(workingDir) ||
+    ($locale === "zh" ? "选择项目" : "Choose project"),
+);
+const projectTitle = $derived(
+  currentProject
+    ? `${currentProject.name}\n${currentProject.root_path}`
+    : workingDir || ($locale === "zh" ? "选择工作目录" : "Choose a working directory"),
+);
+const showProjectPicker = $derived(
+  $chat.messages.length === 0 && !$chat.isProcessing && !disabled,
+);
+let projectMenuOpen = $state(false);
+let projectBusy = $state(false);
+let projectError = $state("");
+let projectPillEl: HTMLButtonElement | undefined = $state();
+
+async function selectProject(projectId: string) {
+  if (projectBusy) return;
+  projectBusy = true;
+  projectError = "";
+  try {
+    await onPickProject(projectId);
+    projectMenuOpen = false;
+  } catch (e) {
+    projectError = e instanceof Error ? e.message : String(e);
+  } finally {
+    projectBusy = false;
+  }
+}
+
+async function pickProjectFolder() {
+  if (projectBusy) return;
+  projectBusy = true;
+  projectError = "";
+  try {
+    if (!isTauri()) {
+      projectError = localT("project.desktopOnly");
+      return;
+    }
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: localT("project.openFolderTitle"),
+    });
+    if (!selected || typeof selected !== "string") return;
+    const existing = get(projects).projects.find(
+      (p) => p.root_path.replace(/\/+$/, "") === selected.replace(/\/+$/, ""),
+    );
+    if (existing) {
+      await onPickProject(existing.id);
+      projectMenuOpen = false;
+      return;
+    }
+    const record = await projects.add(selected);
+    await onPickProject(record.id);
+    projectMenuOpen = false;
+  } catch (e) {
+    projectError = e instanceof Error ? e.message : String(e);
+  } finally {
+    projectBusy = false;
+  }
+}
 
 function pickLevel(level: ThinkingLevel) {
   // Same key the send path reads (`selectedModel ?? modelInfo.model`).
@@ -416,6 +497,81 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
       disabled={disabled}
     ></textarea>
     <div class="composer-row">
+      {#if showProjectPicker}
+        <div class="attach-wrap project-wrap">
+          <button
+            type="button"
+            class="attach-btn project-pill"
+            class:open={projectMenuOpen}
+            class:busy={projectBusy}
+            onclick={() => {
+              projectMenuOpen = !projectMenuOpen;
+              projectError = "";
+            }}
+            aria-haspopup="menu"
+            aria-expanded={projectMenuOpen}
+            title={projectTitle}
+            bind:this={projectPillEl}
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M1.8 4.5A1.5 1.5 0 0 1 3.3 3h3l1.4 1.8h5A1.5 1.5 0 0 1 14.2 6.3v5.9a1.5 1.5 0 0 1-1.5 1.5H3.3a1.5 1.5 0 0 1-1.5-1.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+            </svg>
+            <span class="project-label">{projectLabel}</span>
+            <span class="project-chevron" aria-hidden="true">▾</span>
+          </button>
+          {#if projectMenuOpen}
+            <div
+              class="attach-menu project-menu"
+              role="menu"
+              use:clickOutside={{
+                handler: () => (projectMenuOpen = false),
+                except: [projectPillEl],
+              }}
+            >
+              <div class="project-menu-head">{$t("project.menuTitle")}</div>
+              {#if $projects.projects.length === 0}
+                <div class="project-empty">{$t("project.empty")}</div>
+              {/if}
+              {#each $projects.projects as p (p.id)}
+                <button
+                  type="button"
+                  class="attach-menu-item project-item"
+                  class:on={p.id === currentProject?.id}
+                  role="menuitemradio"
+                  aria-checked={p.id === currentProject?.id}
+                  disabled={projectBusy || p.broken}
+                  title={p.root_path}
+                  onclick={() => selectProject(p.id)}
+                >
+                  <span class="am-ic">{p.id === currentProject?.id ? "✓" : ""}</span>
+                  <span class="project-item-text">
+                    <span class="project-item-name">{p.name}</span>
+                    <span class="project-item-path">{p.root_path}</span>
+                  </span>
+                  {#if p.broken}
+                    <span class="project-broken">{$t("project.broken")}</span>
+                  {/if}
+                </button>
+              {/each}
+              {#if isTauri()}
+                <div class="project-menu-sep" aria-hidden="true"></div>
+                <button
+                  type="button"
+                  class="attach-menu-item"
+                  disabled={projectBusy}
+                  onclick={pickProjectFolder}
+                >
+                  <span class="am-ic" aria-hidden="true">＋</span>
+                  {$t("project.openFolder")}
+                </button>
+              {/if}
+              {#if projectError}
+                <div class="project-error" role="alert">{projectError}</div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
       <div class="attach-wrap">
         <button
           class="attach-btn"
@@ -523,8 +679,9 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
 <style>
   .input-wrapper {
     position: relative;
-    /* 预览规格：与消息列同宽 860，居中 */
-    max-width: min(100%, 860px);
+    /* Follow the message column; the old 860px cap left the composer
+       narrower than the bubbles after the pane was widened. */
+    max-width: 100%;
     margin: 0 auto;
     width: 100%;
     padding: 8px 24px 16px;
@@ -751,6 +908,98 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
   }
   .thinking-menu {
     min-width: 180px;
+  }
+  /* ── Project picker (empty conversation only) ── */
+  .project-pill {
+    max-width: 220px;
+    color: var(--color-body);
+    border-color: var(--color-hairline);
+    background: var(--color-surface-soft);
+  }
+  .project-label {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .project-chevron {
+    font-size: 8px;
+    color: var(--color-muted);
+    margin-left: 1px;
+    flex: none;
+  }
+  .project-menu {
+    min-width: 300px;
+    max-width: min(440px, 80vw);
+    max-height: 360px;
+    overflow-y: auto;
+  }
+  .project-menu-head {
+    padding: 5px 10px 4px;
+    font-family: var(--font-serif);
+    font-size: 9.5px;
+    letter-spacing: 0.18em;
+    color: var(--color-muted);
+    text-transform: uppercase;
+  }
+  .project-menu .attach-menu-item {
+    letter-spacing: 0.02em;
+  }
+  .project-item {
+    align-items: flex-start;
+  }
+  .project-item-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+  .project-item-name {
+    color: var(--color-ink);
+    font-size: 12px;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .project-item-path {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0;
+    color: var(--color-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 300px;
+  }
+  .project-item.on .project-item-name {
+    color: var(--color-primary);
+  }
+  .project-broken {
+    font-size: 9px;
+    color: var(--color-status-warn);
+    flex: none;
+  }
+  .project-empty {
+    padding: 8px 10px;
+    font-size: 11px;
+    color: var(--color-muted);
+  }
+  .project-menu-sep {
+    height: 1px;
+    margin: 3px 6px;
+    background: var(--color-hairline);
+  }
+  .project-error {
+    padding: 4px 10px 2px;
+    font-size: 10.5px;
+    line-height: 1.4;
+    color: var(--color-error);
+  }
+  .project-pill.busy {
+    opacity: 0.6;
+    pointer-events: none;
   }
   .attach-menu-item.on {
     color: var(--color-primary);

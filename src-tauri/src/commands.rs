@@ -3092,7 +3092,37 @@ pub async fn send_message(
     app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SendMessageResponse, String> {
-    let state = state.inner().clone();
+    send_message_core(
+        message,
+        session_id,
+        session_name,
+        model_name,
+        reasoning_effort,
+        app_handle,
+        state.inner().clone(),
+        false,
+    )
+    .await
+}
+
+/// Shared implementation used by the Tauri command and Goal Mode. It owns the
+/// running-agent guard and session persistence, so Goal Mode does not fork a
+/// second runner path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_message_core(
+    message: String,
+    session_id: String,
+    session_name: Option<String>,
+    model_name: Option<String>,
+    reasoning_effort: Option<String>,
+    app_handle: AppHandle,
+    state: Arc<AppState>,
+    resume: bool,
+) -> Result<SendMessageResponse, String> {
+    let mut message = message;
+    if let Some(note) = crate::goal_runtime::maybe_auto_start(&state, &session_id, &message) {
+        message = format!("{note}\n\n{message}");
+    }
     if message.chars().count() > MAX_MESSAGE_CHARS {
         return Err(format!(
             "Message too large (max {} characters)",
@@ -3169,13 +3199,14 @@ pub async fn send_message(
         let inner_app = app_clone.clone();
         let inner_model = model_name_clone.clone();
         let inner_effort = reasoning_effort_clone.clone();
+        let inner_resume = resume;
         let inner = tokio::spawn(async move {
             runner::run_agent_for_session(
                 &inner_app,
                 &inner_state,
                 &inner_session,
                 inner_model.as_deref(),
-                false,
+                inner_resume,
                 inner_effort.as_deref(),
                 None,
             )
