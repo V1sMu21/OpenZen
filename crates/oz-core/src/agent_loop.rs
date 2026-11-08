@@ -5231,11 +5231,11 @@ where
         final_full_response
     };
 
-    // DQ1 QA-4: three-section delivery contract — done / verified / left
-    // open. Honesty becomes protocol rather than goodwill.
+    // DQ1 QA-4: delivery contract — verified / left open. Honesty becomes
+    // protocol rather than goodwill. The old "完成" section repeated the
+    // reply's first 120 chars, so it lives in the reply itself now.
     let final_full_response =
         if config.quality_gates && crate::quality::has_write_operations(&tool_sequence) {
-            let completed_head = smart_format(final_full_response.trim(), 120);
             // P0-6 ③: one honest line from the run's real quality state.
             // The old code printed "独立评审通过" whenever the reviewer said
             // pass, and said nothing at all when the reviewer was
@@ -5275,20 +5275,19 @@ where
                 .iter()
                 .filter(|t| t.status == "pending" || t.status == "in_progress")
                 .count();
-            let leftover = quality_note.clone().or_else(|| {
-                (pending_left > 0).then(|| {
-                    if config.lang == "zh" {
-                        format!("{pending_left} 项待办未完成")
-                    } else {
-                        format!("{pending_left} pending todo(s)")
-                    }
-                })
+            // `quality_note` is already emitted as the "> ⚠️ …" line just
+            // above; repeating it verbatim under "遗留" was pure duplication.
+            let leftover = (pending_left > 0).then(|| {
+                if config.lang == "zh" {
+                    format!("{pending_left} 项待办未完成")
+                } else {
+                    format!("{pending_left} pending todo(s)")
+                }
             });
             let verification = (!verified.is_empty()).then(|| verified.join("；"));
             final_full_response
                 + &crate::quality::format_delivery_contract(
                     &config.lang,
-                    Some(&completed_head),
                     verification.as_deref(),
                     leftover.as_deref(),
                 )

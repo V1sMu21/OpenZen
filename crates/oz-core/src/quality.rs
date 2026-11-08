@@ -1885,25 +1885,25 @@ pub fn build_diff_selfcheck_prompt(excerpt: &str, lang: &str) -> String {
     }
 }
 
-/// QA-4: three-section delivery contract appended to the final reply — what
-/// was done / how it was verified / what remains. Honesty becomes protocol,
-/// not goodwill. Sections are omitted when empty.
-#[allow(clippy::too_many_arguments)]
+/// QA-4: delivery contract appended to the final reply — how it was
+/// verified / what remains. Honesty becomes protocol, not goodwill.
+/// Sections are omitted when empty.
+///
+/// The old "完成" section was removed: it was the first 120 chars of the
+/// reply, so it repeated the answer's own opening (and, for a reply starting
+/// with a heading, repeated that heading verbatim). The reply itself is the
+/// "what was done" section.
 pub fn format_delivery_contract(
     lang: &str,
-    completed: Option<&str>,
     verification: Option<&str>,
     leftover: Option<&str>,
 ) -> String {
-    let (title, done_l, ver_l, left_l) = if lang == "zh" {
-        ("📋 交付说明", "完成", "验证", "遗留")
+    let (title, ver_l, left_l) = if lang == "zh" {
+        ("📋 交付说明", "验证", "遗留")
     } else {
-        ("📋 Delivery notes", "Done", "Verified", "Left open")
+        ("📋 Delivery notes", "Verified", "Left open")
     };
     let mut out = format!("\n\n---\n> **{title}**\n");
-    if let Some(c) = completed.filter(|s| !s.trim().is_empty()) {
-        out.push_str(&format!("> {done_l}：{c}\n"));
-    }
     match verification.filter(|s| !s.trim().is_empty()) {
         Some(v) => out.push_str(&format!("> {ver_l}：{v}\n")),
         None => out.push_str(&format!("> {ver_l}：—\n")),
@@ -3139,5 +3139,32 @@ mod tests {
             };
             assert_eq!(o.contract_review_status(), want);
         }
+    }
+
+    #[test]
+    fn delivery_contract_does_not_repeat_the_reply_opening() {
+        let zh = format_delivery_contract("zh", Some("断言 2/2 通过"), Some("2 项待办未完成"));
+        assert!(
+            !zh.contains("完成："),
+            "the removed 完成 section came back: {zh}"
+        );
+        assert!(zh.contains("> **📋 交付说明**"));
+        assert!(zh.contains("> 验证：断言 2/2 通过"));
+        assert!(zh.contains("> 遗留：2 项待办未完成"));
+
+        let en = format_delivery_contract("en", Some("2/2 assertions passed"), None);
+        assert!(
+            !en.contains("Done：") && !en.contains("Done:"),
+            "the removed Done section came back: {en}"
+        );
+        assert!(en.contains("> **📋 Delivery notes**"));
+        assert!(en.contains("> Verified：2/2 assertions passed"));
+        assert!(!en.contains("Left open：") && !en.contains("Left open:"));
+    }
+
+    #[test]
+    fn delivery_contract_marks_missing_verification() {
+        let zh = format_delivery_contract("zh", None, None);
+        assert!(zh.contains("> 验证：—"));
     }
 }

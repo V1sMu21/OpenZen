@@ -11,6 +11,7 @@
   import { convertStreamEventsToParts } from "../stores/parts";
   import { chat } from "../stores/chat";
   import { mathReady, renderMarkdown } from "../utils/markdown";
+  import { splitDeliveryNote } from "../utils/deliveryNote";
   import { tickerState, useTicker } from "../utils/ticker.svelte";
 import ChangedFilesCard from "./ChangedFilesCard.svelte";
 import { collectTurnFiles, isFileEditTool, parseEditArgs, type TurnFile } from "../utils/fileChanges";
@@ -246,6 +247,10 @@ import { t, locale, tSync } from "../i18n";
     // Fallback to message.content for legacy sessions without parts
     if (!text) text = message.content;
     if (!text) return;
+    // Copy the answer, not the delivery metadata appended to it.
+    const split = splitDeliveryNote(text, message.quality?.note);
+    if (split.note) text = split.body;
+    if (!text) return;
     navigator.clipboard.writeText(text).then(() => {
       copied = true;
       setTimeout(() => copied = false, 1600);
@@ -310,6 +315,8 @@ import { t, locale, tSync } from "../i18n";
   // followed by the final reply only.
 
   let detailsOpen = $state(false);
+  /** Expanded state for the delivery-metadata panel in the footer. */
+  let deliveryOpen = $state(false);
 
   // Only the LAST text segment is the final reply. Earlier text is the
   // model talking between tools ("let me check…") and must fold into the
@@ -353,6 +360,11 @@ import { t, locale, tSync } from "../i18n";
     }
     return message.role === "assistant" ? message.content ?? "" : "";
   });
+
+  // The backend appends the review warning + "📋 交付说明" block to the
+  // final reply. They are delivery metadata, not the answer: render the
+  // body alone and move the block behind the footer's 详情 toggle.
+  let delivery = $derived(splitDeliveryNote(finalText, message.quality?.note));
 
   let completedLine = $derived(
     message.duration != null && message.duration > 0
@@ -550,8 +562,8 @@ import { t, locale, tSync } from "../i18n";
           {#if detailsOpen}
             {@render detailsPanel()}
           {/if}
-          {#if finalText}
-            <div class="markdown-content content-block">{@html renderMarkdown(finalText, { mathVersion: $mathReady })}</div>
+          {#if delivery.body}
+            <div class="markdown-content content-block">{@html renderMarkdown(delivery.body, { mathVersion: $mathReady })}</div>
           {/if}
         {/if}
         {#if message.exitReason && message.exitReason !== "end_turn" && message.exitReason !== "EXITED" && !isLive}
@@ -645,6 +657,18 @@ import { t, locale, tSync } from "../i18n";
                 <span class="quality-dot" aria-hidden="true"></span>
                 {$t(contract.labelKey)}
               </span>
+              {#if delivery.note}
+                <button
+                  type="button"
+                  class="delivery-toggle"
+                  aria-expanded={deliveryOpen}
+                  title={$t("message.deliveryDetailsTitle")}
+                  onclick={() => (deliveryOpen = !deliveryOpen)}
+                >
+                  {$t("message.deliveryDetails")}
+                  <span class="delivery-chevron" aria-hidden="true">{deliveryOpen ? "▴" : "▾"}</span>
+                </button>
+              {/if}
             {/if}
           </div>
           {#if noteOpen && !feedback}
@@ -667,6 +691,31 @@ import { t, locale, tSync } from "../i18n";
           {/if}
           {#if feedbackError}
             <div class="feedback-error" role="alert">{feedbackError}</div>
+          {/if}
+          {#if deliveryOpen && delivery.note}
+            <div class="delivery-panel">
+              {#if delivery.note.warning}
+                <p class="delivery-warning">⚠️ {delivery.note.warning}</p>
+              {/if}
+              {#if delivery.note.done}
+                <p class="delivery-row">
+                  <span class="delivery-label">{$t("message.deliveryDone")}</span>
+                  <span class="delivery-value">{delivery.note.done}</span>
+                </p>
+              {/if}
+              {#if delivery.note.verified}
+                <p class="delivery-row">
+                  <span class="delivery-label">{$t("message.deliveryVerified")}</span>
+                  <span class="delivery-value">{delivery.note.verified}</span>
+                </p>
+              {/if}
+              {#if delivery.note.left}
+                <p class="delivery-row">
+                  <span class="delivery-label">{$t("message.deliveryLeft")}</span>
+                  <span class="delivery-value">{delivery.note.left}</span>
+                </p>
+              {/if}
+            </div>
           {/if}
         {/if}
 
@@ -744,7 +793,9 @@ import { t, locale, tSync } from "../i18n";
   /* 用户话: 右侧一块釉面玉牌 —— 圆角收右下角, 天青薄釉, 1px 高光边 */
   .message-row.user {
     justify-content: flex-end;
-    padding: 2px 0 2px 15%;
+    /* No 15% left inset: a long user message should be able to use the
+       whole conversation width when the pane grows (2026-11-02). */
+    padding: 2px 0;
   }
   .message-row.user .bubble {
     background: linear-gradient(
@@ -755,7 +806,9 @@ import { t, locale, tSync } from "../i18n";
     border: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
     border-radius: 16px 16px 5px 16px;
     padding: 10px 16px 8px;
-    max-width: min(100%, 680px);
+    /* Was min(100%, 680px): the fixed cap stopped the bubble from following
+       the pane once it grew past 680px (2026-11-02). */
+    max-width: 100%;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
   }
 
@@ -1215,6 +1268,59 @@ import { t, locale, tSync } from "../i18n";
   }
   .footer-quality.muted {
     color: var(--color-muted);
+  }
+  /* Delivery metadata (⚠️ / 📋 交付说明) lives behind this toggle instead of
+     inside the answer bubble; the raw message keeps it for exports/CLI. */
+  .delivery-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    background: none;
+    border: none;
+    padding: 0 2px;
+    margin: 0;
+    color: var(--color-muted);
+    font-family: inherit;
+    font-size: 10px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .delivery-toggle:hover {
+    color: var(--color-ink);
+  }
+  .delivery-chevron {
+    font-size: 8px;
+  }
+  .delivery-panel {
+    margin-top: 6px;
+    padding: 7px 10px;
+    border-left: 1px solid var(--color-hairline);
+    font-size: 11.5px;
+    line-height: 1.65;
+    color: var(--color-muted);
+    max-height: 32vh;
+    overflow-y: auto;
+  }
+  .delivery-row {
+    margin: 0 0 5px;
+  }
+  .delivery-row:last-child {
+    margin-bottom: 0;
+  }
+  .delivery-label {
+    display: inline-block;
+    margin-right: 6px;
+    color: var(--color-dim);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+  }
+  .delivery-value {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .delivery-warning {
+    margin: 0 0 5px;
+    color: var(--color-status-warn);
   }
   .footer-exit.warn {
     color: var(--color-status-warn);
