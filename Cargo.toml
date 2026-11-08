@@ -11,6 +11,7 @@ members = [
     "crates/oz-mcp",
     "crates/oz-skill-mcp",
     "crates/oz-safety",
+    "crates/oz-steward",
     "crates/oz-scheduler",
     "crates/oz-server",
     "crates/oz-reflect",
