@@ -1,5 +1,28 @@
 
-## Unreleased
+## v0.2.6 (2026-11-08)
+
+### ⚙️ Miscellaneous Tasks
+
+- Ignore the local work/ scratch directory
+
+### 🎨 Styling
+
+- **ui:** Lay the job and subagent strips side by side
+
+### 🐛 Bug Fixes
+
+- **llm:** Recover truncated DSML closers and trailing call tags
+
+### 📚 Documentation
+
+- Record the November gateway-leak fixes and layout rules
+
+### 🚀 Features
+
+- **steward:** Add supervision, flight recorder and StartLux decisions
+- **app:** Wire steward, goals and project picking into the desktop
+- **quality:** Fold the delivery note out of the reply body
+## v0.2.5 (2026-10-28)
 
 ### 🎨 Styling
 

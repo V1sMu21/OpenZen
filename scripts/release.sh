@@ -152,11 +152,15 @@ fi
 # ---------- 5. 更新 CHANGELOG ----------
 log "更新 CHANGELOG.md..."
 if [[ $DRY_RUN -eq 0 ]]; then
-  # 用 git-cliff 全量生成（含历史 tag 段），保留我们手写的 v0.1.0 前导说明
-  git-cliff --output CHANGELOG.md 2>/dev/null || die "git-cliff 生成 CHANGELOG 失败"
+  # 用 git-cliff 全量生成（含历史 tag 段），保留我们手写的 v0.1.0 前导说明。
+  # `--tag` 必须显式传：不传时当前 commit 尚未打 tag，新段会写成
+  # `## Unreleased`，而 CI 的 release job 取的是**第一个 `## ` 段**
+  # （.github/workflows/release.yml 的 awk），于是 Release 页标题变成
+  # "Unreleased"（v0.2.5 就是这样）。
+  git-cliff --tag "$NEW_VERSION" --output CHANGELOG.md 2>/dev/null || die "git-cliff 生成 CHANGELOG 失败"
   log "CHANGELOG.md 已更新（顶部为新版本段）"
 else
-  log "[dry-run] 将执行: git-cliff --output CHANGELOG.md"
+  log "[dry-run] 将执行: git-cliff --tag ${NEW_VERSION} --output CHANGELOG.md"
   echo "---- 新版本段预览 ----"
   git-cliff --unreleased 2>/dev/null || true
   echo "---- 预览结束 ----"
