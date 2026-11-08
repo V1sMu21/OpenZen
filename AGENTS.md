@@ -334,6 +334,74 @@ denies `computer_*` unconditionally.
 `outside_write_needs_an_approval_and_then_succeeds` (oz-tools: unapproved →
 blocked and file untouched, approved → written, other session → still blocked).
 
+**Eighth pass (2026-11-02, session `269ba4e4` — `deepseek-v4.1-flash`,
+reasoning=high).** User report: "连最基本的写入、打开面板都会出现非常低级的调用
+错误". Two independent causes, both client-side:
+
+1. **The 60 s SSE idle timeout is the upstream trigger.** `chunk_timeout_secs`
+   used 60 s for every cloud API, and this gateway buffers a whole `arguments`
+   payload without emitting a single SSE frame while the model writes it. That
+   fired **30 times in one session** (~30 min of pure stall), and every timeout
+   throws away the partial answer and re-sends the request. The *retried* stream
+   is where the corruption comes from: the model re-generated from scratch and
+   degenerated — one turn replayed its own transcript (writing `<function_results>`
+   it never received), another looped on `</invoke>\n</function_calls>` for
+   420 KB. Ceiling is now **180 s** (local stays 300 s), overridable with
+   `OPENZEN_SSE_IDLE_SECS`.
+
+2. **The truncated closer was invisible to every matcher.** The leaked values end
+   at a bare `</` instead of `</parameter>`:
+   `"artifact_path": "…/diag_f30.png</\n＜｜DSML｜  parameter name="artifact_type"…`.
+   That is *valid JSON*, so `sanitize_dsml_pollution` was the only layer that
+   could catch it and it only knew `</parameter>` / `</｜DSML` — neither matches
+   a closer whose `parameter>` half is gone. Result: `open_side_panel` failed
+   `missing artifact_type or artifact_path` with a 12 KB "path", and `write`
+   buried the body inside `file_path`. New `dsml_closer_index` accepts
+   `</` + `parameter`/`DSML`/`｜`/`<｜`/`invoke`/`function_calls`, plus a
+   *single-line* value ending in a bare `</` (torn scalar: `"label": "…f30</"`).
+   Multi-line bodies are exempt so a file that legitimately ends with `</` keeps
+   its bytes. `extract_dsml_params` now bounds a value at the next closer **or
+   opener** of any dialect — before, a lifted field with no `</parameter>` ran
+   to end-of-string and swallowed the rest of the transcript.
+
+Also: `open_side_panel` had **no curated alias table**, so `canonical_param_names`
+was `None` and both the alias repair and the nameless-DSML fallback were blind to
+it. It now maps `path`/`file`/`target` → `artifact_path` (primary),
+`type`/`kind`/`format` → `artifact_type`, `label`/`title`/`name` →
+`artifact_label`. And its missing-argument error names **only** the field that is
+actually absent (plus the keys the call did send) instead of always saying
+"missing artifact_type or artifact_path" — the old wording sent the model looking
+in the wrong place, so it re-sent the same broken call.
+
+**Tests**: `real_20261102_panel_survives_the_truncated_closer` and
+`real_20261102_write_survives_the_truncated_closer` replay the exact bytes from
+the session (`panel_transcript_replay_20261102.txt` 14 KB,
+`write_truncated_closer_20261102.txt`); `truncated_closer_leaves_ordinary_code_alone`
+pins that HTML/JS content and multi-line bodies survive byte-for-byte;
+`side_panel_accepts_aliases_and_keeps_canonical_calls` (oz-core-types) and
+`missing_argument_error_names_only_the_missing_key` (oz-tools).
+
+3. **Call scaffolding left glued to command values.** Same session, a
+   `code_run` whose `code` ended `… && echo "FILES OK"</個parameter>` and whose
+   `timeout` was `120</｜parameter>\n＜｜DSML｜  parameter name="type"…>bash</｜parameter>`.
+   `個`/`｜` are substituted for the DSML bar, so neither matcher fired, and the
+   shell died on the redirect: `syntax error near unexpected token 'newline'`.
+   New `strip_trailing_call_tag` / `trailing_call_tag_len` removes trailing
+   call tags (`parameter`, `description`, `function_calls`, `invoke`, …) from
+   **command-like fields only** (`code`/`command`/`cmd`/`script`/`question`/
+   `response`) — a file body must never be stripped, because an `.svg` written
+   through `content` legitimately ends with `</description>`. The same tag on a
+   command field is scaffolding. The tag name is matched after dropping every
+   non-ASCII char, so `個parameter` / `｜parameter` still resolve to
+   `parameter`.
+   **Tests**: `real_20261102_code_run_drops_trailing_call_tags` (real bytes) and
+   `trailing_call_tag_is_kept_inside_a_file_body`.
+
+Known gap (unchanged): when the gateway drops the *body* of a `write` and leaves
+`{"content": "<path>"}`, the payload is gone upstream — the call fails with an
+actionable "missing `file_path`" and the model re-issues it. Nothing client-side
+can restore text that never arrived.
+
 ---
 
 # Tauri E2E driving — lessons from the ask_user test (2026-06-17)
