@@ -608,11 +608,40 @@ pub fn get_memory_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     let enabled = state
         .memory_enabled
         .load(std::sync::atomic::Ordering::SeqCst);
+    let memories = runtime.store.router().l3_engine().storage().all();
+    let scope_total = memories.len();
+    let scope_tagged = memories.iter().filter(|m| !m.tags.is_empty()).count();
+    let scope_untagged = scope_total.saturating_sub(scope_tagged);
+    let scope_archived = memories
+        .iter()
+        .filter(|m| m.tags.iter().any(|t| t == "archived"))
+        .count();
+    let memory_dir = crate::data_dir().join("memory_erme");
+    let file_bytes = |name: &str| -> u64 {
+        std::fs::metadata(memory_dir.join(name))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
+    let wal_bytes = file_bytes("erme_memory.log");
+    let snapshot_bytes = file_bytes("erme_memory.bin");
+    let cache_bytes = file_bytes("l2_embeddings.json");
     serde_json::json!({
         "enabled": enabled,
         "backend": if enabled { "erme" } else { "file" },
         "erne_available": true,
         "embedding_kind": runtime.store.router().l2_engine().embedding_kind(),
+        "embedding_model": crate::embed_model_name(),
+        "scope": {
+            "tagged": scope_tagged,
+            "untagged": scope_untagged,
+            "archived": scope_archived,
+            "coverage": if scope_total > 0 { scope_tagged as f64 / scope_total as f64 } else { 0.0 },
+        },
+        "storage": {
+            "wal_bytes": wal_bytes,
+            "snapshot_bytes": snapshot_bytes,
+            "embedding_cache_bytes": cache_bytes,
+        },
         "soul": soul,
         "store": {
             "total_entries": stats.total_entries,
@@ -2573,6 +2602,23 @@ pub async fn stop_session(
         store.save();
     }
     stop_running_agent(&id, &state).await;
+    // Task-graph cascade: stopping a butler must terminalize its open tasks,
+    // and stopping a worker must terminalize the task it owns. Otherwise the
+    // scheduler keeps an owner-less Running task and never digests.
+    let is_butler = {
+        let sessions = lock_poison_guard(&state.sessions);
+        sessions
+            .get(&id)
+            .map(|e| e.role.is_butler())
+            .unwrap_or(false)
+    };
+    if let Some(store) = crate::butler::store() {
+        let _ = if is_butler {
+            store.fail_tasks_for_butler(&id, "butler stopped by user")
+        } else {
+            store.fail_tasks_for_owner(&id, "worker stopped by user")
+        };
+    }
     // Stop also means "stop the work I started": background jobs owned by
     // this session would otherwise keep running with no UI able to kill them
     // (their owner row can be gone after a restart).
@@ -3119,10 +3165,36 @@ pub(crate) async fn send_message_core(
     state: Arc<AppState>,
     resume: bool,
 ) -> Result<SendMessageResponse, String> {
+    send_message_core_ex(
+        message,
+        session_id,
+        session_name,
+        model_name,
+        reasoning_effort,
+        app_handle,
+        state,
+        resume,
+        true,
+    )
+    .await
+}
+
+/// Like [`send_message_core`], but `auto_goal` can be turned off: a task the
+/// user handed to the butler must become butler tasks, not a Goal that then
+/// runs in the same session and competes with the control plane.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_message_core_ex(
+    message: String,
+    session_id: String,
+    session_name: Option<String>,
+    model_name: Option<String>,
+    reasoning_effort: Option<String>,
+    app_handle: AppHandle,
+    state: Arc<AppState>,
+    resume: bool,
+    auto_goal: bool,
+) -> Result<SendMessageResponse, String> {
     let mut message = message;
-    if let Some(note) = crate::goal_runtime::maybe_auto_start(&state, &session_id, &message) {
-        message = format!("{note}\n\n{message}");
-    }
     if message.chars().count() > MAX_MESSAGE_CHARS {
         return Err(format!(
             "Message too large (max {} characters)",
@@ -3135,6 +3207,28 @@ pub(crate) async fn send_message_core(
         message.len()
     ));
 
+    // Reserve the session BEFORE touching persisted state. The old order
+    // appended the user message and set Running, then rejected because
+    // another agent was live — leaving a permanent Running session and an
+    // unanswered digest message on disk.
+    {
+        let agents = lock_poison_guard(&state.running_agents);
+        let mut starting = lock_poison_guard(&state.starting_agents);
+        if agents.contains_key(&session_id) || starting.contains(&session_id) {
+            return Err("Another agent is already running for this session".to_string());
+        }
+        if agents.len() + starting.len() >= 3 {
+            return Err("Too many concurrent agent sessions (max 3)".to_string());
+        }
+        starting.insert(session_id.clone());
+    }
+    // Goal detection runs AFTER admission: creating a Goal for a message
+    // that is rejected as "already running" left a phantom active goal.
+    if auto_goal {
+        if let Some(note) = crate::goal_runtime::maybe_auto_start(&state, &session_id, &message) {
+            message = format!("{note}\n\n{message}");
+        }
+    }
     {
         let mut store = lock_poison_guard(&state.sessions);
         let existed = store.has_session(&session_id);
@@ -3171,16 +3265,12 @@ pub(crate) async fn send_message_core(
 
     abort_detached_agent(&session_id, &state);
 
-    {
-        let agents = lock_poison_guard(&state.running_agents);
-        if agents.contains_key(&session_id) {
-            return Err("Another agent is already running for this session".to_string());
-        }
-        if agents.len() >= 3 {
-            return Err("Too many concurrent agent sessions (max 3)".to_string());
-        }
-        drop(agents);
-    }
+    // Register the stop signal BEFORE the runner task starts. A Stop that
+    // arrives while the runner is still reading config/memory used to find no
+    // entry, wait 10s, detach, and let the run continue.
+    lock_poison_guard(&state.stop_signals)
+        .entry(session_id.clone())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
 
     let handle = tokio::spawn(async move {
         // RAII cleanup — runs even if run_agent_for_session panics.
@@ -3188,42 +3278,29 @@ pub(crate) async fn send_message_core(
             state: state_clone.clone(),
             session_id: session_id_clone.clone(),
         };
-        // Panic isolation: run the loop in an inner task so a panic (e.g. a
-        // byte-slice on CJK user input) still reaches the frontend as an
-        // error SSE event. Without this the UI stays isProcessing forever —
-        // no new cards ever render and the stop pill never flips back
-        // (observed 2026-09-02: intervention with Chinese content panicked
-        // agent_loop and the session silently died).
-        let inner_session = session_id_clone.clone();
-        let inner_state = state_clone.clone();
-        let inner_app = app_clone.clone();
-        let inner_model = model_name_clone.clone();
-        let inner_effort = reasoning_effort_clone.clone();
-        let inner_resume = resume;
-        let inner = tokio::spawn(async move {
-            runner::run_agent_for_session(
-                &inner_app,
-                &inner_state,
-                &inner_session,
-                inner_model.as_deref(),
-                inner_resume,
-                inner_effort.as_deref(),
-                None,
-            )
-            .await
-        });
-        match inner.await {
+        // Panic isolation WITHOUT a detached inner task: the outer JoinHandle
+        // is what Stop/abort controls. The old inner tokio::spawn meant an
+        // aborted wrapper left the actual run alive.
+        use futures::FutureExt;
+        let run = std::panic::AssertUnwindSafe(runner::run_agent_for_session(
+            &app_clone,
+            &state_clone,
+            &session_id_clone,
+            model_name_clone.as_deref(),
+            resume,
+            reasoning_effort_clone.as_deref(),
+            None,
+        ))
+        .catch_unwind()
+        .await;
+        match run {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 debug_log(&format!("run_agent error: {e}"));
                 emit_agent_run_error(&state_clone, &app_clone, &session_id_clone, &e.to_string());
             }
-            Err(join_err) => {
-                let msg = if join_err.is_panic() {
-                    "agent task panicked (see openzen.log for the backtrace)".to_string()
-                } else {
-                    format!("agent task cancelled: {join_err}")
-                };
+            Err(_) => {
+                let msg = "agent task panicked (see openzen.log for the backtrace)".to_string();
                 debug_log(&msg);
                 emit_agent_run_error(&state_clone, &app_clone, &session_id_clone, &msg);
             }
@@ -3231,6 +3308,7 @@ pub(crate) async fn send_message_core(
     });
 
     lock_poison_guard(&state.running_agents).insert(session_id.clone(), handle);
+    lock_poison_guard(&state.starting_agents).remove(&session_id);
 
     Ok(SendMessageResponse {
         session_id,
@@ -3912,20 +3990,6 @@ pub fn add_platform(
 }
 
 #[tauri::command]
-pub fn get_crystallization(state: State<'_, Arc<AppState>>) -> bool {
-    state
-        .crystallization_enabled
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
-
-#[tauri::command]
-pub fn set_crystallization(enabled: bool, state: State<'_, Arc<AppState>>) {
-    state
-        .crystallization_enabled
-        .store(enabled, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[tauri::command]
 pub fn get_full_access(state: State<'_, Arc<AppState>>) -> bool {
     state.full_access.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -4179,6 +4243,7 @@ mod tests {
 
     fn reminder(session: &str, fire_at_ms: u64, persist: bool) -> oz_core_types::Reminder {
         oz_core_types::Reminder {
+            id: "test".into(),
             session_id: session.to_string(),
             message: "report".into(),
             fire_at_ms,

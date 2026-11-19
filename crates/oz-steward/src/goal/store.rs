@@ -462,6 +462,7 @@ fn parse_status(s: &str) -> Result<GoalStatus> {
         "verifying" => GoalStatus::Verifying,
         "blocked" => GoalStatus::Blocked,
         "achieved" => GoalStatus::Achieved,
+        "unverified" => GoalStatus::Unverified,
         "exhausted" => GoalStatus::Exhausted,
         "abandoned" => GoalStatus::Abandoned,
         _ => return Err(StewardError::Invalid(format!("bad goal status: {s}"))),
@@ -476,6 +477,7 @@ fn status_str(s: GoalStatus) -> &'static str {
         GoalStatus::Verifying => "verifying",
         GoalStatus::Blocked => "blocked",
         GoalStatus::Achieved => "achieved",
+        GoalStatus::Unverified => "unverified",
         GoalStatus::Exhausted => "exhausted",
         GoalStatus::Abandoned => "abandoned",
     }
@@ -489,6 +491,7 @@ pub fn ticket_status_for(goal: GoalStatus) -> TicketStatus {
         GoalStatus::Active | GoalStatus::Verifying => TicketStatus::Active,
         GoalStatus::Blocked => TicketStatus::Blocked,
         GoalStatus::Achieved => TicketStatus::Achieved,
+        GoalStatus::Unverified => TicketStatus::Exhausted,
         GoalStatus::Exhausted => TicketStatus::Exhausted,
         GoalStatus::Abandoned => TicketStatus::Abandoned,
     }

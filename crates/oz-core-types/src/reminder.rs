@@ -11,6 +11,9 @@ use tokio::sync::mpsc::UnboundedSender;
 /// A scheduled reminder created by the agent during a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reminder {
+    /// Stable id for UI cancellation (indexes shift when a reminder fires).
+    #[serde(default)]
+    pub id: String,
     pub session_id: String,
     pub message: String,
     pub fire_at_ms: u64,

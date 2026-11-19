@@ -20,21 +20,6 @@
         "devtools": false,
         "label": "main",
         "acceptFirstMouse": true
-      },
-      {
-        "label": "pet",
-        "title": "阿青",
-        "url": "/pet/pet.html",
-        "width": 260,
-        "height": 340,
-        "resizable": false,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "visible": false,
-        "skipTaskbar": true,
-        "shadow": false,
-        "acceptFirstMouse": true
       }
     ],
     "security": {

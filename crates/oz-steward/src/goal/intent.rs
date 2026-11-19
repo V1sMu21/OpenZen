@@ -143,7 +143,12 @@ fn infer_gate(lower: &str) -> GoalGate {
             };
         }
     }
-    GoalGate::human()
+    // No command was named: run autonomously and let the verifier settle on
+    // `unverified` rather than parking for a human.
+    GoalGate::Review {
+        rubric: "Does the delivered work match the user's stated objective?".into(),
+        min_confidence: 0.6,
+    }
 }
 
 #[cfg(test)]

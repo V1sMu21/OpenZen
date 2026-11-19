@@ -591,11 +591,16 @@ impl ConsolidationEngine {
     // ================================================================
 
     pub fn extract_from_interaction(&self, raw_text: &str) -> Vec<(String, String, String, f32)> {
-        if self.config.use_llm_compression {
+        let mut facts = if self.config.use_llm_compression {
             self.extract_with_mlx(raw_text)
         } else {
             self.extract_rule_based(raw_text)
-        }
+        };
+        // Real data: the CJK verb table produced "继续吧 → 继续 → …" style
+        // triples. Filter them before they reach the store; the store is
+        // append-only and every junk row costs an embedding + WAL entry.
+        facts.retain(|(s, p, o, c)| is_useful_triple(s, p, o, *c));
+        facts
     }
 
     fn extract_with_mlx(&self, raw_text: &str) -> Vec<(String, String, String, f32)> {
@@ -891,6 +896,19 @@ mod tests {
     use crate::l2::{HnswConfig, L2Config};
     use crate::l3::{BudgetConfig, L3Config};
     use tempfile::tempdir;
+
+    #[test]
+    fn extraction_rejects_filler_and_graph_triples() {
+        assert!(!is_useful_triple("继续", "是", "继续吧", 0.8));
+        assert!(!is_useful_triple("Node 12", "可能", "Node 34", 0.8));
+        assert!(!is_useful_triple("用户", "喜欢", "1", 0.8));
+        assert!(is_useful_triple("用户", "喜欢", "深色主题", 0.7));
+        let engine = ConsolidationEngine::new(ConsolidationConfig::default());
+        let facts = engine.extract_from_interaction("继续吧。好的。嗯。");
+        assert!(facts
+            .iter()
+            .all(|(_, _, o, _)| o != "继续吧" && o != "好的"));
+    }
 
     fn make_l2() -> L2Engine {
         L2Engine::new(L2Config {
@@ -1459,6 +1477,48 @@ fn is_cjk_char(c: char) -> bool {
 /// Extract at most one fact from a Chinese sentence:
 ///   「X的KEY是VALUE」 → (X, KEY, VALUE)      (attribute, highest confidence)
 ///   「X喜欢/需要/住在…VALUE」 → (X, verb_en, VALUE)
+/// Quality gate for extracted triples.
+fn is_useful_triple(subject: &str, predicate: &str, object: &str, confidence: f32) -> bool {
+    let s = subject.trim();
+    let p = predicate.trim();
+    let o = object.trim();
+    if s.is_empty() || p.is_empty() || o.is_empty() || confidence < 0.45 {
+        return false;
+    }
+    if s.chars().count() < 2 || o.chars().count() < 2 {
+        return false;
+    }
+    if s.contains("Node ") || o.contains("Node ") {
+        return false;
+    }
+    if o.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // Filler acknowledgements and bare imperatives are not knowledge.
+    const FILLERS: &[&str] = &[
+        "继续",
+        "继续吧",
+        "继续啊",
+        "好的",
+        "好",
+        "嗯",
+        "收到",
+        "谢谢",
+        "可以",
+        "行",
+        "是的",
+        "ok",
+        "okay",
+        "yes",
+        "no",
+    ];
+    if FILLERS.contains(&o.to_lowercase().as_str()) || FILLERS.contains(&s.to_lowercase().as_str())
+    {
+        return false;
+    }
+    true
+}
+
 fn extract_cjk_facts(sentence: &str) -> Vec<(String, String, String, f32)> {
     let s = sentence.trim().trim_start_matches(['-', '*', ' ', '\t']);
     if s.chars().count() < 5 {

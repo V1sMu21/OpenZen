@@ -209,6 +209,18 @@ impl Store {
         Ok(())
     }
 
+    /// (open, total) tickets; a ticket is open until it has a terminal_at.
+    pub fn ticket_stats(&self) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM ticket", [], |r| r.get(0))?;
+        let open: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ticket WHERE terminal_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((open as usize, total as usize))
+    }
+
     pub fn set_phase(&self, ticket_id: &str, phase: Phase) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(

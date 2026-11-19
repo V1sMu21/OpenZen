@@ -1,0 +1,45 @@
+name: Nightly ECF
+
+on:
+  schedule:
+    # 19:00 UTC = 03:00 Asia/Shanghai
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+
+jobs:
+  ecf:
+    name: Full corpus + E2E matrix + mutation probe
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Build CLI
+        run: cargo build --bin openzen
+      - name: Corpus / contract check
+        run: cargo run -q -p oz-testkit --bin oz-casegen -- check
+      - name: Ratchet
+        run: python3 scripts/caselab/ratchet.py
+      - name: Full 5k wire corpus
+        run: cargo run -q -p oz-testkit --bin oz-caselab -- run --tier nightly
+      - name: Mutation probe (detectors must be able to fail)
+        run: python3 scripts/caselab/mutation_probe.py
+      - name: E2E matrix (30 scenarios, mock model only)
+        run: bash scripts/e2e/matrix.sh --replay
+      - name: Merged release report
+        run: cargo run -q -p oz-testkit --bin oz-caselab -- run --tier release
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecf-report
+          path: |
+            target/caselab/results.jsonl
+            target/caselab/report.html
+            target/caselab/e2e-results.jsonl
+            target/caselab/mutation-results.jsonl
+          retention-days: 30

@@ -4,6 +4,10 @@
 # 用法:
 #   bash scripts/install-macos.sh              # 只构建+校验；OpenZen 运行中则跳过安装（默认）
 #   bash scripts/install-macos.sh --restart    # 允许退出→安装→重启（需用户显式同意）
+#   bash scripts/install-macos.sh --no-slim    # 构建安装后不清理 target（默认会清理）
+#
+# target 清理：安装成功后自动跑 scripts/target-slim.sh --apply --max ${OZ_SLIM_MAX:-8GB}，
+# 只删可重建的缓存（incremental / dmg / 超限的旧产物），保留 target/release/bundle 里的 .app。
 #
 # ⛔ 硬性规则（见 AGENTS.md）：绝不关闭用户正在使用的 OpenZen。
 #   所以默认模式检测到 OpenZen 在运行就只构建、不安装、不重启。
@@ -26,12 +30,29 @@ SIGN_ID="OpenZen Local Dev"
 PROC_PATTERN="/Applications/${APP_NAME}.app/Contents/MacOS/"
 
 RESTART=0
-if [[ "${1:-}" == "--restart" ]]; then RESTART=1; fi
+SLIM=1
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { echo -e "${GREEN}==>${NC} $*"; }
 warn() { echo -e "${YELLOW}!! ${NC}$*"; }
 die()  { echo -e "${RED}!! ${NC}$*" >&2; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --restart) RESTART=1 ;;
+    --no-slim) SLIM=0 ;;
+    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "未知参数: ${1}（可用: --restart / --no-slim）" ;;
+  esac
+  shift
+done
+
+# 构建安装成功后精简 target：只删可重建缓存，绝不动 $BUILT 这个 .app
+slim_target() {
+  [[ $SLIM -eq 1 ]] || return 0
+  bash "$ROOT/scripts/target-slim.sh" --apply --max "${OZ_SLIM_MAX:-8GB}" \
+    || warn "target 精简跳过（不影响已完成的安装）"
+}
 
 # ── 0. 前置：签名身份必须存在 ───────────────────────────────
 security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID" \
@@ -68,6 +89,7 @@ if [[ $RUNNING -eq 1 && $RESTART -eq 0 ]]; then
   echo "    待你方便时二选一："
   echo "      1) 自己退出 OpenZen 后重新运行本脚本 → 自动安装并启动"
   echo "      2) 运行: bash scripts/install-macos.sh --restart  → 允许脚本退出并重启它"
+  slim_target
   exit 0
 fi
 
@@ -91,3 +113,6 @@ xattr -dr com.apple.quarantine "$DEST" >/dev/null 2>&1 || true
 log "启动 ${APP_NAME}"
 open "$DEST"
 log "完成 ✓"
+
+# ── 7. 精简 target（放在安装之后：此时 .app 已装到 /Applications） ──
+slim_target

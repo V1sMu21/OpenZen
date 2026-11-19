@@ -56,6 +56,18 @@ impl ScheduledTask for TrustDecay {
         if let Some(tp) = ctx.trust_path.as_ref().map(PathBuf::from) {
             targets.push(tp);
         }
+        // Desktop grants now live in {data_dir}/trust/<project-hash>.json.
+        if let Some(ref wd) = working_dir {
+            let trust_dir = wd.join("trust");
+            if let Ok(entries) = std::fs::read_dir(&trust_dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|x| x.to_str()) == Some("json") {
+                        targets.push(p);
+                    }
+                }
+            }
+        }
 
         let mut decayed = 0usize;
         for path in targets {

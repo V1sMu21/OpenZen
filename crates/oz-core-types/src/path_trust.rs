@@ -63,29 +63,110 @@ impl SessionPaths {
 /// permission problem (2026-10-23 isolated run: three retries on
 /// `work/e2e/hello.py` before a manual `mkdir -p`).
 pub fn resolve_boundary_path(path: &Path) -> PathBuf {
+    resolve_boundary_path_depth(path, 0)
+}
+
+fn resolve_boundary_path_depth(path: &Path, depth: u8) -> PathBuf {
+    // Canonicalize the ORIGINAL path first. Pre-collapsing `..` before
+    // canonicalize is wrong when a component is a symlink: `link/../x`
+    // resolves relative to the link target, not to the lexical parent.
     if let Ok(real) = std::fs::canonicalize(path) {
         return real;
     }
-    let mut missing: Vec<std::ffi::OsString> = Vec::new();
-    if let Some(name) = path.file_name() {
-        missing.push(name.to_os_string());
-    }
-    let mut cursor = path.parent();
-    while let Some(dir) = cursor {
-        if let Ok(real_dir) = std::fs::canonicalize(dir) {
-            let mut rebuilt = real_dir;
-            for part in missing.iter().rev() {
-                rebuilt.push(part);
+    // A dangling symlink still exists as a link; `canonicalize` fails only
+    // because its target does not. Re-attaching the leaf lexically treated it
+    // as an in-workspace file while the eventual write followed the link out
+    // of the workspace. Resolve the target (bounded) before falling back.
+    if depth <= 8 {
+        if let Ok(md) = std::fs::symlink_metadata(path) {
+            if md.file_type().is_symlink() {
+                if let Ok(target) = std::fs::read_link(path) {
+                    let abs = if target.is_absolute() {
+                        target
+                    } else {
+                        path.parent().unwrap_or(Path::new("/")).join(target)
+                    };
+                    return normalize_lexical(&resolve_boundary_path_depth(&abs, depth + 1));
+                }
             }
-            return rebuilt;
         }
-        if let Some(name) = dir.file_name() {
-            missing.push(name.to_os_string());
-        }
-        cursor = dir.parent();
     }
-    // Nothing on the chain exists (not even the root): fall back to the input.
-    path.to_path_buf()
+    // Deepest existing ancestor, preserving every trailing component
+    // (including `..`): `file_name()` returns None for `..`, which is how the
+    // old fallback silently dropped a traversal segment.
+    let mut cursor = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&cursor) {
+            let mut rebuilt = real;
+            for part in tail.iter().rev() {
+                if part == ".." {
+                    rebuilt.pop();
+                } else if part != "." {
+                    rebuilt.push(part);
+                }
+            }
+            return normalize_lexical(&rebuilt);
+        }
+        if depth <= 8 {
+            if let Ok(md) = std::fs::symlink_metadata(&cursor) {
+                if md.file_type().is_symlink() {
+                    if let Ok(target) = std::fs::read_link(&cursor) {
+                        let abs = if target.is_absolute() {
+                            target
+                        } else {
+                            cursor.parent().unwrap_or(Path::new("/")).join(target)
+                        };
+                        let mut rebuilt = resolve_boundary_path_depth(&abs, depth + 1);
+                        for part in tail.iter().rev() {
+                            if part == ".." {
+                                rebuilt.pop();
+                            } else if part != "." {
+                                rebuilt.push(part);
+                            }
+                        }
+                        return normalize_lexical(&rebuilt);
+                    }
+                }
+            }
+        }
+        let Some(parent) = cursor.parent() else {
+            break;
+        };
+        if let Some(name) = cursor.file_name() {
+            tail.push(name.to_os_string());
+        } else if let Some(last) = cursor.components().next_back() {
+            // `.` / `..` / root component.
+            tail.push(last.as_os_str().to_os_string());
+        }
+        if parent == cursor {
+            break;
+        }
+        cursor = parent.to_path_buf();
+    }
+    normalize_lexical(path)
+}
+
+/// Fold `.`/`..` WITHOUT touching the filesystem. This must run before the
+/// deepest-existing-ancestor fallback: `file_name()` on a path ending in `..`
+/// is `None`, and the old fallback silently dropped that segment, turning a
+/// traversal into an in-workspace path.
+pub fn normalize_lexical(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            Component::Normal(p) => out.push(p),
+            Component::RootDir | Component::Prefix(_) => out.push(c.as_os_str()),
+        }
+    }
+    out
 }
 
 /// The file a mutating tool is about to write, if it names one.
@@ -296,5 +377,49 @@ mod tests {
             resolved.display()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_parent_traversal_is_resolved_lexically() {
+        let root = tmpdir("lexical-root");
+        let raw = root.join("missing/../../../../etc/passwd");
+        let resolved = normalize_lexical(&raw);
+        assert!(
+            !resolved.starts_with(&root),
+            "traversal must not stay inside root: {}",
+            resolved.display()
+        );
+        let target = outside_workspace_target(
+            "write",
+            &serde_json::json!({"file_path": raw.to_string_lossy()}),
+            root.to_str().unwrap(),
+        );
+        assert!(
+            target.is_some(),
+            "missing-parent traversal must require approval"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn symlink_parent_traversal_is_not_treated_as_inside() {
+        let root = tmpdir("symlink-root");
+        let outside = tmpdir("symlink-outside");
+        std::fs::write(outside.join("victim.txt"), "x").unwrap();
+        let link = root.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let raw = link.join("../victim.txt");
+        let target = outside_workspace_target(
+            "write",
+            &serde_json::json!({"file_path": raw.to_string_lossy()}),
+            root.to_str().unwrap(),
+        );
+        assert!(
+            target.is_some(),
+            "symlink/.. must resolve outside: {target:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

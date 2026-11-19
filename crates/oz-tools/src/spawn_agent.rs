@@ -125,6 +125,9 @@ impl ToolHandler for SpawnAgentTool {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(String::from),
+            project_id: None,
+            project_name: None,
+            working_dir: None,
         };
         if background {
             return start_background(host, req, label, ctx);

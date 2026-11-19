@@ -18,6 +18,7 @@
     onAddProject = $bindable<() => void>(() => {}),
     onOpenSteward = $bindable<() => void>(() => {}),
     onOpenGoals = $bindable<() => void>(() => {}),
+    onOpenButler = $bindable<() => void>(() => {}),
   } = $props();
 
   let filterText = $state("");
@@ -88,15 +89,17 @@
   <SidebarFilter bind:filterText bind:this={filterRef} />
 
   <div class="sidebar-content">
-    <div class="side-head"><span>{$t("sidebar.projects")}</span></div>
-    <ProjectList
-      bind:filterText
-      bind:currentSessionId={$sessions.currentId}
-      {onSelectSession}
-      onNewSession={handleNewSessionInProject}
-      onEscape={onSidebarEscape}
-      bind:openAddDialog={triggerAddDialog}
-    />
+    <details class="side-projects">
+      <summary class="side-head"><span>{$t("sidebar.projects")}</span></summary>
+      <ProjectList
+        bind:filterText
+        bind:currentSessionId={$sessions.currentId}
+        {onSelectSession}
+        onNewSession={handleNewSessionInProject}
+        onEscape={onSidebarEscape}
+        bind:openAddDialog={triggerAddDialog}
+      />
+    </details>
 
     <div class="side-head"><span>{$t("sidebar.sessions")}</span></div>
     <UngroupedSection
@@ -111,6 +114,11 @@
     <div class="side-foot">
       <button class="foot-btn" onclick={() => switchLocale($locale === "zh" ? "en" : "zh")} title={$locale === "zh" ? "Switch to English" : "切换到中文"}>{$locale === "zh" ? "EN" : "中文"}</button>
       <span class="foot-spacer"></span>
+      <button class="foot-btn" onclick={() => onOpenButler()} title={$t("butler.open")} aria-label={$t("butler.open")}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10.5V20h13v-9.5"/><path d="M10 20v-5h4v5"/>
+        </svg>
+      </button>
       <button class="foot-btn" onclick={() => onOpenGoals()} title={$t("goal.open")} aria-label={$t("goal.open")}>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/>
@@ -242,6 +250,8 @@
     outline-offset: 2px;
   }
 
+  .side-projects > summary { cursor: pointer; list-style: none; }
+  .side-projects > summary::-webkit-details-marker { display: none; }
   .sidebar-content {
     flex: 1;
     overflow-y: auto;

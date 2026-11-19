@@ -45,6 +45,15 @@ pub struct SessionInfo {
     /// from project root_path or default). Used by agent loop.
     #[serde(default)]
     pub working_dir: Option<String>,
+    /// Worker by default; `Butler` sessions own a task graph.
+    #[serde(default)]
+    pub role: oz_core_types::session_role::SessionRole,
+    /// How many leading messages are outside the model's context window.
+    #[serde(default)]
+    pub archived_before: usize,
+    /// One-line handoff describing the archived epoch.
+    #[serde(default)]
+    pub epoch_summary: Option<String>,
 }
 
 /// The question a waiting session is parked on. Persisted with the session
@@ -87,7 +96,27 @@ pub struct SessionEntry {
     /// snapshot, so the change came back after a restart (round5 P0-3).
     #[serde(default)]
     pub revision: u64,
+    /// Worker by default; `Butler` sessions own a task graph.
+    #[serde(default)]
+    pub role: oz_core_types::session_role::SessionRole,
+    /// Model actually used by the last run (for worker inheritance).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Whether that model was the user's choice or a resolved default.
+    #[serde(default)]
+    pub model_source: oz_core_types::session_role::ModelSource,
+    /// Large, idle sessions are moved out of sessions.json into one file per
+    /// session under sessions-archive/. They stay in memory (UI list works)
+    /// but are not rewritten on every save.
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
 }
+
+/// One archive directory. The old `sessions_archive` spelling is read for
+/// migration, but all new writes use this one.
+const SESSIONS_ARCHIVE_DIR: &str = "sessions-archive";
 
 /// In-memory session store with optional file persistence.
 pub struct SessionStore {
@@ -99,6 +128,8 @@ pub struct SessionStore {
     /// (interior-mutable: save() takes &self because read-guard callers
     /// persist through the tokio RwLock).
     persist_cache: std::sync::Mutex<HashMap<String, (EntryFingerprint, Arc<String>)>>,
+    /// Runtime read/parse failure: do not overwrite a file we could not read.
+    degraded: bool,
 }
 
 /// Background persistence writer. `save()` snapshots the session map and
@@ -196,7 +227,9 @@ impl PersistWriter {
                             json.push_str(&snapshot[*k]);
                         }
                         json.push('}');
-                        SessionStore::write_atomic(&path, &json);
+                        if let Err(e) = SessionStore::write_atomic(&path, &json) {
+                            tracing::error!("[sessions] persist failed {}: {e}", path.display());
+                        }
                         // Record when WE last wrote, so a later staleness
                         // check does not mistake our own write for another
                         // process's change (and vice versa).
@@ -242,6 +275,7 @@ impl SessionStore {
             max_sessions: 0,
             persist_cache: std::sync::Mutex::new(HashMap::new()),
             writer: None,
+            degraded: false,
         }
     }
 
@@ -283,7 +317,7 @@ impl SessionStore {
     fn archive_entry(&self, id: &str, json: Option<serde_json::Value>) {
         let archive_dir = if let Some(ref p) = self.path {
             if let Some(parent) = p.parent() {
-                parent.join("sessions_archive")
+                parent.join(SESSIONS_ARCHIVE_DIR)
             } else {
                 return;
             }
@@ -360,12 +394,9 @@ impl SessionStore {
             .map(|(id, _)| id.clone())
             .collect();
         for id in &ids {
-            let json = self
-                .sessions
-                .get(id)
-                .and_then(|e| serde_json::to_value(e).ok());
-            self.archive_entry(id, json);
-            self.sessions.remove(id);
+            // Pruning is a deletion, not an archive: keeping a copy here made
+            // the next load_archives resurrect the pruned session.
+            self.delete(id);
         }
         if !ids.is_empty() || ghosts > 0 {
             self.save();
@@ -381,12 +412,58 @@ impl SessionStore {
             max_sessions: 0,
             persist_cache: std::sync::Mutex::new(HashMap::new()),
             writer: Some(PersistWriter::spawn()),
+            degraded: false,
         };
-        if let Ok(data) = std::fs::read_to_string(&path) {
-            if let Ok(sessions) = serde_json::from_str::<HashMap<String, SessionEntry>>(&data) {
-                store.sessions = sessions;
+        match std::fs::read_to_string(&path) {
+            Ok(data) => match serde_json::from_str::<HashMap<String, SessionEntry>>(&data) {
+                Ok(sessions) => store.sessions = sessions,
+                Err(e) => {
+                    // NEVER start with an empty map and then overwrite the
+                    // file: one unknown SessionStatus or corrupt entry would
+                    // permanently erase every conversation. Move the bad file
+                    // aside and let the new store start empty.
+                    // Millisecond + pid suffix: two corrupt files in the same
+                    // second must not overwrite each other (the old name had
+                    // second granularity and silently destroyed the first
+                    // backup — E2E-019/E2E-020).
+                    let backup = path.with_extension(format!(
+                        "corrupt-{}-{}",
+                        chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ"),
+                        std::process::id()
+                    ));
+                    let moved = std::fs::rename(&path, &backup).is_ok();
+                    if !moved {
+                        store.degraded = true;
+                    }
+                    tracing::error!(
+                        "[sessions] parse failed ({e}); preserved={} backup={}",
+                        moved,
+                        backup.display()
+                    );
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                let backup = path.with_extension(format!(
+                    "corrupt-{}-{}",
+                    chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ"),
+                    std::process::id()
+                ));
+                let moved = std::fs::rename(&path, &backup).is_ok();
+                if !moved {
+                    store.degraded = true;
+                }
+                tracing::error!(
+                    "[sessions] cannot read {}: {e}; preserved={} backup={}",
+                    path.display(),
+                    moved,
+                    backup.display()
+                );
             }
         }
+        // Archived sessions live one-per-file; merge them so history and the
+        // session list survive the main-file compaction.
+        store.load_archives();
         // Recover: reset any Running sessions left from a previous crash
         let mut recovered = 0;
         for entry in store.sessions.values_mut() {
@@ -396,7 +473,8 @@ impl SessionStore {
                 recovered += 1;
             }
         }
-        if recovered > 0 {
+        let archived_now = store.archive_inactive(16 * 1024 * 1024);
+        if recovered > 0 || archived_now > 0 {
             store.save_to_disk();
         }
         store
@@ -467,28 +545,138 @@ impl SessionStore {
                 return;
             }
         }
-        if let Some(ref path) = self.path {
-            if let Ok(meta) = std::fs::metadata(path) {
-                if let Ok(mtime) = meta.modified() {
-                    if let Some(ref w) = self.writer {
-                        *w.last_write.lock().unwrap_or_else(|e| e.into_inner()) = Some(mtime);
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let data = match std::fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                self.degraded = true;
+                tracing::error!("[sessions] reload failed ({}): {e}", path.display());
+                return;
+            }
+        };
+        match serde_json::from_str::<HashMap<String, SessionEntry>>(&data) {
+            Ok(sessions) => {
+                self.sessions = sessions;
+                self.load_archives();
+                self.degraded = false;
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    if let Ok(mtime) = meta.modified() {
+                        if let Some(ref w) = self.writer {
+                            *w.last_write.lock().unwrap_or_else(|e| e.into_inner()) = Some(mtime);
+                        }
                     }
                 }
+                self.persist_cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
             }
-            if let Ok(data) = std::fs::read_to_string(path) {
-                if let Ok(sessions) = serde_json::from_str::<HashMap<String, SessionEntry>>(&data) {
-                    self.sessions = sessions;
-                    // The cache holds serializations of the *previous*
-                    // in-memory state. Keeping them could write that older
-                    // content back over what we just loaded (same revision,
-                    // different bytes) — drop it.
-                    self.persist_cache
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clear();
-                }
+            Err(e) => {
+                self.degraded = true;
+                tracing::error!("[sessions] reload parse failed ({}): {e}", path.display());
             }
         }
+    }
+
+    fn archive_dir(&self) -> Option<PathBuf> {
+        let path = self.path.as_ref()?;
+        Some(path.parent()?.join(SESSIONS_ARCHIVE_DIR))
+    }
+
+    /// Merge one-file-per-session archives into memory. Main-file entries win:
+    /// an archive copy is stale once the session was unarchived.
+    fn load_archives(&mut self) {
+        let Some(dir) = self.archive_dir() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(mut entry) = serde_json::from_str::<SessionEntry>(&raw) else {
+                tracing::warn!("[sessions] unreadable archive {}", path.display());
+                continue;
+            };
+            entry.archived = true;
+            self.sessions.entry(entry.info.id.clone()).or_insert(entry);
+        }
+    }
+
+    /// Split the oldest idle sessions out of the monolithic sessions.json once
+    /// it exceeds `max_bytes`. They remain in memory, so the UI still lists
+    /// them; only the hot file stops carrying every old message.
+    pub fn archive_inactive(&mut self, max_bytes: usize) -> usize {
+        let Some(dir) = self.archive_dir() else {
+            return 0;
+        };
+        let active: HashMap<_, _> = self
+            .sessions
+            .iter()
+            .filter(|(_, e)| !e.archived)
+            .map(|(k, v)| (k.clone(), v))
+            .collect();
+        let Ok(initial) = serde_json::to_vec(&active) else {
+            return 0;
+        };
+        let mut active_size = initial.len();
+        if active_size <= max_bytes {
+            return 0;
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        let mut candidates: Vec<(String, String)> = self
+            .sessions
+            .iter()
+            .filter(|(_, e)| {
+                !e.archived
+                    && !matches!(e.status, SessionStatus::Running | SessionStatus::Waiting)
+                    && e.pending_ask_user.is_none()
+            })
+            .map(|(id, e)| (id.clone(), e.created_at.to_rfc3339()))
+            .collect();
+        candidates.sort_by(|a, b| a.1.cmp(&b.1));
+        let mut written = 0;
+        for (id, _) in candidates {
+            if active_size <= max_bytes {
+                break;
+            }
+            let Some(entry) = self.sessions.get_mut(&id) else {
+                continue;
+            };
+            entry.archived = true;
+            entry.archived_at = Some(chrono::Utc::now());
+            let Ok(json) = serde_json::to_string(entry) else {
+                entry.archived = false;
+                entry.archived_at = None;
+                continue;
+            };
+            let path = dir.join(format!("{id}.json"));
+            if let Err(e) = Self::write_atomic(&path, &json) {
+                entry.archived = false;
+                entry.archived_at = None;
+                tracing::warn!("[sessions] archive write failed {}: {e}", path.display());
+                continue;
+            }
+            active_size = active_size.saturating_sub(json.len());
+            written += 1;
+        }
+        if written > 0 {
+            self.save_to_disk();
+            tracing::info!(
+                "[sessions] archived {written} idle session(s); main file is no longer {} bytes",
+                initial.len()
+            );
+        }
+        written
     }
 
     /// Save all sessions to disk atomically (write temp file, then rename).
@@ -496,11 +684,24 @@ impl SessionStore {
     /// and the disk write happens off the caller's thread; otherwise the
     /// write is synchronous (stores without a path, e.g. in tests).
     fn save_to_disk(&self) {
+        if self.degraded {
+            tracing::error!("[sessions] persist suppressed: store is degraded (unreadable file)");
+            return;
+        }
         let Some(ref path) = self.path else { return };
         let Some(ref w) = self.writer else {
-            // No background writer (tests): synchronous full snapshot.
-            if let Ok(json) = serde_json::to_string(&self.sessions) {
-                Self::write_atomic(path, &json);
+            // No background writer (tests): synchronous snapshot of active
+            // sessions only; archived sessions have their own files.
+            let active: HashMap<_, _> = self
+                .sessions
+                .iter()
+                .filter(|(_, e)| !e.archived)
+                .map(|(k, v)| (k.clone(), v))
+                .collect();
+            if let Ok(json) = serde_json::to_string(&active) {
+                if let Err(e) = Self::write_atomic(path, &json) {
+                    tracing::error!("[sessions] persist failed {}: {e}", path.display());
+                }
             }
             return;
         };
@@ -509,7 +710,7 @@ impl SessionStore {
         // sessions simply drop out of the snapshot/cache.
         let mut cache = self.persist_cache.lock().unwrap_or_else(|e| e.into_inner());
         let mut snapshot: SessionSnapshot = HashMap::with_capacity(self.sessions.len());
-        for (id, entry) in &self.sessions {
+        for (id, entry) in self.sessions.iter().filter(|(_, e)| !e.archived) {
             let fp = entry_fingerprint(entry);
             let cached: Option<Arc<String>> = cache.get(id).and_then(|(cfp, json)| {
                 if *cfp == fp {
@@ -538,16 +739,26 @@ impl SessionStore {
         w.submit(path.clone(), snapshot);
     }
 
-    /// Atomic tmp-file + rename write. Errors are best-effort by design:
-    /// a failed persist must never crash the app mid-conversation.
-    fn write_atomic(path: &std::path::Path, json: &str) {
+    /// Atomic tmp-file + rename write. A failed persist must not crash the
+    /// app mid-conversation, but it must be visible: silently returning made
+    /// the UI look saved and lost the messages on restart.
+    fn write_atomic(path: &std::path::Path, json: &str) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
+        // Unique temp name: two processes sharing a data root must not write
+        // the same sessions.tmp and rename a spliced file.
+        let tmp = path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&tmp, json)?;
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
         }
+        Ok(())
     }
 
     pub fn create(&mut self, name: &str) -> SessionInfo {
@@ -590,6 +801,9 @@ impl SessionStore {
             project_id: project_id.map(|s| s.to_string()),
             project_name: project_name.map(|s| s.to_string()),
             working_dir: working_dir.map(|s| s.to_string()),
+            role: oz_core_types::session_role::SessionRole::Worker,
+            archived_before: 0,
+            epoch_summary: None,
         };
         self.sessions.insert(
             id.to_string(),
@@ -603,6 +817,11 @@ impl SessionStore {
                 todos: Vec::new(),
                 pending_ask_user: None,
                 revision: 0,
+                role: oz_core_types::session_role::SessionRole::Worker,
+                model: None,
+                model_source: oz_core_types::session_role::ModelSource::Default,
+                archived: false,
+                archived_at: None,
             },
         );
     }
@@ -633,12 +852,26 @@ impl SessionStore {
         // `#[allow]`: clippy suggests `inspect`, which only hands out `&`.
         #[allow(clippy::manual_inspect)]
         self.sessions.get_mut(id).map(|e| {
+            if e.archived {
+                // Do NOT unlink the archive here: it is the only durable copy
+                // until the next successful main-file save. Main entries win
+                // over a stale archive on load, and delete() removes both.
+                e.archived = false;
+                e.archived_at = None;
+            }
             e.revision = e.revision.wrapping_add(1);
             e
         })
     }
 
     pub fn delete(&mut self, id: &str) -> bool {
+        if let Some(dir) = self.archive_dir() {
+            let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
+            let _ = std::fs::remove_file(
+                dir.with_file_name("sessions_archive")
+                    .join(format!("{id}.json")),
+            );
+        }
         let removed = self.sessions.remove(id).is_some();
         if removed {
             self.save_to_disk();
@@ -659,6 +892,9 @@ impl SessionStore {
                 project_id: entry.info.project_id.clone(),
                 project_name: entry.info.project_name.clone(),
                 working_dir: entry.info.working_dir.clone(),
+                role: entry.role,
+                archived_before: entry.info.archived_before,
+                epoch_summary: entry.info.epoch_summary.clone(),
             })
             .collect();
         list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -761,6 +997,9 @@ mod incremental_persist_tests {
                 project_id: None,
                 project_name: None,
                 working_dir: None,
+                role: oz_core_types::session_role::SessionRole::Worker,
+                archived_before: 0,
+                epoch_summary: None,
             },
             status: SessionStatus::Idle,
             messages: vec![serde_json::json!({"role": "user", "content": "hi"})],
@@ -770,6 +1009,11 @@ mod incremental_persist_tests {
             todos: vec![],
             pending_ask_user: None,
             revision: 0,
+            role: oz_core_types::session_role::SessionRole::Worker,
+            model: None,
+            model_source: oz_core_types::session_role::ModelSource::Default,
+            archived: false,
+            archived_at: None,
         };
         let e2 = SessionEntry {
             info: SessionInfo {
@@ -847,6 +1091,9 @@ mod fingerprint_regression_tests {
                 project_id: None,
                 project_name: None,
                 working_dir: None,
+                role: oz_core_types::session_role::SessionRole::Worker,
+                archived_before: 0,
+                epoch_summary: None,
             },
             status: SessionStatus::Idle,
             messages: vec![serde_json::json!({"role": "user", "content": content})],
@@ -856,6 +1103,11 @@ mod fingerprint_regression_tests {
             todos: vec![],
             pending_ask_user: None,
             revision: 0,
+            role: oz_core_types::session_role::SessionRole::Worker,
+            model: None,
+            model_source: oz_core_types::session_role::ModelSource::Default,
+            archived: false,
+            archived_at: None,
         }
     }
 
@@ -973,6 +1225,70 @@ mod fingerprint_regression_tests {
             store.persist_cache.lock().unwrap().is_empty(),
             "reload must clear the persist cache"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_sessions_file_is_preserved_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("oz-fp-corrupt-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions.json");
+        std::fs::write(&path, "{not json").unwrap();
+        let store = SessionStore::persisted(path.clone());
+        assert!(store.sessions.is_empty());
+        assert!(!path.exists(), "bad file must not stay at the live path");
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("corrupt-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "corrupt file must be preserved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_reload_parse_failure_blocks_overwrite() {
+        let dir = std::env::temp_dir().join(format!("oz-fp-degraded-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions.json");
+        let mut store = SessionStore::persisted(path.clone());
+        store.sessions.insert("s1".into(), entry("s1", "good"));
+        store.save();
+        store.wait_persisted(std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, "{broken").unwrap();
+        store.reload();
+        assert!(store.get("s1").is_some(), "in-memory data must survive");
+        assert!(store.degraded, "store must stop writing after a bad reload");
+        store.save();
+        store.wait_persisted(std::time::Duration::from_millis(300));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn idle_sessions_archive_and_reload_without_losing_history() {
+        let dir = std::env::temp_dir().join(format!("oz-fp-archive-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions.json");
+        let mut store = SessionStore::persisted(path.clone());
+        for i in 0..3 {
+            let id = format!("s{i}");
+            store.sessions.insert(id.clone(), entry(&id, "old message"));
+        }
+        let archived = store.archive_inactive(10);
+        assert_eq!(archived, 3, "tiny budget must archive all idle sessions");
+        store.wait_persisted(std::time::Duration::from_secs(2));
+        let main: HashMap<String, SessionEntry> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(main.is_empty(), "archived entries must leave the main file");
+        drop(store);
+        let reloaded = SessionStore::persisted(path.clone());
+        assert_eq!(reloaded.sessions.len(), 3);
+        assert!(reloaded
+            .sessions
+            .values()
+            .all(|e| e.archived && e.messages.len() == 1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

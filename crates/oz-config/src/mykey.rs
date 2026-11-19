@@ -211,6 +211,24 @@ pub struct RouteRule {
 }
 
 impl MyKeyConfig {
+    /// Resolve the model to use when the caller did not name one.
+    ///
+    /// Never falls back to a hardcoded vendor model: an install whose config
+    /// only has `[my-local-model]` must use that, not `claude_sonnet`
+    /// (2026-11-18 GUI run: the app tried `claude_sonnet` and failed with
+    /// "Session 'claude_sonnet' not found" on a config that had exactly one
+    /// non-Claude model).
+    pub fn resolved_default_session(&self) -> Option<&str> {
+        if let Some(name) = self.default_session.as_deref() {
+            if self.sessions.contains_key(name) {
+                return Some(name);
+            }
+        }
+        let mut names: Vec<&String> = self.sessions.keys().collect();
+        names.sort();
+        names.first().map(|s| s.as_str())
+    }
+
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, anyhow::Error> {
         let content = std::fs::read_to_string(path.as_ref())?;
         let raw: toml::Table =

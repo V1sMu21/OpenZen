@@ -521,6 +521,7 @@ pub async fn on_run_finished(
             );
         }
         oz_steward::goal::GoalDecision::Achieved
+        | oz_steward::goal::GoalDecision::Unverified
         | oz_steward::goal::GoalDecision::Blocked
         | oz_steward::goal::GoalDecision::Exhausted
         | oz_steward::goal::GoalDecision::Paused

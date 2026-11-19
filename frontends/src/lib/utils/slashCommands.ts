@@ -9,6 +9,8 @@ export interface SlashCommand {
 }
 
 const COMMAND_KEYS: Array<[string, string]> = [
+  ["/butler", "cmd.butler.desc"],
+  ["/erya", "cmd.butler.desc"],
   ["/help", "cmd.help.desc"],
   ["/clear", "cmd.clear.desc"],
   ["/new", "cmd.new.desc"],

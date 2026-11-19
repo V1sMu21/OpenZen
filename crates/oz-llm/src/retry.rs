@@ -276,6 +276,35 @@ mod tests {
         assert_eq!(seen[1].2, 3.0);
     }
 
+    /// Scenario: the gateway returns 503 twice, then a normal response. The
+    /// retry must succeed on the third attempt without duplicating the result.
+    #[tokio::test]
+    async fn transient_gateway_outage_then_success() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let mut config = retry_test_config(2);
+        config.timeout = Some(0); // no backoff sleep in this scenario
+        let out: Result<u32, LlmError> = retry_with_backoff(
+            || {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if n < 2 {
+                        Err(LlmError::HttpError {
+                            status: 503,
+                            body: "gateway unavailable".into(),
+                        })
+                    } else {
+                        Ok(42)
+                    }
+                })
+            },
+            &config,
+        )
+        .await;
+        assert_eq!(out.unwrap(), 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
     /// A non-retryable failure is surfaced immediately and reported as such.
     #[tokio::test]
     async fn notify_is_silent_when_the_error_is_not_retryable() {

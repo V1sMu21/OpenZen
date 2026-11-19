@@ -248,8 +248,6 @@ pub struct LoopConfig {
     /// tokio Mutex because guards are held across `.await` (build_context);
     /// a std guard would make the loop future !Send.
     pub skill_mcp_store: Option<std::sync::Arc<tokio::sync::Mutex<oz_skill_mcp::SkillMcpStore>>>,
-    /// When true, use the LLM to crystallize knowledge from completed sessions.
-    pub enable_crystallization: bool,
     /// When true, periodically refine existing skills via LLM.
     pub enable_refinement: bool,
     /// Maximum number of tools to execute concurrently (0 = unlimited).
@@ -275,10 +273,11 @@ pub struct LoopConfig {
     /// Approval handler for requesting user confirmation on tool calls.
     /// When set, tools that need approval will pause the loop until the handler responds.
     pub approval_handler: Option<std::sync::Arc<dyn oz_safety::ApprovalHandler>>,
-    /// Timeout in seconds for tool approval requests (default: 300).
+    /// Timeout in seconds for tool approval requests (default: 1800 = 30 min).
     pub approval_timeout_secs: u64,
-    /// How long an `ask_user` question waits for a reply. 0 (the desktop
-    /// default) waits until the user answers or the run is stopped: users
+    /// How long an `ask_user` question waits for a reply. 0 means wait until
+    /// the user answers or the run is stopped; the desktop runner overrides
+    /// this to 1800 so an away user is not stuck forever.
     /// are usually away from the machine, and a 5-minute timeout turned one
     /// unanswered question into a 40-minute stall (2026-10-23 session).
     pub ask_user_timeout_secs: u64,
@@ -380,7 +379,6 @@ impl Default for LoopConfig {
             sop_dir: None,
             skill_mcp_dir: None,
             skill_mcp_store: None,
-            enable_crystallization: false,
             enable_refinement: false,
             max_concurrent_tools: 8,
             // Fail-fast default for tools that do NOT manage their own
@@ -395,7 +393,7 @@ impl Default for LoopConfig {
             working_dir: String::from("."),
             safety_guard: None,
             approval_handler: None,
-            approval_timeout_secs: 300,
+            approval_timeout_secs: 1800,
             ask_user_timeout_secs: 0,
             checkpoint_dir: None,
             trust_path: None,
@@ -451,7 +449,6 @@ impl Clone for LoopConfig {
             sop_dir: self.sop_dir.clone(),
             skill_mcp_dir: self.skill_mcp_dir.clone(),
             skill_mcp_store: self.skill_mcp_store.clone(),
-            enable_crystallization: self.enable_crystallization,
             enable_refinement: self.enable_refinement,
             max_concurrent_tools: self.max_concurrent_tools,
             tool_timeout_secs: self.tool_timeout_secs,
@@ -510,6 +507,14 @@ mod tests {
         assert!(wm.in_plan_mode.is_none());
         assert_eq!(wm.sensorium.calls, 0);
         assert!(wm.sensorium.tool_history.is_empty());
+    }
+
+    #[test]
+    fn default_approval_timeout_is_thirty_minutes() {
+        let cfg = LoopConfig::default();
+        assert_eq!(cfg.approval_timeout_secs, 1800);
+        // ask_user stays 0 at the loop layer; the desktop runner overrides it.
+        assert_eq!(cfg.ask_user_timeout_secs, 0);
     }
 
     // ---- Sensorium ----

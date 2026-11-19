@@ -107,6 +107,41 @@ export function isSameReplyText(a: string, b: string): boolean {
   return na.length >= HEAD && nb.length >= HEAD && na.slice(0, HEAD) === nb.slice(0, HEAD);
 }
 
+/** Fold the backend's authoritative final reply into the parts that are
+ *  already on screen.
+ *
+ *  The streamed text and `done.full_response` can differ (the backend appends
+ *  the delivery-contract block, or cleans the stream), and the streamed text
+ *  may sit *before* a tool card. Appending in that case renders the reply
+ *  twice — once as the streamed copy, once as the final copy. Replace the
+ *  last text part that is the same reply (prefix-aware) instead.
+ */
+export function mergeFinalReply(parts: UIMessagePart[], preferred: string): UIMessagePart[] {
+  if (!preferred) return parts;
+  const norm = (t: string) => t.replace(/\s+/g, " ").trim();
+  const target = norm(preferred);
+  if (parts.some((p) => p.type === "text" && p.text && norm(p.text) === target)) {
+    return parts;
+  }
+  let idx = -1;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    if (p.type === "text" && p.text && isSameReplyText(p.text, preferred)) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx >= 0) {
+    const next = parts.slice();
+    next[idx] = { ...next[idx], text: preferred, state: "done" } as UIMessagePart;
+    return next;
+  }
+  return [
+    ...parts,
+    { type: "text", id: generatePartId(), text: preferred, state: "done" } as UIMessagePart,
+  ];
+}
+
 /** Loose union: accepts both legacy StreamEventItem and the new
  *  protocol_v1 events saved to disk by the backend. Server-side
  *  events have a `duration_ms` field added at save time that we
@@ -217,7 +252,13 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
       noteUnpairedTool(part);
     } else {
       if (name && !part.name) part.name = name;
-      if (args !== undefined) part.args = args;
+      // A replayed `tool_input_start` arrives AFTER its
+      // `tool_input_available` (the stream replays the speculative call
+      // before the final one). Overwriting with that empty payload erased
+      // every argument — historical tool cards showed no args, and
+      // deliverables / changed-file cards disappeared on reload. Only
+      // replace when the new payload is non-empty, or when we have none yet.
+      if (args !== undefined && (args !== '' || !part.args)) part.args = args;
     }
     return part;
   }
@@ -284,7 +325,7 @@ export function convertStreamEventsToParts(items: SavedEvent[]): UIMessagePart[]
       case 'tool_input_start': {
         const tcId = String(item.tool_call_id ?? '');
         const name = String(item.name ?? '');
-        if (tcId) getOrCreateTool(tcId, name, '');
+        if (tcId) getOrCreateTool(tcId, name);
         break;
       }
       case 'tool_input_delta': {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use linkme::distributed_slice;
@@ -29,12 +30,19 @@ pub trait ToolHandler: Send + Sync {
 /// Supports both static `&'static str` names and dynamic `String` names.
 pub struct ToolRegistry {
     handlers: HashMap<String, Box<dyn ToolHandler>>,
+    /// Per-run cap on direct (non-orchestration) tools. Used by a butler in
+    /// simple mode so a misclassified request still cannot become a long
+    /// research session — after N calls it must task_create.
+    direct_calls: AtomicUsize,
+    max_direct_calls: Option<usize>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         ToolRegistry {
             handlers: HashMap::new(),
+            direct_calls: AtomicUsize::new(0),
+            max_direct_calls: None,
         }
     }
 
@@ -48,6 +56,19 @@ impl ToolRegistry {
         self.handlers.insert(name.to_string(), Box::new(tool));
     }
 
+    /// Cap direct tool calls for this run. Orchestration tools (task_*,
+    /// ask_user, respond, …) do not consume the budget.
+    pub fn limit_direct_calls(&mut self, max: usize) {
+        self.max_direct_calls = Some(max);
+    }
+
+    /// Restrict the registry to an allowlist. Used for role boundaries
+    /// (the butler may orchestrate but must not execute; workers keep all).
+    pub fn retain_only(&mut self, allowed: &[&str]) {
+        self.handlers
+            .retain(|name, _| allowed.iter().any(|a| a == name));
+    }
+
     pub fn get(&self, name: &str) -> Option<&dyn ToolHandler> {
         self.handlers.get(name).map(|b| b.as_ref())
     }
@@ -58,6 +79,16 @@ impl ToolRegistry {
         args: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolOutput, oz_core_types::ToolError> {
+        if let Some(max) = self.max_direct_calls {
+            if !is_orchestration_tool(name) {
+                let used = self.direct_calls.fetch_add(1, Ordering::Relaxed) + 1;
+                if used > max {
+                    return Err(oz_core_types::ToolError::Custom(format!(
+                        "{name}: direct-tool budget exhausted ({max} calls). Stop and call                          task_create to dispatch the remaining work; do not keep researching."
+                    )));
+                }
+            }
+        }
         match self.handlers.get(name) {
             Some(tool) => {
                 // A gateway-merged call cannot be attributed back to the
@@ -178,6 +209,14 @@ impl ToolRegistry {
         reg.register(crate::schedule_reminder::ScheduleReminderTool);
         reg.register(crate::open_side_panel::OpenSidePanelTool);
         crate::computer_use::register_all(&mut reg);
+        reg.register(crate::butler_tools::TaskCreateTool);
+        reg.register(crate::butler_tools::ProjectListTool);
+        reg.register(crate::butler_tools::TaskListTool);
+        reg.register(crate::butler_tools::TaskGetTool);
+        reg.register(crate::butler_tools::RunListTool);
+        reg.register(crate::butler_tools::HistorySearchTool);
+        reg.register(crate::butler_tools::ArtifactFindTool);
+        reg.register(crate::butler_tools::TaskNoteTool);
 
         reg
     }
@@ -218,6 +257,25 @@ fn canonicalize_dispatch_args(
         );
     }
     repaired
+}
+
+fn is_orchestration_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "task_create"
+            | "task_list"
+            | "task_get"
+            | "task_note"
+            | "run_list"
+            | "project_list"
+            | "history_search"
+            | "ask_user"
+            | "respond"
+            | "submit_plan"
+            | "schedule_reminder"
+            | "long_term"
+            | "no_tool"
+    )
 }
 
 #[cfg(test)]
@@ -619,8 +677,6 @@ mod tests {
 
     // ── fixture-driven regression: real "missing `code` argument" sessions ──
 
-    /// Deep-collect every string in `v` containing a `<tool_use:…>` transcript tag.
-
     /// Extract `(tool_name, input)` pairs from a session transcript.
     fn tool_uses_from_transcript(text: &str) -> Vec<(String, serde_json::Value)> {
         let mut found = Vec::new();
@@ -788,4 +844,36 @@ mod tests {
             .expect("dispatch");
         assert_eq!(*seen.lock().unwrap(), args);
     }
+
+    #[tokio::test]
+    async fn direct_budget_stops_after_limit_but_keeps_dispatch_tools() {
+        let mut reg = ToolRegistry::build_default();
+        reg.limit_direct_calls(1);
+        let ctx = ctx();
+        let _ = reg
+            .dispatch("ls", serde_json::json!({"path": "."}), &ctx)
+            .await;
+        let err = reg
+            .dispatch("ls", serde_json::json!({"path": "."}), &ctx)
+            .await
+            .expect_err("second direct call must be refused");
+        assert!(format!("{err:?}").contains("budget exhausted"));
+        if let Err(e) = reg.dispatch("task_list", serde_json::json!({}), &ctx).await {
+            // The store may be unconfigured in this unit test; the important
+            // part is that the orchestration call was not blocked by budget.
+            assert!(!format!("{e:?}").contains("budget exhausted"));
+        }
+    }
+}
+
+#[test]
+fn retain_only_removes_execution_tools_but_keeps_dispatch() {
+    let mut reg = ToolRegistry::build_default();
+    reg.retain_only(&["task_create", "task_list", "ask_user"]);
+    let names = reg.names();
+    assert!(names.contains(&"task_create".to_string()));
+    assert!(names.contains(&"ask_user".to_string()));
+    assert!(!names.contains(&"code_run".to_string()));
+    assert!(!names.contains(&"read".to_string()));
+    assert!(!names.contains(&"web_search".to_string()));
 }

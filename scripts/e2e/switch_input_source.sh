@@ -1,46 +1,52 @@
 #!/usr/bin/env bash
-# scripts/e2e/switch_input_source.sh
+# Switch the active macOS input source (e.g. "ABC").
 #
-# Switch the active macOS input source (e.g. "ABC" for English, "Pinyin" for
-# Chinese Pinyin IME).  Required before typing into the Tauri webview because
-# Quartz unicode injection still routes through the active input source's
-# keyboard layout — Pinyin IME will mangle the typed string into candidates.
+# ⚠️ 2026-11-14: Cmd+Ctrl+Space opens the Character Viewer when only ONE input
+# source is enabled — the old version of this script did that unconditionally
+# and every typed character went into the emoji search box. This version reads
+# the enabled sources first and no-ops when there is nothing to switch.
 #
 # Usage: switch_input_source.sh ABC
-#        switch_input_source.sh "搜狗拼音"
-
 set -euo pipefail
 TARGET="${1:-ABC}"
 
-osascript <<OSA
-tell application "System Events"
-    set currentSource to name of current input source
-    if currentSource is "$TARGET" then
-        return "already $TARGET"
-    end if
-end tell
-OSA
+info=$(python3 - "$TARGET" <<'PY'
+import plistlib, os, sys
+p = os.path.expanduser("~/Library/Preferences/com.apple.HIToolbox.plist")
+try:
+    d = plistlib.load(open(p, "rb"))
+except Exception:
+    print("unknown unknown 0"); raise SystemExit
+def name(s):
+    return s.get("KeyboardLayout Name") or s.get("Input Source Kind") or ""
+enabled = [name(s) for s in d.get("AppleEnabledInputSources", [])]
+active = [name(s) for s in d.get("AppleSelectedInputSources", [])]
+print((active[0] if active else "unknown"), ("|".join(enabled) or "unknown"), len(enabled))
+PY
+)
+read -r CURRENT ENABLED COUNT <<<"$info"
 
-# Cycle through input sources until we land on the target.  The most reliable
-# way on macOS is Cmd+Ctrl+Space which is the "select next input source"
-# shortcut (note: this is the OPPOSITE of Spotlight's Cmd+Space).
-for i in 1 2 3 4 5 6 7 8; do
-    src=$(osascript -e 'tell application "System Events" to return name of current input source' 2>/dev/null || echo unknown)
-    [[ "$src" == "$TARGET" ]] && { echo "✅ input source = $src"; exit 0; }
-    osascript -e 'tell application "System Events" to keystroke " " using {command down, control down}' >/dev/null 2>&1 || true
-    sleep 0.3
+if [[ "$CURRENT" == "$TARGET" ]]; then
+  echo "✅ input source already $TARGET"
+  exit 0
+fi
+if [[ "$COUNT" -le 1 ]]; then
+  echo "⚠️  only one input source enabled ($ENABLED); not cycling (Cmd+Ctrl+Space would open the emoji panel)" >&2
+  exit 0
+fi
+
+for _ in 1 2 3 4 5 6 7 8; do
+  osascript -e 'tell application "System Events" to keystroke " " using {command down, control down}' >/dev/null 2>&1 || true
+  sleep 0.3
+  CURRENT=$(python3 - <<'PY'
+import plistlib, os
+p = os.path.expanduser("~/Library/Preferences/com.apple.HIToolbox.plist")
+d = plistlib.load(open(p, "rb"))
+a = d.get("AppleSelectedInputSources", [])
+print((a[0].get("KeyboardLayout Name") or a[0].get("Input Source Kind") or "unknown") if a else "unknown")
+PY
+)
+  [[ "$CURRENT" == "$TARGET" ]] && { echo "✅ input source = $CURRENT"; exit 0; }
 done
-
-# Fallback: try setInputSourceLayout via the System Events API
-osascript <<OSA || true
-tell application "System Events"
-    set inputSources to name of every input source
-    if "$TARGET" is in inputSources then
-        -- no direct API; cycle one more time
-        keystroke " " using {command down, control down}
-    end if
-end tell
-OSA
-sleep 0.5
-src=$(osascript -e 'tell application "System Events" to return name of current input source' 2>/dev/null || echo unknown)
-echo "ℹ️  final input source = $src (target was $TARGET)"
+echo "❌ could not switch to $TARGET (current: $CURRENT)" >&2
+exit 1

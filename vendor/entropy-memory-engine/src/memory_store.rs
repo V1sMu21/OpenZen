@@ -170,7 +170,11 @@ impl MemoryStore {
         };
 
         // P0: write-path conflict resolution (格物致知).
-        let resolutions = if self.consolidation.config().align_on_write {
+        // Alignment is a similarity search per write; only pay it for
+        // high-confidence facts and summaries, not every low-value fragment.
+        let worth_aligning =
+            input.importance >= 0.5 || matches!(&input.content, MemoryContent::Summary(_));
+        let resolutions = if self.consolidation.config().align_on_write && worth_aligning {
             self.orchestrator()
                 .map(|orch| orch.pre_resolve(&input, &self.router))
                 .unwrap_or_default()
@@ -331,6 +335,148 @@ impl MemoryStore {
     ///
     /// Fast path: directly checks L1 without building a Query or going through
     /// the full cascade. Falls through to the cascade only on L1 miss.
+    /// Tag every untagged L3 memory with `tag` (one-time scope migration).
+    ///
+    /// Untagged entries are legacy rows written before scope tags existed.
+    /// They must not silently join a project's recall; tagging them makes the
+    /// gap visible in stats and lets a global-only query opt in.
+    pub fn tag_untagged_with(&self, tag: &str) -> usize {
+        let all = self.router.l3_engine().storage().all();
+        let mut tagged = 0usize;
+        for mem in all {
+            if !mem.tags.is_empty() {
+                continue;
+            }
+            if self.router.l3_engine().storage().update_tags(mem.id, tag) {
+                self.router.l2().update_tags(mem.id, tag);
+                tagged += 1;
+            }
+        }
+        tagged
+    }
+
+    /// Bounded maintenance: exact-duplicate collapse + stale low-value archive.
+    ///
+    /// Duplicates are superseded (kept for audit, skipped by Query::matches);
+    /// stale low-importance rows get an `archived` tag, which recall excludes.
+    /// Returns `(deduped, archived)`.
+    pub fn maintenance(&self) -> (usize, usize) {
+        use std::collections::HashMap;
+        let now = crate::core::now_nanos();
+        const ARCHIVE_AFTER_NANOS: i64 = 180 * 24 * 3600 * 1_000_000_000;
+        const ARCHIVE_IMPORTANCE: f32 = 0.25;
+
+        let mut all = self.router.l3_engine().storage().all();
+        all.sort_by_key(|m| m.metadata.created_at);
+        let mut seen: HashMap<String, u64> = HashMap::new();
+        let mut deduped = 0usize;
+        for mem in &all {
+            if mem.metadata.superseded_by.is_some() {
+                continue;
+            }
+            let key = mem.content_text().trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+            match seen.get(&key) {
+                Some(&old) if old != mem.id => {
+                    self.mark_superseded(old, mem.id);
+                    deduped += 1;
+                }
+                _ => {
+                    seen.insert(key, mem.id);
+                }
+            }
+        }
+
+        let mut archived = 0usize;
+        for mem in &all {
+            if mem.metadata.superseded_by.is_some() || mem.tags.iter().any(|t| t == "archived") {
+                continue;
+            }
+            let old = now.saturating_sub(mem.metadata.created_at) > ARCHIVE_AFTER_NANOS;
+            if !(old && mem.metadata.importance < ARCHIVE_IMPORTANCE) {
+                continue;
+            }
+            if self
+                .router
+                .l3_engine()
+                .storage()
+                .update_tags(mem.id, "archived")
+            {
+                self.router.l2().update_tags(mem.id, "archived");
+                archived += 1;
+            }
+        }
+        (deduped, archived)
+    }
+
+    /// Lexical (keyword) recall, scope-filtered.
+    ///
+    /// The configured embedding model is English-first; Chinese queries often
+    /// land near-orthogonal to their target (distances 0.85–0.92), so the
+    /// vector path alone misses them. This is a deterministic CJK-bigram /
+    /// Latin-word overlap scan over L3 — cheap at the current scale and used
+    /// as a hybrid merge, not as the primary path.
+    pub fn keyword_recall(
+        &self,
+        query: &str,
+        tags: &[String],
+        k: usize,
+    ) -> MemoryResult<Vec<(Memory, f32, LayerId)>> {
+        let q_tokens = keyword_tokens(query);
+        if q_tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut scored: Vec<(f32, Memory)> = Vec::new();
+        for mem in self.router.l3_engine().storage().all() {
+            if mem.metadata.superseded_by.is_some() {
+                continue;
+            }
+            if mem.tags.iter().any(|t| t == "archived") {
+                continue;
+            }
+            if !tags.iter().all(|t| mem.tags.contains(t)) {
+                continue;
+            }
+            let text = mem.content_text();
+            let toks = keyword_tokens(&text);
+            if toks.is_empty() {
+                continue;
+            }
+            let overlap = q_tokens.iter().filter(|t| toks.contains(*t)).count() as f32;
+            if overlap <= 0.0 {
+                continue;
+            }
+            let score = overlap / (toks.len() as f32).sqrt();
+            scored.push((score, mem));
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(scored
+            .into_iter()
+            .take(k)
+            .map(|(score, mem)| {
+                // Exact-term hits must outrank unrelated vectors: map score
+                // into 0.28..0.45 instead of a flat 0.45.
+                let dist = 0.45 - 0.17 * score.min(1.0);
+                (mem, dist, LayerId::L3)
+            })
+            .collect())
+    }
+
+    /// Scope-filtered text recall (used by harness dedup so an identical
+    /// lesson in project A does not suppress the same lesson in project B).
+    pub fn recall_by_text_scoped(
+        &self,
+        text: &str,
+        k: usize,
+        tags: &[String],
+    ) -> MemoryResult<Vec<(Memory, f32, LayerId)>> {
+        let mut query = Query::by_text(text);
+        query.tags_include = Some(tags.to_vec());
+        self.recall(&query, k)
+    }
+
     pub fn recall_by_id(&self, id: u64) -> MemoryResult<Option<Memory>> {
         // Fast path: DashMap lookup in L1 — no Query construction, no cascade.
         if let Some(cached) = self.router.l1().get_by_id_fast(id) {
@@ -494,6 +640,70 @@ mod tests {
             ..Default::default()
         });
         MemoryStore::new(l1, Arc::new(l2), l3, ConsolidationConfig::default())
+    }
+
+    #[test]
+    fn scoped_recall_only_returns_matching_tags() {
+        let store = make_store();
+        let mut a = MemoryInput::new(MemoryContent::Fact(Fact::new("alice", "likes", "apples")));
+        a.tags = vec!["project:a".into()];
+        store.store(a).unwrap();
+        let mut b = MemoryInput::new(MemoryContent::Fact(Fact::new("alice", "likes", "bananas")));
+        b.tags = vec!["project:b".into()];
+        store.store(b).unwrap();
+
+        let hits = store
+            .recall_by_text_scoped("alice likes apples", 8, &["project:a".into()])
+            .unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits
+            .iter()
+            .all(|(m, _, _)| m.tags.iter().any(|t| t == "project:a")));
+        assert!(hits
+            .iter()
+            .all(|(m, _, _)| m.content_text().contains("apples")));
+
+        let none = store
+            .recall_by_text_scoped("alice likes apples", 8, &["project:c".into()])
+            .unwrap();
+        assert!(
+            none.is_empty(),
+            "no tag match must return empty, not global"
+        );
+    }
+
+    #[test]
+    fn maintenance_collapses_exact_duplicates() {
+        let store = make_store();
+        let mk = || MemoryInput::new(MemoryContent::Fact(Fact::new("alice", "likes", "tea")));
+        store.store(mk()).unwrap();
+        store.store(mk()).unwrap();
+        let (deduped, _archived) = store.maintenance();
+        assert!(deduped >= 1, "exact duplicate must be superseded");
+        let live: Vec<_> = store
+            .router()
+            .l3_engine()
+            .storage()
+            .all()
+            .into_iter()
+            .filter(|m| m.metadata.superseded_by.is_none())
+            .collect();
+        assert_eq!(live.len(), 1);
+    }
+
+    #[test]
+    fn tag_untagged_with_is_idempotent() {
+        let store = make_store();
+        store
+            .store(MemoryInput::new(MemoryContent::Fact(Fact::new(
+                "old", "row", "value",
+            ))))
+            .unwrap();
+        assert_eq!(store.tag_untagged_with("legacy"), 1);
+        assert_eq!(store.tag_untagged_with("legacy"), 0);
+        let all = store.router().l3_engine().storage().all();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].tags.contains(&"legacy".to_string()));
     }
 
     #[test]
@@ -833,4 +1043,32 @@ mod tests {
         );
         assert!(store.recall_by_id(new_id).unwrap().is_some());
     }
+}
+
+/// Tokenize for lexical recall: CJK character bigrams + Latin words (>=2 chars).
+fn keyword_tokens(text: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for word in text.split(|c: char| !c.is_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        if word
+            .chars()
+            .any(|c| matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF))
+        {
+            let chars: Vec<char> = word.chars().collect();
+            for pair in chars.windows(2) {
+                out.insert(pair.iter().collect::<String>());
+            }
+            if chars.len() == 1 {
+                out.insert(chars[0].to_string());
+            }
+        } else {
+            let w = word.to_lowercase();
+            if w.chars().count() >= 2 {
+                out.insert(w);
+            }
+        }
+    }
+    out
 }

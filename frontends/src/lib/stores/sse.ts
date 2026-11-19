@@ -113,8 +113,23 @@ function trackRunState(sessionId: string | undefined, eventType: string | undefi
   }
 }
 
+
+/** Approval requests are not chat content: they must reach the modal even when
+ *  the request belongs to a background child session (butler workers run as
+ *  children while the user is looking at the butler). The old session guard
+ *  dropped those events entirely, so the worker waited out the 300 s backend
+ *  timeout and the tool was denied with no prompt ever shown. */
+function routeBackgroundApproval(raw: { session_id?: string; data?: unknown }) {
+  const inner = typeof raw.data === "string" ? tryParseJSON(raw.data) : raw.data;
+  routeApproval({ type: "approval_needed", data: inner } as SSEEvent, raw.session_id);
+}
+
 function handleTauriEvent(raw: { session_id?: string; event_type?: string; data?: unknown }) {
   trackRunState(raw.session_id, raw.event_type);
+  if (raw.event_type === "approval_needed") {
+    routeBackgroundApproval(raw);
+    return;
+  }
   // Strict session guard: an event belonging to another session must NEVER
   // reach chat.handleSSEEvent. The old check required a current session to be
   // selected already, so an event arriving in the window between
@@ -191,6 +206,11 @@ function handleSSEEvent(event: MessageEvent) {
 
     trackRunState(raw.session_id, raw.event_type);
 
+    if (raw.event_type === "approval_needed") {
+      routeBackgroundApproval(raw as { session_id?: string; data?: unknown });
+      return;
+    }
+
     // Filter events by current session to avoid cross-session interference
     const currentId = get(sessions).currentId;
     if (raw.session_id && currentId && raw.session_id !== currentId) {
@@ -246,6 +266,28 @@ function handleSSEEvent(event: MessageEvent) {
   }
 }
 
+let butlerDoneUnlisten: (() => void) | null = null;
+
+/** A butler run can finish while the user is on another session (scheduler
+ *  digest). Reload that session's messages instead of leaving the 1h view
+ *  cache painted with the pre-digest snapshot. */
+async function handleButlerDone(sessionId: string) {
+  // Invalidate the cached view even if the session list refresh fails.
+  chat.noteSessionFinished(sessionId);
+  try {
+    await sessions.load();
+  } catch (err) {
+    console.warn("[butler] session refresh failed:", err);
+  }
+  if (get(sessions).currentId === sessionId && !get(chat).isProcessing) {
+    try {
+      await chat.loadSession(sessionId);
+    } catch (err) {
+      console.warn("[butler] digest reload failed:", err);
+    }
+  }
+}
+
 async function connectTauri() {
   if (tauriUnlisten) {
     tauriUnlisten();
@@ -255,6 +297,11 @@ async function connectTauri() {
     tauriUnlisten = await listen<{ session_id?: string; event_type?: string; data?: unknown }>("sse_event", (e) => {
       handleTauriEvent(e.payload);
     });
+    if (!butlerDoneUnlisten) {
+      butlerDoneUnlisten = await listen<{ session_id?: string }>("butler://done", (e) => {
+        if (e.payload?.session_id) void handleButlerDone(e.payload.session_id);
+      });
+    }
   } catch (err) {
     console.warn("Failed to listen for Tauri sse_event:", err);
   }

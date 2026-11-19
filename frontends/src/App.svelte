@@ -1,9 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { emitTo } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
+  import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { sessions } from "./lib/stores/sessions";
   import { projects } from "./lib/stores/projects";
   import { chat } from "./lib/stores/chat";
@@ -13,8 +12,7 @@
   import ChatMessage from "./lib/components/ChatMessage.svelte";
   import SoulCard from "./lib/components/SoulCard.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
-  import { askConfirm } from "./lib/stores/confirm";
-  import ChatInput from "./lib/components/ChatInput.svelte";
+    import ChatInput from "./lib/components/ChatInput.svelte";
   import JobStrip from "./lib/components/JobStrip.svelte";
   import { jobs } from "./lib/stores/jobs.svelte";
   import SubagentStrip from "./lib/components/SubagentStrip.svelte";
@@ -27,6 +25,7 @@
   import SidePanel from "./lib/components/SidePanel.svelte";
   import TaskChips from "./lib/components/TaskChips.svelte";
   import StewardPanel from "./lib/components/StewardPanel.svelte";
+  import ButlerPanel from "./lib/components/ButlerPanel.svelte";
   import GoalPanel from "./lib/components/GoalPanel.svelte";
   import GoalBanner from "./lib/components/GoalBanner.svelte";
   import { initLocale } from "./lib/i18n";
@@ -70,98 +69,22 @@ function installGlobalErrorHandlers() {
   // 读共享 soul store：设置面板/灵魂卡里改名后这里即时更新。
   let agentName = $derived(soulDisplayName(soulStore.status));
   let stewardOpen = $state(false);
+  let butlerOpen = $state(false);
   let goalOpen = $state(false);
 
   onMount(() => {
     const openGoals = () => { goalOpen = true; };
+    const selectSession = (event: Event) => {
+      const id = (event as CustomEvent<string>).detail;
+      if (id) void handleSelectSession(id);
+    };
     window.addEventListener("openzen:open-goals", openGoals);
-    return () => window.removeEventListener("openzen:open-goals", openGoals);
+    window.addEventListener("openzen:select-session", selectSession);
+    return () => {
+      window.removeEventListener("openzen:open-goals", openGoals);
+      window.removeEventListener("openzen:select-session", selectSession);
+    };
   });
-
-  // 宠物小猫咪：seal 点击切换显隐（再点一次即可关掉，不必右键菜单）。
-  // 宠物窗本体是 tauri.conf.json 里声明的静态窗口（启动即建、隐藏）。
-  function handlePetClick() {
-    console.log("[pet] seal clicked");
-    togglePetWindow();
-  }
-  // 轻量桌面 toast：点击 seal 后给出可见反馈（成功/失败不再静默）
-  let petToast = $state("");
-  let petToastTimer: ReturnType<typeof setTimeout> | undefined;
-  function showPetToast(msg: string) {
-    petToast = msg;
-    clearTimeout(petToastTimer);
-    petToastTimer = setTimeout(() => (petToast = ""), 2400);
-  }
-  async function togglePetWindow() {
-    try {
-      const existing = await WebviewWindow.getByLabel("pet");
-      if (existing) {
-        // 已可见 → 隐藏（关闭）；不可见 → 显示并置顶。
-        // isVisible 失败（旧权限）时保守按"显示"处理，保持旧按钮行为。
-        let visible = true;
-        try { visible = await existing.isVisible(); } catch (_) {}
-        if (visible) {
-          // 先让猫走掉（宠物页收到信号播放走路退场），再隐藏窗口。
-          // emitTo 发射即忘——await 它一旦挂起会阻塞后续隐藏。
-          emitTo("pet", "pet-walkout").catch(() => {});
-          await new Promise((r) => setTimeout(r, 1150));
-          await existing.hide();
-          showPetToast("宠物已隐藏（再点印章唤醒）");
-          console.log("[pet] hidden via seal toggle");
-          return;
-        }
-        try { await existing.show(); } catch (_) {}
-        try { await existing.setAlwaysOnTop(true); } catch (_) {}
-        try { await existing.setFocus(); } catch (_) {}
-        // 宠物窗必须持焦（key window）：WebKit 只给 key window 投递
-        // mouseMoved，且失去 key 后页面整体转 hidden、一切输入失效。
-        // 代价：收起需两次 seal 点击（第一次只是激活主窗）——这是 macOS
-        // 多窗口应用的标准行为；猫身上双击/右键菜单随时可关闭。
-        showPetToast("宠物已显示（再点印章收起）");
-        console.log("[pet] shown existing window");
-        return;
-      }
-      // 兜底：窗口不存在（配置异常）时动态创建。
-      // 注意：WebviewWindow 构造是异步 fire-and-forget，创建成败通过
-      // tauri://created / tauri://error 事件上报；不监听会让失败静默
-      // （toast 照弹但窗口根本没出现）。
-      const w = new WebviewWindow("pet", {
-        url: "/pet/pet.html",
-        width: 260,
-        height: 340,
-        resizable: false,
-        transparent: true,
-        decorations: false,
-        alwaysOnTop: true,
-        visible: true,
-        focus: false,
-        skipTaskbar: true,
-        shadow: false,
-      });
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("超时（10s 未收到创建回执）")), 10_000);
-        w.once("tauri://created", () => { clearTimeout(timer); resolve(); });
-        w.once("tauri://error", (e) => {
-          const msg = (e as { message?: string } | null)?.message ?? "创建被拒绝";
-          clearTimeout(timer);
-          reject(new Error(msg));
-        });
-      });
-      // 防御性置前：macOS 下程序化创建的置顶透明窗偶发落在主窗之后。
-      // 不拉焦点（同上：避免主窗失活吞掉下一次 seal 点击）。
-      try { await w.show(); } catch (_) {}
-      try { await w.setAlwaysOnTop(true); } catch (_) {}
-      try { await w.setFocus(); } catch (_) {}
-      showPetToast("宠物已放到桌面");
-      console.log("[pet] created /pet/pet.html");
-    } catch (e) {
-      console.error("[pet] create failed", e);
-      const msg = e instanceof Error ? e.message : String(e);
-      // P2-s: native alert() blocks the whole webview — use the in-page toast.
-      showPetToast($t("pet.createFailed").replace("{msg}", msg));
-    }
-  }
-
 
   let sidebarOpen = $state(true);
 
@@ -183,30 +106,12 @@ function installGlobalErrorHandlers() {
   let showShortcuts = $state(false);
   let sidebarFocused = $state(false);
   let workingDir = $state("");
-  let crystallizationOn = $state(false);
-  let fullAccessOn = $state(false);
-  // Elapsed-time display. It is the ONLY switch behind every per-step
-  // duration in the UI (tool cards, thinking blocks, skill cards), so it
-  // defaults ON: a long task must be able to answer "how long has this been
-  // running" without the user finding a toggle first.
-  const TIMER_PREF_KEY = "openzen.showTimers.v1";
-  function loadShowTimers(): boolean {
-    try {
-      const raw = localStorage.getItem(TIMER_PREF_KEY);
-      return raw === null ? true : raw === "1";
-    } catch {
-      return true;
-    }
-  }
-  let showThinkingTimer = $state(loadShowTimers());
-  function setShowTimers(on: boolean) {
-    showThinkingTimer = on;
-    try {
-      localStorage.setItem(TIMER_PREF_KEY, on ? "1" : "0");
-    } catch {
-      /* private mode / storage disabled — the in-memory value still applies */
-    }
-  }
+  let archivedBefore = $derived(
+    $sessions.sessions.find((s) => s.id === $sessions.currentId)?.archived_before ?? 0,
+  );
+  let epochSummary = $derived(
+    $sessions.sessions.find((s) => s.id === $sessions.currentId)?.epoch_summary ?? "",
+  );
   let messagesEnd: HTMLDivElement | undefined = $state();
   let isDragOver = $state(false);
 
@@ -788,25 +693,8 @@ function installGlobalErrorHandlers() {
   // changes that don't cause DOM mutations (e.g. isProcessing flag
   // flip while the same message is being streamed).
   onMount(() => {
-    // 主窗关闭时把宠物窗一并关掉：只有最后一个窗口关闭，Tauri 才会退出
-    // 应用。若只关主窗而宠物窗还开着，应用会"无窗存活"，Dock/头像再点
-    // 也打不开（macOS 不会自动重建主窗）。
-    // Tauri-only API：纯浏览器（HTTP webui / vite dev）下 getCurrentWebviewWindow
-    // 访问 __TAURI_INTERNALS__ 直接抛 TypeError。这里不捕获会中断整个
-    // onMount 回调链 —— Svelte 的根 effect 顺序执行，同步异常会让排在
-    // 后面的会话加载、SSE 连接、滚动观察器全部不运行（webui 白屏根因）。
-    try {
-      getCurrentWebviewWindow().onCloseRequested(async () => {
-        const petWin = await WebviewWindow.getByLabel("pet").catch(() => null);
-        if (petWin) {
-          petWin.close().catch(() => {});
-        }
-      });
-    } catch (_) { /* Not in Tauri — no window lifecycle to wire. */ }
     initLocale();
     invoke<string>("get_working_dir").then(d => workingDir = d).catch(() => {});
-    invoke<boolean>("get_crystallization").then(v => crystallizationOn = v).catch(() => {});
-    invoke<boolean>("get_full_access").then(v => fullAccessOn = v).catch(() => {});
     let prevMessageCount = 0;
     let prevStreamingTextLen = 0;
     let prevProcessing = false;
@@ -1087,22 +975,6 @@ function installGlobalErrorHandlers() {
     sidebarOpen = !sidebarOpen;
   }
 
-  function toggleCrystallization() {
-    crystallizationOn = !crystallizationOn;
-    invoke("set_crystallization", { enabled: crystallizationOn }).catch(() => {});
-  }
-
-  async function toggleFullAccess() {
-    const next = !fullAccessOn;
-    // Enabling is the dangerous direction: it removes the approval prompt for
-    // every tool. Ask first; disabling needs no confirmation.
-    // `window.confirm` is a silent no-op in this app (Tauri routes it to
-    // `plugin:dialog|confirm`, which the ACL rejects) — use the in-app dialog.
-    if (next && !(await askConfirm($t("status.fullAccessConfirm"), { danger: true }))) return;
-    fullAccessOn = next;
-    invoke("set_full_access", { enabled: next }).catch(() => {});
-  }
-
   function focusSidebar() {
     if (!sidebarOpen) sidebarOpen = true;
     sidebarFocused = true;
@@ -1137,6 +1009,11 @@ function installGlobalErrorHandlers() {
     );
 
     // ── Global: always available (even when ChatInput focused) ──
+    if (mod && e.shiftKey && e.key.toLowerCase() === "b") {
+      e.preventDefault();
+      butlerOpen = true;
+      return;
+    }
     if (mod && e.key === "n") {
       e.preventDefault();
       handleNewChat();
@@ -1239,14 +1116,10 @@ function installGlobalErrorHandlers() {
     // One startup pass for both stores; api/sessions dedupes the
     // overlapping all-sessions fetch so this is projects + sessions,
     // not projects + sessions + sessions (the old Sidebar onMount).
-    // FIXME(startup-debug): temporary instrumentation — surface the first
-    // startup error on screen (30s) to diagnose the dead heartbeat light.
+    // FIXME(startup-debug): temporary instrumentation — log the first
+    // startup error to diagnose the dead heartbeat light.
     const startupDebug = (step: string, e: unknown) => {
       console.error(`[startup] ${step} failed:`, e);
-      showPetToast(
-        `⚠️ startup ${step}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 160),
-      );
-      setTimeout(() => (petToast = ""), 30000);
     };
     try {
       await Promise.all([sessions.load(), projects.loadAll()]);
@@ -1332,7 +1205,7 @@ function installGlobalErrorHandlers() {
 <svelte:window onkeydown={handleGlobalKeydown} />
 
 <div class="app-layout">
-  <Sidebar bind:sidebarOpen onNewChat={handleNewChat} onSelectSession={handleSelectSession} onSidebarEscape={handleSidebarEscape} onOpenSteward={() => (stewardOpen = true)} onOpenGoals={() => (goalOpen = true)} />
+  <Sidebar bind:sidebarOpen onNewChat={handleNewChat} onSelectSession={handleSelectSession} onSidebarEscape={handleSidebarEscape} onOpenButler={() => (butlerOpen = true)} onOpenSteward={() => (stewardOpen = true)} onOpenGoals={() => (goalOpen = true)} />
 
   <main class="main-area">
     <!-- 器物底款标题栏 -->
@@ -1350,7 +1223,6 @@ function installGlobalErrorHandlers() {
           {/if}
         </svg>
       </button>
-      <span class="seal" title={$t("pet.toggleTitle")} onclick={() => handlePetClick()} style="cursor:pointer"><img class="seal-icon" src="/cat-icon.webp" alt="OpenZen" width="28" height="28" decoding="async" /></span>
       <div class="brand">
         <span class="brand-name">OpenZen</span>
       </div>
@@ -1388,26 +1260,6 @@ function installGlobalErrorHandlers() {
       <span class="header-spacer"></span>
       <!-- 工作目录改由输入框里的项目选择器承载：标题栏的路径 chip
            只能截断显示，长路径根本看不全（2026-11-02）。 -->
-      <!-- 运行选项: 结晶 / 计时 / 完全访问 -->
-      <div class="switch-group">
-        <label class="crystallization-switch" title={crystallizationOn ? $t("status.autoCrystallizeOn") : $t("status.autoCrystallizeOff")}>
-          <input type="checkbox" checked={crystallizationOn} onchange={toggleCrystallization} />
-          <span class="switch-track"></span>
-          <span class="switch-label">{$t("status.autoCrystallize")}</span>
-        </label>
-        <label class="crystallization-switch" title={showThinkingTimer ? $t("status.timer") + "：" + $t("status.on") : $t("status.timer") + "：" + $t("status.off")}>
-          <input type="checkbox" checked={showThinkingTimer} onchange={() => setShowTimers(!showThinkingTimer)} />
-          <span class="switch-track"></span>
-          <span class="switch-label">{$t("status.timer")}</span>
-        </label>
-        <!-- 完全访问: 开启后 agent 执行任务不再请求权限 (免弹窗自动放行)。
-             开关本身不换色、也不额外加标记 —— 状态已在 title 里说明。 -->
-        <label class="crystallization-switch" title={$t("status.fullAccessDanger") + "：" + (fullAccessOn ? $t("status.on") : $t("status.off"))}>
-          <input type="checkbox" checked={fullAccessOn} onchange={toggleFullAccess} />
-          <span class="switch-track"></span>
-          <span class="switch-label">{$t("status.fullAccessDanger")}</span>
-        </label>
-      </div>
       <ThemeSwitcher />
       <button class="icon-btn" onclick={() => sidepanel.toggle()} title="Toggle Panel (⌘⇧E)" aria-label="Toggle Panel">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1431,7 +1283,8 @@ function installGlobalErrorHandlers() {
         <SoulCard />
         <div class="empty-chat">
           <div class="empty-disc" aria-hidden="true">
-            <img src="/cat-icon.webp" alt="" width="88" height="88" decoding="async" />
+            <img class="empty-mark empty-mark-ink" src="/openzen-windmill-ink.png" alt="" width="84" height="84" decoding="async" />
+            <img class="empty-mark empty-mark-cream" src="/openzen-windmill-cream.png" alt="" width="84" height="84" decoding="async" />
           </div>
           <h2 class="empty-title">OpenZen</h2>
           <p class="empty-subtitle">{$t("empty.subtitle")}</p>
@@ -1457,6 +1310,11 @@ function installGlobalErrorHandlers() {
                 {/if}
                 {$t("message.loadEarlier", "Load earlier messages")}
               </button>
+            {/if}
+            {#if archivedBefore > 0}
+              <div class="archive-divider" title={epochSummary}>
+                已归档 {archivedBefore} 条早期对话{epochSummary ? ` · ${epochSummary}` : ""}
+              </div>
             {/if}
             {#if virtualWindow.beforeHeight > 0}
               <div class="virtual-spacer" style="height:{virtualWindow.beforeHeight}px" aria-hidden="true"></div>
@@ -1603,15 +1461,12 @@ function installGlobalErrorHandlers() {
     <SidePanel />
   </div>
 
-  {#if petToast}
-    <div class="pet-toast">{petToast}</div>
-  {/if}
-
 <ConfirmDialog />
 
 </div>
 
 <AuthDialog />
+<ButlerPanel bind:open={butlerOpen} />
 <StewardPanel bind:open={stewardOpen} />
 <GoalPanel bind:open={goalOpen} />
 <ApprovalModal />
@@ -1947,6 +1802,18 @@ function installGlobalErrorHandlers() {
     50% { opacity: 1; transform: scale(1); }
     100% { opacity: 0.25; transform: scale(0.8); }
   }
+  .archive-divider {
+    margin: 10px 0 6px;
+    padding: 6px 10px;
+    border-top: 1px dashed #2e3746;
+    border-bottom: 1px dashed #2e3746;
+    color: #6f7a8a;
+    font-size: 11.5px;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .virtual-spacer {
     flex: none;
     width: 1px;
@@ -1995,10 +1862,23 @@ function installGlobalErrorHandlers() {
     border: 1px solid var(--color-hairline);
   }
   .empty-disc img {
+    grid-area: 1 / 1;
     width: 84px;
     height: 84px;
     border-radius: 28px;
     object-fit: cover;
+    transition: opacity 0.2s var(--ease-soak, ease);
+  }
+
+  /* 空状态跟随会话主题：深色用 ink 底，浅色用 cream 底。 */
+  .empty-mark-cream {
+    opacity: 0;
+  }
+  :global(html.theme-light) .empty-mark-cream {
+    opacity: 1;
+  }
+  :global(html.theme-light) .empty-mark-ink {
+    opacity: 0;
   }
 
 
@@ -2290,86 +2170,6 @@ function installGlobalErrorHandlers() {
     box-shadow: 0 0 4px var(--color-primary);
   }
 
-  .switch-group {
-    display: flex;
-    align-items: center;
-    gap: 1px;
-    padding: 3px;
-    border-radius: 11px;
-    background: var(--color-surface-soft);
-    border: 1px solid var(--color-hairline);
-    flex: none;
-  }
-
-  .crystallization-switch {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 7px;
-    border-radius: 8px;
-    cursor: pointer;
-    user-select: none;
-    transition: background 0.16s;
-  }
-  .crystallization-switch:hover {
-    background: var(--color-surface-soft);
-  }
-  /* The full-access switch keeps the same colours as every other title-bar
-     switch (the .danger label colour and the extra red .full-access-badge were
-     removed on request, 2026-10-23): the on/off state is carried by the track
-     and the tooltip, not by a warning colour. */
-  .crystallization-switch input {
-    /* Visually hidden but FOCUSABLE: display:none removed the safety
-       toggles (incl. full-access) from the tab order entirely. */
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-    border: 0;
-  }
-  .crystallization-switch input:focus-visible + .switch-track {
-    outline: 2px solid var(--color-primary);
-    outline-offset: 2px;
-    border-radius: 4px;
-  }
-  .switch-label {
-    font-family: var(--font-sans);
-    font-size: 10.5px;
-    letter-spacing: 0;
-    color: var(--color-dim);
-    white-space: nowrap;
-  }
-  .switch-track {
-    position: relative;
-    width: 24px;
-    height: 13px;
-    background: rgba(255, 255, 255, 0.08);
-    border-radius: 999px;
-    transition: background 0.3s var(--ease-soak, ease);
-  }
-  .switch-track::after {
-    content: "";
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 9px;
-    height: 9px;
-    background: var(--color-muted);
-    border-radius: 50%;
-    transition: transform 0.3s var(--ease-soak, ease), background 0.3s;
-  }
-  .crystallization-switch:has(input:checked) .switch-track {
-    background: rgba(111, 216, 196, 0.28);
-  }
-  .crystallization-switch:has(input:checked) .switch-track::after {
-    transform: translateX(11px);
-    background: var(--color-primary);
-  }
-
   @media (max-width: 900px) {
     .sidebar-toggle {
       display: flex;
@@ -2415,26 +2215,4 @@ function installGlobalErrorHandlers() {
     50% { transform: translateY(-6px); }
   }
 
-  /* 宠物开关 toast */
-  .pet-toast {
-    position: fixed;
-    left: 50%;
-    bottom: 28px;
-    transform: translateX(-50%);
-    z-index: 200;
-    padding: 8px 16px;
-    border-radius: 999px;
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-hairline);
-    color: var(--color-ink);
-    font-size: 13px;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
-    pointer-events: none;
-    white-space: nowrap;
-    animation: petToastIn 0.18s ease-out;
-  }
-  @keyframes petToastIn {
-    from { opacity: 0; transform: translateX(-50%) translateY(4px); }
-    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
-  }
 </style>

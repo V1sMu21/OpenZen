@@ -61,6 +61,16 @@ const NEVER_AUTO_TRUST: &[&str] = &[
     "open",
     "curl",
     "wget",
+    "find",
+    "tar",
+    "awk",
+    "sed",
+    "vim",
+    "vi",
+    "less",
+    "sqlite3",
+    "gdb",
+    "make",
     "nc",
     "ncat",
     "netcat",
@@ -156,7 +166,12 @@ pub fn is_auto_trustable(tool: &str, pattern: &str) -> bool {
         return false;
     }
     // A wildcard pattern means "one approval covers every argument".
-    if p == "*" {
+    if p == "*" || p.starts_with('!') {
+        return false;
+    }
+    // Shell metacharacters make the "first word" meaningless: `ls; rm -rf`
+    // and `find -exec sh -c …` must never become a standing trust.
+    if p.contains([';', '&', '|', '$', '`', '\n', '>', '<']) {
         return false;
     }
     if NEVER_AUTO_TRUST_TOOLS.contains(&tool) || tool.starts_with("mcp__") {
@@ -193,27 +208,45 @@ pub fn is_auto_trustable(tool: &str, pattern: &str) -> bool {
     true
 }
 
+fn short_hash(s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 pub fn build_pattern(tool: &str, args: &Value) -> (String, String) {
     match tool {
         "code_run" => {
             let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
-            let first_word = code.split_whitespace().next().unwrap_or("unknown");
-            (tool.to_string(), first_word.to_lowercase())
+            // Key on the whole command (bounded), not just the first word:
+            // a trust grant for `git status` must not cover `git clean -fdx`.
+            let normalized = code.split_whitespace().collect::<Vec<_>>().join(" ");
+            // Newlines would be collapsed by split_whitespace, hiding a
+            // second command from the metachar check. Oversized commands get
+            // a content-addressed key; both are marked non-auto-trustable and
+            // can never be shared by a different command.
+            let key = if code.contains('\n') || code.contains('\r') {
+                format!("!unsafe:{}", short_hash(code))
+            } else if normalized.chars().count() > 4096 {
+                format!("!long:{}", short_hash(&normalized))
+            } else if normalized.is_empty() {
+                "unknown".into()
+            } else {
+                normalized
+            };
+            (tool.to_string(), key)
         }
         "read" | "write" | "patch" | "edit" => {
+            // Full path, not the first two segments: a grant for
+            // `~/Desktop/report.md` must not cover the whole Desktop.
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            let segments: Vec<&str> = path
-                .split('/')
-                .filter(|s| !s.is_empty() && *s != ".")
-                .collect();
-            let key = if segments.len() <= 2 {
-                if segments.is_empty() {
-                    ".".to_string()
-                } else {
-                    segments.join("/")
-                }
+            let key = if path.chars().count() > 1024 {
+                format!("!long:{}", short_hash(path))
+            } else if path.is_empty() {
+                ".".into()
             } else {
-                segments[..2].join("/")
+                path.to_string()
             };
             (tool.to_string(), key)
         }
@@ -246,7 +279,7 @@ mod tests {
             &serde_json::json!({"code": "npm install --save-dev typescript"}),
         );
         assert_eq!(t, "code_run");
-        assert_eq!(p, "npm");
+        assert_eq!(p, "npm install --save-dev typescript");
     }
 
     #[test]
@@ -262,13 +295,13 @@ mod tests {
             &serde_json::json!({"file_path": "/tmp/project/src/main.rs"}),
         );
         assert_eq!(t, "write");
-        assert_eq!(p, "tmp/project");
+        assert_eq!(p, "/tmp/project/src/main.rs");
     }
 
     #[test]
     fn test_write_pattern_shallow() {
         let (_, p) = build_pattern("write", &serde_json::json!({"file_path": "/tmp/test.txt"}));
-        assert_eq!(p, "tmp/test.txt");
+        assert_eq!(p, "/tmp/test.txt");
     }
 
     #[test]
@@ -378,5 +411,31 @@ mod tests {
         // Empty and wildcard patterns are never trustable.
         assert!(!is_auto_trustable("code_run", ""));
         assert!(!is_auto_trustable("read", "*"));
+    }
+
+    #[test]
+    fn metacharacters_and_dangerous_tools_are_never_auto_trusted() {
+        for code in [
+            "find . -exec sh -c 'id' \\;",
+            "ls; rm -rf /",
+            "echo $(whoami)",
+            "tar --checkpoint-action=exec=sh",
+        ] {
+            let (tool, pattern) = build_pattern("code_run", &serde_json::json!({"code": code}));
+            assert!(
+                !is_auto_trustable(&tool, &pattern),
+                "must not auto-trust: {code}"
+            );
+        }
+        assert!(is_auto_trustable("code_run", "git status"));
+        let (_, multiline) = build_pattern(
+            "code_run",
+            &serde_json::json!({"code": "echo ok\nrm -rf /"}),
+        );
+        assert!(!is_auto_trustable("code_run", &multiline));
+        let long = "x".repeat(5000);
+        let (_, long_key) = build_pattern("code_run", &serde_json::json!({"code": long}));
+        assert!(long_key.starts_with("!long:"));
+        assert!(!is_auto_trustable("code_run", &long_key));
     }
 }

@@ -1,0 +1,443 @@
+{
+  "version": 1,
+  "baseline_implemented": 34,
+  "scenarios": [
+    {
+      "id": "approval_blocks_then_unblocks_dependents",
+      "feature": "butler.approval",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "blocked => no dependent; approve => ready"
+    },
+    {
+      "id": "approval_denied_cancels_dependents",
+      "feature": "butler.approval",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "deny => A failed, B failed"
+    },
+    {
+      "id": "approval_expiry_blocks_dependents",
+      "feature": "butler.approval",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "expired approval => A failed, B failed"
+    },
+    {
+      "id": "blocked_dependency_waits_then_releases_after_approval",
+      "feature": "butler.approval",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "blocked dep keeps B queued; approve -> B ready"
+    },
+    {
+      "id": "worker_wall_budget_times_out_and_blocks_downstream",
+      "feature": "butler.budget",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "wall budget timeout -> task failed, dependent failed"
+    },
+    {
+      "id": "cancelled_task_blocks_dependents",
+      "feature": "butler.cancel",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "stop => failed + downstream failed"
+    },
+    {
+      "id": "concurrency_is_bounded_and_each_task_runs_once",
+      "feature": "butler.concurrency",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "8 tasks, limit 2, each once"
+    },
+    {
+      "id": "content_chain_a_to_d_propagates_values",
+      "feature": "butler.content",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "A.sum -> B.doubled -> C.total -> D.validated"
+    },
+    {
+      "id": "digest_is_sent_at_most_once_per_project",
+      "feature": "butler.digest",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "failed digest retried; sent only once"
+    },
+    {
+      "id": "new_task_clears_a_previously_sent_digest",
+      "feature": "butler.digest",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "new task re-opens digest"
+    },
+    {
+      "id": "failure_blocks_dependents",
+      "feature": "butler.failure",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "A failed => B not dispatched"
+    },
+    {
+      "id": "partial_fanout_failures_do_not_block_successes",
+      "feature": "butler.failure",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "2/6 fail, 4 still succeed"
+    },
+    {
+      "id": "deep_chain_of_ten_runs_in_order",
+      "feature": "butler.graph",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "10-deep chain, one at a time"
+    },
+    {
+      "id": "dependency_cycle_fails_instead_of_hanging",
+      "feature": "butler.graph",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "A<->B cycle -> both failed, no hang"
+    },
+    {
+      "id": "diamond_merges_two_branches",
+      "feature": "butler.graph",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "A -> (B,C) -> D join"
+    },
+    {
+      "id": "join_failure_blocks_only_the_join",
+      "feature": "butler.graph",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "B fails, C succeeds, D join fails; C not blocked"
+    },
+    {
+      "id": "missing_dependency_fails_the_dependent",
+      "feature": "butler.graph",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "missing dep -> task failed, no dispatch"
+    },
+    {
+      "id": "running_task_is_not_dispatched_twice",
+      "feature": "butler.graph",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "running task excluded from ready"
+    },
+    {
+      "id": "large_deliverable_is_written_and_verified",
+      "feature": "butler.large_output",
+      "kind": "headless",
+      "severity": "P2",
+      "status": "implemented",
+      "assert": "5MB file written, size exact"
+    },
+    {
+      "id": "cross_project_dependency_is_rejected_at_promotion",
+      "feature": "butler.project",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "p2 depends on p1 -> p2 failed"
+    },
+    {
+      "id": "projects_do_not_leak_ready_tasks",
+      "feature": "butler.project",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "p1 ready list never includes p2"
+    },
+    {
+      "id": "restart_preserves_pending_approval",
+      "feature": "butler.restart",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "pending approval survives reopen; approve unblocks B"
+    },
+    {
+      "id": "restart_resumes_without_duplicate_work",
+      "feature": "butler.restart",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "reopen DB resumes at C, no duplicate A/B"
+    },
+    {
+      "id": "restart_while_verifying_requeues_cleanly",
+      "feature": "butler.restart",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "verifying survives restart and requeues"
+    },
+    {
+      "id": "attempts_are_exhausted_and_downstream_stays_blocked",
+      "feature": "butler.retry",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "max_attempts exhausted => failed"
+    },
+    {
+      "id": "retry_then_succeeds_after_transient_failure",
+      "feature": "butler.retry",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "verifying failure -> ready -> verified"
+    },
+    {
+      "id": "fanout_of_twenty_runs_each_task_once",
+      "feature": "butler.scale",
+      "kind": "headless",
+      "severity": "P1",
+      "status": "implemented",
+      "assert": "20 fanout, limit 4, each once"
+    },
+    {
+      "id": "hundred_task_graph_completes_once_each",
+      "feature": "butler.scale",
+      "kind": "headless",
+      "severity": "P2",
+      "status": "implemented",
+      "assert": "100 tasks, each once"
+    },
+    {
+      "id": "failing_verify_command_marks_the_task_failed",
+      "feature": "butler.verify",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "[verify] command exits nonzero -> task Failed, not Unverified"
+    },
+    {
+      "id": "strict_dependency_does_not_consume_unverified_upstream",
+      "feature": "butler.verify",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "strict_deps: unverified upstream keeps dependent queued; verified releases"
+    },
+    {
+      "id": "strong_verify_command_makes_content_task_verified",
+      "feature": "butler.verify",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "[verify] command passes -> task Verified; strict child releases"
+    },
+    {
+      "id": "unverified_upstream_is_visible_not_silently_verified",
+      "feature": "butler.verify",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "unverified stays unverified; dependent is released (documented risk)"
+    },
+    {
+      "id": "custom_verify_command_is_refused_without_approval",
+      "feature": "safety.verify",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "custom StrongCommand is pending, never executed; marker absent"
+    },
+    {
+      "id": "shell_chained_verify_is_refused",
+      "feature": "safety.verify",
+      "kind": "headless",
+      "severity": "P0",
+      "status": "implemented",
+      "assert": "cargo test; touch … is refused, pending, marker absent"
+    },
+    {
+      "id": "butler_duplicate_goal_rejected",
+      "feature": "butler.graph",
+      "kind": "unit",
+      "severity": "P1",
+      "status": "covered",
+      "assert": "same open goal rejected; one task only",
+      "evidence": "crates/oz-tools/src/butler_tools.rs::duplicate_open_goal_is_rejected"
+    },
+    {
+      "id": "verify_commands_make_dependent_task_strict",
+      "feature": "butler.verify",
+      "kind": "unit",
+      "severity": "P0",
+      "status": "covered",
+      "evidence": "crates/oz-tools/src/butler_tools.rs::verify_commands_make_a_dependent_task_strict",
+      "assert": "task_create verify + deps -> StrongCommand gate + strict_deps true"
+    },
+    {
+      "id": "context_compaction_recall",
+      "feature": "context.compaction",
+      "kind": "unit",
+      "severity": "P1",
+      "status": "covered",
+      "assert": "removed window exposes key fact to summarizer; newest turn + system survive",
+      "evidence": "crates/oz-core/src/compress.rs::scenario_compaction_tests::compaction_exposes_removed_key_fact_for_the_summarizer"
+    },
+    {
+      "id": "gateway_corrupt_tool_args",
+      "feature": "gateway.resilience",
+      "kind": "unit",
+      "severity": "P0",
+      "status": "covered",
+      "assert": "leaked args repaired or rejected, no bad write",
+      "evidence": "crates/oz-llm/src/stream.rs::real_20261023_* / real_20261102_*"
+    },
+    {
+      "id": "gateway_timeout_retry",
+      "feature": "gateway.resilience",
+      "kind": "unit",
+      "severity": "P0",
+      "status": "covered",
+      "assert": "mock 500/timeout -> retry then honest error",
+      "evidence": "crates/oz-llm/src/retry.rs::transient_gateway_outage_then_success"
+    },
+    {
+      "id": "goals_no_progress_and_budget_are_bounded",
+      "feature": "goals.gate",
+      "kind": "unit",
+      "severity": "P1",
+      "status": "covered",
+      "evidence": "crates/oz-steward/tests/goal_fault_injection.rs::scenario_03..05",
+      "assert": "budget/no-progress/false-completion cannot achieve"
+    },
+    {
+      "id": "goals_progress_gate",
+      "feature": "goals.gate",
+      "kind": "unit",
+      "severity": "P1",
+      "status": "covered",
+      "assert": "goal progress updates only on verified evidence",
+      "evidence": "crates/oz-steward/tests/goal_fault_injection.rs::scenario_01..06"
+    },
+    {
+      "id": "jobs_background_stream_and_kill",
+      "feature": "jobs.lifecycle",
+      "kind": "unit",
+      "severity": "P1",
+      "status": "covered",
+      "evidence": "crates/oz-tools/src/job_bg.rs::background_bash_streams_and_kills",
+      "assert": "background job streams output and cancel kills the process"
+    },
+    {
+      "id": "jobs_parallel_results",
+      "feature": "jobs.lifecycle",
+      "kind": "unit",
+      "severity": "P1",
+      "status": "covered",
+      "assert": "two jobs stream isolated output; both collectable; one cancel does not corrupt the other",
+      "evidence": "crates/oz-tools/src/job_bg.rs::parallel_jobs_are_isolated_and_both_collectable"
+    },
+    {
+      "id": "safety_outside_write_approval",
+      "feature": "safety.boundary",
+      "kind": "unit",
+      "severity": "P0",
+      "status": "covered",
+      "assert": "outside write needs approval; deny leaves file absent",
+      "evidence": "crates/oz-tools/src/file_ops.rs::outside_write_needs_an_approval_and_then_succeeds"
+    },
+    {
+      "id": "custom_verify_command_is_rejected_at_creation",
+      "feature": "safety.verify",
+      "kind": "unit",
+      "severity": "P0",
+      "status": "covered",
+      "evidence": "crates/oz-tools/src/butler_tools.rs::custom_verify_command_is_rejected_at_creation",
+      "assert": "task_create rejects non-allowlisted verify with actionable error"
+    },
+    {
+      "id": "steward_rollback",
+      "feature": "steward.recovery",
+      "kind": "unit",
+      "severity": "P0",
+      "status": "covered",
+      "assert": "bad mutation rolled back, workspace restored",
+      "evidence": "crates/oz-steward/tests/steward_fault_injection.rs::scenario_10"
+    },
+    {
+      "id": "subagent_cancel",
+      "feature": "subagents.lifecycle",
+      "kind": "unit",
+      "severity": "P1",
+      "status": "covered",
+      "assert": "cancel sets only the target child stop flag; unknown id is a no-op",
+      "evidence": "src-tauri/src/subagents.rs::cancel_tests::cancelling_a_child_sets_its_stop_signal_only"
+    },
+    {
+      "id": "gui_approval_dialog",
+      "feature": "butler.approval",
+      "kind": "gui",
+      "severity": "P0",
+      "status": "designed",
+      "assert": "approval dialog allow/deny + dependent state"
+    },
+    {
+      "id": "gui_stop_worker",
+      "feature": "butler.cancel",
+      "kind": "gui",
+      "severity": "P1",
+      "status": "designed",
+      "assert": "stop running worker; no orphan; panel failed"
+    },
+    {
+      "id": "gui_failure_panel",
+      "feature": "butler.failure",
+      "kind": "gui",
+      "severity": "P1",
+      "status": "designed",
+      "assert": "A failed shown in panel, B/C blocked"
+    },
+    {
+      "id": "gui_large_document",
+      "feature": "butler.large_output",
+      "kind": "gui",
+      "severity": "P2",
+      "status": "designed",
+      "assert": "5MB file opens without UI freeze"
+    },
+    {
+      "id": "gui_restart_panel",
+      "feature": "butler.restart",
+      "kind": "gui",
+      "severity": "P1",
+      "status": "designed",
+      "assert": "panel reflects resumed tasks after relaunch"
+    },
+    {
+      "id": "gui_content_chain_restart",
+      "feature": "butler.content",
+      "kind": "gui",
+      "severity": "P0",
+      "status": "manual-pass",
+      "assert": "real app A->B->C->D + digest + panel; passed 2026-11-18"
+    }
+  ]
+}

@@ -23,11 +23,17 @@ export interface ApprovalRequest {
   origin?: string;
 }
 
+const APPROVAL_TIMEOUT_SECS = 30 * 60;
+
 export interface ApprovalState {
   queue: ApprovalRequest[];
   current: ApprovalRequest | null;
   showModal: boolean;
   countdown: number;
+  /** Wall-clock deadline for the countdown. Tick-counting alone stalls when
+   *  macOS throttles timers in an occluded window: the modal can sit for
+   *  minutes with "30m" left and never auto-deny. */
+  deadline: number;
   /** Set when the decision could not be delivered to the backend. The modal
    *  stays open (and the queue does NOT advance) so the user can retry —
    *  advancing would look like the tool was approved while the backend is
@@ -40,7 +46,8 @@ function createApprovalStore() {
     queue: [],
     current: null,
     showModal: false,
-    countdown: 30,
+    countdown: APPROVAL_TIMEOUT_SECS,
+    deadline: 0,
     sendError: null,
   });
 
@@ -50,6 +57,7 @@ function createApprovalStore() {
   // Last decision that failed to reach the backend, so "retry" re-sends the
   // SAME answer instead of guessing (a failed deny must not become an allow).
   let lastFailedDecision: string | null = null;
+  let responding = false;
 
   function clearCountdownInterval() {
     if (countdownInterval) {
@@ -58,23 +66,32 @@ function createApprovalStore() {
     }
   }
 
-  function startCountdown() {
+  function startCountdown(deadline: number = Date.now() + APPROVAL_TIMEOUT_SECS * 1000) {
     clearCountdownInterval();
+    // Set the deadline in its own update; never call update() from inside
+    // another update()'s updater (Svelte's set uses the pre-update snapshot,
+    // which overwrote the deadline back to 0 and auto-denied in ~0.5s).
+    update((s) => ({
+      ...s,
+      deadline,
+      countdown: Math.max(0, Math.ceil((deadline - Date.now()) / 1000)),
+    }));
     countdownInterval = setInterval(() => {
       update((s) => {
-        const countdown = s.countdown - 1;
-        if (countdown <= 0) {
+        // Compute from the wall clock, not from the number of ticks: a
+        // throttled interval would otherwise never reach zero.
+        const remaining = Math.max(0, Math.ceil((s.deadline - Date.now()) / 1000));
+        if (remaining <= 0) {
           clearCountdownInterval();
-          // Auto-deny on timeout. The network call must run outside
-          // update(), so fire-and-forget it.
+          // Network call must run outside update(), so fire-and-forget it.
           if (s.current) {
             void respondInner("deny");
           }
           return { ...s, countdown: 0 };
         }
-        return { ...s, countdown };
+        return { ...s, countdown: remaining };
       });
-    }, 1000);
+    }, 500);
   }
 
   function stopCountdown() {
@@ -82,34 +99,55 @@ function createApprovalStore() {
   }
 
   function push(request: ApprovalRequest) {
-    update((s) => {
-      if (s.current) {
-        return { ...s, queue: [...s.queue, request] };
-      }
-      const current = request;
-      startCountdown();
-      return {
-        ...s,
-        queue: s.queue,
-        current,
-        showModal: true,
-        countdown: 30,
-        sendError: null,
-      };
-    });
+    const state = get({ subscribe });
+    if (state.current?.requestId === request.requestId) return;
+    if (state.queue.some((r) => r.requestId === request.requestId)) return;
+    if (state.current) {
+      update((s) => ({ ...s, queue: [...s.queue, request] }));
+      return;
+    }
+    const deadline = Date.now() + APPROVAL_TIMEOUT_SECS * 1000;
+    update((s) => ({
+      ...s,
+      current: request,
+      showModal: true,
+      countdown: APPROVAL_TIMEOUT_SECS,
+      deadline,
+      sendError: null,
+    }));
+    startCountdown(deadline);
   }
 
-  async function respond(decision: string) {
+  async function respond(decision: string, requestId?: string) {
     stopCountdown();
-    await respondInner(decision);
+    await respondInner(decision, requestId);
     // On failure the modal stays open with the error + Retry; the countdown
-    // is deliberately NOT re-armed (a failing auto-deny every 30s would just
+    // is deliberately NOT re-armed (a failing auto-deny every 30 min would just
     // spam the backend).
   }
 
-  async function respondInner(decision: string) {
+  function advance() {
+    const next = get({ subscribe }).queue[0] ?? null;
+    const deadline = next ? Date.now() + APPROVAL_TIMEOUT_SECS * 1000 : 0;
+    update((s) => ({
+      ...s,
+      queue: next ? s.queue.slice(1) : [],
+      current: next,
+      showModal: !!next,
+      countdown: next ? APPROVAL_TIMEOUT_SECS : 0,
+      deadline,
+      sendError: null,
+    }));
+    if (next) startCountdown(deadline);
+    else stopCountdown();
+  }
+
+  async function respondInner(decision: string, requestId?: string) {
+    if (responding) return;
     const state = get({ subscribe });
     if (!state.current) return;
+    if (requestId && state.current.requestId !== requestId) return;
+    responding = true;
     const req = state.current;
 
     // Send response to backend (network call — must not run inside update())
@@ -132,32 +170,30 @@ function createApprovalStore() {
       }
     } catch (err) {
       console.error("[approval] failed to send response:", err);
-      // Keep `current` and surface the failure: the backend never received
-      // the decision, so the request is still pending.
+      const msg = err instanceof Error ? err.message : String(err);
+      responding = false;
+      // The backend timed out / was stopped first: this request can never be
+      // answered. Drop it and advance, or the full-screen modal is stuck.
+      if (/not found|unknown request|expired/i.test(msg)) {
+        advance();
+        return;
+      }
       lastFailedDecision = decision;
-      update((s) => ({
-        ...s,
-        sendError: err instanceof Error ? err.message : String(err),
-      }));
+      update((s) => ({ ...s, sendError: msg }));
       return;
     }
 
     lastFailedDecision = null;
-    // Advance queue
-    update((s) => {
-      const current = s.queue[0] ?? null;
-      if (current) {
-        startCountdown();
-        return {
-          ...s,
-          queue: s.queue.slice(1),
-          current,
-          countdown: 30,
-          sendError: null,
-        };
-      }
-      return { ...s, queue: [], current: null, showModal: false, countdown: 0, sendError: null };
-    });
+    responding = false;
+    advance();
+  }
+
+  /** Test-only reset; production never calls this. */
+  function reset() {
+    stopCountdown();
+    responding = false;
+    lastFailedDecision = null;
+    set({ current: null, queue: [], showModal: false, countdown: 0, deadline: 0, sendError: null });
   }
 
   /** Re-send the decision that failed, without touching the queue. */
@@ -166,7 +202,7 @@ function createApprovalStore() {
     await respondInner(lastFailedDecision);
   }
 
-  return { subscribe, push, respond, retry };
+  return { subscribe, push, respond, retry, reset };
 }
 
 export const approval = createApprovalStore();

@@ -477,10 +477,7 @@ import { t, locale, tSync } from "../i18n";
                 {#if p.type === "reasoning"}
                   <ThinkingBlock
                     thinking={p.text}
-                    duration={message.duration ?? 0}
-                    durationMs={("durationMs" in p) ? p.durationMs : undefined}
                     streaming={isLive && p.state === "streaming"}
-                    showTimer={false}
                     showPausedWarning={!isLive}
                   />
                 {:else if p.type === "tool-invocation" && isFileEditTool(p.name)}
@@ -492,7 +489,6 @@ import { t, locale, tSync } from "../i18n";
                     durationMs={p.durationMs}
                     result={p.result}
                     completed={isToolPartDone(p)}
-                    showTimer={false}
                     workingDir={workingDir}
                   />
                 {:else if p.type === "tool-invocation" && isSkillOrMcpInvocation(p.name)}
@@ -500,7 +496,6 @@ import { t, locale, tSync } from "../i18n";
                     toolCall={{ name: p.name, arguments: p.args, result: p.result }}
                     durationMs={p.durationMs}
                     completed={isToolPartDone(p)}
-                    showTimer={false}
                   />
                 {:else if p.type === "tool-invocation"}
                   <ToolCallCard
@@ -508,7 +503,6 @@ import { t, locale, tSync } from "../i18n";
                     durationMs={p.durationMs}
                     liveElapsedSecs={p.liveElapsedSecs}
                     completed={isToolPartDone(p)}
-                    showTimer={false}
                     hasError={p.state === "output-error"}
                     workingDir={workingDir}
                   />

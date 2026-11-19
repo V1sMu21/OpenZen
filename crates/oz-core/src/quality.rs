@@ -927,81 +927,6 @@ pub async fn review_prompt_via_client<C: LlmClient>(
     }
 }
 
-/// P0-6 ⑥: should this user input become a crystallized SOP?
-///
-/// The real SOP store contained 7 entries named
-/// `system-reminder__today_s_date__2026-10-…` — the agent's own session
-/// scaffolding was being distilled into "knowledge" and then re-injected as
-/// instructions. Scaffolding is not a task.
-pub fn is_crystallisable_input(user_input: &str) -> bool {
-    let t = user_input.trim_start();
-    if t.is_empty() {
-        return false;
-    }
-    let lower = t.to_lowercase();
-    if t.starts_with("<system-reminder>") || lower.contains("system-reminder") {
-        return false;
-    }
-    if lower.contains("today's date") || lower.contains("today’s date") {
-        return false;
-    }
-    if lower.starts_with("<system") || lower.starts_with("[system") {
-        return false;
-    }
-    // Too short to describe a reusable procedure.
-    t.chars().count() >= 12
-}
-
-/// P0-6 ⑥: slug for a crystallized SOP name, with a scaffolding blacklist.
-/// Returns None when the input must not be crystallized at all.
-pub fn slug_sop_name(user_input: &str) -> Option<String> {
-    if !is_crystallisable_input(user_input) {
-        return None;
-    }
-    let slug: String = user_input
-        .trim_start()
-        .chars()
-        .take(40)
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let lowered = slug.to_lowercase();
-    const BLACKLIST: &[&str] = &[
-        "system_reminder",
-        "system-reminder",
-        "today_s_date",
-        "todays_date",
-        "system_prompt",
-    ];
-    if BLACKLIST.iter().any(|b| lowered.contains(b)) {
-        return None;
-    }
-    // Collapse runs of underscores so names stay readable.
-    let mut out = String::with_capacity(slug.len());
-    let mut prev_us = false;
-    for c in slug.chars() {
-        if c == '_' {
-            if prev_us {
-                continue;
-            }
-            prev_us = true;
-        } else {
-            prev_us = false;
-        }
-        out.push(c);
-    }
-    let trimmed = out.trim_matches('_').to_string();
-    if trimmed.len() < 3 {
-        return None;
-    }
-    Some(trimmed)
-}
-
 /// QA-2: parse a review verdict from pre-fetched raw text (summary-model
 /// path). Empty input → None so callers can fall back.
 pub fn review_verdict_from_raw(raw: &str) -> Option<ReviewVerdict> {
@@ -3065,29 +2990,6 @@ mod tests {
             .expect("own spec must be accepted");
         assert!(text.contains("# my spec"));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// T6.2: session scaffolding must never become a "SOP" — the real store
-    /// contained 7 SOPs named `system-reminder__today_s_date__…`.
-    #[test]
-    fn scaffolding_is_not_crystallised() {
-        assert!(
-            slug_sop_name("<system-reminder>Today's date is 2026-10-21</system-reminder>")
-                .is_none()
-        );
-        assert!(slug_sop_name("system-reminder today_s_date 2026-10").is_none());
-        assert!(!is_crystallisable_input(
-            "<system-reminder>anything</system-reminder>"
-        ));
-        assert!(!is_crystallisable_input("short"));
-        // A real task still crystallises, with a readable slug.
-        let name = slug_sop_name("Build a pixel-art platformer with three levels")
-            .expect("a real task must crystallise");
-        assert!(
-            name.starts_with("Build_a_pixel-art_platformer"),
-            "unexpected slug: {name}"
-        );
-        assert!(!name.contains("__"));
     }
 
     /// P0-6 ③ / frontend contract: the `done` event's `quality` block must use

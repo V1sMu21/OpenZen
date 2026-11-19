@@ -66,6 +66,11 @@
       {#if mem.pendingEvents !== null && mem.pendingEvents > 0}
         <span class="soul-stat">· {mem.pendingEvents} {$t("soul.pendingEvents", "pending")}</span>
       {/if}
+      {#if mem.scopeCoverage !== null}
+        <span class="soul-stat">
+          · {$t("soul.scopeCoverage", "scoped")} {Math.round((mem.scopeCoverage ?? 0) * 100)}%
+        </span>
+      {/if}
       {#if mem.portraitUpdatedAt}
         <span class="soul-stat">· {$t("soul.portraitUpdated", "updated")} {formatWhen(mem.portraitUpdatedAt)}</span>
       {/if}

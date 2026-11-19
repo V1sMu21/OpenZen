@@ -22,6 +22,8 @@ pub struct ApprovalRequest {
 #[derive(Clone, Debug)]
 pub enum ApprovalDecision {
     Allow,
+    /// Full-access automatic allow. Never counts as progressive trust.
+    AutoAllow,
     TrustSession,
     TrustWorkspace,
     Deny,

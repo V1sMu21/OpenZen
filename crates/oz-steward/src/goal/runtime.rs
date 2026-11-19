@@ -16,6 +16,7 @@ pub enum GoalDecision {
     Continue,
     Verify,
     Achieved,
+    Unverified,
     Paused,
     Blocked,
     Exhausted,
@@ -180,16 +181,10 @@ impl GoalRuntime {
         let token_exhausted = tokens_used > goal.spec.budget.max_tokens;
         let attempts_exhausted = attempt_no >= goal.spec.budget.max_attempts;
 
-        let decision = if all_passed {
-            // Command/file gates passed. A human/review gate is recorded as
-            // pending, so it reaches verifying and stops; otherwise the goal
-            // is achieved by the runtime, not by the model.
-            let needs_human = goal.spec.require_human_acceptance
-                || goal
-                    .spec
-                    .gates
-                    .iter()
-                    .any(|g| g.has_human() || g.has_review());
+        // Budget is enforced before any acceptance path. A pending
+        // human/review gate must never disable cost control — that is exactly
+        // how one goal burned 22.5x its budget while "waiting for acceptance".
+        if wall_exhausted || token_exhausted || attempts_exhausted {
             self.store.update_counters(
                 goal_id,
                 attempt_no,
@@ -199,15 +194,47 @@ impl GoalRuntime {
                 Some(wall_started_at),
             )?;
             self.store
-                .set_status(goal_id, GoalStatus::Verifying, "gates passed")?;
-            if needs_human {
-                self.store.set_status(
+                .set_status(goal_id, GoalStatus::Verifying, "budget check")?;
+            self.store
+                .set_status(goal_id, GoalStatus::Exhausted, "budget exhausted")?;
+            let _ = self.store.release_lease(goal_id, &self.runner_id);
+            self.write_report(goal_id, GoalStatus::Exhausted, "budget exhausted", &gates)?;
+            return Ok(GoalDecision::Exhausted);
+        }
+
+        let decision = if all_passed {
+            self.store.update_counters(
+                goal_id,
+                attempt_no,
+                goal.consecutive_failures,
+                goal.no_progress_rounds,
+                tokens_used,
+                Some(wall_started_at),
+            )?;
+            let needs_acceptance = goal.spec.require_human_acceptance
+                || goal
+                    .spec
+                    .gates
+                    .iter()
+                    .any(|g| g.has_human() || g.has_review());
+            if needs_acceptance {
+                // No automatic acceptance exists for this contract: settle
+                // honestly instead of parking in `verifying` forever.
+                self.store
+                    .set_status(goal_id, GoalStatus::Verifying, "gates passed")?;
+                self.store
+                    .set_status(goal_id, GoalStatus::Unverified, "acceptance unavailable")?;
+                let _ = self.store.release_lease(goal_id, &self.runner_id);
+                self.write_report(
                     goal_id,
-                    GoalStatus::Verifying,
-                    "gates passed; acceptance required",
+                    GoalStatus::Unverified,
+                    "gates passed but no automatic acceptance",
+                    &gates,
                 )?;
-                GoalDecision::Verify
+                GoalDecision::Unverified
             } else {
+                self.store
+                    .set_status(goal_id, GoalStatus::Verifying, "gates passed")?;
                 self.store
                     .set_status(goal_id, GoalStatus::Achieved, "all gates passed")?;
                 let _ = self.store.release_lease(goal_id, &self.runner_id);
@@ -215,15 +242,29 @@ impl GoalRuntime {
                 GoalDecision::Achieved
             }
         } else if pending {
+            self.store.update_counters(
+                goal_id,
+                attempt_no,
+                goal.consecutive_failures,
+                goal.no_progress_rounds,
+                tokens_used,
+                Some(wall_started_at),
+            )?;
             self.store
                 .set_status(goal_id, GoalStatus::Verifying, "human/review gate pending")?;
-            GoalDecision::Verify
-        } else if wall_exhausted || token_exhausted || attempts_exhausted {
-            self.store
-                .set_status(goal_id, GoalStatus::Exhausted, "budget exhausted")?;
+            self.store.set_status(
+                goal_id,
+                GoalStatus::Unverified,
+                "human/review gate cannot be satisfied automatically",
+            )?;
             let _ = self.store.release_lease(goal_id, &self.runner_id);
-            self.write_report(goal_id, GoalStatus::Exhausted, "budget exhausted", &gates)?;
-            GoalDecision::Exhausted
+            self.write_report(
+                goal_id,
+                GoalStatus::Unverified,
+                "human/review gate pending",
+                &gates,
+            )?;
+            GoalDecision::Unverified
         } else {
             let failures = goal.consecutive_failures + 1;
             let no_progress = if gates.iter().all(|g| !g.passed) {
@@ -273,16 +314,6 @@ impl GoalRuntime {
                 GoalDecision::Continue
             }
         };
-        if all_passed || pending {
-            self.store.update_counters(
-                goal_id,
-                attempt_no,
-                goal.consecutive_failures,
-                goal.no_progress_rounds,
-                tokens_used,
-                Some(wall_started_at),
-            )?;
-        }
         Ok(decision)
     }
 
@@ -426,7 +457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn human_gate_stops_at_verifying() {
+    async fn human_gate_settles_unverified() {
         let store = Arc::new(GoalStore::open_memory().unwrap());
         let mut s = GoalSpec::new("g1", "goal", "do it");
         s.gates = vec![GoalGate::Human {
@@ -448,16 +479,11 @@ mod tests {
             rt.complete_attempt("g1", "wait", 1, None, vec![gate])
                 .await
                 .unwrap(),
-            GoalDecision::Verify
+            GoalDecision::Unverified
         );
         assert_eq!(
             rt.store().get("g1").unwrap().unwrap().status,
-            GoalStatus::Verifying
-        );
-        rt.accept("g1", "user approved").unwrap();
-        assert_eq!(
-            rt.store().get("g1").unwrap().unwrap().status,
-            GoalStatus::Achieved
+            GoalStatus::Unverified
         );
     }
 }

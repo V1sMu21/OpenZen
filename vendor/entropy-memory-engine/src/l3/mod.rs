@@ -9,4 +9,4 @@ pub use compress::{
     DistillationConfig, DistillationStats, MLXCompressor, NoopCompressor, TruncatingCompressor,
 };
 pub use engine::{L3Config, L3Engine};
-pub use storage::L3Storage;
+pub use storage::{L3Storage, StorageConfig};

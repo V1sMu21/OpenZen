@@ -46,6 +46,9 @@ export interface SoulStatus {
     last_consolidation?: number | null;
   };
   harness?: { entry_count: number };
+  embedding_model?: string;
+  scope?: { tagged: number; untagged: number; archived: number; coverage: number };
+  storage?: { wal_bytes: number; snapshot_bytes: number; embedding_cache_bytes: number };
 
   // ── P1-12 memory-control fields ──────────────────────────────────────
   // The backend is being extended with an explicit memory-control surface
@@ -86,6 +89,10 @@ export interface MemoryStatusView {
   totalEntries: number | null;
   recalls: number | null;
   hitRate: number | null;
+  scopeCoverage: number | null;
+  scopeArchived: number | null;
+  walBytes: number | null;
+  embeddingModel: string | null;
 }
 
 /** Fold either status shape into one. Never invents a value: a field the
@@ -112,6 +119,10 @@ export function memoryStatus(status: SoulStatus | null | undefined): MemoryStatu
     totalEntries: num(s?.store?.total_entries),
     recalls: num(s?.store?.recalls),
     hitRate: num(s?.store?.recall_hit_rate),
+    scopeCoverage: num(s?.scope?.coverage),
+    scopeArchived: num(s?.scope?.archived),
+    walBytes: num(s?.storage?.wal_bytes),
+    embeddingModel: str(s?.embedding_model),
   };
 }
 

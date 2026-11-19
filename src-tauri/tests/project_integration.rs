@@ -70,7 +70,7 @@ mod project_integration {
         assert_eq!(parsed[0]["name"], "project-one");
         assert_eq!(parsed[0]["session_count"], 3);
         assert!(!parsed[0]["broken"].as_bool().unwrap());
-        assert_eq!(parsed[1]["broken"].as_bool().unwrap(), true);
+        assert!(parsed[1]["broken"].as_bool().unwrap());
     }
 
     #[test]

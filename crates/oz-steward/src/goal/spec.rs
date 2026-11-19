@@ -20,6 +20,9 @@ pub enum GoalStatus {
     Verifying,
     Blocked,
     Achieved,
+    /// Finished, but no executable evidence could prove it. Terminal and
+    /// honest: never silently upgraded to `achieved`, never left waiting.
+    Unverified,
     Exhausted,
     Abandoned,
 }
@@ -47,6 +50,7 @@ impl GoalStatus {
             ) | (
                 GoalStatus::Verifying,
                 GoalStatus::Achieved
+                    | GoalStatus::Unverified
                     | GoalStatus::Blocked
                     | GoalStatus::Paused
                     | GoalStatus::Exhausted
@@ -61,7 +65,10 @@ impl GoalStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            GoalStatus::Achieved | GoalStatus::Exhausted | GoalStatus::Abandoned
+            GoalStatus::Achieved
+                | GoalStatus::Unverified
+                | GoalStatus::Exhausted
+                | GoalStatus::Abandoned
         )
     }
 }
@@ -135,12 +142,40 @@ pub enum GoalGate {
         #[serde(default)]
         retries: u32,
     },
+    /// Explicit verification command from a task's `[verify]` line. It is
+    /// strong evidence even when the command is not a known build/test tool:
+    /// the task author chose it as the acceptance check.
+    StrongCommand {
+        command: String,
+        #[serde(default = "default_timeout")]
+        timeout_secs: u64,
+    },
     FileAssertion {
         path: String,
         #[serde(default = "default_true")]
         must_exist: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         contains: Option<String>,
+    },
+    /// Structural assertion for documents: required/forbidden literals and a
+    /// minimum size. Added for the butler verifier; goals may use it too.
+    FileContent {
+        path: String,
+        #[serde(default)]
+        contains_all: Vec<String>,
+        #[serde(default)]
+        not_contains: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_bytes: Option<u64>,
+    },
+    /// Research-grade evidence: the document must cite at least N local
+    /// sources (absolute paths or workspace-relative paths) that actually
+    /// exist. This is an independent filesystem check, not a text match, so
+    /// research tasks can be `verified` without a build/test command.
+    SourceCheck {
+        path: String,
+        #[serde(default = "default_min_sources")]
+        min_sources: usize,
     },
     Review {
         rubric: String,
@@ -165,6 +200,10 @@ fn default_confidence() -> f32 {
     0.8
 }
 
+fn default_min_sources() -> usize {
+    3
+}
+
 impl GoalGate {
     pub fn human() -> Self {
         GoalGate::Human {
@@ -175,6 +214,7 @@ impl GoalGate {
     pub fn has_human(&self) -> bool {
         match self {
             GoalGate::Human { .. } => true,
+            GoalGate::SourceCheck { .. } => false,
             GoalGate::All { gates } | GoalGate::Any { gates } => {
                 gates.iter().any(GoalGate::has_human)
             }
@@ -232,7 +272,7 @@ impl GoalSpec {
             objective: objective.into(),
             session_id: String::new(),
             non_goals: Vec::new(),
-            gates: vec![GoalGate::human()],
+            gates: Vec::new(),
             constraints: Vec::new(),
             budget: GoalBudget::default(),
             auto_continue: true,
@@ -258,20 +298,25 @@ impl GoalSpec {
         if self.version == 0 {
             return Err(StewardError::Invalid("goal version must be >= 1".into()));
         }
-        // An empty gate list gets the mandatory Human gate instead of
-        // entering active with no acceptance at all.
+        // An empty gate list gets a Review gate: it runs autonomously and,
+        // without a reviewer, settles as `unverified` instead of parking.
         if self.gates.is_empty() {
-            self.gates.push(GoalGate::human());
+            self.gates.push(GoalGate::Review {
+                rubric: format!("Does the work satisfy: {}", self.objective),
+                min_confidence: 0.6,
+            });
         }
         if self.require_human_acceptance && !self.gates.iter().any(GoalGate::has_human) {
             self.gates.push(GoalGate::human());
         }
         self.budget.validate()?;
-        if let Some(gate) = self
-            .gates
-            .iter()
-            .find(|g| matches!(g, GoalGate::Command { command, .. } if command.trim().is_empty()))
-        {
+        if let Some(gate) = self.gates.iter().find(|g| {
+            matches!(
+                g,
+                GoalGate::Command { command, .. } | GoalGate::StrongCommand { command, .. }
+                    if command.trim().is_empty()
+            )
+        }) {
             return Err(StewardError::Invalid(format!(
                 "gate command is empty: {gate:?}"
             )));
@@ -349,11 +394,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_gates_get_human_gate() {
+    fn empty_gates_get_a_review_gate_not_human() {
         let mut s = GoalSpec::new("g", "title", "objective");
         s.gates.clear();
         s.validate().unwrap();
-        assert!(s.gates.iter().any(GoalGate::has_human));
+        assert!(s.gates.iter().any(GoalGate::has_review));
+        assert!(!s.gates.iter().any(GoalGate::has_human));
     }
 
     #[test]
@@ -377,6 +423,7 @@ mod tests {
     #[test]
     fn status_terminality() {
         assert!(GoalStatus::Achieved.is_terminal());
+        assert!(GoalStatus::Unverified.is_terminal());
         assert!(GoalStatus::Exhausted.is_terminal());
         assert!(!GoalStatus::Blocked.is_terminal());
         assert!(!GoalStatus::Active.is_terminal());

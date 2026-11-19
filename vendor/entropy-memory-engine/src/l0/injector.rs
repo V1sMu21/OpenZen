@@ -1,6 +1,16 @@
 use std::sync::Arc;
 
+use crate::core::now_nanos;
 use crate::l0::soul::{SoulHandle, SoulModel};
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
 
 /// 提示词注入器：把灵魂模型组装成系统前缀。
 ///
@@ -53,9 +63,19 @@ impl PromptInjector {
 
 /// 段1：身份与情境
 fn segment_identity(model: &SoulModel) -> String {
-    let mut parts = vec![format!("[Identity] {}", model.core.identity)];
-    if !model.state.focus.is_empty() {
-        parts.push(format!("[Focus] {}", model.state.focus));
+    let mut parts = vec![format!(
+        "[Identity] {}",
+        truncate_chars(&model.core.identity, 40)
+    )];
+    // A focus older than a week is stale context, not current work.
+    const FOCUS_TTL_NANOS: i64 = 7 * 24 * 3600 * 1_000_000_000;
+    let focus_fresh = model.state.last_updated_nanos > 0
+        && now_nanos().saturating_sub(model.state.last_updated_nanos) <= FOCUS_TTL_NANOS;
+    if !model.state.focus.is_empty() && focus_fresh {
+        parts.push(format!(
+            "[Focus] {}",
+            truncate_chars(&model.state.focus, 80)
+        ));
     }
     parts.push(format!(
         "[State] mood={} energy={:.2} confidence={:.2}",
@@ -69,10 +89,13 @@ fn segment_narrative(model: &SoulModel) -> String {
     let mut parts = vec!["[Narrative]".to_string()];
     let latest = model.narrative.latest_summary();
     if !latest.is_empty() {
-        parts.push(format!("latest: {}", latest));
+        parts.push(format!("latest: {}", truncate_chars(latest, 300)));
     }
     if !model.narrative.current_arc.is_empty() {
-        parts.push(format!("arc: {}", model.narrative.current_arc));
+        parts.push(format!(
+            "arc: {}",
+            truncate_chars(&model.narrative.current_arc, 120)
+        ));
     }
     if parts.len() == 1 {
         parts.push("(narrative not yet formed)".into());
@@ -82,15 +105,19 @@ fn segment_narrative(model: &SoulModel) -> String {
 
 /// 段3：画像与关系
 fn segment_portrait(model: &SoulModel, query: &str) -> String {
-    const PORTRAIT_FACTS: usize = 3;
+    const PORTRAIT_FACTS: usize = 2;
+    const FACT_CHARS: usize = 80;
     let mut parts = vec!["[Portrait]".to_string()];
-    let self_line = model.self_portrait.summary_line();
+    let self_line = model
+        .self_portrait
+        .summary_line_bounded(PORTRAIT_FACTS, FACT_CHARS);
     if !self_line.is_empty() {
         parts.push(format!("self: {}", self_line));
     }
-    let user_line = model
-        .user_portrait
-        .summary_line_with_query(query, PORTRAIT_FACTS);
+    let user_line =
+        model
+            .user_portrait
+            .summary_line_with_query_bounded(query, PORTRAIT_FACTS, FACT_CHARS);
     if !user_line.is_empty() {
         parts.push(format!("user: {}", user_line));
     }
@@ -150,5 +177,65 @@ mod tests {
         let prefix = injector.build_system_prefix();
         assert!(prefix.contains("new agent"));
         assert!(!prefix.contains("old agent"));
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::l0::portrait::{PortraitFact, Relationship};
+    use std::sync::{Arc, RwLock};
+
+    fn fact(s: &str, c: f32) -> PortraitFact {
+        PortraitFact {
+            statement: s.into(),
+            confidence: c,
+            supporting_ids: vec![],
+            contradicting_ids: vec![],
+        }
+    }
+
+    #[test]
+    fn prefix_never_contains_graph_ids_and_stays_bounded() {
+        let mut soul = SoulModel::new();
+        soul.core.identity = "尔雅".into();
+        for i in 0..6 {
+            soul.self_portrait.facts.push(fact(
+                &format!("Node {i} and node {} may be related", i + 1),
+                0.7,
+            ));
+            soul.user_portrait.facts.push(fact(
+                &format!("用户偏好第 {i} 条很长的描述文字，用来测试预算"),
+                0.8,
+            ));
+        }
+        soul.narrative.chapters.clear();
+        let handle = Arc::new(RwLock::new(soul));
+        let prefix = PromptInjector::new(handle).build_system_prefix_with_query("测试");
+        assert!(
+            !prefix.contains("Node "),
+            "graph ids must never be injected"
+        );
+        assert!(
+            prefix.chars().count() <= 600,
+            "prefix too long: {}",
+            prefix.chars().count()
+        );
+    }
+
+    #[test]
+    fn stale_focus_is_not_injected() {
+        let mut soul = SoulModel::new();
+        soul.state.focus = "旧的 SOP".into();
+        soul.state.last_updated_nanos = 1;
+        let handle = Arc::new(RwLock::new(soul));
+        let prefix = PromptInjector::new(handle).build_system_prefix();
+        assert!(!prefix.contains("[Focus]"));
+    }
+
+    #[test]
+    fn relationship_default_does_not_break_serde() {
+        let r = Relationship::default();
+        assert!(r.trust >= 0.0);
     }
 }

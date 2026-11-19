@@ -206,6 +206,31 @@ impl L3Storage {
         }
     }
 
+    /// Add a tag in place (e.g. the one-time `legacy` migration). Written
+    /// through the same WAL path as `update_metadata`, so it survives replay.
+    pub fn update_tags(&self, id: u64, add_tag: &str) -> bool {
+        let mut log_guard = self.log.lock().unwrap();
+        let updated = {
+            let memories = self.memories.read().unwrap();
+            let Some(mem) = memories.get(&id) else {
+                return false;
+            };
+            if mem.tags.iter().any(|t| t == add_tag) {
+                return false;
+            }
+            let mut updated = mem.clone();
+            updated.tags.push(add_tag.to_string());
+            updated
+        };
+        if log_guard.append(&LogEntry::Put(updated.clone())).is_err() {
+            return false;
+        }
+        self.memories.write().unwrap().insert(id, updated);
+        drop(log_guard);
+        self.maybe_compact();
+        true
+    }
+
     /// In-place metadata update (e.g. `superseded_by`) without touching
     /// content. The updated memory is written to the WAL under the same log
     /// lock as `store()`, so crash replay reproduces the flag.
@@ -324,6 +349,20 @@ impl L3Storage {
             return;
         }
         self.compact();
+    }
+
+    /// Compact at startup when the WAL is unusually large relative to the
+    /// snapshot (default policy only fires at 4 MB *and* 256 mutations).
+    pub fn compact_log_if_larger_than(&self, bytes: u64) -> bool {
+        let over = {
+            let log = self.log.lock().unwrap();
+            log.bytes > bytes
+        };
+        if !over {
+            return false;
+        }
+        self.compact();
+        true
     }
 
     /// Full rewrite of the snapshot followed by log truncation.
@@ -673,5 +712,43 @@ mod tests {
             let s = L3Storage::new(&path);
             assert!(s.is_empty(), "Clear in log must win over snapshot");
         }
+    }
+}
+
+#[cfg(test)]
+mod compaction_policy_tests {
+    use super::*;
+    use crate::core::{Fact, Memory, MemoryContent};
+
+    #[test]
+    fn compacts_when_log_exceeds_the_startup_threshold() {
+        let dir = std::env::temp_dir().join(format!("oz-wal-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mem.bin");
+        let storage = L3Storage::with_config(
+            &path,
+            StorageConfig {
+                compact_interval: 10_000,
+                compact_log_bytes: 10_000_000,
+            },
+        );
+        for i in 0..20u64 {
+            let mut mem = Memory::new(MemoryContent::Fact(Fact::new(
+                "subject",
+                "predicate",
+                format!("object {i}"),
+            )));
+            mem.id = i + 1;
+            storage.store(mem).unwrap();
+        }
+        let log_path = path.with_extension("log");
+        let before = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+        assert!(before > 0);
+        assert!(storage.compact_log_if_larger_than(1024));
+        let after = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+        assert!(after < before, "WAL must shrink after compaction");
+        assert_eq!(storage.all().len(), 20, "snapshot must keep every row");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -812,8 +812,12 @@ async fn run_agent_for_session(
 
     // Use default session, or the one specified by model_name
     let session_name = model_name
-        .or(cfg.default_session.as_deref())
-        .unwrap_or("claude_sonnet");
+        .or_else(|| cfg.resolved_default_session())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No model configured. Add a model section to mykey.toml or pick one in Settings."
+            )
+        })?;
     let mut sess_config = cfg
         .get(session_name)
         .ok_or_else(|| anyhow::anyhow!("Session '{session_name}' not found in config"))?
@@ -1425,6 +1429,21 @@ async fn run_agent_for_session(
         map.remove(session_id);
     }
 
+    // A run that ended in `llm_error` must not be reported as "completed":
+    // the user got no answer and every retry failed. Surface the loop's own
+    // error text so /api/chat answers `status=error` with the real cause
+    // (E2E-029: a permanently failing 404 used to return completed/None).
+    if outcome.exit_reason == "llm_error" {
+        let msg = outcome
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("llm_error")
+            .to_string();
+        return Err(anyhow::anyhow!(msg));
+    }
+
     Ok(full_response)
 }
 
@@ -1784,14 +1803,14 @@ async fn handle_compress(
                             .and_then(|name| resolve_session_pair(c, name))
                     })
                     .or_else(|| {
-                        let name = c.default_session.as_deref().unwrap_or("claude_sonnet");
+                        let name = c.resolved_default_session()?;
                         c.get(name).cloned().map(|s| (name.to_string(), s))
                     })
             });
         let sess_name = sess_pair
             .as_ref()
             .map(|(n, _)| n.as_str())
-            .unwrap_or("claude_sonnet")
+            .unwrap_or("")
             .to_string();
         let sess_config = sess_pair.map(|(_, s)| s);
         let sess_type = cfg

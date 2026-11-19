@@ -6,6 +6,8 @@ export interface SessionInfo {
   message_count: number;
   project_id?: string | null;
   project_name?: string | null;
+  archived_before?: number;
+  epoch_summary?: string | null;
 }
 
 import { isTauri, tauriInvoke } from "./tauri";

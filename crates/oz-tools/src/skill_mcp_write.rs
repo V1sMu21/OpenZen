@@ -1,6 +1,6 @@
 //! Knowledge write & refine tools — allow the agent to manually store and refine knowledge.
 //!
-//! These complement the automatic crystallization and refinement in `oz-core`.
+//! These are explicit writes of SOPs/skills; `oz-core` no longer auto-crystallizes completed runs.
 
 use async_trait::async_trait;
 use oz_core_types::{ToolContext, ToolError, ToolOutput};

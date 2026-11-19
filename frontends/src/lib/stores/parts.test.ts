@@ -97,4 +97,21 @@ describe("文本与工具卡重建", () => {
   it("空事件数组 → 空 parts（不产生幽灵卡片）", () => {
     expect(convertStreamEventsToParts([])).toEqual([]);
   });
+
+  it("keeps args when a replayed tool_input_start arrives after available", () => {
+    const parts = convertStreamEventsToParts([
+      { type: "tool_input_start", tool_call_id: "t1", name: "open_side_panel" },
+      {
+        type: "tool_input_available",
+        tool_call_id: "t1",
+        name: "open_side_panel",
+        args: '{"artifact_path":"/w/report.html","artifact_type":"html"}',
+      },
+      { type: "tool_input_start", tool_call_id: "t1", name: "open_side_panel" },
+      { type: "tool_output_available", tool_call_id: "t1", name: "open_side_panel", output: '{"status":"OPENED"}' },
+    ] as never);
+    const tool = parts.find((p) => p.type === "tool-invocation") as { args: string };
+    expect(tool.args).toContain("artifact_path");
+  });
+
 });

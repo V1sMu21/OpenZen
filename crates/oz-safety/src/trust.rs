@@ -4,8 +4,8 @@
 //! auto-escalates trust level based on user behavior.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -70,6 +70,30 @@ pub struct TrustStore {
 struct TrustStoreInner {
     entries: HashMap<(String, String), TrustEntry>,
     session_trusts: HashSet<(String, String)>,
+}
+
+/// Serialize read-merge-write per trust file. Two runs in the same project
+/// share the file; without this, whichever snapshot lands last erased the
+/// other run's grants.
+static SAVE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn save_lock(path: &Path) -> Arc<Mutex<()>> {
+    let map = SAVE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    Arc::clone(
+        map.entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+}
+
+fn level_rank(level: &TrustLevel) -> u8 {
+    match level {
+        TrustLevel::Blocked => 4,
+        TrustLevel::GlobalTrust => 3,
+        TrustLevel::WorkspaceTrust => 2,
+        TrustLevel::SessionTrust => 1,
+        TrustLevel::AlwaysAsk => 0,
+    }
 }
 
 impl TrustStore {
@@ -157,22 +181,97 @@ impl TrustStore {
         entry.last_approved = Some(Utc::now());
 
         // Escalate trust level
-        let now = Utc::now();
-        let span = entry.created_at;
-        let days_span = (now - span).num_days();
-
         // Interpreters / network clients never escalate: one approval for
         // `python3 x.py` must not become a standing approval for
         // `python3 -c "<anything>"` (round5 P1-8a).
         if crate::patterns::is_auto_trustable(tool, pattern) {
-            if entry.approved_count >= 10 && days_span >= 1 {
+            // Three ordinary Allow clicks on the same concrete pattern is
+            // enough to stop asking for it in this project. The old rule
+            // (10 approvals AND >=1 day) almost never fired; the old 3-click
+            // rule only set an in-memory SessionTrust that was lost with the
+            // run's TrustStore.
+            if entry.approved_count >= 3 {
                 entry.level = TrustLevel::WorkspaceTrust;
-            } else if entry.approved_count >= 3 {
-                entry.level = TrustLevel::SessionTrust;
-                inner.session_trusts.insert(key.clone());
             }
         }
 
+        drop(inner);
+        self.maybe_save();
+    }
+
+    /// "Trust this session": allow immediately, not persisted.
+    pub fn trust_session(&self, tool: &str, pattern: &str) {
+        // A wildcard/tool-name pattern would trust every invocation of a
+        // whole tool. Explicit trust is still per concrete action.
+        if pattern == "*" || pattern == tool {
+            return;
+        }
+        let mut inner = self.inner.write().unwrap();
+        let key = (tool.to_string(), pattern.to_string());
+        if inner
+            .entries
+            .get(&key)
+            .is_some_and(|e| e.level == TrustLevel::Blocked)
+        {
+            return;
+        }
+        let entry = inner
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| TrustEntry {
+                tool: tool.to_string(),
+                pattern: pattern.to_string(),
+                level: TrustLevel::SessionTrust,
+                approved_count: 0,
+                denied_count: 0,
+                last_approved: None,
+                last_denied: None,
+                created_at: Utc::now(),
+            });
+        entry.approved_count += 1;
+        entry.last_approved = Some(Utc::now());
+        if entry.level != TrustLevel::WorkspaceTrust && entry.level != TrustLevel::Blocked {
+            entry.level = TrustLevel::SessionTrust;
+        }
+        inner.session_trusts.insert(key);
+        drop(inner);
+        self.maybe_save();
+    }
+
+    /// "Trust this project": allow immediately and persist.
+    pub fn trust_workspace(&self, tool: &str, pattern: &str) {
+        // Interpreters/network/MCP wildcards never get a durable grant; fall
+        // back to this-run trust instead of silently broadening the scope.
+        if !crate::patterns::is_auto_trustable(tool, pattern) || pattern == "*" || pattern == tool {
+            self.trust_session(tool, pattern);
+            return;
+        }
+        let mut inner = self.inner.write().unwrap();
+        let key = (tool.to_string(), pattern.to_string());
+        if inner
+            .entries
+            .get(&key)
+            .is_some_and(|e| e.level == TrustLevel::Blocked)
+        {
+            return;
+        }
+        let entry = inner
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| TrustEntry {
+                tool: tool.to_string(),
+                pattern: pattern.to_string(),
+                level: TrustLevel::WorkspaceTrust,
+                approved_count: 0,
+                denied_count: 0,
+                last_approved: None,
+                last_denied: None,
+                created_at: Utc::now(),
+            });
+        entry.approved_count += 1;
+        entry.last_approved = Some(Utc::now());
+        entry.level = TrustLevel::WorkspaceTrust;
+        inner.session_trusts.insert(key);
         drop(inner);
         self.maybe_save();
     }
@@ -289,21 +388,41 @@ impl TrustStore {
     }
 
     pub(crate) fn maybe_save(&self) {
-        if let Some(ref path) = self.path {
-            let inner = self.inner.read().unwrap();
-            let entries: Vec<TrustEntry> = inner
-                .entries
-                .values()
-                .filter(|e| {
-                    e.level == TrustLevel::WorkspaceTrust
-                        || e.level == TrustLevel::GlobalTrust
-                        || e.level == TrustLevel::Blocked
-                })
-                .cloned()
-                .collect();
-            drop(inner);
-            Self::save_to_disk(path, &entries);
+        let Some(ref path) = self.path else { return };
+        let lock = save_lock(path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = self.inner.read().unwrap();
+        let mut merged: HashMap<(String, String), TrustEntry> = inner
+            .entries
+            .values()
+            .filter(|e| {
+                e.level == TrustLevel::WorkspaceTrust
+                    || e.level == TrustLevel::GlobalTrust
+                    || e.level == TrustLevel::Blocked
+            })
+            .map(|e| ((e.tool.clone(), e.pattern.clone()), e.clone()))
+            .collect();
+        drop(inner);
+        // Merge the current disk state so a concurrent run's grants are not
+        // overwritten by this run's older snapshot.
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            if let Ok(file) = serde_json::from_str::<TrustFile>(&raw) {
+                for e in file.entries {
+                    let key = (e.tool.clone(), e.pattern.clone());
+                    match merged.get(&key) {
+                        Some(existing)
+                            if level_rank(&existing.level) > level_rank(&e.level)
+                                || (existing.level == e.level
+                                    && existing.approved_count >= e.approved_count) => {}
+                        _ => {
+                            merged.insert(key, e);
+                        }
+                    }
+                }
+            }
         }
+        let entries: Vec<TrustEntry> = merged.into_values().collect();
+        Self::save_to_disk(path, &entries);
     }
 
     fn load_from_disk(path: &PathBuf) -> Option<HashMap<(String, String), TrustEntry>> {
@@ -329,7 +448,11 @@ impl TrustStore {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let tmp = path.with_extension("tmp");
+        let tmp = path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
         let file = TrustFile {
             version: 1,
             entries: entries.to_vec(),
@@ -449,5 +572,104 @@ mod tests {
         let store2 = TrustStore::new(Some(path));
         let decision = store2.check("code_run", "echo");
         assert!(matches!(decision, TrustDecision::Allowed));
+    }
+
+    #[test]
+    fn repeated_allow_persists_workspace_trust_across_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust.json");
+        let info = ApprovalInfo {
+            tool_name: "code_run".into(),
+            pattern: "git status".into(),
+            arguments_summary: String::new(),
+            approved_count: 0,
+            current_level: TrustLevel::AlwaysAsk,
+        };
+        {
+            let store = TrustStore::new(Some(path.clone()));
+            for _ in 0..3 {
+                store.record_approval("code_run", "git status", &info);
+            }
+            assert!(matches!(
+                store.check("code_run", "git status"),
+                TrustDecision::Allowed
+            ));
+        }
+        // A new run creates a new TrustStore; the grant must survive.
+        let reloaded = TrustStore::new(Some(path));
+        assert!(
+            matches!(
+                reloaded.check("code_run", "git status"),
+                TrustDecision::Allowed
+            ),
+            "three Allow clicks must persist, not reset with the run"
+        );
+    }
+
+    #[test]
+    fn explicit_session_trust_is_immediate_but_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust.json");
+        {
+            let store = TrustStore::new(Some(path.clone()));
+            store.trust_session("code_run", "npm test");
+            assert!(matches!(
+                store.check("code_run", "npm test"),
+                TrustDecision::Allowed
+            ));
+        }
+        let reloaded = TrustStore::new(Some(path));
+        assert!(
+            matches!(
+                reloaded.check("code_run", "npm test"),
+                TrustDecision::NeedsApproval(_)
+            ),
+            "session trust must not leak into the next run"
+        );
+    }
+
+    #[test]
+    fn explicit_workspace_trust_is_immediate_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust.json");
+        {
+            let store = TrustStore::new(Some(path.clone()));
+            store.trust_workspace("code_run", "cargo test");
+        }
+        let reloaded = TrustStore::new(Some(path));
+        assert!(matches!(
+            reloaded.check("code_run", "cargo test"),
+            TrustDecision::Allowed
+        ));
+    }
+
+    #[test]
+    fn concurrent_trust_stores_merge_instead_of_losing_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust.json");
+        let a = TrustStore::new(Some(path.clone()));
+        let b = TrustStore::new(Some(path.clone()));
+        let info = |tool: &str, pattern: &str| ApprovalInfo {
+            tool_name: tool.into(),
+            pattern: pattern.into(),
+            arguments_summary: String::new(),
+            approved_count: 0,
+            current_level: TrustLevel::AlwaysAsk,
+        };
+        for _ in 0..3 {
+            a.record_approval("code_run", "git status", &info("code_run", "git status"));
+            b.record_approval("code_run", "npm test", &info("code_run", "npm test"));
+        }
+        a.maybe_save();
+        b.maybe_save();
+        let reloaded = TrustStore::new(Some(path));
+        assert!(matches!(
+            reloaded.check("code_run", "git status"),
+            TrustDecision::Allowed
+        ));
+        assert!(matches!(
+            reloaded.check("code_run", "npm test"),
+            TrustDecision::Allowed
+        ));
     }
 }

@@ -16,16 +16,17 @@
 
   let { show = $approval.showModal }: { show?: boolean } = $props();
 
-  // a11y: this is a security dialog with a 30s auto-deny countdown — if
+  // a11y: this is a security dialog with a 30-minute auto-deny countdown — if
   // the user does not notice it, the task is silently rejected. It gets
   // alertdialog semantics, a focus trap, Esc=deny (the same path the
   // countdown uses) and returns focus to the chat input on close.
   let dialogEl: HTMLElement | undefined = $state();
+  let focusedFor: string | null = null;
 
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
       e.preventDefault();
-      approval.respond("deny");
+      approval.respond("deny", $approval.current?.requestId);
       return;
     }
     if (e.key !== "Tab" || !dialogEl) return;
@@ -46,9 +47,15 @@
   }
 
   $effect(() => {
-    if ($approval.showModal) {
+    // Depend on the request id too: when one approval is answered and the
+    // next is promoted, showModal stays true and focus must move to the new
+    // dialog instead of staying on the old Allow button.
+    const requestId = $approval.current?.requestId;
+    if ($approval.showModal && requestId && focusedFor !== requestId) {
+      focusedFor = requestId;
       queueMicrotask(() => dialogEl?.focus());
     }
+    if (!$approval.showModal) focusedFor = null;
     return () => {
       // Focus returns to the chat input when the dialog closes.
       if ($approval.showModal === false) {
@@ -76,7 +83,9 @@
           <path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16zm0 3.5a.75.75 0 0 1 .75.75v4a.75.75 0 0 1-1.5 0v-4A.75.75 0 0 1 10 5.5zm0 8a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" fill="currentColor"/>
         </svg>
         <h3 class="approval-title" id="approval-title">{$t("approval.title")}</h3>
-        <span class="approval-countdown">{$approval.countdown}s</span>
+        <span class="approval-countdown">
+          {Math.floor($approval.countdown / 60)}:{String($approval.countdown % 60).padStart(2, "0")}
+        </span>
       </div>
 
       {#if req.origin}
@@ -116,7 +125,7 @@
       <div class="approval-actions">
         <button
           class="btn btn-deny"
-          onclick={() => approval.respond("deny")}
+          onclick={() => approval.respond("deny", $approval.current?.requestId)}
           title={$t("approval.denyTitle")}
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -127,7 +136,7 @@
 
         <button
           class="btn btn-allow"
-          onclick={() => approval.respond("allow")}
+          onclick={() => approval.respond("allow", $approval.current?.requestId)}
           title={$t("approval.allowTitle")}
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -138,7 +147,7 @@
 
         <button
           class="btn btn-trust-session"
-          onclick={() => approval.respond("trust_session")}
+          onclick={() => approval.respond("trust_session", $approval.current?.requestId)}
           title={$t("approval.trustSessionTitle")}
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -149,8 +158,20 @@
         </button>
 
         <button
+          class="btn btn-trust-workspace"
+          onclick={() => approval.respond("trust_workspace", $approval.current?.requestId)}
+          title={$t("approval.trustWorkspaceTitle")}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M2 11V5.5L7 2l5 3.5V11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+            <path d="M5 7l1.5 1.5L9.5 5.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          {$t("approval.trustWorkspace")}
+        </button>
+
+        <button
           class="btn btn-block"
-          onclick={() => approval.respond("block_forever")}
+          onclick={() => approval.respond("block_forever", $approval.current?.requestId)}
           title={$t("approval.permDenyTitle")}
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -331,6 +352,15 @@
     cursor: pointer;
     border: 1px solid transparent;
     transition: all 0.15s;
+  }
+
+  .btn-block {
+    grid-column: 1 / -1;
+  }
+
+  .btn-trust-workspace {
+    border-color: #cbb26a;
+    color: #e2cd96;
   }
 
   .btn-deny {

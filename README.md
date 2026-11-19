@@ -1,338 +1,495 @@
-# OpenZen
+<h1 align="center">OpenZen</h1>
 
-> **A cat that remembers you.**
-> A fully-local AI agent that lives on your Mac — it runs your tasks on your own machine, remembers between sessions, and never phones home.
+> **A local-first agent harness for work that outlives the chat.**
+> One conversation becomes a durable task graph: background workers execute, executable gates verify, and the outcome is remembered — on your Mac, with your models, under your permissions.
 
-[![Release](https://img.shields.io/github/v/release/V1sMu21/OpenZen)](https://github.com/V1sMu21/OpenZen/releases/latest)
-[![CI](https://github.com/V1sMu21/OpenZen/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/V1sMu21/OpenZen/actions/workflows/ci.yml)
-![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-93c3d6)
-[![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/V1sMu21/OpenZen)](https://github.com/V1sMu21/OpenZen/releases/latest) [![CI](https://github.com/V1sMu21/OpenZen/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/V1sMu21/OpenZen/actions/workflows/ci.yml) ![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-93c3d6) [![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
 **English** · [中文](README.zh-CN.md)
 
-<img src="assets/bench/runtime-demo.gif" width="100%">
+<a href="assets/runtime-demo.gif"><img src="assets/runtime-preview.png" width="100%" alt="OpenZen desktop: artifact preview panel"></a>
 
-*Real runtime capture on v0.2.6 (an 8-minute task compressed into a 16-second loop): one prompt → the agent writes a celadon card, opens it in the **artifact preview panel**, verifies it with real checks (static assertions plus a 60-second motion capture), and closes with the delivery report and a `完成` state.*
+*A real desktop run: one prompt → plan → artifact preview → executable verification → delivery note. Click the image to watch the 16-second loop.*
 
-**⬇️ [Download the latest dmg](https://github.com/V1sMu21/OpenZen/releases/latest)** — drag into Applications, point OpenZen at a local model server, and go. No account, no telemetry, works offline.
+**⬇️ [Download for macOS](https://github.com/V1sMu21/OpenZen/releases/latest)** · [Build from source](#build-from-source) · [Development guide](docs/development-guide.md)
 
-- 🔒 **Fully local** — inference (oMLX / LM Studio / Ollama / any OpenAI-compatible server, or a cloud API), memory and every file stay on your machine;
-- 🧠 **Memory that compounds** — a 7×24 resident companion: checkpoint resume, a lessons ledger, reflection loops; your history is an asset, not a scrollback buffer;
-- ✅ **Quality-gated delivery** — acceptance assertions, independent review and a mandatory delivery contract before a task may call itself done;
-- 🏺 **A desktop you can live in** — Song-celadon "artifact grammar" UI, a streaming timeline that folds itself, and a desktop kitten; the same agent also answers on WeChat / Feishu / Telegram.
-- 🎯 **Long work that stays accounted for** — background jobs, parallel subagents and goal mode (acceptance command + budget), plus an opt-in steward that records every step, detects drift before any model does, and can roll a step back.
-
----
-
-## Why OpenZen
-
-A Mac Studio M3 Ultra has **256GB of unified memory** — the wall between VRAM and RAM disappears. Fitting a large model used to mean budgeting a 8–48GB card; unified memory lets **model weights, vector indexes, browsers and toolchains live in one pool**.
-
-OpenZen is designed for that machine: a **fully local** autonomous agent harness —
-
-- **Local inference**: the oMLX inference server (MLX framework, OpenAI-compatible `/v1` API on `127.0.0.1:8000`) keeps multiple long-context models resident (e.g. 256K-context MXFP4 quantized models);
-- **Local memory**: the in-house ERME entropy-reduced memory engine lives entirely under `~/.openzen/` — data never leaves the machine;
-- **Local cache dividend**: prompt cache hit rate is about **96%** on typical sessions and climbs to **98%** on long-running tasks (>2h) — measured 98.05% on a 6.3-hour, 38.1M-token benchmark run. For a locally deployed model, cache hit rate measures not token cost — local cache is free — but **prefill speed**: the higher the hit rate, the fewer tokens genuinely need re-prefilling per request, dramatically accelerating prefill and therefore response speed, which keeps long local sessions responsive.
-
-It's also a **7×24 resident companion**: interrupted sessions resume from checkpoints, and every delivery — success or failure — is remembered and turned into experience for the next task. That's the compounding a session-based harness cannot do.
-
-> Current form: a macOS Apple Silicon desktop app (Tauri). The same `openzen` binary also ships a CLI/TUI and a local WebUI server (`openzen serve`) for headless machines and remote use.
+- 🧭 **A control plane, not a chat wrapper.** Erya turns a request into a durable task graph, dispatches bounded background workers, and keeps the console — projects, tasks, runs, automations, approvals — in one place.
+- ✅ **"Done" is a verdict, not a claim.** The model cannot mark its own work complete. Executable gates, a blind review, and a diff self-check decide between `verified`, `unverified`, and `failed`.
+- 🧠 **Memory that compounds — and knows its scope.** ERME keeps a bounded soul layer, a crash-safe working cache, a vector index, and a budgeted store. Project memory does not leak across projects.
+- 🔒 **Local-first, desktop-native.** By default, inference, memory, and files stay on your machine. Bring oMLX on Apple Silicon — or a cloud endpoint when you choose one. No account, no telemetry.
+- 🛠 **Engineered for real model output.** Streaming tool calls are repaired, arguments are canonicalized, approval decisions are remembered, and checkpoints survive crashes. We treat model output as untrusted input, because it is.
 
 ---
 
-## Quick Start
+## Contents
 
-1. **Download** the latest [dmg](https://github.com/V1sMu21/OpenZen/releases/latest) (CI builds one for every release) and drag it into Applications;
-2. **Bring a model** — start any OpenAI-compatible local server: oMLX on Apple Silicon (MLX, up to 256K context), LM Studio, Ollama or `llama.cpp-server`; a cloud API works too (any number of named model entries, local-first);
-3. **Point OpenZen at it** — settings → models (defaults to `http://127.0.0.1:8000/v1`);
-4. **Talk** — the agent plans, runs tools, verifies its own delivery, and remembers.
-
-**System requirements**: macOS on Apple Silicon (arm64). 16GB RAM runs 7–14B models comfortably; 64GB+ unlocks the large-context models this design targets (the 256GB M3 Ultra is the sweet spot).
-
-**Data & privacy**: everything stays on your machine under `~/.openzen/` (`workspace/`, `memory_erme/`, `harness/`, `logs/`). No accounts, no telemetry.
+- [What OpenZen is](#what-openzen-is)
+- [Meet Erya: one conversation, a team behind it](#meet-erya-one-conversation-a-team-behind-it)
+- [Done is a verdict](#done-is-a-verdict)
+- [Memory that compounds](#memory-that-compounds)
+- [Context, tools, and the loop](#context-tools-and-the-loop)
+- [Permissions and safety](#permissions-and-safety)
+- [The desktop](#the-desktop)
+- [Models and local inference](#models-and-local-inference)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Extending](#extending)
+- [Status and limits](#status-and-limits)
+- [Engineering](#engineering)
+- [FAQ](#faq)
+- [Contributing](#contributing)
+- [Prior art](#prior-art)
+- [License](#license)
 
 ---
 
-## Features
+## What OpenZen is
 
-### 1. Fully local: zero-cloud inference & memory
+Every agent product is two things: a model and a harness. The model predicts tokens. The harness decides what those tokens are allowed to do — which tools exist, what context survives, how work is split, when a result is accepted, what is remembered, and what happens when a tool call arrives malformed.
 
-oMLX inference + ERME memory + all data (`workspace/`, `memory_erme/`, `harness/`, `logs/`) live on your machine. Any number of named model entries in `mykey.toml` (local oMLX primary, cloud APIs optional; entries can share one provider credential). Works offline.
+OpenZen is the second thing: a harness written as one Rust workspace and shipped as a macOS app. It is built around a simple rule:
 
-### 2. ERME — entropy-reduced memory engine (in-house)
+> **The model proposes. The harness disposes.**
 
-A layered engine for long-term personal memory, built on the philosophy of **entropy reduction** — a hot cache layer, a semantic vector layer, and a compressed persistent layer:
+The agent can plan, call tools, run commands, and write code. It cannot declare its own work verified, silently widen its permissions, or forget a project boundary.
 
-| Layer | Recall latency | Key implementation |
+The harness has five jobs:
+
+1. **Keep context small and relevant** — a compact base prompt, progressive disclosure for skills, a live state block instead of a growing transcript.
+2. **Turn intent into durable state** — a task graph in SQLite, not a plan that lives only in the model's context.
+3. **Run work in parallel under explicit permissions** — background jobs, bounded workers, approvals that wait for a human.
+4. **Verify with the environment** — executable acceptance gates, not self-report.
+5. **Remember what happened** — scoped memory, lessons with evidence, and a run ledger you can query later.
+
+> **Current form:** a macOS Apple Silicon desktop app (Tauri v2 + Svelte 5). The same kernel also runs as a local WebUI server (`openzen serve`) for headless machines and remote use.
+
+---
+
+## Meet Erya: one conversation, a team behind it
+
+**Erya (尔雅)** is the resident agent. The name comes from the oldest surviving Chinese dictionary — a book about making distinctions. Its job here is similar: decide what is done, what is not, and what is worth remembering.
+
+A session can run in two modes:
+
+| Mode | What happens | Best for |
 |---|---|---|
-| **L0 Soul layer** | nanosecond (resident in memory) | Portrait, LifeNarrative, ReflectionEngine, RamblingEngine |
-| **L1 Working cache** | nanosecond (resident in memory) | Concurrent hashmap + Moka + AttentionLRU + WAL crash recovery |
-| **L2 Vector index** | microsecond (resident in memory) | HNSW (384-dim) + MLX embeddings (pure-Rust fallback without MLX) |
-| **L3 Persistence** | millisecond | Budget control (daily token cap + importance-scored per-item eviction) |
+| **Conversation** | You and Erya work in the same turn. It plans, reads, edits, and answers directly. | Thinking, small edits, questions, exploratory work |
+| **Dispatch** | Erya decomposes the request into a small task graph (≤6 verifiable items), writes it to SQLite, and returns control to you while workers run. | Multi-step work, parallel tasks, anything longer than one turn |
 
-Deeply optimized for the Mac Studio M3 Ultra's 256GB unified memory: L0/L1/L2 live fully resident in RAM, recalling at nanosecond / nanosecond / microsecond levels. With 256K tokens of new memory per day, a year of memory occupies only ~**100MB** locally — the budget controller guarantees it never grows unbounded. Plus conflict resolution (supplement / sublimate / overturn), a quarantine zone (bad conjectures never pollute memory) and reality anchoring. 301 tests.
+Both modes share the same tools and memory; the model is chosen per session, and per task in dispatch mode. `/erya` — or the **Hand to Erya** button — hands the current request to dispatch mode. There is no second persona.
 
-### 3. Memory compounding — what session-based harnesses can't do
+![Erya console: project, task counts, and verdict states](assets/erya-console.png)
 
-- **Checkpoint resume**: MmapWal + loop checkpoints resume mid-session after process restarts; checkpoints carry git snapshots (sha / branch / origin);
-- **Harness refine** (mechanism borrowed from Prime Agent): the model **proactively writes reusable lessons into an audited ledger** (`harness_state.json`) — writes require verifiable evidence, with snapshot rollback; each session injects `## Persistent Harness Lessons` ranked by Jaccard relevance;
-- **Reflection loop**: successes and failures settle into `reflections.jsonl`, readable by future sessions.
+*The Erya console: one project, its tasks, and the three terminal verdicts side by side. No transcript needed to see what is done, what is unproven, and what failed.*
 
-### 4. Background jobs, subagents and goals
+### The lifecycle
 
-Long work no longer blocks the conversation:
+```
+you ──▶ Erya ──▶ task graph (SQLite)
+                    │
+          scheduler │ promotes ready tasks, dispatches workers
+                    ▼
+              background workers ──▶ files, commands, artifacts
+                    │
+                    ▼
+                 verifier ──▶ verified | unverified | failed
+                    │
+                    ▼
+             run ledger + one digest ──▶ you
+```
 
-- **Background jobs** — long commands run as tracked jobs; the composer shows a live strip (`5 background jobs`) that expands into a vertical list and is scoped to the session that started it;
-- **Subagents** — a turn can fan out into parallel subagents (slot-capped per parent), shown in their own strip next to the jobs;
-- **Goal mode** — declare a goal plus a contract (acceptance command, risk level, budget: attempts / wall time / tokens / turns / no-progress rounds). A gate executes the acceptance command for real, a guardian turns goal state + gate evidence into a verdict, and the runtime stops on budget exhaustion instead of looping forever. Goals persist in a dedicated SQLite store and are driven through the same chat path, so Stop, approvals and SSE keep working unchanged.
+- **The scheduler is durable.** Tasks, attempts, approvals, and runs live in `butler.db`. A crash loses at most the in-flight attempt; the graph, approvals, and completed runs are still there after a restart.
+- **Workers are bounded.** A worker gets its own session, its own working directory, and the task's model policy. It cannot ask you a question; if it needs a decision, it reports back and Erya asks.
+- **You get a digest, not a stream of chatter.** One report at the end: what finished, what is unverified, what is blocked, and what happens next.
+- **Every attempt is inspectable.** The console keeps the run's model, duration, status, summary, and the child transcript with its tool timeline. "What happened at 14:02?" is a query, not a guess.
 
-### 5. Delivery quality gates (QA–QE)
+Under the graph, the same primitives are available directly: background jobs, subagents, goal mode (one objective, one budget, one acceptance command), and the opt-in steward. Erya orchestrates them; it does not replace them.
 
-Turning "delivery quality" from an intention into a measurable, regression-tested engineering system:
+### The console
 
-- **Acceptance assertions**: tasks first create a `task_spec.md` with real executable `[verify]` commands, enforced before exit (minimal assertions auto-synthesized when no spec exists);
-- **Independent review**: a clean-context review (spec + deliverables + reply), preferably with a different model / temperature=0 to escape self-review blind spots;
-- **Diff self-check**: a final pass of the whole diff against the spec, file by file;
-- **Delivery contract**: a mandatory report — how it was verified / what was left open. The desktop folds the note out of the reply body, so copying the answer copies only the answer;
-- **Post-write verification chains**: auto-runs the lightweight check for the project type (`cargo check` / `tsc` / `py_compile` / `go vet` …);
-- **Ledger feedback**: quality failures become ledger entries that future sessions automatically avoid.
+The **Erya** panel is the operations side of the app, with five tabs:
 
-### 6. Steward: flight recorder and supervision layer (opt-in)
-
-Off by default (`OPENZEN_STEWARD=1`, or the steward panel). When on, every step is written to a local **SQLite flight recorder**, and **deterministic detectors** run before any model: a stalled ticket, a repeated tool call, a write outside the contract's scope, a budget overrun, or a self-declared completion without evidence. A local **StartLux** decision model answers the remaining ambiguous questions as typed verdicts (never free text), the correction engine can nudge the worker or roll back the files a step touched (file-scoped journal — unrelated edits survive), and the report composer writes the post-mortem. No hosted decision API: supervision stays as local as inference.
-
-### 7. Artifact-grammar UI: a piece of Ru-ware celadon
-
-The desktop is not a "software panel" — it's a **Ru-ware porcelain**: the "sky-clearing-after-rain" celadon aesthetic translated into an interface language.
-
-- **Three-color restraint**: glaze-white (surface), celadon (the only functional color), ink (text); the sole exception is cinnabar (seals and errors);
-- **Glaze as interface**: messages are carvings on the glaze, tool calls are underglaze patterns — no cards, no glassmorphism;
-- **Cultural anchors**: Song-serif epigraphy + Kai-style handwriting (thinking blocks), "Zen"/"Speak" seals, stems-and-branches dating ("Bingwu year, made"), colophon signing ("Xiuyan, inscribed");
-- **Artifact preview panel**: the right panel renders html / markdown / image / pdf / office / spreadsheet / code / diff / terminal artifacts; it sits side by side when the window is wide enough and floats over the conversation when it isn't;
-- **Complexity contract**: everything beautiful is O(1) — tiled textures decoded once on GPU, timeline folding that never mounts DOM, animations that only touch the compositor (10h soak target: RSS ≤ 350MB).
-
-### 8. Efficiency discipline
-
-- System prompt ~4.4KB (~1.1k tokens) vs Claude Code's 20k–43k tokens;
-- Local prompt cache ~96% typical, 98% on long tasks (see Bench);
-- Session distillation **fully async** (job queue + leases + crash takeover), never blocking the agent loop;
-- Parallel tool execution; linkme distributed slices for zero-copy tool registration (30 built-in tools + MCP bridge);
-- Frontend streaming rendering is O(1) (timeline folding + virtual scrolling + compositor-only animations; the DOM stays constant across long sessions) — which is why peak RSS stays low (180–240MB) and responses stay snappy, a real fit for locally deployed models.
-
-### 9. Lightweight
-
-| Metric | Value |
+| Tab | What it shows |
 |---|---|
-| Single binary | 30.6MB |
-| Installer (dmg, arm64) | 19.1MB |
-| Idle memory | ~180MB (desktop main process, measured) |
-| Peak memory in bench | 180–240MB RSS |
-| Tests | 1563 workspace + 301 ERME |
+| **Projects** | Registered project roots, task/run counts, recent activity, reveal in Finder, "start a conversation here" |
+| **Tasks** | The task graph: status, dependencies, attempts, assumptions, project, approval state |
+| **Runs** | Every dispatch: model, duration, status, summary, replayable transcript and tool timeline |
+| **Automations** | Reminders, goals, steward tickets, platform bridges — one registry instead of four panels |
+| **Approvals** | Irreversible actions waiting for a human decision, with impact and reversibility |
 
-### 10. Desktop experience
+### Context stays bounded
 
-Tauri (Rust + Svelte 5): SSE streaming; `ask_user` dialogs that really wait (amber *waiting* state, restored after a restart, notification if you stepped away); a per-session working-directory picker; job and subagent strips; todo/reminder chips above the composer instead of a permanent side rail; a collapsible delivery note; the artifact preview panel; a settings panel (models / skills / MCP / **soul status** / token stats); and an in-app updater. Long tasks don't cause progress anxiety — the timeline folds itself into a scroll.
+A dispatch session does not grow without limit. Each turn carries:
 
-### 11. Ah-Qing: the soul made visible
+- a **state block** rebuilt from the task graph (counts, active tasks, pending approvals, projects);
+- the **last 30 turns** of the conversation;
+- a **one-line epoch summary** for older history, with `history_search` available when the model needs the original.
 
-OpenZen's agent is named **Ah-Qing by default** (users may rename it anytime). There's also a desktop kitten of the same name — a six-state animation prototype (`idle / working / thinking / waiting / error / done`), with the animation assets produced by a **locally deployed ComfyUI + MiniMax H3 (MLX build)**. Its "mood" comes from the ERME soul layer (`get_memory_status`) — "unity of knowing and doing" made visible.
-
-> Current stage: six-state animation prototype and a soul-visibility experiment; full desktop interactions are still being polished.
-
-### 12. Messaging platform access: WeChat / Feishu / Telegram
-
-The same agent kernel also connects to **WeChat, Feishu (Lark) and Telegram** via the `oz-platform-*` bridge crates — the companion on your desktop also keeps watch in the places you chat every day; 7×24 residency goes beyond the desktop.
+The model sees the current state of the work, not a transcript of everything that ever happened. That is what makes a 7×24 session practical instead of expensive.
 
 ---
 
-## Design Philosophy
+## Done is a verdict
 
-### Functional design
+Most agents end a task when the model says it is done. OpenZen ends it when the environment agrees.
 
-The agent loop is a state machine grown in Rust: explicit `exit_reason` accounting (stopped / paused / llm_error / EXITED), exponential-backoff retry for consecutive LLM errors (local-inference stall protection), `ask_user` wait slots, **Breaker loop detection** (catches tool-call dead loops), and checkpoint resume. "Plan before acting": tasks first create a `task_spec.md` + checklist, and acceptance assertions are executed for real — **the environment is the truth, not the model's self-report**.
+Before work starts, a non-trivial task gets a verification contract. In a normal session it is a `task_spec.md`; in dispatch mode the same fields live on the task in the graph. Either way, it names a deliverable list and executable acceptance commands:
 
-### Visual design
-
-Artifact Grammar is a design *spec*, not a skin: three-color tokens, three glaze layers of tiled texture, "entering-the-glaze" easing (`cubic-bezier(.22,1,.36,1)`, 350–600ms), vertical headers, scroll-shaped narrative flow. The forbidden list is equally explicit: no cards, no glassmorphism, no full-page Canvas, no animated layout properties.
-
-### Efficiency & lightness
-
-Token economics + constant-cost rendering. System prompt held at ~4.4KB; skills/SOPs progressively disclosed; compression thresholds and summary-waiting policies tuned; frontend streaming rendering stays O(1) (timeline folding + virtual scrolling + compositor-only animations, constant DOM in long sessions) — the key to low peak RSS and fast responses with locally deployed models; memory bounded by budget controllers, UI bounded by the complexity contract.
-
-### Delivery quality
-
-Quality is a loop, not a checkpoint: failure → reflection log → ledger lesson → avoided next time. **Delivery quality is a compounding curve, not a single task's pass/fail** — the unique asset of a 7×24 resident companion.
-
-### Soul
-
-**Unity of knowing and doing** (from Wang Yangming's School of Mind): memory and behavior stay consistent; reflection drives evolution. The L0 soul layer evolves continuously (portrait → preference trajectory → idle association → quarantine → evolution), aiming at "understanding you better over time".
-
-**Honest limits** (the "three buckets of cold water" written into the design):
-
-1. The "soul layer" is a state machine plus text generation, not consciousness;
-2. The "magic chemistry" is an **emergent** product of memory density × interaction count × model capability — not a deliverable. Persisting past three months of use is a precondition for the vision;
-3. The value model **suggests, never decides** — progressing very cautiously.
-
----
-
-## Comparison with Existing Harnesses
-
-> Focusing on the harness (scaffolding) layer, not model capability. Sourced from public docs and community practice (2026-08).
-
-| Dimension | **OpenZen** | ZCode | Hermes (Nous) | Claude Code |
-|---|---|---|---|---|
-| Positioning | 7×24 local resident companion | Goal-mode IDE | Minimal self-improving CLI | Industry reference |
-| Runtime | **Local by default** (oMLX + ERME), data never leaves the machine | Local / cloud | Local / cloud | Cloud API |
-| System prompt | ~4.4KB (~1.1k tokens) | — | Byte-stable (cache-sacred) | 20k–43k tokens |
-| Memory | ERME 3 layers + L0 soul layer | Yes | SessionDB (SQLite FTS5) | CLAUDE.md ×4 + MEMORY.md |
-| Memory compounding | Ledger injection + reflection + async distillation | None | Post-task auto skill crystallization | None (manual) |
-| Delivery quality | Assertions / independent review / diff self-check / delivery contract | submit_plan + checklist | No system | No explicit mechanism |
-| Checkpoint resume | MmapWal + git snapshot + crash recovery | None | None | In-session compact |
-| Loop protection | Breaker loop detection | None | None | None |
-| Desktop | Tauri artifact-grammar UI + Ah-Qing | IDE | — | — |
-| Weight | 29MB binary / ~180MB idle RSS | IDE-class | Python-based | Heavy |
-
-In one line: ZCode and Hermes also support local models and both have memory — **OpenZen's difference is turning memory into an evolving compounding loop (lessons ledger + reflection + async distillation) and turning delivery quality into a regression-tested engineering system** — the line between a companion and a tool.
-
----
-
-## Comparison with Existing Memory Engines
-
-**ERME (in-house)** — three layers plus a soul, deeply optimized for M3 Ultra unified memory: L1 working cache (nanosecond; WAL crash recovery) → L2 vector index (microsecond; HNSW semantic recall, MLX-accelerated embeddings / pure-Rust fallback) → L3 persistence (millisecond; budget control: daily token cap + importance-scored per-item forgetting); L0 soul layer (portrait / life narrative / reflection / idle rambling / quarantine evolution), also memory-resident at the nanosecond level. At 256K tokens of new memory per day, a year occupies only ~100MB. Three-state conflict resolution (supplement / sublimate / overturn), a quarantine zone ensuring bad conjectures never pollute memory. 301 tests, pure Rust, no external services.
-
-| Alternative | Mechanism | Difference |
-|---|---|---|
-| **Claude Code** | 4-layer manual CLAUDE.md + auto MEMORY.md | No semantic search; section injection only |
-| **Hermes SessionDB** | SQLite FTS5 (incl. CJK trigram) + LLM summaries | Full-text only, no vectors; no budgets / forgetting |
-| **Gemini CLI** | `~/.gemini/GEMINI.md` save_memory append | Minimal but zero retrieval |
-| **Mem0 / Zep** | Vector + graph, Python / Go | 10–50ms; mostly hosted, data leaves the machine |
-| **Letta (MemGPT)** | Recursive summarization + self-editing | LongMemEval ~85%; Python ecosystem |
-| **Hindsight** | 4-way parallel retrieval + re-rankers | LongMemEval 91.4% (highest); depends on external graph & re-ranking models |
-| **OpenClaw** | 3-layer Markdown files + LLM heartbeat distillation | Zero semantic retrieval |
-| **OpenHuman** | On-disk local memory + TokenJuice compression | Details undisclosed |
-| **GenericAgent** (origin) | JSON files + skill crystallization | No retrieval, no forgetting, unbounded growth |
-
-Each has its strengths (CJK full-text search, recursive summarization, 4-way retrieval) — but **none has turned memory into a soul**: the L0 layer, idle evolution, and a cat you can see on your desktop are OpenZen's unique combination.
-
----
-
-## Bench: Three Tasks × Three Harnesses
-
-> Identical task prompts, identical local model backend (DeepSeek-V4-Flash-0731 locally deployed in oMLX, MXFP4-quantized); all task assets were produced by a **locally deployed ComfyUI**; a monitor script collected tokens / memory / duration / deliverables in real time. All metrics are from each agent's final optimization round. The Codex desktop app joined some tasks but was removed from this bench: the locally deployed DeepSeek-V4-Flash has no vision capability, so the task prompts forbid reading images while permitting pixel-level monitoring — Codex ignored the rule and kept reading images, ballooning its context past 1M tokens until oMLX refused the requests.
-> Deliverable screenshots below each cell.
-
-### TASK 1 · Web game "Star Salvage"
-
-A single-file HTML/CSS/JS game; ≥6 ComfyUI-generated art assets required; judged by play-testing.
-
-| Metric | **OpenZen** | ZCode | Hermes |
-|---|---|---|---|
-| Prompt tokens | **2.67M** | 12.12M | 8.18M |
-| Peak RSS | **192MB** | 680MB | 613MB |
-| Duration | **43 min** | 83 min | 81 min |
-| Deliverables | 12 assets | 10 | 10 |
-| Screenshot | <img src="assets/bench/task1-openzen.gif" width="300"> | <img src="assets/bench/task1-zcode.gif" width="300"> | <img src="assets/bench/task1-hermes.gif" width="300"> |
-
-### TASK 2 · Brand site "Qinglan Tea House"
-
-A single-page brand site; ≥8 ComfyUI assets; judged by screenshots.
-
-| Metric | **OpenZen** | ZCode | Hermes |
-|---|---|---|---|
-| Prompt tokens | **731K** | 1.07M | 721K |
-| Peak RSS | **195MB** | 480MB | 562MB |
-| Duration | **23 min** | 26 min | 25 min |
-| Deliverables | 9 | 10 | 9 |
-| Screenshot | <img src="assets/bench/task2-openzen.gif" width="300"> | <img src="assets/bench/task2-zcode.gif" width="300"> | <img src="assets/bench/task2-hermes.gif" width="300"> |
-
-### TASK 3 · Indie game industry 2026 research report
-
-An illustrated report; ≥4 ComfyUI images; volume & completeness judged by reviewers.
-
-| Metric | **OpenZen** | ZCode | Hermes |
-|---|---|---|---|
-| Prompt tokens | **1.33M** | 12.04M | 3.24M |
-| Peak RSS | **212MB** | 631MB | 827MB |
-| Duration | **22 min** | 124 min | 52 min |
-| Deliverables | 7 images, complete | 7 | 6 |
-| Report size | **706KB** | — | 7.16MB |
-| Screenshot | <img src="assets/bench/task3-openzen.gif" width="300"> | <img src="assets/bench/task3-zcode.gif" width="300"> | <img src="assets/bench/task3-hermes.gif" width="300"> |
-
-**How to read this**: across the three tasks OpenZen delivered equal or more complete results with roughly **1/4–1/9 the token consumption, ~1/3 the memory, and about half the time**. Don't over-index on single-round cache hit rates — the **absolute tokens spent per unit of work** is the real evidence of efficiency.
-
-### Long-task validation (OpenZen only; task4 / task5)
-
-| Task | Scale | Results |
-|---|---|---|
-| TASK 4 · ICLR paper reproduction (pure code) | 6.3h · 38.1M tokens · 434 turns | Cache hit **98.05%** · peak 240MB · **zero stalls** |
-| TASK 5 · PhD postdoc interview deck | 48 min · 3.06M tokens | Cache hit 95.2% · peak 204MB |
-
----
-
-## Design Borrowings & Credits
-
-OpenZen follows the excellent experience of preceding harnesses, with explicit credits:
-
-- **GenericAgent (origin)** — OpenZen began as a Rust rewrite of the Python GenericAgent framework (a single static binary, one to two orders of magnitude lighter in size and memory); after multiple rounds of restructuring (deleting the 375-line heuristic `narration.rs`, the 559-line `content.rs`, the protocol adapter layer; adding checkpoints / ERME / quality gates) it diverged completely, inheriting only the spirit: "a minimal autonomous agent with skill crystallization";
-- **EverMind** — inspiration for the user-portrait (Portrait) and self-evolution (idle rambling / quarantine evolution) mechanisms;
-- **Claude Code** — `<system-reminder>` dynamic injection, MEMORY.md auto-memory, Agent Skills progressive disclosure, 4-layer CLAUDE.md hierarchy;
-- **Codex desktop app** — two-phase memory pipeline, pre-finish diff self-check discipline, per-env profiles;
-- **ZCode** — submit_plan + checklist dual track, the verify-check four-stage pipeline (cargo check → test → clippy → E2E);
-- **Hermes (Nous)** — sacred prompt caching (byte-stable system prompt), post-task learning loop, CJK full-text search ideas;
-- **Prime Agent** — the harness refine mechanism (lessons ledger / self-refinement);
-- **Pi** — the minimal-harness philosophy (just loop / tools / context / sessions);
-- **Gemini CLI / opencode / MiMo** — minimal save_memory, tool registry & declarative permissions, spec-driven workflows.
-
-> We took the clay of our predecessors and fired it with Rust into a piece of porcelain that remembers you.
-
----
-
-## Architecture at a Glance
-
-```
-┌────────────────────────────────────────────────────────────┐
-│ OpenZen.app (Tauri desktop · Rust + Svelte 5 · Artifact UI) │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐ │
-│  │ oz-core      │  │ oz-tools     │  │ oz-memory + ERME  │ │
-│  │ agent_loop   │  │ 30 built-in  │  │ L0 soul layer     │ │
-│  │ checkpoints  │  │ oz-mcp bridge│  │ L1/L2/L3 memory   │ │
-│  │ quality gates│  │ oz-skill-mcp │  │ harness ledger    │ │
-│  └──────────────┘  └──────────────┘  └───────────────────┘ │
-│  ┌────────────────────────────────────────────────────────┐ │
-│  │ oz-steward (opt-in) · flight recorder · detectors      │ │
-│  │ StartLux decisions · rollback journal · goal runtime   │ │
-│  └────────────────────────────────────────────────────────┘ │
-└──────────────────────────┬─────────────────────────────────┘
-                           │ http://127.0.0.1:8000/v1 (OpenAI-compatible)
-┌──────────────────────────▼─────────────────────────────────┐
-│ oMLX local inference server (MLX · MXFP4 · 256K context)    │
-└────────────────────────────────────────────────────────────┘
+```markdown
+# normal-session examples; dispatch verification is stricter (below)
+[verify] cargo test --lib
+[verify] python3 scripts/check_assets.py --pixels
+[verify] python3 scripts/run_sim.py --duration 60
 ```
 
-`oz-core` is the kernel (agent loop / checkpoints / compression / quality gates / reflection / subagents); `oz-core-types` holds the shared wire types; `oz-tools` registers tools automatically via linkme distributed slices; `oz-memory` integrates the vendored in-house ERME engine; `oz-mcp` / `oz-skill-mcp` bridge external tools and skill stores; `oz-steward` is the optional supervision and goal layer; `oz-platform-feishu / oz-platform-telegram / oz-platform-wechat` provide messaging platform access; `src-tauri + frontends` is the artifact-grammar shell. 23 `oz-*` crates form one Rust workspace ([Cargo.toml](Cargo.toml)).
+If no contract exists, the harness synthesizes a minimal one from the task. In a normal session's `task_spec.md`, the commands use a policy-safe grammar (no pipes, no `&&`, no backticks; relative paths only). A command that policy refuses is **blocked**, not failed — it does not burn the repair budget.
+
+Dispatch mode is stricter. An explicit `[verify]` / `verify` command on the task graph defaults to known test/build runners — `cargo test/check/build`, `npm/pnpm/yarn test/build`, `pytest`, `go test`, `tsc`, `make test`. Custom scripts are refused unless the process is started with `OPENZEN_ALLOW_CUSTOM_VERIFY=1`; shell chaining and redirects are never accepted.
+
+When a task has dependencies and explicit verification commands, dispatch defaults to `strict_deps`: the child waits until every upstream task is `verified`. An `unverified` upstream is not silently consumed; pass `strict_deps: false` only for a deliberate legacy flow. This is what makes a content chain (A → B → C → D) safe: B cannot start on A's unproven output.
+
+### The evidence stack
+
+1. **Hard gates** — the acceptance commands, executed in the task's project root.
+2. **Blind review** — a clean-context reviewer sees the spec and the gate evidence, never the worker's own summary. It can name a defect; only a named defect earns another repair round.
+3. **Diff self-check** — the final patch is reviewed against the spec, file by file.
+4. **Delivery note** — how it was verified and what was left open. The desktop folds it out of the reply body, so copying the answer copies only the answer.
+
+### Terminal states
+
+| State | Meaning | Desktop label |
+|---|---|---|
+| `verified` | Every hard gate passed, at least one strong gate passed, no review defect, no inconclusive gate. | Completed (verified) |
+| `unverified` | The work finished, but the evidence could not prove it. Honest, terminal, never silently upgraded. | Completed (evidence insufficient) |
+| `failed` | A hard gate failed. The run is red and the evidence says why. | Failed |
+
+The verifier is the only component allowed to write a terminal status in dispatch mode. Erya can report a verdict; it cannot create one. This is slower than self-report. It is the difference between a demo and a delivery.
+
+![Task list with verified, evidence-insufficient, and failed states](assets/verdict-states.png)
+
+*`verified`, `unverified` (evidence insufficient), and `failed` are separate terminal states. The badge is written by the verifier, not by the model.*
 
 ---
 
-## Roadmap & Status
+## Memory that compounds
 
-**v0.1.0 released 2026-08; v0.2.6 is the current release (2026-11).** Between them: full ERME integration (M1–M4 + P0–P4), QA–QE quality gates, the artifact-grammar UI migration, background jobs and subagents, the artifact preview panel, goal mode, the opt-in steward, and a round of gateway-leak hardening in the streaming parser.
+**ERME** is the in-house memory engine. It is not a vector store bolted onto a chat log; it is a tiered store with a write policy.
 
-- ✅ Done: streaming protocol, desktop app, ERME integration, quality gates, artifact-grammar migration, background jobs / subagents, artifact preview panel, goal mode, steward (opt-in)
-- 🚧 In progress: steward default-on hardening, artifact-grammar complexity audit (10h soak RSS ≤ 350MB), Ah-Qing interactions
+![Long-term memory controls: backend, export, and clear](assets/memory-panel.png)
+
+*The memory control surface: the long-term store is on, backed by ERME, and exportable/clearable without editing files.*
+
+| Layer | What it holds | Why it exists |
+|---|---|---|
+| **L0 · soul** | Portrait, life narrative, reflection, idle associations | Continuity across sessions; injected in a bounded prefix, not a dump |
+| **L1 · working** | Hot facts and recent state, with a write-ahead log | Crash-safe, nanosecond reads |
+| **L2 · vector** | HNSW index plus hybrid lexical/vector recall | Semantic search without leaving the machine |
+| **L3 · persistence** | Compressed long-term store with budgets | Bounded growth: daily caps, importance-scored eviction, dedupe, decay |
+
+### Scope, quality, budget
+
+- **Every memory carries a scope** — `project:<id>`, `workspace:<hash>`, or `legacy`. Project recall does not silently fall back to the global pool. A project's memory stays in that project.
+- **Writes pass a quality gate.** Low-confidence statements are rejected or quarantined; a bad conjecture never becomes a permanent fact. The soul prefix is capped at a few hundred characters and only high-confidence, readable facts are injected.
+- **Secrets are redacted** before storage — API keys, bearer tokens, cloud credentials, private keys.
+- **Growth is budgeted.** The store does not grow forever because the assistant is always on.
+
+### The compounding loop
+
+- **Checkpoints** resume a session mid-run after a restart, with git context attached.
+- **The harness ledger** records reusable lessons, but only with verifiable evidence and snapshot rollback.
+- **Reflections** (`reflections.jsonl`) turn successes and failures into text future sessions can read.
+- **Quality failures** become ledger entries that later sessions avoid.
+
+A resident assistant should get better at your work, not just longer. That is the point of memory that is scoped, audited, and bounded.
 
 ---
 
-## Testing & Verification
+## Context, tools, and the loop
 
-- **Four-stage verification pipeline**: `cargo check` → `cargo test` (1563 workspace tests) → `cargo clippy` → Tauri E2E (CGEvent-driven real desktop interaction + screenshot verification);
-- **ERME ships 301 tests** (it is a vendored crate, tested separately from the workspace);
-- **Release flow**: versions derived from Conventional Commits via git-cliff; the release script gates on the test suite before tagging; GitHub Actions builds the dmg and attaches it to the Release.
+### Context
+
+The base system prompt is **under 4 KB** (3.4 KB Chinese / 3.8 KB English). Skills and SOPs are disclosed progressively; they are searched and loaded when relevant, not pasted into every request. Ordinary sessions compress when they approach the model's context window; dispatch sessions use the state-block/epoch strategy above.
+
+Tool schemas are sorted, the prompt prefix is kept byte-stable, and the tool list is deterministic — so provider-side prompt caches actually hit. With a local model, that is not a billing optimization; it is the difference between a responsive session and a long prefill on every turn.
+
+### Tools
+
+**40+ built-in tools** cover files, shell, search, browser, computer use, scheduling, tasks, and memory. MCP servers add more; skills add playbooks. The important part is not the count:
+
+- **One dispatch boundary.** Every tool call passes through `ToolRegistry::dispatch`, where arguments are canonicalized against the tool's schema. A model that sends `cmd` instead of `code`, or the tool name as the key, still gets its call executed.
+- **Parallel where safe.** Independent reads and probes run concurrently; control tools (`ask_user`, `submit_plan`) bypass the queue so they never wait behind a long build.
+- **Cancellation propagates.** Stopping the parent stops its children; stopping a child leaves the parent alive.
+- **Jobs are first-class.** Long commands and subagents run as tracked jobs with output, status, and a kill switch, instead of blocking the conversation.
+
+### Reliability
+
+Real gateways and local models produce malformed tool calls. OpenZen repairs them at the stream boundary:
+
+- leaked DSML parameters and half-converted tool-call fragments;
+- truncated closers (`</` instead of `</parameter>`) and trailing call tags;
+- wrong key names, doubly-encoded arguments, and nameless parameters;
+- a JSON value that parses cleanly but has swallowed the next parameter.
+
+The regression fixtures are the raw bytes from failing sessions. The parser is not "hoping for the best"; it has tests for the exact shapes that broke real runs.
+
+Long silences are treated as slow, not dead: an idle SSE stream is tolerated for 180 seconds on cloud gateways and 300 seconds on local servers before a retry, because a local model may be thinking. Checkpoints and retries keep long runs alive; a loop breaker stops repeated identical calls. The goal is boring reliability, not a perfect demo.
 
 ---
 
-## Feedback
+## Permissions and safety
 
-Found a bug or want a feature? [Open an issue](https://github.com/V1sMu21/OpenZen/issues) — and if OpenZen earns a place on your Mac, a ⭐ helps others find it too.
+Local does not mean trusted. The model's output is untrusted input, and the safety layer sits at dispatch time, not in the prompt.
+
+| Boundary | Behavior |
+|---|---|
+| **Workspace** | Writes stay inside the working directory. A write outside it requires an explicit approval, and the approval is remembered for that path in that session. |
+| **Shell** | Commands are approved by pattern. "Always trust" remembers a specific command shape, not a blanket "allow everything". |
+| **Workers** | A worker's write tools refuse paths outside its project. On macOS, its shell runs under a `sandbox-exec` write-jail: project root, temp, and build caches only. |
+| **Irreversible work** | In dispatch mode, tasks are classified as read-only, reversible, or irreversible. Irreversible tasks park in the approval queue instead of proceeding. |
+| **Secrets** | Credentials live in your config, not in prompts. Memory redacts common key patterns before storage. |
+| **Audit** | Approvals, denials, and tool calls are logged; the run ledger keeps what happened and which model did it. |
+
+**Approvals wait for a human.** The current default is up to 30 minutes, with a countdown, a system notification when you step away, and a watchdog that does not mistake your absence for a bad request. A denial is recorded, so the same question is not asked twice. **Full access** exists for unattended runs — it is a mode you choose, not the default.
+
+**Steward (opt-in).** Every step can be written to a local SQLite flight recorder. Deterministic detectors flag a stalled ticket, a repeated tool call, an out-of-scope write, a budget overrun, or a completion without evidence before any model is asked; the correction engine can nudge the worker or roll back the files a step touched. Supervision stays as local as inference.
+
+---
+
+## The desktop
+
+The desktop is not a terminal with a text box. It is built for the shape of agent work: long, parallel, artifact-heavy.
+
+- **Artifact panel** — HTML, Markdown, images, PDF, Word/Excel/PowerPoint, spreadsheets, code, diffs, and terminal output. Side by side when the window is wide, floating over the conversation when it is not.
+- **Streaming timeline** — thinking blocks, tool cards, and changed-file summaries that fold themselves. Long sessions keep a constant DOM instead of growing a scrollback monument.
+- **Work in view** — job and subagent strips next to the composer, task chips above it, approval cards with impact and reversibility, and a delivery note that folds away.
+- **Erya console** — projects, tasks, runs, automations, approvals; a project card can open a conversation rooted in that project.
+- **Settings** — models, providers, skills, MCP servers, soul status, token usage, and updates. The UI is bilingual (Chinese/English).
+- **A design language, not a theme** — Song-celadon “artifact grammar”: three colors, glaze-like surfaces, Song serif for structure and Kai calligraphy for thought. The rules live in [frontends/DESIGN.md](frontends/DESIGN.md).
+
+**Other surfaces.** The same kernel also runs as `openzen serve` (local WebUI). WeChat, Feishu, and Telegram bridges let the same assistant answer where you already chat, sharing the same kernel and data root.
+
+---
+
+## Models and local inference
+
+OpenZen is **local-first, not local-only**. It speaks OpenAI-compatible chat completions. You can register any number of named model entries and choose one per session, with per-model reasoning effort.
+
+| Backend | Typical endpoint | Notes |
+|---|---|---|
+| **oMLX** (reference) | `http://127.0.0.1:8000/v1` | MLX on Apple Silicon; keeps multiple long-context models resident |
+| **Cloud API** | your provider | Optional; data goes only to the endpoint you configure |
+
+**Suggested local models.** Practical starting points on oMLX — not endorsements: `qwen3.8-27b`, `qwen3.8-flash-next`, `glm5.3-flash`, `Sage-A1.5`, `Occamy-1.0`. Pick by your memory and context needs.
+
+**Hardware.** Apple Silicon is required for the desktop app. 16 GB is enough for 7–14B models at practical context sizes; 64 GB+ unlocks the long-context models this harness is designed for. A 256 GB unified-memory Mac is the sweet spot, not a requirement.
+
+**Privacy.** Runtime data lives under `~/.openzen/` — workspace, memory, harness ledger, logs, sessions, and the butler database. There is no account and no telemetry. With local models and local tools, it works offline; web search, browser, and cloud models need the network you give them.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ macOS app · Tauri v2 + Svelte 5                             │
+│  chat · artifact panel · Erya console · approvals · settings│
+└───────────────┬─────────────────────────────────────────────┘
+                │ Tauri commands / SSE
+┌───────────────▼─────────────────────────────────────────────┐
+│ oz-core        loop · context · checkpoints · quality gates │
+│ oz-tools       40+ tools · MCP · skills · browser           │
+│ oz-llm         OpenAI-compatible · streaming               │
+│ oz-memory      ERME L0–L3 · scoped recall · budgets         │
+│ oz-steward     task graph · verifier · goals · flight log   │
+│ oz-safety      approvals · trust store · boundaries         │
+└───────────────┬─────────────────────────────────────────────┘
+                │
+┌───────────────▼─────────────────────────────────────────────┐
+│ local model server (oMLX)                                   │
+│ or a cloud endpoint you configure                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+| Layer | Crates | Responsibility |
+|---|---|---|
+| **Kernel** | `oz-core`, `oz-core-types` | Agent loop, context and compression, checkpoints, quality gates, jobs, subagents |
+| **Models** | `oz-llm` | OpenAI-compatible client, streaming, retries, routing |
+| **Tools** | `oz-tools`, `oz-mcp`, `oz-skill-mcp`, `oz-browser` | Tool registry, MCP bridge, skill store, browser and computer use |
+| **State** | `oz-memory`, `oz-steward` | ERME memory, task graph, verifier, goals, flight recorder, rollback |
+| **Safety** | `oz-safety` | Permission pipeline, trust store, workspace and path boundaries |
+| **Surfaces** | `src-tauri`, `frontends`, `oz-server`, `oz-platform-*` | Desktop, WebUI, messaging bridges |
+| **Ops** | `oz-config`, `oz-scheduler`, `oz-reflect`, `oz-plugin`, `oz-import`, `oz-tests` | Config, scheduling, reflection, plugins, session import, test harness |
+
+23 `oz-*` crates plus the Tauri shell form one Cargo workspace. The frontend is Svelte 5 with a custom `@theme` token system, not a component kit.
+
+---
+
+## Quick start
+
+### 1. Install the app
+
+Download the latest [dmg](https://github.com/V1sMu21/OpenZen/releases/latest), open it, and drag **OpenZen** into Applications. The build is ad-hoc signed rather than notarized, so macOS may ask you to confirm the first launch (System Settings → Privacy & Security → Open Anyway).
+
+### 2. Bring a model
+
+Start oMLX on Apple Silicon at `http://127.0.0.1:8000/v1`. This is the supported local runtime; a cloud OpenAI-compatible endpoint is optional.
+
+```bash
+# sanity check: your server should answer this
+# (a 401 asking for a key is also a healthy answer)
+curl http://127.0.0.1:8000/v1/models
+```
+
+### 3. Point OpenZen at it
+
+Open **Settings → Models**, add a named entry with the endpoint and model id, and set it as default. Credentials are stored locally. The first launch creates `~/.openzen/`.
+
+### 4. Give it real work
+
+Ask for something multi-step — "build a landing page and verify it in the browser", "fix the failing test and show me the diff", "research this market and produce a report". For a long-running job, hand it to Erya and get on with your day; the task graph keeps working while you do something else.
+
+### Build from source
+
+Requirements: macOS with the Command Line Tools (they provide `clang` and the linker; full Xcode is not required), Rust (the pinned toolchain is in `rust-toolchain.toml`), Node.js 20+, and the Tauri v2 CLI.
+
+```bash
+git clone https://github.com/V1sMu21/OpenZen.git
+cd OpenZen
+
+# once
+cargo install tauri-cli --version "^2" --locked
+
+npm --prefix frontends ci
+cargo tauri build --bundles app
+# → target/release/bundle/macos/OpenZen.app
+```
+
+For development:
+
+```bash
+cargo tauri dev
+# or isolate runtime data from your real install:
+OPENZEN_DATA_DIR=/private/tmp/openzen-dev cargo tauri dev
+```
+
+### WebUI
+
+```bash
+npm --prefix frontends run build
+cargo run -- serve --port 18567
+```
+
+`OPENZEN_DATA_DIR` moves the whole data root (workspace, memory, sessions, logs) for a dev build. The default is `~/.openzen/`.
+
+---
+
+## Extending
+
+- **Tools.** Implement `ToolHandler` in `oz-tools` and register it in `ToolRegistry`; or expose tools from an MCP server without touching Rust.
+- **Skills.** A skill is a `SKILL.md` with frontmatter and a body. Skills are indexed, searched, and loaded on demand — progressive disclosure, not a prompt dump.
+- **MCP.** Add stdio MCP servers in Settings; their tools appear in the same registry, with the same approval pipeline.
+- **Platforms.** `oz-platform-wechat`, `oz-platform-feishu`, and `oz-platform-telegram` adapt the same kernel to messaging surfaces.
+- **UI.** Svelte 5 components and tokens live in `frontends/`; read `frontends/DESIGN.md` before changing the visual language.
+- **Docs.** Start with [docs/development-guide.md](docs/development-guide.md), then the design notes under `docs/`.
+
+---
+
+## Status and limits
+
+**Pre-1.0, actively developed.** The latest tagged release is **v0.2.6** (November 2026). The control-plane work described here is on `main` and ships in the next release; build from source if you want it today.
+
+**Working now**
+
+- Erya dispatch mode: task graph, scheduler, background workers, verifier-owned terminal states, digest.
+- Project console: projects, tasks, runs, automations, approvals; run transcripts and tool timelines.
+- Project-scoped execution: task-level project binding, worker file isolation, macOS shell write-jail.
+- ERME: scoped recall, quality-gated writes, bounded soul injection, WAL compaction, dedupe/decay, secret redaction.
+- Approvals that wait: 30-minute default, notifications, wall-clock countdown, denial memory.
+- Streaming repair: canonical arguments, DSML leak recovery, truncated closers, trailing call tags.
+- 1,600+ workspace tests; the ERME crate has its own suite.
+
+**Known limits**
+
+- The desktop is macOS Apple Silicon only. The kernel and server are independent of the desktop shell, but other desktop targets are not supported yet.
+- A weak local model produces weak plans. The harness can reject bad work; it cannot invent capability.
+- Verification is only as strong as the gates. An explicit `[verify]` command can make a content task `verified`; without strong evidence it ends `unverified` — by design. Custom verification scripts need `OPENZEN_ALLOW_CUSTOM_VERIFY=1`.
+- This is not a VM. Approvals and sandboxes reduce risk; they do not make untrusted code safe.
+- The desktop is the primary surface. The WebUI is useful for headless machines, but it does not have the console or artifact panel.
+
+---
+
+## Engineering
+
+The project is developed like the harness it ships: gates before claims.
+
+```bash
+# backend
+cargo test --workspace -- --test-threads=1
+cargo clippy --workspace --all-targets
+
+# mechanical gates (event pairings, i18n, undefined CSS vars, defaults, safety boundaries)
+bash scripts/verify_gates.sh --base HEAD
+
+# complex scenario suite (release-gate R2.5)
+cargo test -p oz-steward --test scenario_suite -- --test-threads=1
+cargo test -p oz-steward --test goal_fault_injection -- --test-threads=1
+cargo test -p oz-steward --test steward_fault_injection -- --test-threads=1
+python3 scripts/scenarios/check.py
+
+# frontend
+npm --prefix frontends run check
+npm --prefix frontends run build
+```
+
+- **Regression tests come from real failures.** Streaming-parser tests replay the raw bytes of malformed gateway responses; checkpoint tests use real session data when available.
+- **One fix, one failing test first.** A change that cannot be tested is marked as such and given a manual verification path.
+- **Releases are derived.** [Conventional Commits](https://www.conventionalcommits.org/) → `git-cliff` → `scripts/release.sh` → a tag. The release gate runs the suite, builds the dmg on macOS, and attaches it to the GitHub Release.
+- **The workspace is checked as a whole.** Per-crate tests are not enough; a change can compile in one crate and break the binary.
+- **Complex scenarios are a gate, not a demo.** 34 executable scenarios cover content dependency chains, failure blocking, restart recovery, approvals, concurrency, project boundaries, cancellation, worker timeouts, subagent cancellation and compaction recall. `scripts/scenarios/check.py` is a ratchet: removing a scenario fails the release gate.
+
+---
+
+## FAQ
+
+**Do I need a 256 GB Mac?**
+No. 16 GB is enough for 7–14B models at practical context sizes. Unified memory matters for long-context models and for keeping the model, the vector index, and the browser in one pool.
+
+**Can I use a cloud model?**
+Yes. Any OpenAI-compatible endpoint can be a named model. Local is the default posture, not a restriction.
+
+**Does my data leave the machine?**
+Only to the endpoints you configure — a local model server, a cloud model you add, or a web tool you invoke. There is no account, no telemetry, and no hosted control plane.
+
+**Does it work offline?**
+With a local model and local tools, yes. Web search, browser automation, and cloud models need the network you give them.
+
+**How is "done" decided?**
+By the verifier, from gate evidence. The model can propose a completion; it cannot write `verified`. If the evidence is inconclusive, the task ends as `unverified`.
+
+**Is there a Linux or Windows desktop build?**
+Not today. The Rust kernel and server are not tied to the desktop shell; the desktop shell and its macOS integrations are not supported on other platforms yet.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. For a non-trivial change:
+
+1. Read [AGENTS.md](AGENTS.md) and [docs/development-guide.md](docs/development-guide.md).
+2. Keep the change scoped. A bug fix should not carry a refactor.
+3. Add a regression test that fails before the fix.
+4. Run the gates above, including the workspace-wide check.
+5. Use a Conventional Commit message (`fix(llm): …`, `feat(butler): …`). Releases are derived from them.
+
+If you change the system prompt, the streaming parser, or a safety boundary, add a test with the exact shape you are protecting. Those are the places where "it works on my machine" is not enough.
+
+If OpenZen earns a place on your Mac, a star helps other people find it.
+
+---
+
+## Prior art
+
+OpenZen began as a Rust rewrite of the Python **GenericAgent** framework and has since diverged completely. It also owes ideas to the wider open-source harness community — system reminders, progressive-disclosure skills, diff self-checks, flight recorders, and the discipline of treating prompts as code. Thank you to the open-source harness community.
 
 ---
 

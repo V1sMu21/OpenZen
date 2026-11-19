@@ -1034,11 +1034,41 @@ pub async fn parse_openai_sse(
             }
             let raw_args = t.args.clone();
             let tc_id = t.id.clone();
-            let parsed_args: serde_json::Value = normalize_tool_args_for(
-                &t.name,
-                serde_json::from_str(&raw_args)
-                    .unwrap_or_else(|_| serde_json::Value::String(raw_args.clone())),
-            );
+            // End of stream without `[DONE]`/`finish_reason` means the gateway
+            // cut the call mid-arguments. Repairing that tail would execute a
+            // *truncated* payload (E2E-028: `write` created a file whose
+            // content was the first byte of the intended body). Only a
+            // syntactically complete object may be flushed here; a leaked but
+            // complete shape is still repaired on the normal [DONE] path.
+            let Some(parsed) = eof_tool_args(&raw_args) else {
+                tracing::warn!(
+                    "[oz-llm] refusing truncated tool call {} ({} bytes): arguments are not valid JSON",
+                    t.name,
+                    raw_args.len()
+                );
+                // Surface the refusal to the loop/model instead of vanishing:
+                // the dispatcher refuses the sentinel with an actionable error,
+                // and the model can re-issue the call next turn.
+                let marker = oz_core_types::tool_args::corrupt_call_marker(&format!(
+                    "truncated tool arguments ({} bytes) — the call was not executed; re-issue it",
+                    raw_args.len()
+                ));
+                emit(
+                    &event_tx,
+                    StreamEvent::ToolInputAvailable {
+                        tool_call_id: t.id.clone(),
+                        name: t.name.clone(),
+                        args: marker.to_string(),
+                    },
+                );
+                content_blocks.push(ContentBlock::ToolUse {
+                    id: t.id.clone(),
+                    name: t.name.clone(),
+                    input: marker,
+                });
+                continue;
+            };
+            let parsed_args: serde_json::Value = normalize_tool_args_for(&t.name, parsed);
             emit(
                 &event_tx,
                 StreamEvent::ToolInputAvailable {
@@ -1056,6 +1086,19 @@ pub async fn parse_openai_sse(
     }
 
     Ok((content_blocks, usage))
+}
+
+/// Arguments that may be flushed at end-of-stream: valid JSON only.
+///
+/// This is deliberately stricter than the normal `[DONE]` path. A stream that
+/// dies mid-`arguments` has no way to tell a style leak from a lost tail; the
+/// only safe answer is to refuse the call and let the model re-issue it.
+fn eof_tool_args(raw: &str) -> Option<serde_json::Value> {
+    if raw.trim().is_empty() {
+        // A no-argument tool legitimately streams `""`.
+        return Some(serde_json::json!({}));
+    }
+    serde_json::from_str::<serde_json::Value>(raw.trim()).ok()
 }
 
 // ── Leaked parameter-call repair ─────────────────────────────────────
@@ -1936,6 +1979,13 @@ pub fn normalize_tool_args_for(tool: &str, v: serde_json::Value) -> serde_json::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eof_flush_refuses_truncated_arguments() {
+        assert!(eof_tool_args("{\"file_path\":\"a\",\"content\":\"x").is_none());
+        assert!(eof_tool_args("{\"file_path\":\"a\"}").is_some());
+        assert_eq!(eof_tool_args(""), Some(serde_json::json!({})));
+    }
     use tokio::sync::mpsc;
 
     #[tokio::test]

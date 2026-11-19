@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 oz-core-types = { path = "../oz-core-types" }
+oz-steward = { path = "../oz-steward" }
 oz-core = { path = "../oz-core" }
 oz-config = { path = "../oz-config" }
 oz-browser = { path = "../oz-browser" }

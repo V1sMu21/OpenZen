@@ -3,7 +3,6 @@ pub mod audit;
 pub mod checkpoint;
 pub mod compress;
 pub mod context;
-pub mod crystallizer;
 pub mod diagnostics;
 pub mod goal;
 pub mod handler;

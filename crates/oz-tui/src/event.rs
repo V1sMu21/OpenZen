@@ -53,7 +53,7 @@ pub fn spawn_agent_loop(
             return (rx, Arc::new(AtomicBool::new(false)));
         }
     };
-    let session_name = cfg.default_session.as_deref().unwrap_or("claude_sonnet");
+    let session_name = cfg.resolved_default_session().unwrap_or("");
     let sess_config = match cfg.get(session_name) {
         Some(c) => c.clone(),
         None => {
@@ -679,7 +679,7 @@ pub async fn start_run(app: &mut App, prompt: String) {
     if let Ok(cfg) = oz_config::mykey::MyKeyConfig::from_file(
         std::path::PathBuf::from(&app.config_path).as_path(),
     ) {
-        let session_name = cfg.default_session.as_deref().unwrap_or("claude_sonnet");
+        let session_name = cfg.resolved_default_session().unwrap_or("");
         if let Some(sess_config) = cfg.get(session_name) {
             app.model_name = sess_config.model.clone();
             let sess_type = cfg.session_type(session_name);

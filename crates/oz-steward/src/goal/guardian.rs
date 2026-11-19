@@ -42,7 +42,9 @@ impl GoalGuardian {
             .unwrap_or_default();
         let verdict = match goal.status {
             GoalStatus::Achieved => Verdict::OnTrack,
-            GoalStatus::Abandoned | GoalStatus::Exhausted => Verdict::OffTrack,
+            GoalStatus::Unverified | GoalStatus::Abandoned | GoalStatus::Exhausted => {
+                Verdict::OffTrack
+            }
             GoalStatus::Blocked => Verdict::Blocked,
             GoalStatus::Verifying => Verdict::Stalled,
             GoalStatus::Active | GoalStatus::Paused => {
@@ -60,6 +62,9 @@ impl GoalGuardian {
         };
         let summary = match (&goal.status, &attempt) {
             (GoalStatus::Achieved, _) => "goal achieved with gate evidence".into(),
+            (GoalStatus::Unverified, _) => {
+                "goal finished without executable evidence; reported as unverified".into()
+            }
             (GoalStatus::Verifying, Some(a)) => {
                 format!(
                     "goal is waiting for human/review acceptance after attempt {}",
@@ -81,7 +86,7 @@ impl GoalGuardian {
             evidence_ids,
             summary,
             next_actions: match goal.status {
-                GoalStatus::Verifying => vec!["Accept or reject the gate evidence.".into()],
+                GoalStatus::Verifying => vec!["Verification is still running.".into()],
                 GoalStatus::Blocked => vec!["Resolve the blocker, then resume.".into()],
                 GoalStatus::Exhausted => vec!["Create a new version with more budget.".into()],
                 _ => vec!["Continue the bounded attempt loop.".into()],

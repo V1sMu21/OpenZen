@@ -14,6 +14,7 @@ import CommandPalette from "./CommandPalette.svelte";
 import { filterCommands } from "../utils/slashCommands";
 import { t, localT, locale } from "../i18n";
 import { clickOutside } from "../actions/clickOutside";
+import { askConfirm } from "../stores/confirm";
 
 let {
   disabled = $bindable(false),
@@ -22,6 +23,7 @@ let {
 } = $props();
 
 let inputText = $state("");
+let fullAccessOn = $state(false);
 
 // 模型 chip 要显示“模型本身”的名字，就需要这份列表在会话打开时就到手，
 // 而不是等用户点开一次模型选择器。
@@ -29,6 +31,7 @@ onMount(() => {
   listModels()
     .then((list) => chat.setModelList(list))
     .catch(() => {});
+  invoke<boolean>("get_full_access").then((v) => (fullAccessOn = v)).catch(() => {});
 });
 let showCommands = $state(false);
 let attachMenuOpen = $state(false);
@@ -213,6 +216,76 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
     if (sid) sessions.bumpMessageCount(sid, 1);
   }
 
+
+  async function toggleFullAccess() {
+    const next = !fullAccessOn;
+    // Enabling removes the approval prompt for every tool; the in-app dialog
+    // is used because window.confirm is a silent no-op under Tauri's ACL.
+    if (next && !(await askConfirm($t("status.fullAccessConfirm"), { danger: true }))) return;
+    fullAccessOn = next;
+    invoke("set_full_access", { enabled: next }).catch(() => {});
+  }
+
+  /** Send the current text to the butler session and switch to it. */
+  async function handoffToButler(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    try {
+      const res = await invoke<{ session_id: string }>("butler_submit", {
+        text: trimmed,
+        projectId: null,
+      });
+      await sessions.load();
+      sessions.select(res.session_id);
+      window.dispatchEvent(
+        new CustomEvent("openzen:select-session", { detail: res.session_id }),
+      );
+    } catch (e) {
+      chat.addUserMessage(trimmed);
+      chat.startAssistantMessage();
+      chat.appendLocalText("⚠️ " + (e instanceof Error ? e.message : String(e)));
+      chat.finalizeAssistantMessage();
+    }
+  }
+
+  let handoffBusy = $state(false);
+
+  /** Open the butler session without handing a task over (entry point). */
+  async function openButlerSession() {
+    try {
+      const res = await invoke<{ session_id: string }>("butler_ensure_session", {
+        projectId: null,
+      });
+      if (res?.session_id) {
+        await sessions.load();
+        sessions.select(res.session_id);
+        window.dispatchEvent(
+          new CustomEvent("openzen:select-session", { detail: res.session_id }),
+        );
+      }
+    } catch (e) {
+      chat.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function handoffCurrent() {
+    if (handoffBusy) return;
+    const text = inputText.trim();
+    handoffBusy = true;
+    try {
+      // Empty box: the button is the butler entry point, not a no-op.
+      if (!text) {
+        await openButlerSession();
+        return;
+      }
+      inputText = "";
+      if (textareaEl) textareaEl.style.height = "auto";
+      await handoffToButler(text);
+    } finally {
+      handoffBusy = false;
+    }
+  }
+
   async function handleCommand(cmd: string) {
     showCommands = false;
     const parts = cmd.trim().split(/\s+/);
@@ -220,6 +293,18 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
     const arg = parts.slice(1).join(" ");
 
     switch (base) {
+      case "/butler":
+      case "/erya": {
+        if (!arg) {
+          chat.addUserMessage(cmd);
+          chat.startAssistantMessage();
+          chat.appendLocalText(localT("butler.empty"));
+          chat.finalizeAssistantMessage();
+        } else {
+          await handoffToButler(arg);
+        }
+        break;
+      }
       case "/clear": {
         chat.clearMessages();
         const cid = $sessions.currentId;
@@ -235,6 +320,7 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
         chat.startAssistantMessage();
         chat.appendLocalText(
           localT("help.title") + "\n\n" +
+          "- `/butler <任务>` — " + localT("cmd.butler.desc") + "\n" +
           "- `/help` — " + localT("help.item.help") + "\n" +
           "- `/clear` — " + localT("help.clear") + "\n" +
           "- `/new` — " + localT("help.new") + "\n" +
@@ -652,6 +738,38 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
           </div>
         {/if}
       </div>
+      <button
+        class="attach-btn full-access-pill"
+        class:on={fullAccessOn}
+        onclick={toggleFullAccess}
+        title={$t("status.fullAccessDanger") + "：" + (fullAccessOn ? $t("status.on") : $t("status.off"))}
+        aria-label={$t("status.fullAccessDanger")}
+        aria-pressed={fullAccessOn}
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          {#if fullAccessOn}
+            <path d="M4 7V5a4 4 0 0 1 8 0v2" stroke="currentColor" stroke-width="1.3"/>
+            <rect x="3" y="7" width="10" height="7" rx="1.6" stroke="currentColor" stroke-width="1.3"/>
+          {:else}
+            <path d="M4 7V5a4 4 0 0 1 7.5-1.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            <rect x="3" y="7" width="10" height="7" rx="1.6" stroke="currentColor" stroke-width="1.3"/>
+          {/if}
+        </svg>
+        {$t("status.fullAccessDanger")}
+      </button>
+      <button
+        class="attach-btn butler-handoff"
+        onclick={handoffCurrent}
+        disabled={handoffBusy}
+        title={$t("butler.handoffTitle")}
+        aria-label={$t("butler.handoff")}
+      >
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M2 7.2 8 2.5l6 4.7V14H2V7.2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+          <path d="M6.2 14v-3.4h3.6V14" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        {handoffBusy ? "…" : $t("butler.handoff")}
+      </button>
       <span class="composer-hint"><kbd>⌘</kbd> {$t("input.send")} · <kbd>⇧⏎</kbd> {$t("input.newline")}</span>
       <span class="composer-spacer"></span>
       {#if $chat.isProcessing}
@@ -905,6 +1023,11 @@ let textareaEl: HTMLTextAreaElement | undefined = $state();
   .thinking-pill.engaged {
     border-color: var(--color-primary);
     color: var(--color-primary-hover);
+  }
+  .full-access-pill.on {
+    border-color: var(--color-gold-line);
+    color: var(--color-gold);
+    background: var(--color-gold-soft);
   }
   .thinking-menu {
     min-width: 180px;

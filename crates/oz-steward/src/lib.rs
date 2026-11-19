@@ -7,6 +7,7 @@
 //! That keeps the core loop free of steward dependencies and makes the
 //! supervision layer testable without an LLM.
 
+pub mod butler;
 pub mod calibration;
 pub mod contract;
 pub mod decision;

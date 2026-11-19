@@ -202,6 +202,52 @@ mod tests {
     use super::*;
     use oz_core::jobs::JobStatus;
 
+    /// Two concurrent background jobs must keep separate output rings and
+    /// both remain collectable after one finishes.
+    #[tokio::test]
+    async fn parallel_jobs_are_isolated_and_both_collectable() {
+        let owner = format!("test-{}", uuid::Uuid::new_v4());
+        let a = start_bash("echo job-a; sleep 0.4; echo done-a", "/tmp", &owner).unwrap();
+        let b = start_bash("echo job-b; sleep 0.2; echo done-b", "/tmp", &owner).unwrap();
+        let registry = global();
+        let mut out_a = String::new();
+        let mut out_b = String::new();
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            out_a.push_str(&registry.read(&a, &owner).unwrap().0);
+            out_b.push_str(&registry.read(&b, &owner).unwrap().0);
+            if out_a.contains("done-a") && out_b.contains("done-b") {
+                break;
+            }
+        }
+        assert!(
+            out_a.contains("job-a") && out_a.contains("done-a"),
+            "{out_a:?}"
+        );
+        assert!(
+            out_b.contains("job-b") && out_b.contains("done-b"),
+            "{out_b:?}"
+        );
+        assert!(!out_a.contains("job-b"), "output rings leaked: {out_a:?}");
+        assert!(!out_b.contains("job-a"), "output rings leaked: {out_b:?}");
+        let done_a = registry
+            .wait(&a, &owner, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let done_b = registry
+            .wait(&b, &owner, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(matches!(
+            done_a.status,
+            JobStatus::Completed | JobStatus::Killed
+        ));
+        assert!(matches!(
+            done_b.status,
+            JobStatus::Completed | JobStatus::Killed
+        ));
+    }
+
     /// End-to-end through the real registry: output streams while running,
     /// cancel actually stops the process group, settlement is `killed`.
     #[tokio::test]

@@ -30,7 +30,7 @@
   let gateCommand = $state("cargo test");
   let maxAttempts = $state(8);
   let autoContinue = $state(true);
-  let requireHuman = $state(false);
+
   let autoStart = $state(true);
   let error = $state("");
   let busy = $state(false);
@@ -46,8 +46,9 @@
 
   const current = $derived(goals.find((g) => g.id === selected) ?? null);
   const statusLabel: Record<string, string> = {
-    draft: "草稿", active: "进行中", paused: "已暂停", verifying: "验收中",
-    blocked: "需要你", achieved: "已达成", exhausted: "预算耗尽", abandoned: "已放弃",
+    draft: "草稿", active: "进行中", paused: "已暂停", verifying: "核验中",
+    blocked: "需要你", achieved: "已达成", unverified: "已完成·未验证",
+    exhausted: "预算耗尽", abandoned: "已放弃",
   };
 
   $effect(() => {
@@ -86,7 +87,7 @@
           max_no_progress_rounds: 2,
         },
         autoContinue,
-        requireHumanAcceptance: requireHuman,
+        requireHumanAcceptance: false,
       });
       if (autoStart && created?.id) {
         await tauriInvoke("goal_start", { goalId: created.id, modelName: null });
@@ -118,34 +119,33 @@
 
 {#if open}
   <div class="gp-overlay" role="button" tabindex="0" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === "Escape" && close()}>
-    <div class="gp-panel" role="dialog" aria-modal="true" aria-label="目标模式" tabindex="-1">
+    <div class="gp-panel" role="dialog" aria-modal="true" aria-label={$t("goal.title")} tabindex="-1">
       <header class="gp-head">
-        <div><div class="gp-kicker">GOAL MODE</div><h2>目标模式</h2></div>
-        <button class="gp-icon" onclick={close} aria-label="关闭">×</button>
+        <div><div class="gp-kicker">GOAL MODE</div><h2>{$t("goal.title")}</h2></div>
+        <button class="gp-icon" onclick={close} aria-label={$t("goal.close")}>×</button>
       </header>
 
       <div class="gp-body">
-        <p class="gp-hint">发消息时自动判断长任务/验收循环并开启 Goal Mode；这里只用于手动覆盖或查看。</p>
+        <p class="gp-hint">{$t("goal.hint")}</p>
         <section class="gp-create">
-          <h3>新建目标</h3>
-          <label>标题<input bind:value={title} placeholder="修好测试并提交" /></label>
-          <label>目标<textarea bind:value={objective} rows="2" placeholder="验收标准是什么？"></textarea></label>
-          <label>验收命令<input bind:value={gateCommand} placeholder="留空 → 人工验收" /></label>
+          <h3>{$t("goal.new")}</h3>
+          <label>{$t("goal.titleLabel")}<input bind:value={title} placeholder="修好测试并提交" /></label>
+          <label>{$t("goal.objectiveLabel")}<textarea bind:value={objective} rows="2" placeholder="验收标准是什么？"></textarea></label>
+          <label>{$t("goal.gateLabel")}<input bind:value={gateCommand} placeholder="留空 → 自动合成验收" /></label>
           <div class="gp-row">
-            <label>最多尝试<input type="number" min="1" max="50" bind:value={maxAttempts} /></label>
-            <label class="gp-check"><input type="checkbox" bind:checked={autoContinue} /> 失败自动续跑</label>
-            <label class="gp-check"><input type="checkbox" bind:checked={requireHuman} /> 必须人工验收</label>
-            <label class="gp-check"><input type="checkbox" bind:checked={autoStart} /> 创建后立即开始</label>
+            <label>{$t("goal.maxAttempts")}<input type="number" min="1" max="50" bind:value={maxAttempts} /></label>
+            <label class="gp-check"><input type="checkbox" bind:checked={autoContinue} /> {$t("goal.autoContinue")}</label>
+            <label class="gp-check"><input type="checkbox" bind:checked={autoStart} /> {$t("goal.autoStart")}</label>
           </div>
-          <button class="gp-primary" onclick={createGoal} disabled={busy}>创建目标</button>
+          <button class="gp-primary" onclick={createGoal} disabled={busy}>{$t("goal.create")}</button>
         </section>
 
         {#if error}<p class="gp-error">{error}</p>{/if}
 
         <section class="gp-list">
-          <h3>目标列表</h3>
+          <h3>{$t("goal.list")}</h3>
           {#if goals.length === 0}
-            <p class="gp-empty">还没有目标。</p>
+            <p class="gp-empty">{$t("goal.empty")}</p>
           {:else}
             {#each goals as g (g.id)}
               <button class="gp-card" class:selected={selected === g.id} onclick={() => (selected = g.id)}>
@@ -169,18 +169,15 @@
             </p>
             <div class="gp-actions">
               {#if current.status === "draft" || current.status === "paused" || current.status === "blocked"}
-                <button class="gp-btn" onclick={() => act(current.status === "draft" ? "goal_start" : "goal_resume", current.id)} disabled={busy}>开始 / 继续</button>
+                <button class="gp-btn" onclick={() => act(current.status === "draft" ? "goal_start" : "goal_resume", current.id)} disabled={busy}>{$t("goal.start")}</button>
               {/if}
               {#if current.status === "active" || current.status === "verifying"}
-                <button class="gp-btn" onclick={() => act("goal_pause", current.id)} disabled={busy}>暂停</button>
+                <button class="gp-btn" onclick={() => act("goal_pause", current.id)} disabled={busy}>{$t("goal.pause")}</button>
               {/if}
-              {#if current.status === "verifying"}
-                <button class="gp-primary" onclick={() => act("goal_accept", current.id)} disabled={busy}>人工验收</button>
+              {#if current.status !== "achieved" && current.status !== "unverified" && current.status !== "abandoned" && current.status !== "exhausted"}
+                <button class="gp-btn" onclick={() => act("goal_stop", current.id)} disabled={busy}>{$t("goal.stop")}</button>
               {/if}
-              {#if current.status !== "achieved" && current.status !== "abandoned" && current.status !== "exhausted"}
-                <button class="gp-btn" onclick={() => act("goal_stop", current.id)} disabled={busy}>停止</button>
-              {/if}
-              <button class="gp-btn" onclick={() => act("goal_takeover", current.id)}>接管</button>
+              <button class="gp-btn" onclick={() => act("goal_takeover", current.id)}>{$t("goal.takeover")}</button>
             </div>
           </section>
         {/if}

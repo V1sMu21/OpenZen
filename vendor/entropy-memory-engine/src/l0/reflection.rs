@@ -8,7 +8,7 @@ use crate::consolidation::ConsolidationStats;
 use crate::core::types::{KnowledgeSource, MemoryMeta, Query};
 use crate::l0::narrative::{NarrativeBuilder, NarrativeConfig};
 use crate::l0::portrait::PortraitFact;
-use crate::l0::soul::SoulHandle;
+use crate::l0::soul::{ConjectureNote, SoulHandle};
 use crate::memory_store::MemoryStore;
 use crate::phase1::types::default_factuality;
 use crate::phase1::{ConflictResolution, ConflictResolver};
@@ -389,19 +389,28 @@ impl ReflectionEngine {
                     continue;
                 }
             }
-            let fact = PortraitFact {
+            // Conjectures are audit notes, not self-image. Storing them in
+            // self_portrait injected "Node 123… may be related" into every
+            // system prompt (24/24 real facts were this shape).
+            soul.conjectures.push(ConjectureNote {
                 statement: c.statement.clone(),
                 confidence: c.sss_score.clamp(0.2, 0.8),
-                supporting_ids: vec![c.node_a, c.node_b],
-                contradicting_ids: Vec::new(),
-            };
-            if soul.self_portrait.insert_fact(fact) {
-                changed = true;
-                self.observer.record(BehaviorEvent::InsightGenerated {
-                    depth: c.sss_score,
-                    statement: c.statement.clone(),
-                });
+                created_at_nanos: crate::core::now_nanos(),
+            });
+            // Bound the audit list: 7 days, 64 entries.
+            const TTL: i64 = 7 * 24 * 3600 * 1_000_000_000;
+            let now = crate::core::now_nanos();
+            soul.conjectures
+                .retain(|n| now.saturating_sub(n.created_at_nanos) <= TTL);
+            if soul.conjectures.len() > 64 {
+                let drop = soul.conjectures.len() - 64;
+                soul.conjectures.drain(0..drop);
             }
+            changed = true;
+            self.observer.record(BehaviorEvent::InsightGenerated {
+                depth: c.sss_score,
+                statement: c.statement.clone(),
+            });
         }
         if changed {
             soul.bump_version();

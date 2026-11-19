@@ -11,3 +11,6 @@ thiserror.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

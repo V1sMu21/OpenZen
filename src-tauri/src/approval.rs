@@ -24,6 +24,45 @@ use crate::AppState;
 pub struct PendingApproval {
     pub session_id: String,
     pub tx: oneshot::Sender<ApprovalDecision>,
+    /// When the request was registered. The watchdog uses it to catch a
+    /// request whose run-task is wedged before it can even await its timer.
+    pub created: std::time::Instant,
+}
+
+/// A request left undecided this long is treated as broken, not as "the user
+/// is still thinking": the modal auto-denies at 30 min, so anything older
+/// means the event never reached the UI or the run task is stuck.
+const APPROVAL_STUCK_SECS: u64 = 3600;
+
+/// Independent watchdog: runs on its own task so it can deny a stuck request
+/// even when the agent's task is blocked and its own 30-minute timeout never fires.
+pub fn start_watchdog(pending: PendingApprovals) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let stuck: Vec<(String, PendingApproval)> = {
+                let mut map = crate::lock_poison_guard(&pending);
+                let now = std::time::Instant::now();
+                let ids: Vec<String> = map
+                    .iter()
+                    .filter(|(_, p)| {
+                        now.duration_since(p.created) >= Duration::from_secs(APPROVAL_STUCK_SECS)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                ids.into_iter()
+                    .filter_map(|id| map.remove(&id).map(|p| (id, p)))
+                    .collect()
+            };
+            for (id, p) in stuck {
+                tracing::warn!(
+                    "[safety] approval {id} undecided for {APPROVAL_STUCK_SECS}s — auto-deny (session={})",
+                    p.session_id
+                );
+                let _ = p.tx.send(ApprovalDecision::Deny);
+            }
+        }
+    });
 }
 
 pub type PendingApprovals = Arc<Mutex<HashMap<String, PendingApproval>>>;
@@ -54,6 +93,15 @@ impl Clone for TauriApprovalHandler {
     }
 }
 
+/// Abort a reminder task on every exit path, including a dropped approval
+/// future (Stop/cancel), not just the normal timeout/decision path.
+struct AbortTask(tokio::task::JoinHandle<()>);
+impl Drop for AbortTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl TauriApprovalHandler {
     pub fn new(
         app_handle: AppHandle,
@@ -77,6 +125,14 @@ impl ApprovalHandler for TauriApprovalHandler {
         request: ApprovalRequest,
         timeout: Duration,
     ) -> Result<ApprovalDecision, ApprovalError> {
+        tracing::info!(
+            "[safety] approval request {}/{} session={} full_access={} timeout={}s",
+            request.tool_name,
+            request.pattern,
+            request.session_id,
+            self.full_access.load(Ordering::Relaxed),
+            timeout.as_secs()
+        );
         // Full-access mode: auto-allow every request without showing the
         // modal, so the agent can execute without user intervention.
         if self.full_access.load(Ordering::Relaxed) {
@@ -86,7 +142,7 @@ impl ApprovalHandler for TauriApprovalHandler {
                 request.pattern,
                 request.session_id,
             );
-            return Ok(ApprovalDecision::Allow);
+            return Ok(ApprovalDecision::AutoAllow);
         }
 
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -97,6 +153,7 @@ impl ApprovalHandler for TauriApprovalHandler {
             PendingApproval {
                 session_id: request.session_id.clone(),
                 tx,
+                created: std::time::Instant::now(),
             },
         );
         // Drop-safe cleanup: when the waiting future is cancelled
@@ -165,7 +222,27 @@ impl ApprovalHandler for TauriApprovalHandler {
             id = request_id,
         );
 
-        match tokio::time::timeout(timeout, &mut rx).await {
+        // Remind the user while the request is pending: first tick fires
+        // immediately, then every 5 minutes. Only notifies when the user is
+        // away/idle (see notify_if_unfocused), so an active user is not spammed.
+        let _notifier = AbortTask({
+            let app = self.app_handle.clone();
+            let title = format!("OpenZen · 需要授权：{}", request.tool_name);
+            let body = format!(
+                "{}（{}）正在等待你的决定，最多 30 分钟。",
+                request.pattern,
+                request.session_id.chars().take(8).collect::<String>()
+            );
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(300));
+                loop {
+                    tick.tick().await;
+                    crate::notify_if_unfocused(&app, &title, &body);
+                }
+            })
+        });
+        let decision = tokio::time::timeout(timeout, &mut rx).await;
+        match decision {
             Ok(Ok(decision)) => Ok(decision),
             Ok(Err(_)) => Err(ApprovalError::Cancelled),
             Err(_) => Err(ApprovalError::Timeout),

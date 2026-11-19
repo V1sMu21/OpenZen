@@ -6,10 +6,7 @@
 
   let {
     thinking = "",
-    duration = 0,
-    durationMs = undefined as number | undefined,
     streaming = false,
-    showTimer = false,
     showPausedWarning = true,
   } = $props();
 
@@ -17,11 +14,6 @@
 
   function toggle() {
     collapsed = !collapsed;
-  }
-
-  function formatDuration(ms: number): string {
-    if (ms < 1000) return `${ms}${tSync(lang, "message.duration.ms")}`;
-    return tSync(lang, "message.duration.formatSec").replace("{s}", (ms / 1000).toFixed(1));
   }
 
   function wordCount(text: string): number {
@@ -129,42 +121,20 @@
     return tSync(lang, "thinking.words").replace("{n}", String(wordN));
   });
 
-  // Header duration — accumulated active thinking time.
-  // Instead of measuring wall-clock from the first token to the last
-  // (which includes gaps when the model is executing tools), we track
-  // the *word count growth* and only count time when thinking content
-  // is actively expanding.
-  //
-  // Concept: when wordCount changes → thinking is happening.
-  //          when wordCount is stable for >3s → thinking is paused.
+  // Pause detection: thinking is "paused" when the word count stops growing.
   const PAUSE_THRESHOLD_MS = 1200;
-  let liveTickMs = $state(0);
-  let lastGrowthMs = 0;       // wall-clock ms of the last word-count change
-  let accumulatedMs = 0;      // total active thinking ms so far
+  let lastGrowthMs = 0;
   let isPaused = $state(false);
   let liveInterval: ReturnType<typeof setInterval> | null = null;
-  let capturedDurationMs = $state(0);
   let prevWordCount = 0;
 
   function startLiveTimer() {
     if (liveInterval !== null) return;
-    const now = Date.now();
-    lastGrowthMs = now;
-    accumulatedMs = 0;
-    liveTickMs = 0;
+    lastGrowthMs = Date.now();
     isPaused = false;
-    capturedDurationMs = 0;
     prevWordCount = 0;
     liveInterval = setInterval(() => {
-      const t = Date.now();
-      const sinceGrowth = t - lastGrowthMs;
-      if (sinceGrowth > PAUSE_THRESHOLD_MS) {
-        liveTickMs = accumulatedMs;
-        isPaused = true;
-      } else {
-        liveTickMs = accumulatedMs + sinceGrowth;
-        isPaused = false;
-      }
+      isPaused = Date.now() - lastGrowthMs > PAUSE_THRESHOLD_MS;
     }, 250);
   }
 
@@ -173,20 +143,13 @@
       clearInterval(liveInterval);
       liveInterval = null;
     }
-    capturedDurationMs = accumulatedMs;
   }
 
-  // Track word-count growth to accumulate active thinking time.
-  // Depends on throttled `wordN` instead of recomputing wordCount() over the
-  // full text on every token.
   $effect(() => {
     if (!streaming) return;
     const wc = wordN;
-    const now = Date.now();
     if (wc !== prevWordCount) {
-      const since = now - lastGrowthMs;
-      accumulatedMs += Math.min(since, PAUSE_THRESHOLD_MS);
-      lastGrowthMs = now;
+      lastGrowthMs = Date.now();
       prevWordCount = wc;
       isPaused = false;
     }
@@ -202,20 +165,6 @@
     return stopLiveTimer;
   });
 
-  // When streaming ends, prefer durationMs from the reasoning_end timing
-  // (computed by protocol-processor.ts from actual reasoning_start→end).
-  // This is the exact server-declared thinking duration per block, not
-  // wall-clock including tool gaps or word-count heuristics.
-  let headerDuration = $derived(
-    streaming ? 0 : (
-      (durationMs != null && durationMs > 200 ? durationMs : 0)
-      || capturedDurationMs
-      || (duration ?? 0)
-    )
-  );
-  let headerDurationLabel = $derived(
-    headerDuration > 0 ? formatDuration(headerDuration) : ""
-  );
 </script>
 
 {#if thinking}
@@ -223,9 +172,6 @@
     <button class="thinking-header" onclick={toggle} aria-expanded={!collapsed} aria-label={$t("thinking.label")}>
       <span class="tglyph" aria-hidden="true"></span>
       <span class="thinking-label">{$t("thinking.label")}</span>
-      {#if headerDurationLabel && showTimer}
-        <span class="thinking-duration">{headerDurationLabel}</span>
-      {/if}
       {#if isPaused && showPausedWarning}
         <span class="thinking-paused" title={$t("thinking.pausedTitle")}>{$t("thinking.paused")}</span>
       {/if}
@@ -295,14 +241,6 @@
     color: var(--color-body);
     font-size: 12px;
     letter-spacing: 0.01em;
-  }
-
-  .thinking-duration {
-    color: var(--color-muted);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
   }
 
   .thinking-words {

@@ -69,6 +69,19 @@ fn valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Pure cancellation primitive: set the child's stop flag if it exists.
+/// Unknown ids are a no-op (the child may have already finished).
+pub fn cancel_child_signal(
+    signals: &std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    >,
+    child: &str,
+) {
+    if let Some(sig) = lock_poison_guard(signals).get(child) {
+        sig.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 fn agents_root() -> PathBuf {
     crate::data_dir().join("openzen").join("agents")
 }
@@ -214,9 +227,7 @@ impl TauriSubagentHost {
 
     /// Stop a child by setting its loop's stop signal.
     pub fn cancel_child(&self, child: &str) {
-        if let Some(sig) = lock_poison_guard(&self.state.stop_signals).get(child) {
-            sig.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
+        cancel_child_signal(&self.state.stop_signals, child);
     }
 
     async fn run_child(
@@ -226,7 +237,7 @@ impl TauriSubagentHost {
         existing_messages: Option<Vec<serde_json::Value>>,
     ) -> Result<SubagentResult, String> {
         let child_id = req.child_id.clone();
-        let (project_id, project_name, working_dir) = {
+        let (mut project_id, mut project_name, mut working_dir) = {
             let store = lock_poison_guard(&self.state.sessions);
             let Some(parent) = store.get(&req.parent_session) else {
                 drop(store);
@@ -239,6 +250,19 @@ impl TauriSubagentHost {
                 parent.working_dir.clone(),
             )
         };
+        if req.project_id.is_some() {
+            project_id = req.project_id.clone();
+        }
+        if req.project_name.is_some() {
+            project_name = req.project_name.clone();
+        }
+        if req.working_dir.is_some() {
+            working_dir = req.working_dir.clone();
+        }
+        if let Some(root) = &working_dir {
+            oz_core::subagent::set_workspace(&child_id, root);
+            oz_core_types::confinement::set_workspace(&child_id, root);
+        }
 
         {
             let mut store = lock_poison_guard(&self.state.sessions);
@@ -389,11 +413,22 @@ impl TauriSubagentHost {
                 }
             }),
         );
-        crate::notify_if_unfocused(
-            &self.app,
-            "子代理已完成",
-            &format!("{} — {}", req.label, finished_status),
-        );
+        // Butler workers are covered by the butler's one consolidated digest;
+        // per-worker notifications would double-ping the user for one task.
+        let parent_is_butler = {
+            let sessions = crate::lock_poison_guard(&self.state.sessions);
+            sessions
+                .get(&req.parent_session)
+                .map(|e| e.role.is_butler())
+                .unwrap_or(false)
+        };
+        if !parent_is_butler {
+            crate::notify_if_unfocused(
+                &self.app,
+                "子代理已完成",
+                &format!("{} — {}", req.label, finished_status),
+            );
+        }
         guard.cleanup();
 
         match run {
@@ -537,6 +572,9 @@ impl SubagentHost for TauriSubagentHost {
             prompt: message.to_string(),
             model: cached_model,
             max_turns: None,
+            project_id: None,
+            project_name: None,
+            working_dir: None,
         };
         self.run_child(&req, depth, Some(history)).await
     }
@@ -584,4 +622,30 @@ pub fn list_children(parent: &str) -> Vec<serde_json::Value> {
 pub fn read_transcript(child_id: &str) -> Result<String, String> {
     let p = transcript_path(child_id).ok_or_else(|| format!("child {child_id} not found"))?;
     std::fs::read_to_string(&p).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::cancel_child_signal;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn cancelling_a_child_sets_its_stop_signal_only() {
+        let child = Arc::new(AtomicBool::new(false));
+        let other = Arc::new(AtomicBool::new(false));
+        let mut map = HashMap::new();
+        map.insert("child-1".to_string(), child.clone());
+        map.insert("child-2".to_string(), other.clone());
+        let signals = Mutex::new(map);
+        cancel_child_signal(&signals, "child-1");
+        assert!(child.load(Ordering::SeqCst));
+        assert!(
+            !other.load(Ordering::SeqCst),
+            "cancel must not hit siblings"
+        );
+        // Unknown child is a no-op, not a panic.
+        cancel_child_signal(&signals, "missing");
+    }
 }

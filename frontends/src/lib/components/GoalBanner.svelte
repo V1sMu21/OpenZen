@@ -21,7 +21,7 @@
   let timer: ReturnType<typeof setInterval> | undefined;
 
   const labels: Record<string, string> = {
-    draft: "草稿", active: "进行中", paused: "已暂停", verifying: "验收中",
+    draft: "草稿", active: "进行中", paused: "已暂停", verifying: "核验中", unverified: "已完成·未验证",
     blocked: "需要你", achieved: "已达成", exhausted: "预算耗尽", abandoned: "已放弃",
   };
 
@@ -71,10 +71,11 @@
         {labels[goal.status] ?? goal.status}
         · attempt {goal.attempts}/{goal.spec.budget.max_attempts}
         · {goal.spec.gates.length} gates
-        {#if goal.status === "verifying"} · 等待人工验收{/if}
+        {#if goal.status === "verifying"} · 自动核验中{/if}
+        {#if goal.status === "unverified"} · 证据不足{/if}
       </span>
     </span>
-    <button class="gb-btn" onclick={openGoals}>{goal.status === "verifying" ? "去验收" : "查看目标"}</button>
+    <button class="gb-btn" onclick={openGoals}>{goal.status === "verifying" ? "查看进度" : "查看目标"}</button>
   </div>
 {/if}
 

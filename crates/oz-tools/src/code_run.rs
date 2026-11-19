@@ -135,6 +135,11 @@ impl ToolHandler for CodeRunTool {
                     "code_run: background execution currently supports bash only",
                 ));
             }
+            if oz_core_types::confinement::workspace_of(&ctx.session_id).is_some() {
+                return Ok(ToolOutput::bad_json(
+                    "code_run: background execution is not available inside a butler worker jail;                      run it in the foreground with a timeout instead",
+                ));
+            }
             return match crate::job_bg::start_bash(code, &ctx.working_dir, &ctx.session_id) {
                 Ok(job_id) => Ok(ToolOutput::success_with_prompt(
                     serde_json::json!({
@@ -379,6 +384,17 @@ fn kill_process_tree(_pid: Option<u32>) {}
 /// lifetime of an inherited pipe, and whatever output was collected is always
 /// returned (partial output on timeout, instead of the empty string this used
 /// to swallow).
+/// Kill the whole process group if the future is dropped (Stop/abort), not
+/// only when run_child_with_timeout itself reaches its timeout branch.
+struct KillGroupOnDrop(Option<u32>);
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            kill_process_tree(Some(pid));
+        }
+    }
+}
+
 async fn run_child_with_timeout(
     mut command: tokio::process::Command,
     timeout: u64,
@@ -397,6 +413,7 @@ async fn run_child_with_timeout(
         .spawn()
         .map_err(|e| ToolError::Custom(format!("{what} execution failed: {e}. Verify the command syntax and that required tools are installed.")))?;
     let pid = child.id();
+    let mut group_guard = KillGroupOnDrop(pid);
 
     let out_buf = std::sync::Arc::new(std::sync::Mutex::new(PipeBuf::default()));
     let err_buf = std::sync::Arc::new(std::sync::Mutex::new(PipeBuf::default()));
@@ -407,8 +424,12 @@ async fn run_child_with_timeout(
     let waited =
         tokio::time::timeout(std::time::Duration::from_secs(timeout.max(1)), child.wait()).await;
     let timed_out = waited.is_err();
+    if !timed_out {
+        group_guard.0 = None; // child reaped; do not signal a reused pgid
+    }
     if timed_out {
         kill_process_tree(pid);
+        group_guard.0 = None;
         let _ = child.start_kill();
     }
 
@@ -468,6 +489,20 @@ async fn run_child_with_timeout(
     Ok(result)
 }
 
+/// macOS seatbelt profile: reads are unrestricted, writes stay inside the
+/// worker's project root plus the caches builds need.
+fn sandbox_write_profile(root: &str) -> String {
+    let escaped = root.replace('"', "\\\"");
+    // No HOME cache allow-list: a worker that can write ~/.cargo/config.toml
+    // can plant a rustc-wrapper that runs outside the jail on the next build.
+    // CARGO_HOME/RUSTUP_HOME/npm cache are redirected into the project.
+    let allow = [format!("(subpath \"{escaped}\")")];
+    format!(
+        "(version 1)(allow default)(deny file-write*)(allow file-write* {})",
+        allow.join(" ")
+    )
+}
+
 impl CodeRunTool {
     async fn run_shell(
         &self,
@@ -475,8 +510,36 @@ impl CodeRunTool {
         timeout: u64,
         ctx: &ToolContext,
     ) -> Result<serde_json::Value, ToolError> {
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg(code).current_dir(&ctx.working_dir);
+        // Butler workers run under a write-jail: only their task's project
+        // root (plus tool caches and temp) is writable, even with full access.
+        let mut cmd = match oz_core_types::confinement::workspace_of(&ctx.session_id) {
+            Some(root) if std::path::Path::new("/usr/bin/sandbox-exec").exists() => {
+                let profile = sandbox_write_profile(&root);
+                let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
+                c.arg("-p").arg(profile).arg("sh").arg("-c").arg(code);
+                c
+            }
+            _ => {
+                let mut c = tokio::process::Command::new("sh");
+                c.arg("-c").arg(code);
+                c
+            }
+        };
+        cmd.current_dir(&ctx.working_dir);
+        // Per-project temp: do not let two projects coordinate through a
+        // globally-writable /private/tmp.
+        let tmp = std::path::Path::new(&ctx.working_dir).join(".openzen/tmp");
+        let _ = std::fs::create_dir_all(&tmp);
+        cmd.env("TMPDIR", &tmp);
+        let cargo_home = std::path::Path::new(&ctx.working_dir).join(".openzen/cargo");
+        let rustup_home = std::path::Path::new(&ctx.working_dir).join(".openzen/rustup");
+        let npm_cache = std::path::Path::new(&ctx.working_dir).join(".openzen/npm");
+        let _ = std::fs::create_dir_all(&cargo_home);
+        let _ = std::fs::create_dir_all(&rustup_home);
+        let _ = std::fs::create_dir_all(&npm_cache);
+        cmd.env("CARGO_HOME", &cargo_home)
+            .env("RUSTUP_HOME", &rustup_home)
+            .env("npm_config_cache", &npm_cache);
         let mut result = run_child_with_timeout(cmd, timeout, "code_run").await?;
         // Preserve the legacy "timed out" heuristic for callers that check it.
         if result.get("timeout").is_none() {
@@ -494,7 +557,15 @@ impl CodeRunTool {
         timeout: u64,
         ctx: &ToolContext,
     ) -> Result<serde_json::Value, ToolError> {
-        let tmp_dir = std::env::temp_dir();
+        let confined = oz_core_types::confinement::workspace_of(&ctx.session_id);
+        let tmp_dir = match &confined {
+            Some(root) => {
+                let t = std::path::Path::new(root).join(".openzen/tmp");
+                let _ = std::fs::create_dir_all(&t);
+                t
+            }
+            None => std::env::temp_dir(),
+        };
         let script_path = tmp_dir.join(format!("ga_{}.ai.py", uuid::Uuid::new_v4()));
         let _script_guard = TmpScriptGuard(script_path.clone());
 
@@ -504,7 +575,7 @@ impl CodeRunTool {
             .await
             .map_err(|e| {
                 ToolError::Custom(format!(
-                    "failed to write temp script: {e}. Check disk space and /tmp permissions."
+                    "failed to write temp script: {e}. Check disk space and permissions."
                 ))
             })?;
 
@@ -514,12 +585,21 @@ impl CodeRunTool {
             "python3"
         };
 
-        let mut cmd = tokio::process::Command::new(python);
+        let mut cmd = match confined {
+            Some(root) if std::path::Path::new("/usr/bin/sandbox-exec").exists() => {
+                let profile = sandbox_write_profile(&root);
+                let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
+                c.arg("-p").arg(profile).arg(python);
+                c
+            }
+            _ => tokio::process::Command::new(python),
+        };
         cmd.arg("-X")
             .arg("utf8")
             .arg("-u")
             .arg(&script_path)
-            .current_dir(&ctx.working_dir);
+            .current_dir(&ctx.working_dir)
+            .env("TMPDIR", &tmp_dir);
         run_child_with_timeout(cmd, timeout, "python").await
     }
 }
@@ -737,5 +817,19 @@ mod tests {
     #[linkme::distributed_slice(crate::registry::TOOL_FACTORIES)]
     fn register_code_run(reg: &mut crate::registry::ToolRegistry) {
         reg.register(crate::code_run::CodeRunTool);
+    }
+}
+
+#[cfg(test)]
+mod sandbox_tests {
+    #[test]
+    fn sandbox_profile_names_the_project_root() {
+        let p = super::sandbox_write_profile("/tmp/proj");
+        assert!(p.contains("(deny file-write*)"));
+        assert!(p.contains("(subpath \"/tmp/proj\")"));
+        assert!(
+            !p.contains("(subpath \"/private/tmp\")"),
+            "global temp must not be writable across projects: {p}"
+        );
     }
 }

@@ -14,6 +14,17 @@ use crate::l0::state::SoulState;
 /// 灵魂模型当前 schema 版本
 pub const SOUL_VERSION: u64 = 1;
 
+/// A conjecture produced by the rambling cycle. Kept for audit only — it is
+/// never injected into the system prompt (real data: 24/24 self-portrait
+/// facts were "Node X and node Y may be related", so the model's self-image
+/// was a list of graph ids).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConjectureNote {
+    pub statement: String,
+    pub confidence: f32,
+    pub created_at_nanos: i64,
+}
+
 /// L0 灵魂模型 = 核心良知 + 情境状态 + 画像对 + 生命叙事
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SoulModel {
@@ -29,6 +40,9 @@ pub struct SoulModel {
     pub relationship: Relationship,
     /// 生命叙事
     pub narrative: LifeNarrative,
+    /// 图关系猜想（仅审计，不注入）
+    #[serde(default)]
+    pub conjectures: Vec<ConjectureNote>,
     /// 单调递增，供外部缓存失效
     pub version: u64,
 }
@@ -42,8 +56,11 @@ impl SoulModel {
             user_portrait: Portrait::new(),
             relationship: Relationship::default(),
             narrative: LifeNarrative::new(),
+            conjectures: Vec::new(),
             version: SOUL_VERSION,
         };
+        soul.self_portrait.capacity = 32;
+        soul.user_portrait.capacity = 64;
         // 新生的灵魂不允许停留在「未命名」占位：用诞生时刻命名。
         soul.core.name_if_unnamed();
         soul
@@ -61,6 +78,8 @@ impl SoulModel {
         // 先尝试新格式
         if let Ok(mut soul) = serde_json::from_str::<SoulModel>(json) {
             soul.core.name_if_unnamed();
+            soul.self_portrait.capacity = 32;
+            soul.user_portrait.capacity = 64;
             return Ok(soul);
         }
         // 旧格式：{ data: { core_identity, ... } }

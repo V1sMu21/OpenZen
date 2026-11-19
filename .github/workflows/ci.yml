@@ -176,3 +176,19 @@ jobs:
             target/release/openzen
             target/release/bundle/macos/OpenZen.app
           if-no-files-found: error
+
+  ecf:
+    name: Edge Case Factory (contract + corpus)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Contract / corpus / manifest check
+        # Exit 4 on drift, duplicate ids, a missing fixture or a stale
+        # manifest — a silently empty corpus must never look green.
+        run: cargo run -q -p oz-testkit --bin oz-casegen -- check
+      - name: Corpus ratchet (may grow, never shrink)
+        run: python3 scripts/caselab/ratchet.py
+      - name: ECF unit cases + wire properties
+        # 1,000 wire seeds in PR; the 5k corpus runs in nightly.
+        run: cargo test -p oz-testkit

@@ -160,7 +160,7 @@ async fn scenario_05_false_completion_never_achieves() {
 }
 
 #[tokio::test]
-async fn scenario_06_human_gate_stops_then_accepts() {
+async fn scenario_06_human_gate_settles_unverified() {
     let store = Arc::new(GoalStore::open_memory().unwrap());
     let mut s = spec("g6");
     s.gates = vec![GoalGate::Human {
@@ -182,16 +182,11 @@ async fn scenario_06_human_gate_stops_then_accepts() {
         rt.complete_attempt("g6", "wait", 1, None, vec![human])
             .await
             .unwrap(),
-        GoalDecision::Verify
+        GoalDecision::Unverified
     );
     assert_eq!(
         store.get("g6").unwrap().unwrap().status,
-        GoalStatus::Verifying
-    );
-    rt.accept("g6", "human approved").unwrap();
-    assert_eq!(
-        store.get("g6").unwrap().unwrap().status,
-        GoalStatus::Achieved
+        GoalStatus::Unverified
     );
 }
 

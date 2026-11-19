@@ -1,3 +1,4 @@
+use crate::l3::storage::StorageConfig;
 use std::path::PathBuf;
 
 use crate::core::error::MemoryError;
@@ -14,6 +15,7 @@ pub struct L3Config {
     pub budget: BudgetConfig,
     pub compression_max_chars: usize,
     pub distillation: DistillationConfig,
+    pub storage: StorageConfig,
 }
 
 impl Default for L3Config {
@@ -23,6 +25,7 @@ impl Default for L3Config {
             budget: BudgetConfig::default(),
             compression_max_chars: 1024,
             distillation: DistillationConfig::default(),
+            storage: StorageConfig::default(),
         }
     }
 }
@@ -229,6 +232,7 @@ mod tests {
                 enable_mlx: false,
                 ..Default::default()
             },
+            storage: StorageConfig::default(),
         })
     }
 

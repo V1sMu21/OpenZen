@@ -93,6 +93,16 @@ impl L2Engine {
 
     /// Which embedder is active — surfaced through memory status so the UI
     /// can show when semantic recall is running on the hash fallback.
+    /// Embed one text with the configured model (used by the startup cache).
+    pub fn embed_text(&self, text: &str) -> Vec<f32> {
+        self.embedder.embed(text)
+    }
+
+    /// Configured vector dimension.
+    pub fn dimension(&self) -> usize {
+        self.config.dimension
+    }
+
     pub fn embedding_kind(&self) -> &'static str {
         self.embedding_kind
     }
@@ -111,12 +121,27 @@ impl L2Engine {
     /// Insert with a pre-determined ID.
     /// Used by MemoryRouter to keep IDs consistent across layers.
     pub fn insert_with_id(&self, input: MemoryInput, id: u64) -> MemoryResult<u64> {
+        let content_text = match &input.content {
+            MemoryContent::Fact(f) => format!("{} {} {}", f.subject, f.predicate, f.object),
+            MemoryContent::Summary(s) => s.clone(),
+            _ => String::new(),
+        };
+        let vector = self.embedder.embed(&content_text);
+        self.insert_with_id_and_vector(input, id, vector)
+    }
+
+    /// Insert using an already-computed embedding. Lets startup reuse the
+    /// persisted embedding cache instead of paying MLX per row.
+    pub fn insert_with_id_and_vector(
+        &self,
+        input: MemoryInput,
+        id: u64,
+        vector: Vec<f32>,
+    ) -> MemoryResult<u64> {
         let memory = Memory::from_input_with_id(input, id);
 
         let content_text = memory.content_text();
-        let vector = self.embedder.embed(&content_text);
-
-        if content_text.len() > 2 {
+        if content_text.len() > 2 && vector.len() == self.config.dimension {
             self.hnsw.insert(id, vector);
         }
 
@@ -188,6 +213,11 @@ impl L2Engine {
         F: FnOnce(&mut crate::core::MemoryMeta),
     {
         self.storage.update_metadata(id, f)
+    }
+
+    /// Add a tag in place (delegates to the same storage as L3 writes).
+    pub fn update_tags(&self, id: u64, add_tag: &str) -> bool {
+        self.storage.update_tags(id, add_tag)
     }
 
     pub fn remove(&self, id: u64) -> bool {

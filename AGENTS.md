@@ -578,6 +578,18 @@ Version fields that must stay in sync: `src-tauri/tauri.conf.json` +
 `frontends/package.json` (handled by release.sh). Rust crate versions in
 `Cargo.toml` are internal and stay at 0.1.0.
 
+### 发布前最后一关：release-gate（2026-11-18）
+
+打 tag / 发 dmg 前必须跑 `bash scripts/release-gate.sh --version X.Y.Z`，并满足：
+
+- 0 个未关闭 P0/P1，0 个 skip；ECF 5k + 30 E2E + mutation 6/6 全绿；
+- UX 预算达标（冷启动、100 会话列表、SSE 握手、最大 JS chunk、数据体积）；
+- 工作树干净（`--allow-dirty` 只用于预演，不能签核）；版本三处一致；
+- 报告 `target/release-gate/report.html` 附在 release PR / tag 说明。
+
+修复循环见 `.opencode/skills/release-gate/SKILL.md`：只修 P0/P1、每条带修前会红的回归、最多 5 轮。
+安装到运行时：`bash scripts/install-skill.sh release-gate`。
+
 ### Known pre-existing test fixes (2026-08-09)
 
 - `recover_from_real_checkpoint_populates_store`: session_id was hardcoded to a
@@ -611,6 +623,22 @@ Rules:
   `/Applications/OpenZen.app` wholesale with
   `target/release/bundle/macos/OpenZen.app` (quit the running app first).
   Never swap just the `MacOS/openzen-tauri` binary.
+
+### target/ 空间管理（2026-11-12，用户明确要求省掉这些 GB）
+
+`target/` 是纯缓存，cargo 从不主动删旧产物，所以每轮「改代码 → 编译 → 打包安装」都在往上叠：
+依赖/rustc 升级留下的旧 hash rlib、`cargo check`/`cargo test` 另建的一整棵 dev 树、
+`target/*/incremental`（纯提速缓存）、`target/release/bundle/dmg`（打包中间产物）。
+
+- 安装脚本已内置：`scripts/install-macos.sh` 成功后自动执行
+  `scripts/target-slim.sh --apply --max "${OZ_SLIM_MAX:-8GB}"`，只删 incremental / dmg /
+  超出上限的最旧产物，**保留** `target/release/bundle/macos/*.app`（安装就靠它）。
+  `--no-slim` 可关闭；上限用 `OZ_SLIM_MAX=5GB` 改。
+- 手动：`bash scripts/target-slim.sh`（只预演、不动文件）/ `--apply`（执行）/
+  `--apply --dev`（再删整棵 dev 树）/ `--apply --full`（清空 target，保留 .app）。
+- `Cargo.toml` 的 dev profile 已收紧：`debug = "line-tables-only"` + 依赖 `debug = false`
+  （`target/debug` 的大头是 Tauri 依赖树的调试信息）。
+- 硬前提：target 里全部可重建，删掉只会让下次构建变慢，不会让构建失败、不会改变产物内容。
 
 ## OpenZen lifecycle rules for AI assistants (2026-09-09)
 

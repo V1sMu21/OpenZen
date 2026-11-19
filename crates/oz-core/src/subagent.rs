@@ -29,6 +29,11 @@ pub struct SubagentRequest {
     pub max_turns: Option<u32>,
     /// Optional mykey.toml session name; `None` inherits the parent's model.
     pub model: Option<String>,
+    /// Optional project binding for the child session (memory scope + cwd).
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    /// Optional working directory override (project root for butler workers).
+    pub working_dir: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +189,21 @@ pub fn release_slot(parent: &str) {
 
 static TURN_LIMITS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
 static STRUCTURED: OnceLock<Mutex<HashMap<String, serde_json::Value>>> = OnceLock::new();
+/// Project-confinement for butler workers: child id → allowed workspace root.
+static WORKSPACES: OnceLock<Mutex<HashMap<String, std::path::PathBuf>>> = OnceLock::new();
+
+pub fn set_workspace(child: &str, root: impl Into<std::path::PathBuf>) {
+    if let Ok(mut m) = WORKSPACES.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        m.insert(child.to_string(), root.into());
+    }
+}
+
+pub fn workspace_of(child: &str) -> Option<std::path::PathBuf> {
+    WORKSPACES
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|m| m.get(child).cloned())
+}
 
 pub fn set_max_turns(child: &str, turns: u32) {
     if let Ok(mut m) = TURN_LIMITS

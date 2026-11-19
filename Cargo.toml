@@ -19,6 +19,7 @@ members = [
     "crates/oz-import",
     "crates/oz-tui",
     "crates/oz-tests",
+    "crates/oz-testkit",
     "crates/oz-agent",
     "crates/oz-platform",
     "crates/oz-platform-telegram",
@@ -104,7 +105,14 @@ panic = "unwind"
 
 [profile.dev]
 opt-level = 0
-debug = true
+# 调试信息只留行号表：断点/回溯仍有 file:line，但 target/debug 体积能小一大截。
+# 需要完整变量视图时临时改回 true，或 `CARGO_PROFILE_DEV_DEBUG=true cargo build`。
+debug = "line-tables-only"
+
+# 第三方依赖（Tauri 生态几百个 crate）不带调试信息 —— 它们是 target/debug 的大头，
+# 而且几乎没人会单步进依赖源码。工作区自己的 crate 不受影响。
+[profile.dev.package."*"]
+debug = false
 
 [[bin]]
 name = "openzen"

@@ -1,0 +1,15 @@
+[package]
+name = "oz-testkit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Dev-only Edge Case Factory: contract miner, case generators, runner and report"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+oz-core-types = { path = "../oz-core-types" }
+oz-llm = { path = "../oz-llm" }
+oz-safety = { path = "../oz-safety" }
+oz-tools = { path = "../oz-tools" }
+tempfile = { workspace = true }

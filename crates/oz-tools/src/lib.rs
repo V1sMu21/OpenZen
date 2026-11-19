@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use oz_core_types::{StepOutcome, ToolContext, ToolDefinition};
 
 pub mod ask_user;
+pub mod butler_tools;
 pub mod code_run;
 pub mod computer_use;
 pub mod doc_reader;

@@ -98,16 +98,10 @@ impl AgentBridge {
                 name
             } else {
                 tracing::warn!("[platform] model '{name}' not found in config, falling back");
-                cfg.default_session
-                    .as_deref()
-                    .or_else(|| cfg.iter_sessions().next().map(|(k, _)| k.as_str()))
-                    .unwrap_or("claude_sonnet")
+                cfg.resolved_default_session().unwrap_or("")
             }
         } else {
-            cfg.default_session
-                .as_deref()
-                .or_else(|| cfg.iter_sessions().next().map(|(k, _)| k.as_str()))
-                .unwrap_or("claude_sonnet")
+            cfg.resolved_default_session().unwrap_or("")
         };
         let sess_config = cfg
             .get(session_name)

@@ -67,6 +67,18 @@ impl L2Storage {
         }
     }
 
+    pub fn update_tags(&self, id: u64, add_tag: &str) -> bool {
+        let mut memories = self.memories.write();
+        if let Some(mem) = memories.get_mut(&id) {
+            if !mem.tags.iter().any(|t| t == add_tag) {
+                mem.tags.push(add_tag.to_string());
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn get_by_subject(&self, subject: &str) -> Vec<Memory> {
         let index = self.subject_index.read();
         let memories = self.memories.read();

@@ -126,6 +126,7 @@ impl ToolHandler for ScheduleReminderTool {
         let session_id = ctx.session_id.clone();
 
         let reminder = Reminder {
+            id: uuid::Uuid::new_v4().to_string(),
             session_id,
             message: message.clone(),
             fire_at_ms,

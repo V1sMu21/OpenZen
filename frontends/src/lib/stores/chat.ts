@@ -4,7 +4,7 @@ import type { ModelEntry } from "../api/chat";
 import { estimateTokens, formatTokenCount } from "./types";
 import type { UIMessagePart, ProtocolV1Event, ToolInvocationPart, DataPart } from "./parts";
 import { sidepanel } from "./sidepanel.svelte";
-import { convertStreamEventsToParts, generatePartId, isSameReplyText } from "./parts";
+import { convertStreamEventsToParts, generatePartId, mergeFinalReply } from "./parts";
 import { applyProtocolEvent, clearReasoningTimers } from "./protocol-processor";
 import { localT } from "../i18n";
 import { sessions } from "./sessions";
@@ -1383,51 +1383,13 @@ function createChatStore() {
         const persistedParts = finalParts.filter((p) => !(p.type === 'data' && p.transient));
 
         // Use preferredContent (authoritative full_response from backend) when available;
-        // fall back to content assembled from streaming parts.
-        const content = preferredContent ?? contentFromParts(persistedParts);
-
-        // The final answer text only ever arrives inside `done.full_response`
-        // (respond rounds never stream it as text_start/text_delta events).
-        // Inject it as a completed text part when no text part already
-        // carries it — otherwise a mixed round's partial streamed text
-        // masks the `message.content` fallback in ChatMessage.svelte and
-        // the final answer never renders live (it only appears after a
-        // refresh, when the persisted stream events re-convert the respond
-        // call into a text part).
-        //
-        // When the turn's trailing text IS this reply (the backend appended a
-        // delivery-contract / quality note to `full_response`, or cleaned the
-        // streamed text), REPLACE that part instead of appending: an equality
-        // check treated the two as different texts and the whole final answer
-        // rendered twice, once with the note and once without.
-        if (preferredContent) {
-          const norm = (t: string) => t.replace(/\s+/g, " ").trim();
-          const target = norm(preferredContent);
-          // Byte-identical text already on screen: nothing to add. Only an
-          // EXACT match short-circuits — a "same reply" match must still
-          // supersede the streamed version, because the backend appends the
-          // delivery-contract block to `full_response` and dropping that
-          // would silently delete the 交付说明 section.
-          const alreadyShown = persistedParts.some(
-            (p) => p.type === 'text' && p.text && norm(p.text) === target,
-          );
-          if (!alreadyShown) {
-            let tailIdx = -1;
-            for (let i = persistedParts.length - 1; i >= 0; i--) {
-              const p = persistedParts[i];
-              if (p.type === 'text' || p.type === 'tool-invocation') {
-                tailIdx = i;
-                break;
-              }
-            }
-            const tail = tailIdx >= 0 ? persistedParts[tailIdx] : undefined;
-            if (tail && tail.type === 'text' && isSameReplyText(tail.text, preferredContent)) {
-              persistedParts[tailIdx] = { ...tail, text: preferredContent, state: 'done' as const };
-            } else {
-              persistedParts.push({ type: 'text', id: generatePartId(), text: preferredContent, state: 'done' as const });
-            }
-          }
-        }
+        // fall back to content assembled from streaming parts. `mergeFinalReply`
+        // replaces the streamed copy (prefix-aware, even when a tool card sits
+        // between it and the end) instead of appending a second copy.
+        const mergedParts = preferredContent
+          ? mergeFinalReply(persistedParts, preferredContent)
+          : persistedParts;
+        const content = preferredContent ?? contentFromParts(mergedParts);
 
         // Auto-title
         const shouldRename = !get(sessions).sessions.some(
@@ -1453,7 +1415,7 @@ function createChatStore() {
                 streaming: false,
                 content,
                 // `persistedParts` = finalParts minus the transient notices.
-                parts: persistedParts,
+                parts: mergedParts,
                 duration: last.timestamp ? Date.now() - new Date(last.timestamp).getTime() : 0,
                 completedAt: new Date().toISOString(),
                 tokensIn: tokensIn ?? m.tokensIn,

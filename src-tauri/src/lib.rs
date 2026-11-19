@@ -324,17 +324,85 @@ pub(crate) fn harness_dir() -> PathBuf {
     data_dir().join("harness")
 }
 
-/// Shared L2 engine construction (384-dim HNSW semantic index). One place so
-/// a dimension/metric change applies everywhere.
+const DEFAULT_EMBED_MODEL: &str = "mlx-community/all-MiniLM-L6-v2-4bit";
+
+pub(crate) fn embed_model_name() -> String {
+    std::env::var("OPENZEN_EMBED_MODEL").unwrap_or_else(|_| DEFAULT_EMBED_MODEL.to_string())
+}
+
+fn embed_dimension(model: &str) -> usize {
+    if model.contains("bge-m3") {
+        1024
+    } else if model.contains("e5-base") || model.contains("e5-large") {
+        768
+    } else {
+        384
+    }
+}
+
+/// Shared L2 engine construction. One place so a dimension/model change
+/// applies everywhere; the embedding model is overridable with
+/// `OPENZEN_EMBED_MODEL` (the embedding cache keys on it).
 fn l2_engine() -> Arc<entropy_memory_engine::l2::L2Engine> {
-    use entropy_memory_engine::l2::{HnswConfig, L2Config};
+    use entropy_memory_engine::l2::{EmbeddingConfig, HnswConfig, L2Config};
+    let model = embed_model_name();
+    let dim = embed_dimension(&model);
     Arc::new(entropy_memory_engine::l2::L2Engine::new(L2Config {
         hnsw: HnswConfig {
-            dimension: 384,
+            dimension: dim,
+            ..Default::default()
+        },
+        dimension: dim,
+        embedding: EmbeddingConfig {
+            dimension: dim,
+            mlx_model: model,
             ..Default::default()
         },
         ..Default::default()
     }))
+}
+
+/// Persisted L2 embedding cache: avoids re-running MLX for every row on each
+/// start (617 rows took 11–17 s). Keys are memory ids; the header invalidates
+/// the whole cache when the model or dimension changes.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct EmbeddingCacheFile {
+    model: String,
+    dim: usize,
+    vectors: Vec<(u64, Vec<f32>)>,
+}
+
+fn load_embedding_cache(
+    path: &std::path::Path,
+    model: &str,
+    dim: usize,
+) -> Option<std::collections::HashMap<u64, Vec<f32>>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let parsed: EmbeddingCacheFile = serde_json::from_str(&text).ok()?;
+    if parsed.model != model || parsed.dim != dim {
+        return None;
+    }
+    Some(parsed.vectors.into_iter().collect())
+}
+
+fn save_embedding_cache(
+    path: &std::path::Path,
+    model: &str,
+    dim: usize,
+    vectors: &std::collections::HashMap<u64, Vec<f32>>,
+) {
+    let file = EmbeddingCacheFile {
+        model: model.to_string(),
+        dim,
+        vectors: vectors.iter().map(|(k, v)| (*k, v.clone())).collect(),
+    };
+    let Ok(json) = serde_json::to_string(&file) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }
 
 /// Long-lived ERME runtime: semantic store + L0 soul layer (M7).
@@ -347,6 +415,37 @@ pub struct ErmeRuntime {
     pub store: Arc<entropy_memory_engine::memory_store::MemoryStore>,
     pub reflection: Arc<entropy_memory_engine::l0::ReflectionEngine>,
     pub injector: entropy_memory_engine::l0::PromptInjector,
+}
+
+/// One-time cleanup of a soul file written before the quality gate existed.
+///
+/// Real data: 24/24 self-portrait facts were "Node … may be related" graph
+/// conjectures, injected into every system prompt. This removes statements
+/// that fail [`is_quality_statement`], caps the portraits, and keeps a
+/// timestamped backup next to the original. Idempotent: a clean file is left
+/// untouched.
+fn sanitize_soul_file(path: &std::path::Path) -> bool {
+    use entropy_memory_engine::l0::soul::SoulModel;
+    let Ok(mut soul) = SoulModel::load_from(path) else {
+        return false;
+    };
+    let mut changed = soul.self_portrait.retain_quality();
+    changed |= soul.user_portrait.retain_quality();
+    if !changed {
+        return false;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_extension(format!("json.bak-{stamp}"));
+    let _ = std::fs::copy(path, &backup);
+    if let Err(e) = soul.save_atomic(path) {
+        tracing::warn!("[erme] failed to persist sanitized soul: {e}");
+        return false;
+    }
+    tracing::info!("[erme] sanitized soul.json (backup: {})", backup.display());
+    true
 }
 
 /// Build the long-lived ERME semantic memory store rooted at `base_dir`.
@@ -386,6 +485,12 @@ fn init_erme_store(
             annual_storage_limit: 50_000_000,
         },
         compression_max_chars: 400,
+        // The default policy only compacts at 4 MB, so the WAL sat at 3.9 MB
+        // with a month-old snapshot. Compact earlier and at startup.
+        storage: entropy_memory_engine::l3::StorageConfig {
+            compact_interval: 128,
+            compact_log_bytes: 1024 * 1024,
+        },
         ..Default::default()
     });
 
@@ -399,6 +504,28 @@ fn init_erme_store(
         },
     ));
 
+    // A month-old snapshot + 3.9 MB WAL meant replaying everything at start.
+    if store
+        .router()
+        .l3_engine()
+        .storage()
+        .compact_log_if_larger_than(1024 * 1024)
+    {
+        tracing::info!("[erme] compacted oversized WAL at startup");
+    }
+
+    // One-time scope migration: rows written before scope tags existed are
+    // tagged `legacy` and stay out of project recall. Idempotent — after the
+    // first run every row has a tag.
+    let tagged_legacy = store.tag_untagged_with("legacy");
+    if tagged_legacy > 0 {
+        tracing::info!("[erme] tagged {tagged_legacy} legacy memories (scope=legacy)");
+    }
+    let (deduped, archived) = store.maintenance();
+    if deduped > 0 || archived > 0 {
+        tracing::info!("[erme] maintenance: deduped {deduped}, archived {archived}");
+    }
+
     // L2 (HNSW + TimeGraph) is memory-only by design: after every restart
     // the semantic layer was empty until new writes trickled in, so recall
     // collapsed to the keyword path. Rebuild it from the persisted L3
@@ -406,6 +533,9 @@ fn init_erme_store(
     // entries skipped) — startup is not blocked and the index converges.
     {
         let store_for_backfill = Arc::clone(&store);
+        let cache_path = memory_erme_dir.join("l2_embeddings.json");
+        let cache_model = embed_model_name();
+        let cache_dim = embed_dimension(&cache_model);
         std::thread::Builder::new()
             .name("erme-l2-backfill".into())
             .spawn(move || {
@@ -426,7 +556,11 @@ fn init_erme_store(
                             .unwrap_or(std::cmp::Ordering::Equal)
                     });
                     let l2 = store_for_backfill.router().l2_engine();
+                    let mut cache = load_embedding_cache(&cache_path, &cache_model, cache_dim)
+                        .unwrap_or_default();
                     let mut inserted = 0usize;
+                    let mut cache_hits = 0usize;
+                    let mut embedded = 0usize;
                     for m in memories {
                         let input = entropy_memory_engine::core::MemoryInput {
                             content: m.content.clone(),
@@ -435,15 +569,38 @@ fn init_erme_store(
                             tags: m.tags.clone(),
                             layer: entropy_memory_engine::core::LayerId::L2,
                         };
-                        if l2.insert_with_id(input, m.id).is_ok() {
+                        let text = match &input.content {
+                            entropy_memory_engine::core::MemoryContent::Fact(f) => {
+                                format!("{} {} {}", f.subject, f.predicate, f.object)
+                            }
+                            entropy_memory_engine::core::MemoryContent::Summary(t) => t.clone(),
+                            _ => String::new(),
+                        };
+                        let vector = match cache.get(&m.id) {
+                            Some(v) if v.len() == cache_dim => {
+                                cache_hits += 1;
+                                v.clone()
+                            }
+                            _ => {
+                                let v = l2.embed_text(&text);
+                                cache.insert(m.id, v.clone());
+                                embedded += 1;
+                                v
+                            }
+                        };
+                        if l2.insert_with_id_and_vector(input, m.id, vector).is_ok() {
                             inserted += 1;
                         }
                     }
-                    inserted
+                    if embedded > 0 {
+                        save_embedding_cache(&cache_path, &cache_model, cache_dim, &cache);
+                    }
+                    (inserted, cache_hits, embedded)
                 }));
                 match result {
-                    Ok(inserted) if inserted > 0 => tracing::info!(
-                        "ERME L2 backfill: {inserted} entries re-indexed in {:.1}s",
+                    Ok((inserted, cache_hits, embedded)) if inserted > 0 => tracing::info!(
+                        "ERME L2 backfill: {inserted} entries re-indexed in {:.1}s \
+                         (cache {cache_hits}, embedded {embedded})",
                         started.elapsed().as_secs_f64()
                     ),
                     Ok(_) => {}
@@ -461,8 +618,10 @@ fn init_erme_store(
         QuarantineConfig::default(),
     ));
 
-    // L0 灵魂模型：从磁盘加载（首次运行则新建默认模型）。
+    // L0 灵魂模型：从磁盘加载（首次运行则新建默认模型）。先做一次质量清洗，
+    // 否则旧 soul.json 里的图关系猜想会继续注入每一轮提示词。
     let soul_path = memory_erme_dir.join("soul.json");
+    sanitize_soul_file(&soul_path);
     let soul: SoulHandle = Arc::new(RwLock::new(
         SoulModel::load_from(&soul_path).unwrap_or_default(),
     ));
@@ -712,6 +871,10 @@ pub struct AppState {
     pub approval_handler: Arc<Mutex<Option<Arc<dyn oz_safety::ApprovalHandler>>>>,
     pub pending_approvals: approval::PendingApprovals,
     pub running_agents: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    /// Sessions that passed admission but have not inserted their JoinHandle
+    /// yet. Reserving here prevents two sends (e.g. digest + user) from both
+    /// passing the check and persisting a Running session with no run.
+    pub starting_agents: Arc<Mutex<std::collections::HashSet<String>>>,
     pub detached_agents: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     pub ask_user_rxs: Arc<Mutex<HashMap<String, AskUserSlot>>>,
     pub sidepanel: Mutex<SidePanelState>,
@@ -741,7 +904,6 @@ pub struct AppState {
     /// before each run instead of re-walking the tree per user message.
     pub shared_skill_store: SharedSkillStoreCell,
     pub projects: Mutex<Vec<projects::store::ProjectRecord>>,
-    pub crystallization_enabled: AtomicBool,
     /// "完全访问" (full access): when set, the approval handler auto-allows
     /// every request so the agent never asks the user for permission.
     pub full_access: Arc<AtomicBool>,
@@ -897,6 +1059,7 @@ impl AppState {
             approval_handler: Arc::new(Mutex::new(None)),
             pending_approvals: approval::new_pending(),
             running_agents: Arc::new(Mutex::new(HashMap::new())),
+            starting_agents: Arc::new(Mutex::new(std::collections::HashSet::new())),
             detached_agents: Arc::new(Mutex::new(HashMap::new())),
             ask_user_rxs: Arc::new(Mutex::new(HashMap::new())),
             sidepanel: Mutex::new(SidePanelState::new()),
@@ -925,10 +1088,6 @@ impl AppState {
                 .map(|p| p.to_string_lossy().to_string()),
             shared_skill_store: std::sync::Mutex::new(None),
             projects: Mutex::new(projects::store::load_projects()),
-            // Auto-crystallization (skill/SOP distillation after each run) is
-            // opt-in: it writes new skills from finished runs, so it starts
-            // off and the user turns it on from the title bar.
-            crystallization_enabled: AtomicBool::new(false),
             full_access: Arc::new(AtomicBool::new(false)),
             memory_enabled: Arc::new(AtomicBool::new(memory_backend_is_erme)),
             erme_store,
@@ -1070,6 +1229,48 @@ fn user_idle_seconds() -> Option<u64> {
     None
 }
 
+/// One scheduler per data root. Two OpenZen processes sharing butler.db can
+/// claim the same task (claim is not CAS yet) and overwrite sessions.json.
+/// The lock is advisory flock on a file under the data root; it dies with the
+/// process, so a crash never leaves a permanent lock.
+#[cfg(unix)]
+fn acquire_instance_lock() -> bool {
+    use std::os::unix::io::AsRawFd;
+    static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+    if LOCK.get().is_some() {
+        return true;
+    }
+    let path = crate::data_dir().join("openzen.instance.lock");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!("[instance] cannot open {}: {e}", path.display());
+            return false;
+        }
+    };
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        tracing::error!("[instance] another OpenZen owns {}", path.display());
+        return false;
+    }
+    let _ = LOCK.set(file);
+    true
+}
+
+#[cfg(not(unix))]
+fn acquire_instance_lock() -> bool {
+    true
+}
+
 /// Fire a system notification WITH sound, but only when the user is not
 /// actively at the machine. Window focus alone is not presence: leaving
 /// OpenZen focused while walking away is common, and the old focus check
@@ -1080,6 +1281,13 @@ fn user_idle_seconds() -> Option<u64> {
 /// `[notify]` prefix so notification issues are diagnosable remotely.
 pub(crate) fn notify_if_unfocused(app: &AppHandle, title: &str, body: &str) {
     use tauri_plugin_notification::NotificationExt;
+    // A system banner renders plain text only. The completion path used to
+    // dump the raw model reply here, so markdown headings arrived literally
+    // ("### 完成情况"). Normalize at this single choke point as well, so a
+    // future call site cannot leak markdown into the banner.
+    let title = oz_core_types::notification_text::compact(title, 80);
+    let body = oz_core_types::notification_text::compact(body, 200);
+    let (title, body) = (title.as_str(), body.as_str());
     let focused = app
         .get_webview_window("main")
         .map(|w| w.is_focused().unwrap_or(false))
@@ -1097,6 +1305,14 @@ pub(crate) fn notify_if_unfocused(app: &AppHandle, title: &str, body: &str) {
             idle
         ));
     }
+    // A notification sound can be muted by Focus/Do-Not-Disturb; play the
+    // system alert directly as well so a user away from the screen hears it.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("/usr/bin/afplay")
+            .arg("/System/Library/Sounds/Glass.aiff")
+            .spawn();
+    }
     match app
         .notification()
         .builder()
@@ -1111,6 +1327,7 @@ pub(crate) fn notify_if_unfocused(app: &AppHandle, title: &str, body: &str) {
 }
 
 // ── Sub-modules ──
+pub(crate) mod butler;
 pub(crate) mod commands;
 pub(crate) mod goal_runtime;
 pub(crate) mod runner;
@@ -1255,6 +1472,7 @@ fn fire_reminder(
     );
     if reminder.repeat_count > 0 {
         lock_poison_guard(&state.pending_reminders).push(oz_core_types::Reminder {
+            id: reminder.id.clone(),
             session_id: session_id.clone(),
             message,
             fire_at_ms: now_ms + (reminder.repeat_interval_secs * 1000),
@@ -1280,7 +1498,10 @@ fn load_persistent_reminders(state: &AppState) -> usize {
             let count = restored.len();
             if count > 0 {
                 let mut pending = lock_poison_guard(&state.pending_reminders);
-                for r in restored {
+                for mut r in restored {
+                    if r.id.is_empty() {
+                        r.id = uuid::Uuid::new_v4().to_string();
+                    }
                     if !pending.iter().any(|p| {
                         p.message == r.message
                             && p.session_id == r.session_id
@@ -1500,9 +1721,24 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            if !acquire_instance_lock() {
+                use tauri_plugin_dialog::DialogExt;
+                let _ = app
+                    .dialog()
+                    .message("OpenZen 已经在运行（同一数据目录只允许一个实例）。\n请切换到已打开的窗口，或先退出旧实例。")
+                    .title("OpenZen 已在运行")
+                    .blocking_show();
+                app.handle().exit(0);
+                return Ok(());
+            }
             crate::steward::start_watchdog();
     crate::goal_runtime::init();
+            crate::butler::init();
             let app_handle = app.handle().clone();
+            {
+                let butler_state = app.state::<std::sync::Arc<AppState>>().inner().clone();
+                crate::butler::scheduler::start_loop(app.handle().clone(), butler_state);
+            }
 
             // ── Background jobs: one process-wide listener ──
             // Started/finished snapshots go to the UI; a finished job also
@@ -1644,7 +1880,31 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // Startup focus. macOS can finish creating the window before the
+            // app is active; the WKWebView then never becomes first responder,
+            // so the composer shows no I-beam/caret until the user switches to
+            // another app and back. `set_focus` also calls
+            // NSApp.activateIgnoringOtherApps on macOS. Re-apply once after the
+            // launch animation because activation can land late.
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // One late retry only: a longer chain would yank focus
+                    // back if the user deliberately switched away right after
+                    // launch.
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    if let Some(w) = handle.get_webview_window("main") {
+                        let _ = w.set_focus();
+                    }
+                });
+            }
+
             let state = app.state::<Arc<AppState>>();
+            crate::butler::migrate_legacy_names(&state);
             *lock_poison_guard(&state.app_handle) = Some(app_handle.clone());
             let handler = Arc::new(approval::TauriApprovalHandler::new(
                 app_handle.clone(),
@@ -1653,6 +1913,7 @@ pub fn run() {
                 state.session_windows.clone(),
             )) as Arc<dyn oz_safety::ApprovalHandler>;
             *lock_poison_guard(&state.approval_handler) = Some(handler);
+            approval::start_watchdog(state.pending_approvals.clone());
 
             let mut scheduler = oz_scheduler::Scheduler::new();
             // Auto-archive of idle sessions is disabled: the 7-day window
@@ -1925,6 +2186,19 @@ pub fn run() {
         })
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
+            butler::butler_status,
+            butler::butler_ensure_session,
+            butler::butler_submit,
+            butler::butler_tasks,
+            butler::butler_task_events,
+            butler::butler_runs,
+            butler::butler_automations,
+            butler::butler_run_detail,
+            butler::butler_cancel_reminder,
+            butler::butler_approvals,
+            butler::butler_decide,
+            butler::butler_pause,
+            butler::butler_tick,
             steward::steward_status,
             steward::steward_set_enabled,
             steward::steward_snapshot,
@@ -2019,8 +2293,6 @@ commands::get_working_dir_for_session,
             commands::get_locale,
             commands::set_locale,
             commands::add_platform,
-            commands::get_crystallization,
-            commands::set_crystallization,
             commands::get_full_access,
             commands::set_full_access,
             projects::commands::add_project,
@@ -2126,9 +2398,8 @@ mod tests {
             "without OPENZEN_DATA_DIR, data root defaults to ~/.openzen"
         );
 
-        match original {
-            Some(v) => std::env::set_var("OPENZEN_DATA_DIR", v),
-            None => {}
+        if let Some(v) = original {
+            std::env::set_var("OPENZEN_DATA_DIR", v);
         }
         match original_home {
             Some(v) => std::env::set_var("HOME", v),
@@ -2191,5 +2462,28 @@ mod tests {
             Some(v) => std::env::set_var("OPENZEN_DATA_DIR", v),
             None => std::env::remove_var("OPENZEN_DATA_DIR"),
         }
+    }
+}
+
+#[cfg(test)]
+mod embedding_cache_tests {
+    use super::*;
+
+    #[test]
+    fn embedding_cache_roundtrip_and_model_invalidation() {
+        let dir = std::env::temp_dir().join(format!("oz-emb-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("l2_embeddings.json");
+        let mut vectors = std::collections::HashMap::new();
+        vectors.insert(1u64, vec![0.1f32, 0.2, 0.3]);
+        save_embedding_cache(&path, "model-a", 3, &vectors);
+        let loaded = load_embedding_cache(&path, "model-a", 3).unwrap();
+        assert_eq!(loaded.get(&1).unwrap(), &vec![0.1f32, 0.2, 0.3]);
+        assert!(load_embedding_cache(&path, "model-b", 3).is_none());
+        assert!(load_embedding_cache(&path, "model-a", 4).is_none());
+        assert_eq!(embed_dimension("mlx-community/all-MiniLM-L6-v2-4bit"), 384);
+        assert_eq!(embed_dimension("bge-m3"), 1024);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

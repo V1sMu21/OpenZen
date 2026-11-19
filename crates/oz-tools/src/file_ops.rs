@@ -113,8 +113,16 @@ pub(crate) fn is_in_working_dir_for_write(path: &str, working_dir: &str) -> bool
 /// positive answer for that session, which is the only way the registry ever
 /// gets an entry. A denial records nothing, so the boundary still holds.
 pub(crate) fn write_path_permitted(path: &str, ctx: &oz_core_types::ToolContext) -> bool {
+    let resolved = if Path::new(path).is_absolute() {
+        Path::new(path).to_path_buf()
+    } else {
+        Path::new(&ctx.working_dir).join(path)
+    };
     is_in_working_dir_for_write(path, &ctx.working_dir)
-        || oz_core_types::path_trust::is_path_approved(&ctx.session_id, Path::new(path))
+        || oz_core_types::path_trust::is_path_approved(
+            &ctx.session_id,
+            &oz_core_types::path_trust::resolve_boundary_path(&resolved),
+        )
 }
 
 /// Shared rejection text for the mutating tools: state what happened, that
@@ -143,55 +151,15 @@ fn is_in_working_dir_inner(path: &str, working_dir: &str, for_write: bool) -> bo
     // on disk) silently fail canonicalize() and get rejected with
     // a confusing "outside working directory" error that prompts
     // the model to re-read the source 4-5 times.
-    let resolved: std::path::PathBuf = if p.is_absolute() {
+    let resolved = if p.is_absolute() {
         p.to_path_buf()
     } else {
         wd.join(p)
     };
-
-    // Canonicalize FIRST. The old code returned "allowed" for any path
-    // whose *components* started with /tmp before resolving anything:
-    // `/tmp/../etc/passwd`, `/tmp/x/../../Users/<u>/.ssh/id_rsa` and
-    // symlinks living under /tmp all passed the fence. Canonicalization
-    // resolves `..` and symlinks, so every later check sees the real
-    // target. New files resolve the deepest EXISTING ancestor and re-attach
-    // the missing tail (a non-existent component cannot be a symlink, so
-    // this adds no traversal surface).
-    //
-    // One level of parent lookup was not enough: for
-    // `work/e2e/hello.py`, where `work/e2e/` does not exist yet, nothing
-    // canonicalized and the caller reported "outside the workspace or in a
-    // protected location" — a permission story for a missing directory. The
-    // agent retried the same write three times in the 2026-10-23 isolated run
-    // before falling back to `mkdir -p`. Now the path is allowed and the
-    // write tool's own actionable ENOENT message ("parent directory does not
-    // exist — mkdir -p") is what the model sees.
-    let real_p = match std::fs::canonicalize(&resolved) {
-        Ok(p) => Some(p),
-        Err(_) => {
-            let mut missing: Vec<std::ffi::OsString> = Vec::new();
-            if let Some(name) = resolved.file_name() {
-                missing.push(name.to_os_string());
-            }
-            let mut found = None;
-            let mut cursor = resolved.parent();
-            while let Some(dir) = cursor {
-                if let Ok(real_dir) = std::fs::canonicalize(dir) {
-                    let mut rebuilt = real_dir;
-                    for part in missing.iter().rev() {
-                        rebuilt.push(part);
-                    }
-                    found = Some(rebuilt);
-                    break;
-                }
-                if let Some(name) = dir.file_name() {
-                    missing.push(name.to_os_string());
-                }
-                cursor = dir.parent();
-            }
-            found
-        }
-    };
+    // Canonicalize the ORIGINAL path (symlinks + `..` resolved by the
+    // kernel), falling back to the deepest existing ancestor. Do not
+    // pre-collapse `..`: `link/../x` is relative to the symlink target.
+    let real_p = Some(oz_core_types::path_trust::resolve_boundary_path(&resolved));
 
     // Sensitive-name check runs on the canonical path so traversal cannot
     // smuggle sensitive targets past the substring match. The
@@ -217,16 +185,13 @@ fn is_in_working_dir_inner(path: &str, working_dir: &str, for_write: bool) -> bo
         }
     }
 
-    // Temp dirs are allowed — but only on the canonical path, and only
-    // after `..`/symlink resolution.
-    if let Some(rp) = real_p.as_deref() {
-        if rp.starts_with("/tmp")
-            || rp.starts_with("/private/tmp")
-            || rp.starts_with("/var/tmp")
-            || rp.starts_with("/private/var/tmp")
-            || rp.starts_with("/var/folders")
-            || rp.starts_with("/private/var/folders")
-        {
+    // No global temp exemption: project A must not write project B just
+    // because both live under /private/tmp. A workspace that IS under temp is
+    // covered by the starts_with(wd) check below.
+    // A workspace that itself lives under /private/tmp (dev/E2E data root)
+    // must still work after removing the global temp exemption.
+    if let (Some(rp), Some(rw)) = (real_p.as_deref(), real_wd.as_deref()) {
+        if rp.starts_with(rw) {
             return true;
         }
     }
@@ -247,6 +212,22 @@ fn is_in_working_dir_inner(path: &str, working_dir: &str, for_write: bool) -> bo
 }
 
 // ── FileReadTool ──
+
+/// Resolve a tool path against the session working directory.
+///
+/// The process CWD is NOT the workspace: a headless `serve` runs from the
+/// repo root, and a Tauri app may run from `/`. A relative `file_path` used
+/// to be passed straight to `tokio::fs`, so the permission check validated
+/// one path while the bytes landed in another directory. Absolute paths are
+/// used verbatim; relative ones are joined to `ctx.working_dir`.
+fn io_path(ctx: &ToolContext, path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::path::Path::new(&ctx.working_dir).join(p)
+    }
+}
 
 pub struct FileReadTool;
 
@@ -283,15 +264,6 @@ impl ToolHandler for FileReadTool {
                 &args,
             )));
         }
-        if let Ok(meta) = tokio::fs::metadata(path).await {
-            if meta.len() > MAX_READ_SIZE {
-                return Ok(ToolOutput::bad_json(format!(
-                    "read: file too large ({} bytes, max {})",
-                    meta.len(),
-                    MAX_READ_SIZE
-                )));
-            }
-        }
         if !is_in_working_dir(path, &ctx.working_dir) {
             let hint = if !Path::new(path).is_absolute() {
                 let suggested = Path::new(&ctx.working_dir).join(path);
@@ -303,18 +275,29 @@ impl ToolHandler for FileReadTool {
                 format!("read: path `{path}` is outside working directory `{}` or in a protected location.{}", ctx.working_dir, hint)
             ));
         }
+        let resolved = io_path(ctx, path);
+        let resolved_str = resolved.to_string_lossy();
+        if let Ok(meta) = tokio::fs::metadata(&resolved).await {
+            if meta.len() > MAX_READ_SIZE {
+                return Ok(ToolOutput::bad_json(format!(
+                    "read: file too large ({} bytes, max {})",
+                    meta.len(),
+                    MAX_READ_SIZE
+                )));
+            }
+        }
         let start = args.get("start").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
         let count = args.get("count").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
 
-        if crate::doc_reader::is_supported_doc(path) {
-            match crate::doc_reader::read_document(path, start, count) {
+        if crate::doc_reader::is_supported_doc(&resolved_str) {
+            match crate::doc_reader::read_document(&resolved_str, start, count) {
                 Ok(result) => return Ok(ToolOutput::success(result)),
                 Err(e) => return Ok(ToolOutput::bad_json(format!("read: {e}"))),
             }
         }
 
-        if crate::doc_reader::is_image(path) {
-            match crate::doc_reader::read_image_base64(path) {
+        if crate::doc_reader::is_image(&resolved_str) {
+            match crate::doc_reader::read_image_base64(&resolved_str) {
                 Ok(data_url) => {
                     let ext = Path::new(path)
                         .extension()
@@ -340,7 +323,7 @@ impl ToolHandler for FileReadTool {
             }
         }
 
-        match tokio::fs::read_to_string(path).await {
+        match tokio::fs::read_to_string(&resolved).await {
             Ok(content) => {
                 let lines: Vec<&str> = content.lines().collect();
                 let from = start.saturating_sub(1).min(lines.len());
@@ -414,10 +397,11 @@ impl ToolHandler for FileWriteTool {
                 &ctx.working_dir,
             )));
         }
-        if let Some(parent) = Path::new(path).parent() {
+        let resolved = io_path(ctx, path);
+        if let Some(parent) = resolved.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        match tokio::fs::write(path, content).await {
+        match tokio::fs::write(&resolved, content).await {
             Ok(()) => Ok(ToolOutput::success(serde_json::json!({"status": "written"}))),
             Err(e) => Ok(ToolOutput::bad_json(format!(
                 "write failed: {e}. Check that the parent directory exists — use 'code_run: mkdir -p <parent>' if needed."
@@ -478,7 +462,8 @@ impl ToolHandler for FilePatchTool {
             )));
         }
 
-        let content = match tokio::fs::read_to_string(path).await {
+        let resolved = io_path(ctx, path);
+        let content = match tokio::fs::read_to_string(&resolved).await {
             Ok(c) => c,
             Err(e) => return Ok(ToolOutput::bad_json(format!("patch read failed: {e}"))),
         };
@@ -497,7 +482,7 @@ impl ToolHandler for FilePatchTool {
         }
 
         let new_content = content.replace(old, new);
-        match tokio::fs::write(path, &new_content).await {
+        match tokio::fs::write(&resolved, &new_content).await {
             Ok(()) => Ok(ToolOutput::success(
                 serde_json::json!({"status": "patched"}),
             )),
@@ -556,7 +541,8 @@ impl ToolHandler for FileEditTool {
             )));
         }
 
-        let content = match tokio::fs::read_to_string(path).await {
+        let resolved = io_path(ctx, path);
+        let content = match tokio::fs::read_to_string(&resolved).await {
             Ok(c) => c,
             Err(e) => return Ok(ToolOutput::bad_json(format!("edit read failed: {e}"))),
         };
@@ -575,7 +561,7 @@ impl ToolHandler for FileEditTool {
         }
 
         let new_content = content.replace(old, new);
-        match tokio::fs::write(path, &new_content).await {
+        match tokio::fs::write(&resolved, &new_content).await {
             Ok(()) => Ok(ToolOutput::success(serde_json::json!({"status": "edited"}))),
             Err(e) => Ok(ToolOutput::bad_json(format!("edit write failed: {e}"))),
         }
@@ -627,7 +613,12 @@ impl ToolHandler for GlobTool {
                 "glob: path '{base}' is outside the working directory"
             )));
         }
-        let glob_pattern = format!("{}/{}", base.trim_end_matches('/'), pattern);
+        let base_abs = io_path(ctx, base);
+        let glob_pattern = format!(
+            "{}/{}",
+            base_abs.to_string_lossy().trim_end_matches('/'),
+            pattern
+        );
 
         let mut results = Vec::new();
         if let Ok(entries) = glob::glob(&glob_pattern) {
@@ -695,7 +686,8 @@ impl ToolHandler for GrepTool {
             .map_err(|e| ToolError::Custom(format!("invalid regex: {e}")))?;
 
         let mut results: Vec<HashMap<String, serde_json::Value>> = Vec::new();
-        let walk_path = Path::new(base);
+        let base_abs = io_path(ctx, base);
+        let walk_path = base_abs.as_path();
 
         if walk_path.is_dir() {
             let mut walk_entries = Vec::new();
@@ -804,7 +796,8 @@ impl ToolHandler for LsTool {
             )));
         }
         let mut entries: Vec<serde_json::Value> = Vec::new();
-        if let Ok(mut rd) = tokio::fs::read_dir(path).await {
+        let resolved = io_path(ctx, path);
+        if let Ok(mut rd) = tokio::fs::read_dir(&resolved).await {
             while let Ok(Some(entry)) = rd.next_entry().await {
                 let ftype = if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
                     "dir"
@@ -918,15 +911,44 @@ mod tests {
     fn ctx() -> TC {
         TC {
             is_subagent: false,
-            working_dir: "/tmp".into(),
-            assets_dir: "/tmp".into(),
-            script_dir: "/tmp".into(),
+            working_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            assets_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            script_dir: std::env::temp_dir().to_string_lossy().to_string(),
             lang: "en".into(),
             skill_mcp_dir: None,
             harness_dir: None,
             session_id: String::new(),
             tool_budget_secs: 0,
         }
+    }
+
+    /// A relative `file_path` must resolve under the session workspace, not
+    /// the server process CWD (E2E-026 on 2026-11-18: `serve` ran from the
+    /// repo root and `write "e2e_in.txt"` landed there while the permission
+    /// check validated a path under the data root).
+    #[tokio::test]
+    async fn relative_write_lands_in_the_session_workspace() {
+        let ws = tempfile::tempdir().unwrap();
+        let mut c = ctx();
+        c.working_dir = ws.path().to_string_lossy().to_string();
+        let tool = FileWriteTool;
+        let out = tool
+            .execute(
+                serde_json::json!({"file_path": "rel.txt", "content": "hi"}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(!out.should_exit);
+        assert!(
+            ws.path().join("rel.txt").is_file(),
+            "not written into {}",
+            ws.path().display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("rel.txt")).unwrap(),
+            "hi"
+        );
     }
 
     /// Regression (2026-10-23): the workspace boundary is now approvable. An
@@ -1056,7 +1078,7 @@ mod tests {
     async fn test_read_nonexistent_file() {
         let r = FileReadTool
             .execute(
-                serde_json::json!({"file_path": "/tmp/nonexistent_ga_test_xxx"}),
+                serde_json::json!({"file_path": std::env::temp_dir().join("nonexistent_ga_test_xxx").to_string_lossy()}),
                 &ctx(),
             )
             .await
@@ -1136,7 +1158,10 @@ mod tests {
     #[tokio::test]
     async fn test_ls_tmp() {
         let r = LsTool
-            .execute(serde_json::json!({"path": "/tmp"}), &ctx())
+            .execute(
+                serde_json::json!({"path": std::env::temp_dir().to_string_lossy()}),
+                &ctx(),
+            )
             .await
             .unwrap();
         let _entries = r.data["entries"].as_array().unwrap();
@@ -1251,15 +1276,15 @@ mod fence_tests {
     }
 
     #[test]
-    fn working_dir_and_tmp_still_allowed() {
-        let wd = wd();
+    fn working_dir_allowed_but_global_temp_rejected() {
+        let wd = wd_named("allowed");
         let _ = std::fs::create_dir_all(&wd);
         assert!(is_in_working_dir(&wd, &wd));
         assert!(is_in_working_dir(".", &wd));
-        // A plain temp file (the common case) stays allowed.
+        // A temp file outside the workspace is a different project's space.
         let f = std::env::temp_dir().join("oz-fence-plain.txt");
         std::fs::write(&f, "x").unwrap();
-        assert!(is_in_working_dir(&f.to_string_lossy(), &wd));
+        assert!(!is_in_working_dir(&f.to_string_lossy(), &wd));
         let _ = std::fs::remove_file(&f);
         let _ = std::fs::remove_dir_all(&wd);
     }

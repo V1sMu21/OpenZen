@@ -46,6 +46,18 @@ impl SafetyGuard {
                 // (round5 P1-8b).
                 "todowrite".into(),
                 "todoupdate".into(),
+                // Butler task-graph tools write only {data_dir}/butler.db:
+                // no user file access, no shell, no network. Approval-gating
+                // them made the whole autonomous flow deadlock into a 30s
+                // auto-deny at the first task (caught by the live E2E).
+                "task_create".into(),
+                "project_list".into(),
+                "task_list".into(),
+                "task_get".into(),
+                "run_list".into(),
+                "artifact_find".into(),
+                "history_search".into(),
+                "task_note".into(),
                 "long_term".into(),
                 // Background-job controls are pure reads of this session's
                 // own registry (kill only cancels work the same session
@@ -128,6 +140,26 @@ impl SafetyGuard {
             .record_approval(&pattern.0, &pattern.1, &info);
     }
 
+    /// Explicit "trust this session" — allow now, in this run only.
+    pub fn trust_session(&self, tool: &str, args: &serde_json::Value) {
+        let pattern = crate::patterns::build_pattern(tool, args);
+        self.trust_store.trust_session(&pattern.0, &pattern.1);
+    }
+
+    /// Explicit "trust this workspace/project" — persisted across sessions.
+    pub fn trust_workspace(&self, tool: &str, args: &serde_json::Value) {
+        let pattern = crate::patterns::build_pattern(tool, args);
+        self.trust_store.trust_workspace(&pattern.0, &pattern.1);
+    }
+
+    /// Consult only the progressive-trust store, bypassing the safe-tool
+    /// shortcut. Used for out-of-workspace writes: those tools are
+    /// safe-listed, so `check()` would return Allowed before any approval.
+    pub fn check_trust_only(&self, tool: &str, args: &serde_json::Value) -> TrustDecision {
+        let pattern = crate::patterns::build_pattern(tool, args);
+        self.trust_store.check(&pattern.0, &pattern.1)
+    }
+
     pub fn record_denial(&self, tool: &str, args: &serde_json::Value) {
         let pattern = build_pattern(tool, args);
         self.trust_store.record_denial(&pattern.0, &pattern.1);
@@ -178,12 +210,15 @@ mod tests {
     #[test]
     fn test_pattern_based_trust() {
         let guard = SafetyGuard::new(TrustStore::in_memory());
-        guard.record_approval("code_run", &serde_json::json!({"code": "echo hello"}));
-        guard.record_approval("code_run", &serde_json::json!({"code": "echo world"}));
-        guard.record_approval("code_run", &serde_json::json!({"code": "echo test"}));
+        for _ in 0..3 {
+            guard.record_approval("code_run", &serde_json::json!({"code": "echo hello"}));
+        }
 
-        let decision = guard.check("code_run", &serde_json::json!({"code": "echo more"}));
+        let decision = guard.check("code_run", &serde_json::json!({"code": "echo hello"}));
         assert!(matches!(decision, TrustDecision::Allowed));
+        // A different command must not inherit the grant.
+        let other = guard.check("code_run", &serde_json::json!({"code": "echo more"}));
+        assert!(matches!(other, TrustDecision::NeedsApproval(_)));
     }
 
     #[test]
@@ -332,5 +367,36 @@ decision = "allow"
             .with_project_trust(ProjectTrustLevel::Restricted);
         let decision = guard.check("code_run", &serde_json::json!({"code": "echo hi"}));
         assert!(matches!(decision, TrustDecision::Blocked(_)));
+    }
+
+    #[test]
+    fn trust_only_does_not_bypass_outside_write_approval() {
+        let guard = SafetyGuard::new(TrustStore::in_memory());
+        let args = serde_json::json!({"file_path": "/tmp/outside/x.txt"});
+        // Normal check says Allowed because write is safe-listed; the
+        // outside-write path must still ask.
+        assert!(matches!(
+            guard.check("write", &args),
+            TrustDecision::Allowed
+        ));
+        assert!(matches!(
+            guard.check_trust_only("write", &args),
+            TrustDecision::NeedsApproval(_)
+        ));
+        guard.trust_workspace("write", &args);
+        assert!(matches!(
+            guard.check_trust_only("write", &args),
+            TrustDecision::Allowed
+        ));
+    }
+
+    #[test]
+    fn explicit_trust_refuses_wildcards() {
+        let guard = SafetyGuard::new(TrustStore::in_memory());
+        guard.trust_workspace("web_js", &serde_json::json!({}));
+        assert!(matches!(
+            guard.check_trust_only("web_js", &serde_json::json!({})),
+            TrustDecision::NeedsApproval(_)
+        ));
     }
 }

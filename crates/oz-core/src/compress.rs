@@ -2564,3 +2564,45 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod scenario_compaction_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A key fact removed from the live window must be exposed in `removed`
+    /// so the summarizer can carry it forward; the newest turn and system
+    /// prompt must survive. This is the "recall" contract, not just a byte
+    /// reduction.
+    #[test]
+    fn compaction_exposes_removed_key_fact_for_the_summarizer() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "system prompt"}),
+            json!({"role": "user", "content": "KEY_FACT=42: the deploy target is staging"}),
+            json!({"role": "assistant", "content": "noted"}),
+        ];
+        for i in 0..20 {
+            msgs.push(json!({
+                "role": "user",
+                "content": format!("old tool output {i}: {}", "x".repeat(5000)),
+            }));
+            msgs.push(json!({"role": "assistant", "content": "ok"}));
+        }
+        msgs.push(json!({"role": "user", "content": "latest question"}));
+
+        let result = compact_store_messages(&msgs, 1, &CompressionConfig::default());
+        assert!(result.before_chars > result.after_chars);
+        assert!(
+            result
+                .removed
+                .iter()
+                .any(|m| m.to_string().contains("KEY_FACT=42")),
+            "removed window must contain the key fact for the summarizer"
+        );
+        assert_eq!(result.messages.first().unwrap()["role"], "system");
+        assert_eq!(
+            result.messages.last().unwrap()["content"],
+            "latest question"
+        );
+    }
+}

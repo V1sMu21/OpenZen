@@ -7,7 +7,6 @@ use oz_core_types::{
     ToolDefinition, ToolError, ToolResultItem,
 };
 
-use crate::crystallizer::Crystallizer;
 use crate::handler::{AgentState, Breaker, Handler, LoopConfig, LoopOutcome};
 use crate::meter;
 use crate::refiner::Refiner;
@@ -670,7 +669,15 @@ async fn approve_outside_write(
     target: &std::path::Path,
     timeout_secs: u64,
     stop_signal: &AtomicBool,
+    guard: Option<&oz_safety::SafetyGuard>,
 ) -> Result<bool, ToolError> {
+    // Do NOT consult the SafetyGuard's allow-list here. `write`/`edit`/`patch`
+    // are on the safe list (they are not shell commands), so `check()` returns
+    // Allowed for every path — that shortcut silently approved every
+    // out-of-workspace write and made this whole gate dead code (found by
+    // E2E-027 on 2026-11-18). The per-run `path_trust` registry is the only
+    // thing that may skip the prompt, and it is consulted by the caller.
+    let _ = guard;
     let pattern = format!("outside workspace: {}", target.display());
     tracing::info!("[safety] requesting approval for {tool_name}/{pattern}");
     let req = oz_safety::ApprovalRequest {
@@ -711,8 +718,17 @@ async fn approve_outside_write(
         // denial for this call (the guard-level blocklist is a separate,
         // tool-scoped mechanism and is not overloaded here).
         Ok(oz_safety::ApprovalDecision::BlockForever) => Ok(false),
+        Ok(oz_safety::ApprovalDecision::AutoAllow) => {
+            // Full access already means "run without prompts"; it must not
+            // create durable project trust as a side effect.
+            oz_core_types::path_trust::approve_path(session_id, target);
+            Ok(true)
+        }
         Ok(_) => {
             oz_core_types::path_trust::approve_path(session_id, target);
+            if let Some(g) = guard {
+                g.record_approval(tool_name, args);
+            }
             Ok(true)
         }
         Err(e) => Err(ToolError::Custom(format!("approval error: {e}"))),
@@ -791,6 +807,11 @@ where
     // One-shot spec hint: only injected once per run so the agent cannot
     // loop on it; the assertion/review fix budgets bound the extra rounds.
     let mut spec_hint_sent = false;
+    // After the spec hint, a model can write ONLY task_spec.md and stop,
+    // leaving the user's original request undone (GUI 2026-11-18: "写文件"
+    // ended with "task_spec.md 已写入" and no gui-note.txt). Nudge once to
+    // continue the original task instead of treating the spec as delivery.
+    let mut spec_continue_sent = false;
     // P1: one-shot gentle plan nudge (non-blocking, ignore-able).
     let mut plan_hint_sent = false;
     let mut assertion_rounds: u32 = 0;
@@ -975,7 +996,7 @@ where
     }
 
     // ── Legacy: sop_dir fallback (deprecated, use skill_mcp_dir) ──
-    let mut sop_store = if skill_mcp_store.is_none() {
+    let sop_store = if skill_mcp_store.is_none() {
         config.sop_dir.as_ref().map(|dir| {
             let store = SopStore::new(std::path::PathBuf::from(dir));
             if !store.is_empty() && config.verbose {
@@ -2421,6 +2442,24 @@ where
                                                 ))),
                                             );
                                         }
+                                        // Butler workers are confined to their task's
+                                        // project root even under full access: a
+                                        // cross-project write is never approved.
+                                        if let Some(root) =
+                                            crate::subagent::workspace_of(&cfg.session_id)
+                                        {
+                                            if !target.starts_with(&root) {
+                                                return (
+                                                    ii,
+                                                    tool_name.clone(),
+                                                    Err(ToolError::Custom(format!(
+                                                        "{tool_name}: write outside the task's \
+                                                         project root is blocked (allowed: {})",
+                                                        root.display()
+                                                    ))),
+                                                );
+                                            }
+                                        }
                                         let digest =
                                             crate::audit::digest_args(&tool_name, &args);
                                         match approve_outside_write(
@@ -2431,6 +2470,7 @@ where
                                             &target,
                                             cfg.approval_timeout_secs,
                                             stop_signal,
+                                            cfg.safety_guard.as_deref(),
                                         )
                                         .await
                                         {
@@ -2541,6 +2581,13 @@ where
                                         match approval_result {
                                             Ok(oz_safety::ApprovalDecision::Allow) => {
                                                 tracing::debug!("[safety] approved {tool_name}");
+                                                // Counting plain Allow is what makes
+                                                // progressive trust work: before this,
+                                                // only the explicit Trust buttons
+                                                // incremented the counter, so a user who
+                                                // clicked Allow 20 times still saw the
+                                                // same prompt forever.
+                                                guard.record_approval(&tool_name, &args);
                                                 crate::audit::log_tool_call(
                                                     &cfg.session_id,
                                                     &tool_name,
@@ -2548,11 +2595,22 @@ where
                                                     "approved",
                                                 );
                                             }
+                                            Ok(oz_safety::ApprovalDecision::AutoAllow) => {
+                                                tracing::debug!(
+                                                    "[safety] full-access auto-allowed {tool_name}"
+                                                );
+                                                crate::audit::log_tool_call(
+                                                    &cfg.session_id,
+                                                    &tool_name,
+                                                    &audit_digest,
+                                                    "approved(full-access)",
+                                                );
+                                            }
                                             Ok(oz_safety::ApprovalDecision::TrustSession) => {
                                                 tracing::info!(
                                                     "[safety] session-trusted {tool_name}"
                                                 );
-                                                guard.record_approval(&tool_name, &args);
+                                                guard.trust_session(&tool_name, &args);
                                                 crate::audit::log_tool_call(
                                                     &cfg.session_id,
                                                     &tool_name,
@@ -2564,7 +2622,7 @@ where
                                                 tracing::info!(
                                                     "[safety] workspace-trusted {tool_name}"
                                                 );
-                                                guard.record_approval(&tool_name, &args);
+                                                guard.trust_workspace(&tool_name, &args);
                                                 crate::audit::log_tool_call(
                                                     &cfg.session_id,
                                                     &tool_name,
@@ -3346,6 +3404,23 @@ where
         // Multiple ask_user calls in one turn are answered in order, so
         // every tool_use gets its own tool_result instead of the last
         // one silently overwriting the rest.
+        if !pending_ask_user.is_empty() {
+            // One checkpoint for the whole ask batch: a SIGKILL while the
+            // dialog is up must leave a resumable point, but one write per
+            // question (plus one on timeout) cloned the conversation and
+            // forked git several times per turn.
+            save_stop_checkpoint_async(
+                config,
+                turn,
+                "waiting_for_clarification",
+                &messages,
+                &history_info,
+                &full_response,
+                &full_thinking,
+                &handler.working().todos,
+            )
+            .await;
+        }
         while !pending_ask_user.is_empty() {
             let pending = pending_ask_user.remove(0);
             // Broadcast the prompt BEFORE waiting so the UI shows the
@@ -3431,17 +3506,6 @@ where
                              question as unanswered",
                             ask_timeout
                         );
-                        save_stop_checkpoint_async(
-                            config,
-                            turn,
-                            "waiting_for_clarification",
-                            &messages,
-                            &history_info,
-                            &full_response,
-                            &full_thinking,
-                            &handler.working().todos,
-                        )
-                        .await;
                         if let Some(ref tx) = config.event_tx {
                             let q_payload = serde_json::json!({
                                 "tool_use_id": pending.tool_use_id,
@@ -3828,6 +3892,52 @@ where
                          before the user answers."
                     )
                 });
+            }
+
+            // ── Spec-only delivery guard ──
+            // The spec anchor asks for task_spec.md "before finishing"; a
+            // model may satisfy it and stop without touching the actual
+            // deliverable. If the only file produced this run is the spec,
+            // push one continuation prompt (bounded by the same gate budget).
+            if exit_reason.is_some()
+                && config.quality_gates
+                && spec_hint_sent
+                && !spec_continue_sent
+                && gate_continuations < MAX_GATE_CONTINUATIONS
+                && crate::quality::read_spec_for_run(
+                    &config.working_dir,
+                    &config.session_id,
+                    run_started_at,
+                )
+                .is_some()
+            {
+                let probe = crate::quality::deliverable_probe(&tool_sequence);
+                let non_spec = probe
+                    .all_files()
+                    .iter()
+                    .filter(|f| !f.ends_with(crate::quality::SPEC_FILE))
+                    .count();
+                if non_spec == 0 {
+                    spec_continue_sent = true;
+                    gate_continuations += 1;
+                    next_prompts.push(if config.lang == "zh" {
+                        "[CONTINUE] task_spec.md 已创建，但原始任务还没有产生任何交付物。\
+                         不要在这里结束：现在继续完成用户最初的请求，执行实际改动/命令，\
+                         完成后再简要汇报。"
+                            .to_string()
+                    } else {
+                        "[CONTINUE] task_spec.md exists, but the original request has produced \
+                         no deliverable yet. Do not stop here: continue the user's original task, \
+                         make the actual changes, then report briefly."
+                            .to_string()
+                    });
+                    exit_reason = None;
+                    transition_state(
+                        handler,
+                        AgentState::Thinking,
+                        "spec-only delivery: continue the original task",
+                    );
+                }
             }
 
             // ── Gate C (P2): unresolved-suspicion closure ──
@@ -4961,70 +5071,6 @@ where
         }
     }
 
-    // P0-6 ⑥: never crystallize the session scaffolding into a "SOP".
-    // The real store had 7 SOPs named `system-reminder__today_s_date__…`
-    // whose body was the conversation scaffold, re-injected as instructions.
-    let sop_name = crate::quality::slug_sop_name(&user_input);
-    if sop_name.is_none() && config.enable_crystallization && !tool_sequence.is_empty() {
-        tracing::info!(
-            "[quality] skipping crystallisation: input is scaffolding or too short ({} chars)",
-            user_input.chars().count()
-        );
-    }
-    if let (Some(safe_name), true) = (
-        sop_name,
-        !tool_sequence.is_empty() && final_reason == "EXITED",
-    ) {
-        let sess_id = if config.session_id.is_empty() {
-            None
-        } else {
-            Some(config.session_id.clone())
-        };
-
-        // Priority: skill_mcp_store > sop_store (legacy)
-        if config.enable_crystallization {
-            if let Some(ref store_arc) = skill_mcp_store {
-                let mut store = store_arc.lock().await;
-                // QC-2: SOP carries this run's acceptance evidence so future
-                // consumers can see whether the path was verified.
-                let sop_verified_by = contract_assertions.map(|(total, failed)| {
-                    if failed == 0 {
-                        format!("all {total} acceptance assertions passed")
-                    } else {
-                        format!(
-                            "{}/{} acceptance assertions passed",
-                            total.saturating_sub(failed),
-                            total
-                        )
-                    }
-                });
-                let _ = store.crystallise_sop(
-                    &safe_name,
-                    &smart_format(&user_input, 100),
-                    &tool_sequence,
-                    sess_id,
-                    sop_verified_by.as_deref(),
-                );
-                if config.verbose {
-                    tracing::info!(
-                        "Crystallised SOP via SkillMcpStore from {} tool calls",
-                        tool_sequence.len()
-                    );
-                }
-            } else if let Some(ref mut store) = sop_store {
-                store.crystallise(
-                    &safe_name,
-                    &smart_format(&user_input, 100),
-                    &tool_sequence,
-                    sess_id,
-                );
-                if config.verbose {
-                    tracing::info!("Crystallised SOP from {} tool calls", tool_sequence.len());
-                }
-            }
-        }
-    }
-
     // Session transcript: built once for the background distillation queue.
     let transcript = messages
         .iter()
@@ -5057,8 +5103,9 @@ where
     // Background memory distillation (M5): enqueue the transcript for async
     // knowledge extraction instead of blocking the loop. The distiller is
     // chosen by the caller (ERME semantic store or legacy skill/MCP), and
-    // the worker retries with backoff under a lease. Falls back to the
-    // LLM-driven Crystallizer below when no scheduler is configured.
+    // the worker retries with backoff under a lease. Without a scheduler the
+    // transcript is left to the normal memory path; no synchronous LLM call
+    // is made here.
     if let Some(ref scheduler) = config.memory_scheduler {
         if !transcript.is_empty() {
             scheduler
@@ -5073,21 +5120,21 @@ where
         }
     }
 
-    // LLM-driven crystallization & refinement (when skill_mcp_store is active)
+    // LLM-driven skill refinement (when skill_mcp_store is active)
     //
-    // Both phases make un-timeouted LLM calls while holding the process-wide
+    // The phase makes an un-timeouted LLM call while holding the process-wide
     // skill-store lock, and this code runs *before* `run_agent_loop` returns
     // — so a slow model used to delay the run's completion (and, by holding
     // the lock, block every other session's skill-index load) for as long as
     // the provider's own HTTP timeout allowed (round5 P1-19). Bound both:
-    // the lock wait (give up rather than queue) and each phase.
+    // the lock wait (give up rather than queue) and the phase.
     if let Some(ref store_arc) = skill_mcp_store {
         const SKILL_STORE_LOCK_WAIT: Duration = Duration::from_secs(2);
-        /// Budget for each LLM-driven skill phase (crystallization,
-        /// refinement). They hold the process-wide skill-store lock, so an
-        /// unbounded call stalls every other session's skill-index load.
-        const CRYSTALLIZE_BUDGET: Duration = Duration::from_secs(60);
-        // Give up rather than queue behind another session's crystallization:
+        /// Budget for the LLM-driven skill-refinement phase. It holds the
+        /// process-wide skill-store lock, so an unbounded call stalls every
+        /// other session's skill-index load.
+        const SKILL_PHASE_BUDGET: Duration = Duration::from_secs(60);
+        // Give up rather than queue behind another session's skill phase:
         // this runs before the loop returns, and holding the lock is what
         // made a new session's skill-index load appear to hang.
         let locked = tokio::time::timeout(SKILL_STORE_LOCK_WAIT, store_arc.lock()).await;
@@ -5098,61 +5145,16 @@ where
             // completion and block every other session's skill-index load
             // (review finding C-F1: the lock wait was bounded, the phases
             // were not).
-            if config.enable_crystallization
-                && !tool_sequence.is_empty()
-                && final_reason == "EXITED"
-            {
-                let crystallize = tokio::time::timeout(
-                    CRYSTALLIZE_BUDGET,
-                    Crystallizer::crystallize(
-                        client,
-                        &mut store,
-                        &user_input,
-                        &messages,
-                        &tool_sequence,
-                        if config.session_id.is_empty() {
-                            None
-                        } else {
-                            Some(config.session_id.clone())
-                        },
-                    ),
-                )
-                .await;
-                match crystallize {
-                    Err(_) => tracing::info!(
-                        "crystallization exceeded {}s — skipped for this run",
-                        CRYSTALLIZE_BUDGET.as_secs()
-                    ),
-                    Ok(Ok(results)) => {
-                        for r in &results {
-                            match r {
-                                crate::crystallizer::CrystallizeResult::SkillCreated { name } => {
-                                    tracing::info!("Crystallized skill: {}", name)
-                                }
-                                crate::crystallizer::CrystallizeResult::SopCreated { name } => {
-                                    tracing::info!("Crystallized SOP: {}", name)
-                                }
-                                crate::crystallizer::CrystallizeResult::FactAdded { content } => {
-                                    tracing::info!("Crystallized fact: {}", content)
-                                }
-                                crate::crystallizer::CrystallizeResult::Nothing => {}
-                            }
-                        }
-                    }
-                    Ok(Err(e)) => tracing::warn!("Crystallization failed: {}", e),
-                }
-            }
-
             if config.enable_refinement && store.skill_count() > 0 {
                 let refine = tokio::time::timeout(
-                    CRYSTALLIZE_BUDGET,
+                    SKILL_PHASE_BUDGET,
                     Refiner::refine_all_skills(client, &mut store),
                 )
                 .await;
                 match refine {
                     Err(_) => tracing::info!(
                         "skill refinement exceeded {}s — skipped for this run",
-                        CRYSTALLIZE_BUDGET.as_secs()
+                        SKILL_PHASE_BUDGET.as_secs()
                     ),
                     Ok(Ok(results)) => {
                         for r in &results {
@@ -5176,7 +5178,7 @@ where
             }
         } else {
             tracing::info!(
-                "skill store busy — skipping crystallization/refinement for session {}",
+                "skill store busy — skipping skill refinement for session {}",
                 config.session_id
             );
         }
@@ -6306,6 +6308,64 @@ mod tests {
             outcome.exit_reason, "max_turns_exhausted",
             "loop should resume and complete normally"
         );
+    }
+
+    #[tokio::test]
+    async fn ask_user_times_out_instead_of_hanging() {
+        // A background worker (butler child) has no user watching its dialog.
+        // With a bounded timeout the loop must proceed on an "unanswered" note
+        // instead of waiting forever for a reply that cannot arrive.
+        let resp = {
+            let mut r = MockResponse::new("need help");
+            r.tool_calls = vec![oz_core_types::MockToolCall::with_id(
+                "ask_user",
+                serde_json::json!({"question": "which one?"}),
+                "call_timeout",
+            )];
+            r
+        };
+        let mut client = MockLlm::new(vec![resp]);
+        let mut handler = MockHandler::new().on_tool(
+            "ask_user",
+            Ok(StepOutcome {
+                data: serde_json::json!({
+                    "status": "INTERRUPT",
+                    "intent": "HUMAN_INTERVENTION",
+                    "data": {"question": "which one?", "candidates": []}
+                }),
+                next_prompt: None,
+                should_exit: false,
+                images: vec![],
+            }),
+        );
+        let signal = AtomicBool::new(false);
+        let ask_rx = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let config = LoopConfig {
+            max_turns: 3,
+            verbose: false,
+            ask_user_rx: Some(ask_rx),
+            ask_user_timeout_secs: 1,
+            ..Default::default()
+        };
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_agent_loop(
+                &mut client,
+                "system".into(),
+                "user".into(),
+                vec![],
+                &mut handler,
+                &[],
+                &default_ctx(),
+                &config,
+                &signal,
+            ),
+        )
+        .await
+        .expect("an unanswered ask_user must not hang the run");
+
+        assert_ne!(outcome.exit_reason, "ASK_USER");
     }
 
     #[tokio::test]

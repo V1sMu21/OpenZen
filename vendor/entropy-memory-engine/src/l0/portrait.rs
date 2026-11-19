@@ -127,6 +127,77 @@ pub fn lexical_compatibility(a: &str, b: &str) -> f32 {
     jaccard.max(containment * 0.8)
 }
 
+/// Is this statement worth keeping / injecting?
+///
+/// Real data showed the self-portrait filled with graph conjectures
+/// ("Node 97062… and node 54521… may be related (SSS=3.14)") and the user
+/// portrait filled with conversational filler ("继续吧", "好的"). Both were
+/// injected into every system prompt. This filter is the single gate for
+/// writes, migration and injection.
+pub fn is_quality_statement(statement: &str) -> bool {
+    let t = statement.trim();
+    let chars = t.chars().count();
+    if !(4..=160).contains(&chars) {
+        return false;
+    }
+    // Graph conjectures carry opaque node ids and no user-visible meaning.
+    if t.contains("may be related") || t.starts_with("Node ") {
+        return false;
+    }
+    // Pure numbers / hex ids.
+    if t.chars()
+        .all(|c| c.is_ascii_digit() || c.is_ascii_hexdigit() || c == '-' || c == '_')
+        && t.chars().any(|c| c.is_ascii_digit())
+    {
+        return false;
+    }
+    // Filler / acknowledgements with no durable content.
+    let lower = t
+        .trim_end_matches(['。', '！', '!', '~', '？', '?', '，', ',', ' '])
+        .to_lowercase();
+    const FILLERS: &[&str] = &[
+        "继续",
+        "继续吧",
+        "继续啊",
+        "继续修复",
+        "好的",
+        "好",
+        "嗯",
+        "嗯嗯",
+        "收到",
+        "谢谢",
+        "ok",
+        "okay",
+        "yes",
+        "no",
+        "hello",
+        "hi",
+        "在吗",
+        "可以",
+        "行",
+        "对",
+        "是的",
+    ];
+    if FILLERS.contains(&lower.as_str()) || (lower.starts_with("继续") && chars <= 8) {
+        return false;
+    }
+    // Must carry at least one letter (CJK counts as alphabetic).
+    t.chars().any(|c| c.is_alphabetic())
+}
+
+fn default_capacity() -> usize {
+    64
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 /// 画像（自画像与用户画像共用同一结构）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Portrait {
@@ -139,6 +210,9 @@ pub struct Portrait {
     /// 整体置信度
     pub confidence: f32,
     pub last_updated_nanos: i64,
+    /// Hard cap on facts; oldest/lowest-confidence facts are dropped first.
+    #[serde(default = "default_capacity")]
+    pub capacity: usize,
 }
 
 /// 画像事实：必须带证据（记忆 ID），保证可溯源、可被推翻
@@ -176,6 +250,7 @@ impl Portrait {
             facts: Vec::new(),
             confidence: 0.0,
             last_updated_nanos: now,
+            capacity: default_capacity(),
         }
     }
 
@@ -196,6 +271,9 @@ impl Portrait {
     /// P0-5 (1): 185 facts, median length 42 chars). A similarity match keeps
     /// the higher-confidence wording and the union of evidence.
     pub fn insert_fact(&mut self, fact: PortraitFact) -> bool {
+        if !is_quality_statement(&fact.statement) {
+            return false;
+        }
         if let Some(existing) = self
             .facts
             .iter_mut()
@@ -224,6 +302,7 @@ impl Portrait {
                     self.facts.push(kept);
                     tracing::debug!("[erme] kept both wordings: {statement}");
                     self.last_updated_nanos = now_nanos();
+                    self.enforce_capacity();
                     return true;
                 }
                 existing.statement = fact.statement;
@@ -247,7 +326,93 @@ impl Portrait {
         }
         self.last_updated_nanos = now_nanos();
         self.facts.push(fact);
+        self.enforce_capacity();
         true
+    }
+
+    /// Drop the lowest-confidence facts until the capacity is satisfied.
+    fn enforce_capacity(&mut self) {
+        if self.facts.len() <= self.capacity {
+            return;
+        }
+        self.facts.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        self.facts.truncate(self.capacity);
+        self.last_updated_nanos = now_nanos();
+    }
+
+    /// Remove statements that fail [`is_quality_statement`] and re-apply the
+    /// capacity. Used by the one-time migration of existing `soul.json`.
+    /// Returns whether anything changed.
+    pub fn retain_quality(&mut self) -> bool {
+        let before = self.facts.len();
+        self.facts.retain(|f| is_quality_statement(&f.statement));
+        self.enforce_capacity();
+        if self.facts.len() != before {
+            self.last_updated_nanos = now_nanos();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Bounded summary line for prompt injection: at most `max_facts` facts,
+    /// each at most `max_chars` characters, plus up to 3 high-confidence traits.
+    pub fn summary_line_bounded(&self, max_facts: usize, max_chars: usize) -> String {
+        let mut parts: Vec<String> = self
+            .traits
+            .iter()
+            .filter(|(_, c)| **c >= 0.5)
+            .map(|(t, _)| truncate_chars(t, 24))
+            .take(3)
+            .collect();
+        parts.sort();
+        for f in self
+            .facts
+            .iter()
+            .filter(|f| is_quality_statement(&f.statement) && f.confidence >= 0.55)
+            .take(max_facts)
+        {
+            parts.push(truncate_chars(&f.statement, max_chars));
+        }
+        if parts.is_empty() {
+            truncate_chars(&self.summary, max_chars * max_facts)
+        } else {
+            parts.join("；")
+        }
+    }
+
+    /// Same as [`Self::summary_line_bounded`], but ranked against `query`.
+    pub fn summary_line_with_query_bounded(
+        &self,
+        query: &str,
+        k: usize,
+        max_chars: usize,
+    ) -> String {
+        let mut parts: Vec<String> = self
+            .traits
+            .iter()
+            .filter(|(_, c)| **c >= 0.5)
+            .map(|(t, _)| truncate_chars(t, 24))
+            .take(3)
+            .collect();
+        parts.sort();
+        for f in self
+            .rank_relevant(query, k * 2)
+            .into_iter()
+            .filter(|f| is_quality_statement(&f.statement) && f.confidence >= 0.55)
+            .take(k)
+        {
+            parts.push(truncate_chars(&f.statement, max_chars));
+        }
+        if parts.is_empty() {
+            truncate_chars(&self.summary, max_chars * k)
+        } else {
+            parts.join("；")
+        }
     }
 
     /// Facts ranked for the CURRENT topic instead of insertion order.
@@ -555,5 +720,82 @@ mod tests {
         assert_eq!(p.traits.get("技术").copied().unwrap_or(0.0), 1.0);
         assert!(p.confidence > 0.0, "confidence follows the traits");
         assert!(p.last_updated_nanos > 0);
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+
+    fn fact(s: &str, c: f32) -> PortraitFact {
+        PortraitFact {
+            statement: s.into(),
+            confidence: c,
+            supporting_ids: vec![],
+            contradicting_ids: vec![],
+        }
+    }
+
+    #[test]
+    fn rejects_graph_conjectures_and_filler() {
+        assert!(!is_quality_statement(
+            "Node 9706248377708755462 and node 5452197043082403625 may be related (SSS=3.14)"
+        ));
+        assert!(!is_quality_statement("继续吧"));
+        assert!(!is_quality_statement("继续修复"));
+        assert!(!is_quality_statement("1234567890"));
+        assert!(!is_quality_statement("好的"));
+        assert!(is_quality_statement("我住在杭州，喜欢龙井"));
+        assert!(is_quality_statement(
+            "The project uses oz-core and oz-tools."
+        ));
+    }
+
+    #[test]
+    fn capacity_drops_the_weakest_facts() {
+        let mut p = Portrait::new();
+        p.capacity = 4;
+        for s in [
+            "用户喜欢苹果和梨子",
+            "项目主要使用 Rust 编写",
+            "明天要去杭州出差",
+            "猫需要每天按时喂食",
+        ] {
+            assert!(p.insert_fact(fact(s, 0.9)));
+        }
+        assert!(p.insert_fact(fact("新事实内容很强", 0.95)));
+        assert_eq!(p.facts.len(), 4);
+        assert!(p.find("新事实内容很强").is_some());
+    }
+
+    #[test]
+    fn retain_quality_removes_junk_and_is_idempotent() {
+        let mut p = Portrait::new();
+        p.facts
+            .push(fact("Node 12 and node 34 may be related", 0.9));
+        p.facts.push(fact("继续吧", 0.8));
+        p.facts.push(fact("用户偏好深色主题", 0.7));
+        assert!(p.retain_quality());
+        assert_eq!(p.facts.len(), 1);
+        assert!(!p.retain_quality());
+    }
+
+    #[test]
+    fn bounded_summary_caps_facts_and_chars() {
+        let mut p = Portrait::new();
+        for (i, s) in [
+            "第一句话很长很长很长很长很长很长很长很长很长很长很长很长",
+            "第二句话也很长很长很长很长很长很长很长很长很长很长很长很长",
+            "第三句",
+        ]
+        .iter()
+        .enumerate()
+        {
+            p.facts.push(fact(s, 0.8 + i as f32 * 0.01));
+        }
+        let line = p.summary_line_bounded(2, 12);
+        let parts: Vec<&str> = line.split('；').collect();
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|s| s.chars().count() <= 12));
     }
 }
