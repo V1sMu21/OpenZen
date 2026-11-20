@@ -1,4 +1,15 @@
 
+## v0.3.0 (2026-11-20)
+
+### 📚 Documentation
+
+- **readme:** Describe the 0.2.x surface and drop stale claims
+- **readme:** Refresh the runtime demo gif for 0.2.6
+- **readme:** Re-record the demo gif through completion
+
+### 🚀 Features
+
+- **ui:** Move full access to composer and drop timers
 ## v0.2.6 (2026-11-08)
 
 ### ⚙️ Miscellaneous Tasks
