@@ -1,0 +1,814 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "artifact_find",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "ask_user",
+      "required": [
+        "question"
+      ],
+      "properties": {
+        "candidates": {
+          "type": "array"
+        },
+        "question": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "code_run",
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "background": {
+          "type": "boolean"
+        },
+        "code": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enumeration": [
+            "inline",
+            "rpc"
+          ]
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "type": {
+          "type": "string",
+          "enumeration": [
+            "bash",
+            "python",
+            "py",
+            "sh",
+            "shell"
+          ]
+        }
+      }
+    },
+    {
+      "name": "computer_click",
+      "required": [],
+      "properties": {
+        "button": {
+          "type": "string",
+          "enumeration": [
+            "left",
+            "right"
+          ]
+        },
+        "double": {
+          "type": "boolean"
+        },
+        "element": {
+          "type": "integer"
+        },
+        "hold_ms": {
+          "type": "integer"
+        },
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "name": "computer_key",
+      "required": [
+        "key"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "repeat": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "name": "computer_read_screen",
+      "required": [],
+      "properties": {
+        "max_depth": {
+          "type": "integer"
+        },
+        "max_elements": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "name": "computer_screenshot",
+      "required": [],
+      "properties": {
+        "display": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "name": "computer_scroll",
+      "required": [
+        "amount"
+      ],
+      "properties": {
+        "amount": {
+          "type": "integer"
+        },
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "name": "computer_type",
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "edit",
+      "required": [
+        "file_path",
+        "old_string",
+        "new_string"
+      ],
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "new_string": {
+          "type": "string"
+        },
+        "old_string": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "glob",
+      "required": [
+        "pattern"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "grep",
+      "required": [
+        "pattern"
+      ],
+      "properties": {
+        "include": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "harness_refine",
+      "required": [
+        "kind",
+        "content",
+        "evidence"
+      ],
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enumeration": [
+            "memory",
+            "skill_note",
+            "subagent_spec"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enumeration": [
+            "upsert",
+            "delete"
+          ]
+        }
+      }
+    },
+    {
+      "name": "history_search",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "query": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "job_kill",
+      "required": [
+        "job_id"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "job_list",
+      "required": [],
+      "properties": {}
+    },
+    {
+      "name": "job_output",
+      "required": [
+        "job_id"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "timeout_ms": {
+          "type": "integer"
+        },
+        "wait": {
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "name": "long_term",
+      "required": [
+        "data",
+        "category"
+      ],
+      "properties": {
+        "category": {
+          "type": "string",
+          "enumeration": [
+            "fact",
+            "sop",
+            "history"
+          ]
+        },
+        "data": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "ls",
+      "required": [],
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "open_side_panel",
+      "required": [
+        "artifact_type",
+        "artifact_path"
+      ],
+      "properties": {
+        "artifact_label": {
+          "type": "string"
+        },
+        "artifact_path": {
+          "type": "string"
+        },
+        "artifact_type": {
+          "type": "string",
+          "enumeration": [
+            "html",
+            "code",
+            "spreadsheet",
+            "pdf",
+            "terminal",
+            "diff",
+            "image",
+            "markdown",
+            "office"
+          ]
+        }
+      }
+    },
+    {
+      "name": "patch",
+      "required": [
+        "file_path",
+        "old_string",
+        "new_string"
+      ],
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "new_string": {
+          "type": "string"
+        },
+        "old_string": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "project_list",
+      "required": [],
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "read",
+      "required": [
+        "file_path"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "file_path": {
+          "type": "string"
+        },
+        "start": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "name": "respond",
+      "required": [
+        "response"
+      ],
+      "properties": {
+        "response": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "run_list",
+      "required": [],
+      "properties": {
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "name": "schedule_reminder",
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "at_unix_ms": {
+          "type": "integer"
+        },
+        "delay_seconds": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "persist": {
+          "type": "boolean"
+        },
+        "repeat_count": {
+          "type": "integer"
+        },
+        "repeat_interval_seconds": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "name": "send_message",
+      "required": [
+        "child_id",
+        "message"
+      ],
+      "properties": {
+        "child_id": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "skill_mcp_list",
+      "required": [],
+      "properties": {
+        "category": {
+          "type": "string",
+          "enumeration": [
+            "all",
+            "skills",
+            "sops"
+          ]
+        }
+      }
+    },
+    {
+      "name": "skill_mcp_refine",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "feedback": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "skill_mcp_search",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "max_results": {
+          "type": "integer"
+        },
+        "query": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "skill_mcp_store",
+      "required": [
+        "category",
+        "name",
+        "content"
+      ],
+      "properties": {
+        "category": {
+          "type": "string",
+          "enumeration": [
+            "fact",
+            "skill",
+            "sop"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array"
+        }
+      }
+    },
+    {
+      "name": "spawn_agent",
+      "required": [
+        "description",
+        "prompt"
+      ],
+      "properties": {
+        "background": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "max_turns": {
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "prompt": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "submit_result",
+      "required": [
+        "result"
+      ],
+      "properties": {
+        "result": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "task_create",
+      "required": [
+        "goal"
+      ],
+      "properties": {
+        "deliverables": {
+          "type": "array"
+        },
+        "deps": {
+          "type": "array"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "goal": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "reversibility": {
+          "type": "string",
+          "enumeration": [
+            "read_only",
+            "workspace_write",
+            "outside_write",
+            "external_effect",
+            "destructive"
+          ]
+        }
+      }
+    },
+    {
+      "name": "task_get",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "task_list",
+      "required": [],
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "task_note",
+      "required": [
+        "task_id",
+        "text"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enumeration": [
+            "assumption",
+            "skipped",
+            "note"
+          ]
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "todoupdate",
+      "required": [
+        "id",
+        "status"
+      ],
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enumeration": [
+            "in_progress",
+            "completed",
+            "cancelled"
+          ]
+        }
+      }
+    },
+    {
+      "name": "todowrite",
+      "required": [
+        "content"
+      ],
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "string",
+          "enumeration": [
+            "high",
+            "medium",
+            "low"
+          ]
+        }
+      }
+    },
+    {
+      "name": "web_execute_js",
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "name": "web_fetch",
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "max_chars": {
+          "type": "integer"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "web_js",
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "web_list_tabs",
+      "required": [],
+      "properties": {}
+    },
+    {
+      "name": "web_scan",
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "max_chars": {
+          "type": "integer"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "web_search",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "engine": {
+          "type": "string",
+          "enumeration": [
+            "keyless",
+            "auto",
+            "bocha",
+            "tavily",
+            "firecrawl",
+            "exa",
+            "bing-rss",
+            "bing-html"
+          ]
+        },
+        "num_results": {
+          "type": "integer"
+        },
+        "query": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "working_mem",
+      "required": [],
+      "properties": {
+        "key_info": {
+          "type": "string"
+        },
+        "plan_mode": {
+          "type": "string"
+        },
+        "related_sop": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "write",
+      "required": [
+        "file_path",
+        "content"
+      ],
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "file_path": {
+          "type": "string"
+        }
+      }
+    }
+  ]
+}

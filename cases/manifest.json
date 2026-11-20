@@ -1,0 +1,17 @@
+{
+  "by_fc": {
+    "FC-B2": 386,
+    "FC-F1": 1,
+    "FC-F2": 9,
+    "FC-F3": 4
+  },
+  "by_layer": {
+    "unit": 399
+  },
+  "contract_fingerprint": "f1ce6fb07c74dfca",
+  "spec_drafts": 28,
+  "tools": 47,
+  "unit_cases": 399,
+  "version": 1,
+  "wire_seeds": 5000
+}
