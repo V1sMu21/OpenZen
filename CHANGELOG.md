@@ -1,4 +1,9 @@
 
+## v0.3.1 (2026-11-21)
+
+### 🚀 Features
+
+- **update:** Check GitHub releases without updater config
 ## v0.3.0 (2026-11-20)
 
 ### 📚 Documentation
@@ -10,6 +15,10 @@
 ### 🚀 Features
 
 - **ui:** Move full access to composer and drop timers
+
+### 🧪 Testing
+
+- **casegen:** Check in contract, unit cases and wire corpus
 ## v0.2.6 (2026-11-08)
 
 ### ⚙️ Miscellaneous Tasks
