@@ -25,6 +25,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+reqwest.workspace = true
 chrono.workspace = true
 oz-core-types = { path = "../crates/oz-core-types" }
 oz-config = { path = "../crates/oz-config" }

@@ -692,5 +692,7 @@
   "goal.start": "Start / resume",
   "goal.pause": "Pause",
   "goal.stop": "Stop",
-  "goal.takeover": "Take over"
+  "goal.takeover": "Take over",
+  "update.availableExternal": "Version {version} available — click to open the download page",
+  "update.openDownload": "Open download page"
 }

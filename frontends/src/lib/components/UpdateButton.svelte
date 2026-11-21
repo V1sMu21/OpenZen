@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import type { Update } from "@tauri-apps/plugin-updater";
+  import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { isTauri } from "../api/tauri";
+  import { isNewerVersion } from "../utils/version";
   import { t } from "../i18n";
 
   /** Where the trigger lives. The sidebar variant pins the popover to the
@@ -28,6 +31,8 @@
   let error = $state("");
   let open = $state(false);
   let pendingUpdate: Update | null = null;
+  /** Set only for the GitHub Release fallback; empty for the signed updater. */
+  let releaseUrl = $state("");
   let rootEl = $state<HTMLDivElement | undefined>();
   let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -36,23 +41,56 @@
 
   async function checkForUpdate() {
     if (!isTauri() || phase !== "idle") return;
+
+    // Preferred: the signed Tauri updater (when endpoints/pubkey exist).
     try {
       const { check } = await import("@tauri-apps/plugin-updater");
       const update = await check();
       if (update) {
         pendingUpdate = update;
+        releaseUrl = "";
         version = update.version;
         notes = (update as unknown as { body?: string }).body ?? "";
         date = (update as unknown as { date?: string }).date ?? "";
         phase = "available";
+        return;
       }
     } catch {
-      // updater endpoints/pubkey missing or offline — stay hidden
+      // No updater endpoint/pubkey, offline, or a transient error: fall through
+      // to the read-only GitHub Release check.
+    }
+
+    // Fallback: show the latest Release and let the user open its download page.
+    try {
+      const info = await invoke<{
+        tag_name: string;
+        html_url: string;
+        body: string;
+        published_at: string;
+      }>("check_latest_release");
+      const current = await getVersion();
+      if (!isNewerVersion(info.tag_name, current)) return;
+      releaseUrl = info.html_url;
+      version = info.tag_name.replace(/^v/i, "");
+      notes = info.body ?? "";
+      date = info.published_at ?? "";
+      phase = "available";
+    } catch {
+      // Network/rate limit — stay hidden rather than showing a broken card.
     }
   }
 
   async function download() {
-    if (phase !== "available" || !pendingUpdate) return;
+    if (phase !== "available") return;
+    if (releaseUrl) {
+      try {
+        await invoke("open_release_page", { url: releaseUrl });
+      } catch (e) {
+        error = String(e).slice(0, 160);
+      }
+      return;
+    }
+    if (!pendingUpdate) return;
     error = "";
     phase = "downloading";
     downloaded = 0;
@@ -109,7 +147,10 @@
 
   const titleText = $derived(
     phase === "available"
-      ? $t("update.available").replace("{version}", version)
+      ? (releaseUrl ? $t("update.availableExternal") : $t("update.available")).replace(
+          "{version}",
+          version,
+        )
       : phase === "downloading"
         ? $t("update.downloading")
         : $t("update.installed"),
@@ -173,7 +214,9 @@
           {#if error}<p class="uc-error">{error}</p>{/if}
           <div class="uc-actions">
             <button class="uc-btn" onclick={close}>{$t("update.later")}</button>
-            <button class="uc-btn primary" onclick={download}>{$t("update.install")}</button>
+            <button class="uc-btn primary" onclick={download}>
+              {releaseUrl ? $t("update.openDownload") : $t("update.install")}
+            </button>
           </div>
         {:else if phase === "downloading"}
           <div class="uc-prog"><i style="width:{pct}%"></i></div>

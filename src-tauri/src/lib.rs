@@ -21,6 +21,7 @@ mod plans;
 pub mod projects;
 mod sidepanel;
 mod subagents;
+mod update_check;
 
 const SESSION_STATE_FILE: &str = "openzen/sessions.json";
 
@@ -2295,6 +2296,8 @@ commands::get_working_dir_for_session,
             commands::add_platform,
             commands::get_full_access,
             commands::set_full_access,
+            update_check::check_latest_release,
+            update_check::open_release_page,
             projects::commands::add_project,
             projects::commands::list_projects,
             projects::commands::remove_project,
