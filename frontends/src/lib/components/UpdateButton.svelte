@@ -5,6 +5,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { isTauri } from "../api/tauri";
   import { isNewerVersion } from "../utils/version";
+  import { renderMarkdown } from "../utils/markdown";
   import { t } from "../i18n";
 
   /** Where the trigger lives. The sidebar variant pins the popover to the
@@ -37,6 +38,7 @@
   let timer: ReturnType<typeof setInterval> | null = null;
 
   const pct = $derived(totalBytes > 0 ? Math.min(100, Math.round((downloaded / totalBytes) * 100)) : 0);
+  const notesHtml = $derived(notes ? renderMarkdown(notes, { highlight: false }) : "");
   const sizeLabel = $derived(totalBytes > 0 ? `${(totalBytes / 1024 / 1024).toFixed(1)} MB` : "");
 
   async function checkForUpdate() {
@@ -209,7 +211,7 @@
 
         {#if phase === "available"}
           {#if notes}
-            <p class="uc-notes">{notes.slice(0, 220)}</p>
+            <div class="uc-notes markdown-content">{@html notesHtml}</div>
           {/if}
           {#if error}<p class="uc-error">{error}</p>{/if}
           <div class="uc-actions">
@@ -381,11 +383,11 @@
   .uc-notes {
     margin: 0 0 10px;
     font-size: 11.5px;
-    line-height: 1.75;
+    line-height: 1.55;
     color: var(--color-body);
-    white-space: pre-wrap;
-    max-height: 118px;
+    max-height: 150px;
     overflow: auto;
+    overflow-wrap: anywhere;
   }
   .uc-error {
     margin: 0 0 10px;
